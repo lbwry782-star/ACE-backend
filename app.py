@@ -8,7 +8,7 @@ import json
 import base64
 import os
 from typing import Dict, Optional
-# ENGINE REMOVED: Engine imports deleted - engine module removed
+from engine.side_by_side_v1 import generate_zip
 
 app = Flask(__name__)
 
@@ -56,64 +56,176 @@ def generate():
     """
     Generate a single ad and return as ZIP file.
     
-    ENGINE DISABLED: Returns 501 stub response (no image generation, no OpenAI calls).
+    SideBySide Engine v1: Generates one ad with SIDE_BY_SIDE layout.
     
     Request JSON:
     {
-        "productName": string,
-        "productDescription": string,
-        "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
-        "adIndex": int (optional, default 0),
-        "batchState": {  // optional
-            "material_analogy_used": boolean,
-            "structural_morphology_used": boolean,
-            "structural_exception_used": boolean
-        }
+        "productName": string (required),
+        "productDescription": string (required),
+        "imageSize": string (e.g. "1536x1024", default: "1536x1024"),
+        "language": string ("he" or "en", default: "he"),
+        "adIndex": int (1-3, default: 1, 0 is treated as 1),
+        "sessionId": string uuid (optional),
+        "history": array of previous ads (optional),
+        "objectList": array of strings (optional, uses default if missing)
     }
     
-    Returns: 501 with engine_disabled error (no credits consumed, no OpenAI calls)
+    Returns: application/zip with image.jpg and text.txt
     """
-    # ENGINE DISABLED: Short-circuit immediately before any engine logic
-    # No OpenAI calls, no image generation, no credit consumption
-    logger.info("ENGINE_DISABLED /api/generate called")
-    return jsonify({
-        'ok': False,
-        'error': 'engine_disabled',
-        'message': 'ACE engine is disabled (rebuild mode).'
-    }), 501
+    request_id = str(uuid.uuid4())
+    
+    try:
+        # Get JSON payload
+        if not request.is_json:
+            logger.warning(f"[{request_id}] Request is not JSON")
+            return jsonify({
+                'ok': False,
+                'error': 'invalid_request',
+                'message': 'Request must be JSON'
+            }), 400
+        
+        payload = request.get_json()
+        
+        # Validate required fields
+        if not payload.get("productName"):
+            logger.warning(f"[{request_id}] Missing productName")
+            return jsonify({
+                'ok': False,
+                'error': 'missing_field',
+                'message': 'productName is required'
+            }), 400
+        
+        if not payload.get("productDescription"):
+            logger.warning(f"[{request_id}] Missing productDescription")
+            return jsonify({
+                'ok': False,
+                'error': 'missing_field',
+                'message': 'productDescription is required'
+            }), 400
+        
+        # Generate ZIP using SideBySide Engine v1
+        logger.info(f"[{request_id}] Starting generation: productName={payload.get('productName')[:50]}, "
+                   f"adIndex={payload.get('adIndex', 0)}, sessionId={payload.get('sessionId')}")
+        
+        zip_bytes = generate_zip(payload_dict=payload, is_preview=False)
+        
+        logger.info(f"[{request_id}] Generation successful, returning ZIP ({len(zip_bytes)} bytes)")
+        
+        # Return ZIP file
+        return send_file(
+            io.BytesIO(zip_bytes),
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name='ad.zip'
+        )
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Generation failed: {error_msg}", exc_info=True)
+        
+        # Handle rate limit specifically
+        if "rate_limited" in error_msg:
+            return jsonify({
+                'ok': False,
+                'error': 'rate_limited',
+                'message': 'Rate limit exceeded. Please try again later.'
+            }), 503
+        
+        # Generic error
+        return jsonify({
+            'ok': False,
+            'error': 'generation_failed',
+            'message': f'Failed to generate ad: {error_msg}'
+        }), 500
     
 
 
 @app.route('/api/preview', methods=['POST'])
 def preview():
     """
-    Generate a single ad and return as JSON for preview.
+    Generate a single ad preview and return as ZIP file.
     
-    ENGINE DISABLED: Returns 501 stub response (no image generation, no OpenAI calls).
+    SideBySide Engine v1: Same logic as /api/generate, returns ZIP for preview.
     
     Request JSON:
     {
-        "productName": string,
-        "productDescription": string,
-        "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
-        "adIndex": int (optional, default 0),
-        "batchState": {  // optional
-            "material_analogy_used": boolean,
-            "structural_morphology_used": boolean,
-            "structural_exception_used": boolean
-        }
+        "productName": string (required),
+        "productDescription": string (required),
+        "imageSize": string (e.g. "1536x1024", default: "1536x1024"),
+        "language": string ("he" or "en", default: "he"),
+        "adIndex": int (1-3, default: 1, 0 is treated as 1),
+        "sessionId": string uuid (optional),
+        "history": array of previous ads (optional),
+        "objectList": array of strings (optional, uses default if missing)
     }
     
-    Returns: 501 with engine_disabled error (no credits consumed, no OpenAI calls)
+    Returns: application/zip with image.jpg and text.txt (same as /api/generate)
     """
-    # ENGINE DISABLED: Short-circuit immediately before any engine logic
-    # No OpenAI calls, no image generation, no credit consumption
-    logger.info("ENGINE_DISABLED /api/preview called")
-    return jsonify({
-        'ok': False,
-        'error': 'engine_disabled',
-        'message': 'ACE engine is disabled (rebuild mode).'
-    }), 501
+    request_id = str(uuid.uuid4())
+    
+    try:
+        # Get JSON payload
+        if not request.is_json:
+            logger.warning(f"[{request_id}] Preview request is not JSON")
+            return jsonify({
+                'ok': False,
+                'error': 'invalid_request',
+                'message': 'Request must be JSON'
+            }), 400
+        
+        payload = request.get_json()
+        
+        # Validate required fields
+        if not payload.get("productName"):
+            logger.warning(f"[{request_id}] Preview missing productName")
+            return jsonify({
+                'ok': False,
+                'error': 'missing_field',
+                'message': 'productName is required'
+            }), 400
+        
+        if not payload.get("productDescription"):
+            logger.warning(f"[{request_id}] Preview missing productDescription")
+            return jsonify({
+                'ok': False,
+                'error': 'missing_field',
+                'message': 'productDescription is required'
+            }), 400
+        
+        # Generate ZIP using SideBySide Engine v1 (preview mode)
+        logger.info(f"[{request_id}] Starting preview: productName={payload.get('productName')[:50]}, "
+                   f"adIndex={payload.get('adIndex', 0)}, sessionId={payload.get('sessionId')}")
+        
+        zip_bytes = generate_zip(payload_dict=payload, is_preview=True)
+        
+        logger.info(f"[{request_id}] Preview generation successful, returning ZIP ({len(zip_bytes)} bytes)")
+        
+        # Return ZIP file (same format as generate)
+        return send_file(
+            io.BytesIO(zip_bytes),
+            mimetype='application/zip',
+            as_attachment=True,
+            download_name='preview.zip'
+        )
+        
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Preview generation failed: {error_msg}", exc_info=True)
+        
+        # Handle rate limit specifically
+        if "rate_limited" in error_msg:
+            return jsonify({
+                'ok': False,
+                'error': 'rate_limited',
+                'message': 'Rate limit exceeded. Please try again later.'
+            }), 503
+        
+        # Generic error
+        return jsonify({
+            'ok': False,
+            'error': 'generation_failed',
+            'message': f'Failed to generate preview: {error_msg}'
+        }), 500
 
 
 # SESSION SYSTEM REMOVED: All entitlement endpoints deleted
