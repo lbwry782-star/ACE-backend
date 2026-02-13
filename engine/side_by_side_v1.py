@@ -13,6 +13,7 @@ import time
 import random
 import io
 import zipfile
+import base64
 from typing import Dict, List, Optional, Tuple
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
@@ -386,6 +387,108 @@ def create_text_file(
     lines.append(f"chosen_objects={' | '.join(chosen_objects)}")
     
     return "\n".join(lines)
+
+
+def generate_preview_data(payload_dict: Dict) -> Dict:
+    """
+    Generate preview data and return as dictionary (for JSON response).
+    
+    Args:
+        payload_dict: Request payload with productName, productDescription, etc.
+    
+    Returns:
+        dict: {
+            "imageBase64": str (base64 encoded JPG),
+            "ad_goal": str,
+            "headline": str,
+            "chosen_objects": [str, str],
+            "layout": "SIDE_BY_SIDE"
+        }
+    """
+    request_id = str(uuid.uuid4())
+    
+    # Extract and validate required fields
+    product_name = payload_dict.get("productName", "")
+    product_description = payload_dict.get("productDescription", "")
+    image_size_str = payload_dict.get("imageSize", "1536x1024")
+    language = payload_dict.get("language", "he")
+    ad_index = payload_dict.get("adIndex", 0)
+    
+    # Normalize ad_index (0 -> 1, ensure 1-3)
+    if ad_index == 0:
+        ad_index = 1
+    ad_index = max(1, min(3, ad_index))
+    
+    # Optional fields
+    session_id = payload_dict.get("sessionId")
+    history = payload_dict.get("history", [])
+    object_list = payload_dict.get("objectList")
+    
+    # Validate and normalize
+    width, height = parse_image_size(image_size_str)
+    object_list = validate_object_list(object_list)
+    
+    # Log request
+    logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
+                f"productName={product_name[:50]}, language={language}")
+    
+    # Get model name
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o1-mini")
+    
+    # Call OpenAI model
+    try:
+        result = call_openai_model(
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            object_list=object_list,
+            history=history,
+            model_name=model_name,
+            max_retries=3
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "rate_limited" in error_msg:
+            logger.error(f"[{request_id}] Rate limited after retries")
+            raise Exception("rate_limited")
+        else:
+            logger.error(f"[{request_id}] OpenAI call failed: {error_msg}")
+            raise
+    
+    ad_goal = result["ad_goal"]
+    headline = result["headline"]
+    chosen_objects = result["chosen_objects"]
+    
+    # Log result
+    logger.info(f"[{request_id}] Model response: ad_goal={ad_goal[:50]}, "
+                f"headline={headline[:50]}, chosen_objects={chosen_objects}, "
+                f"model={model_name}")
+    
+    # Create image
+    try:
+        image_bytes = create_side_by_side_image(
+            width=width,
+            height=height,
+            headline=headline,
+            object_a=chosen_objects[0],
+            object_b=chosen_objects[1]
+        )
+    except Exception as e:
+        logger.error(f"[{request_id}] Image creation failed: {str(e)}")
+        raise
+    
+    # Convert image to base64 (without data URI header)
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+    
+    logger.info(f"[{request_id}] Preview data created successfully: imageBase64 length={len(image_base64)}")
+    
+    return {
+        "imageBase64": image_base64,
+        "ad_goal": ad_goal,
+        "headline": headline,
+        "chosen_objects": chosen_objects,
+        "layout": "SIDE_BY_SIDE"
+    }
 
 
 def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:

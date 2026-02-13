@@ -8,7 +8,7 @@ import json
 import base64
 import os
 from typing import Dict, Optional
-from engine.side_by_side_v1 import generate_zip
+from engine.side_by_side_v1 import generate_zip, generate_preview_data
 
 app = Flask(__name__)
 
@@ -109,7 +109,7 @@ def generate():
         
         zip_bytes = generate_zip(payload_dict=payload, is_preview=False)
         
-        logger.info(f"[{request_id}] Generation successful, returning ZIP ({len(zip_bytes)} bytes)")
+        logger.info(f"[{request_id}] Generation successful, returning ZIP ({len(zip_bytes)} bytes), generate_response_type=zip")
         
         # Return ZIP file
         return send_file(
@@ -164,9 +164,9 @@ def generate():
 @app.route('/api/preview', methods=['POST'])
 def preview():
     """
-    Generate a single ad preview and return as ZIP file.
+    Generate a single ad preview and return as JSON.
     
-    SideBySide Engine v1: Same logic as /api/generate, returns ZIP for preview.
+    SideBySide Engine v1: Same logic as /api/generate, returns JSON for preview.
     
     Request JSON:
     {
@@ -180,7 +180,7 @@ def preview():
         "objectList": array of strings (optional, uses default if missing)
     }
     
-    Returns: application/zip with image.jpg and text.txt (same as /api/generate)
+    Returns: application/json with imageBase64, ad_goal, headline, chosen_objects, layout
     """
     request_id = str(uuid.uuid4())
     
@@ -213,21 +213,16 @@ def preview():
                 'message': 'productDescription is required'
             }), 400
         
-        # Generate ZIP using SideBySide Engine v1 (preview mode)
+        # Generate preview data using SideBySide Engine v1
         logger.info(f"[{request_id}] Starting preview: productName={payload.get('productName')[:50]}, "
                    f"adIndex={payload.get('adIndex', 0)}, sessionId={payload.get('sessionId')}")
         
-        zip_bytes = generate_zip(payload_dict=payload, is_preview=True)
+        preview_data = generate_preview_data(payload_dict=payload)
         
-        logger.info(f"[{request_id}] Preview generation successful, returning ZIP ({len(zip_bytes)} bytes)")
+        logger.info(f"[{request_id}] Preview generation successful, returning JSON, preview_response_type=json")
         
-        # Return ZIP file (same format as generate)
-        return send_file(
-            io.BytesIO(zip_bytes),
-            mimetype='application/zip',
-            as_attachment=True,
-            download_name='preview.zip'
-        )
+        # Return JSON response
+        return jsonify(preview_data), 200
         
     except ValueError as e:
         # Handle 400 errors (invalid_request from OpenAI)
