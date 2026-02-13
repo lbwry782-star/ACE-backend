@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, send_file, Response
+from flask_cors import CORS
 import uuid
 import logging
 import io
@@ -12,61 +13,30 @@ from typing import Dict, Optional
 app = Flask(__name__)
 
 # ============================================================================
-# CORS Configuration (Manual Implementation)
+# CORS Configuration (Flask-CORS)
 # ============================================================================
 
-# Allowed origins (exact match)
+# Allowed origins for production and development
 ALLOWED_ORIGINS = [
+    "https://lbwry782-star.github.io",
     "https://ace-advertising.agency",
-    "https://www.ace-advertising.agency"
+    "http://localhost:5173"
 ]
 
-def is_origin_allowed(origin: Optional[str]) -> bool:
-    """Check if origin is in allowed list."""
-    if not origin:
-        return False
-    return origin in ALLOWED_ORIGINS
-
-@app.before_request
-def handle_preflight():
-    """Handle OPTIONS preflight requests for CORS."""
-    if request.method == "OPTIONS" and request.path.startswith("/api/"):
-        origin = request.headers.get("Origin")
-        
-        if is_origin_allowed(origin):
-            response = Response('', status=200)
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Vary"] = "Origin"
-            response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
-            response.headers["Access-Control-Max-Age"] = "86400"
-            return response
-        else:
-            # Return 200 without Allow-Origin if origin not allowed (don't reveal info)
-            return Response('', status=200)
-
-@app.after_request
-def add_cors_headers(response):
-    """
-    Add CORS headers to all /api/* responses.
-    
-    This applies to all responses (200, 404, 500, etc.) for endpoints under /api/.
-    """
-    if request.path.startswith("/api/"):
-        origin = request.headers.get("Origin")
-        
-        if is_origin_allowed(origin):
-            # Add CORS headers for allowed origin
-            response.headers["Access-Control-Allow-Origin"] = origin
-            response.headers["Vary"] = "Origin"
-            response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
-            
-            # Expose X-ACE-Batch-State header for frontend (if needed)
-            if "X-ACE-Batch-State" in response.headers:
-                response.headers["Access-Control-Expose-Headers"] = "X-ACE-Batch-State"
-    
-    return response
+# Configure CORS for /api/* routes only
+CORS(
+    app,
+    resources={
+        r"/api/*": {
+            "origins": ALLOWED_ORIGINS,
+            "methods": ["GET", "POST", "OPTIONS"],
+            "allow_headers": ["Content-Type", "Authorization", "X-ACE-Batch-State"],
+            "expose_headers": ["X-ACE-Batch-State"],
+            "supports_credentials": False,
+            "max_age": 86400
+        }
+    }
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
