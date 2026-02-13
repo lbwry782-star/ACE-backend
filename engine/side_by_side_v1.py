@@ -364,6 +364,13 @@ Ignore meaning, category, theme, symbolism, relevance, marketing, color, materia
 
 Return EXACT strings from the list (no synonyms, no new words).
 
+GLOBAL VISUAL RULES (MANDATORY):
+- Do NOT select objects that inherently contain printed text or branding.
+- Avoid packaging, labels, posters, signs, billboards.
+- Only physical objects without visible text surfaces.
+- Must be photographable in real life.
+- Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
+
 Available object list:
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
 
@@ -380,7 +387,8 @@ Requirements:
 - Return 12 candidate pairs if possible, minimum 5
 - Each a/b must be EXACT match from the object list
 - Score based ONLY on shape similarity (outer contour/outline)
-- No meaning, no concept, only geometric shape"""
+- No meaning, no concept, only geometric shape
+- Exclude objects with visible text or branding"""
         
         if is_strict:
             prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline).
@@ -390,6 +398,13 @@ ONLY criterion: geometric shape similarity of the objects' outer contour (outlin
 Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
 
 Return exact strings from the list only. Return EXACT strings from the list (no synonyms, no new words).
+
+GLOBAL VISUAL RULES (MANDATORY):
+- Do NOT select objects that inherently contain printed text or branding.
+- Avoid packaging, labels, posters, signs, billboards.
+- Only physical objects without visible text surfaces.
+- Must be photographable in real life.
+- Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
 
 Available object list:
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
@@ -1016,6 +1031,13 @@ Objects:
 
 Task: Show ONE object in the PHYSICAL CONTEXT of the other object.
 
+GLOBAL VISUAL RULES (MANDATORY):
+- Do NOT select objects that inherently contain printed text or branding.
+- Avoid packaging, labels, posters, signs, billboards.
+- Only physical objects without visible text surfaces.
+- Must be photographable in real life.
+- Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
+
 Rules:
 - In the image, we see ONLY the hero_object as a full object.
 - The context_object does NOT appear as a full object in any situation.
@@ -1292,6 +1314,19 @@ COMPOSITION:
 - The context mechanic is: {context_mechanic}
 - Minimal background, clean, physically realistic.
 
+VISUAL STYLE CONSTRAINTS:
+- Ultra realistic photography.
+- Professional studio or real-world photography.
+- Natural lighting.
+- Real materials.
+- No illustration style.
+- No drawn elements.
+- No graphic design look.
+- No visible logos.
+- No printed brand names.
+- No readable text except the main headline generated for the ad.
+- If any object would normally contain branding, render it completely generic and blank.
+
 HEADLINE:
 - Only one headline: "{headline}"
 - {headline_instruction}
@@ -1342,6 +1377,20 @@ PHYSICAL CONTEXT EXTENSIONS:
   * NOT create overlap with the other object.
 - Maintain this exact compositional structure in all attempts (do not change positioning between retries)."""
 
+    # Build visual style constraints section
+    visual_style_constraints = """VISUAL STYLE CONSTRAINTS:
+- Ultra realistic photography.
+- Professional studio or real-world photography.
+- Natural lighting.
+- Real materials.
+- No illustration style.
+- No drawn elements.
+- No graphic design look.
+- No visible logos.
+- No printed brand names.
+- No readable text except the main headline generated for the ad.
+- If any object would normally contain branding, render it completely generic and blank."""
+
     if is_strict:
         return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
 
@@ -1351,6 +1400,8 @@ OBJECTS:
 {physical_context_section}
 
 {composition_rules}
+
+{visual_style_constraints}
 
 HEADLINE:
 - Only one headline: "{headline}"
@@ -1382,6 +1433,8 @@ OBJECTS:
 {physical_context_section}
 
 {composition_rules}
+
+{visual_style_constraints}
 
 HEADLINE:
 - Only one headline: "{headline}"
@@ -1462,6 +1515,7 @@ def generate_image_with_dalle(
     image_prompt_includes_shape_hint = shape_hint is not None and shape_hint != ""
     mode = "HYBRID_SINGLE_OBJECT" if hybrid_plan and hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT" else "SIDE_BY_SIDE"
     logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\", mode={mode}")
+    logger.info(f"STEP 3 VISUAL_RULES_APPLIED: no_logos=true, photorealistic_only=true")
     if mode == "SIDE_BY_SIDE":
         logger.info(f"STEP 3 COMPOSITION: near_touching=true, overlap=false_expected")
     else:
