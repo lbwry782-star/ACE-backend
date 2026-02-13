@@ -20,11 +20,14 @@ from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
-# Default object list (if not provided)
+# Default object list - concrete nouns in English (for shape similarity)
 DEFAULT_OBJECT_LIST = [
-    "ספורט", "מוזיקה", "טכנולוגיה", "אוכל", "טבע", "עיצוב", "אופנה", "מכוניות",
-    "אמנות", "ספרים", "סרטים", "משחקים", "חיות", "ים", "הרים", "ערים",
-    "צבעים", "אור", "צללים", "מרקם", "צורה", "קו", "נקודה", "משטח"
+    "leaf", "shell", "ear", "mask", "bottle", "candle", "banana", "crescent",
+    "ring", "coin", "plate", "wheel", "key", "spoon", "fork", "ladder",
+    "tower", "tree", "feather", "fish", "rocket", "pencil", "pipe", "cone",
+    "triangle", "circle", "square", "cube", "sphere", "cylinder", "hourglass",
+    "moon", "sun", "star", "diamond", "heart", "arrow", "bow", "shield",
+    "crown", "bell", "horn", "trumpet", "flute", "violin", "guitar", "drum"
 ]
 
 # Allowed image sizes
@@ -53,11 +56,12 @@ def parse_image_size(image_size: str) -> Tuple[int, int]:
 def validate_object_list(object_list: Optional[List[str]]) -> List[str]:
     """
     Validate and return object list.
-    If None or too small, return default list.
+    If None or too small, return default concrete objects list.
     """
     if not object_list or len(object_list) < 2:
-        logger.info("objectList missing or too small, using default list")
+        logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), using default concrete objects list (size={len(DEFAULT_OBJECT_LIST)})")
         return DEFAULT_OBJECT_LIST
+    logger.info(f"objectList provided with {len(object_list)} items")
     return object_list
 
 
@@ -118,40 +122,38 @@ def call_openai_model(
         available_objects = object_list
         logger.warning("Not enough unused objects, allowing reuse")
     
-    # Build prompt
-    lang_instruction = "עברית" if language == "he" else "English"
-    headline_lang = "בעברית" if language == "he" else "in English"
-    
+    # Build prompt in English only
     history_context = ""
     if history:
-        history_context = f"\n\nמודעות קודמות:\n"
+        history_context = f"\n\nPrevious ads:\n"
         for i, item in enumerate(history, 1):
             goal = item.get("ad_goal", "")
             objs = item.get("chosen_objects", [])
             history_context += f"{i}. ad_goal: {goal}, chosen_objects: {', '.join(objs) if isinstance(objs, list) else str(objs)}\n"
-        history_context += "\nחשוב: אל תבחר אובייקטים שכבר הופיעו, ותן ad_goal שונה ממה שכבר הופיע."
+        history_context += "\nImportant: Do not choose objects that already appeared, and give a different ad_goal from previous ones."
     
-    prompt = f"""אתה יוצר מודעה פרסומית למוצר.
+    prompt = f"""You are creating an advertisement for a product.
 
-מוצר: {product_name}
-תיאור: {product_description}
-שפה: {lang_instruction}
+Product: {product_name}
+Description: {product_description}
+Language: English only (output must be in English only)
 
-רשימת אובייקטים זמינים (בחר בדיוק 2 שונים):
+Available object list (choose EXACTLY 2 different items):
 {json.dumps(available_objects, ensure_ascii=False, indent=2)}
 {history_context}
 
-דרישות:
-1. בחר בדיוק 2 אובייקטים שונים מתוך הרשימה בלבד.
-2. כתוב headline {headline_lang} (5-8 מילים) שכולל את שם המוצר או שם המותג.
-3. תן ad_goal ברור ומשכנע.
-4. Layout תמיד SIDE_BY_SIDE (אל תציין layout בתשובה).
+Requirements:
+1. Choose EXACTLY 2 different objects from the list above. Return EXACTLY two items from the provided list. No new words. No categories.
+2. Choose two objects with similar silhouette/shape (e.g., ear~shell, leaf~tree, bottle~candle). Do NOT choose conceptual categories.
+3. Write a headline in English (5-8 words) that includes the product name or brand name.
+4. Give a clear and compelling ad_goal.
+5. Layout is always SIDE_BY_SIDE (do not mention layout in response).
 
-החזר JSON בלבד בפורמט:
+Return JSON only in this format:
 {{
   "ad_goal": "...",
   "headline": "...",
-  "chosen_objects": ["אובייקט1", "אובייקט2"]
+  "chosen_objects": ["object1", "object2"]
 }}"""
 
     # Check if model is o* type (o4-mini, o3, o1-mini, etc.) - these don't support temperature
@@ -159,25 +161,56 @@ def call_openai_model(
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
     use_temperature = not is_o_model
     
-    # Build request parameters
-    request_params = {
-        "model": model_name,
-        "messages": [
-            {"role": "system", "content": "אתה עוזר ליצירת מודעות פרסומיות. החזר JSON בלבד ללא טקסט נוסף."},
-            {"role": "user", "content": prompt}
-        ],
-        "response_format": {"type": "json_object"}
-    }
-    
-    # Only add temperature for non-o* models
-    if use_temperature:
-        request_params["temperature"] = 0.7
-        logger.info(f"Using temperature=0.7 for model {model_name}")
-    else:
-        logger.info(f"Omitting temperature parameter for o* model {model_name}")
+    logger.info(f"objectList_size={len(object_list)}, selected objects will be validated against this list")
     
     for attempt in range(max_retries):
+        is_strict_validation = attempt > 0  # Use stricter prompt on retries
+        
+        # Build prompt (stricter on retries)
+        current_prompt = prompt
+        if is_strict_validation:
+            current_prompt = f"""You are creating an advertisement for a product.
+
+Product: {product_name}
+Description: {product_description}
+Language: English only (output must be in English only)
+
+Available object list (choose EXACTLY 2 different items):
+{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+{history_context}
+
+Requirements (STRICT):
+1. Return EXACTLY two items from the provided list. No new words. No categories.
+2. Choose two objects with similar silhouette/shape (e.g., ear~shell, leaf~tree, bottle~candle). Do NOT choose conceptual categories.
+3. Write a headline in English (5-8 words) that includes the product name or brand name.
+4. Give a clear and compelling ad_goal.
+5. Layout is always SIDE_BY_SIDE (do not mention layout in response).
+
+Return JSON only in this format:
+{{
+  "ad_goal": "...",
+  "headline": "...",
+  "chosen_objects": ["object1", "object2"]
+}}"""
+        
+        # Build request parameters
+        request_params = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": "You are an assistant for creating advertisements. Output must be in English only. Return JSON only without additional text."},
+                {"role": "user", "content": current_prompt}
+            ],
+            "response_format": {"type": "json_object"}
+        }
+        
+        # Only add temperature for non-o* models
+        if use_temperature:
+            request_params["temperature"] = 0.7
+        
         try:
+            if attempt == 0:
+                logger.info(f"Using temperature={'0.7' if use_temperature else 'omitted'} for model {model_name}")
+            
             response = client.chat.completions.create(**request_params)
             
             content = response.choices[0].message.content
@@ -193,11 +226,19 @@ def call_openai_model(
             if len(result["chosen_objects"]) != 2:
                 raise ValueError("chosen_objects must contain exactly 2 items")
             
-            # Validate objects are in the list
+            # STRICT VALIDATION: objects must be EXACTLY in the list
             chosen = result["chosen_objects"]
-            if not all(obj in object_list for obj in chosen):
+            validation_passed = all(obj in object_list for obj in chosen)
+            
+            if not validation_passed:
                 invalid = [obj for obj in chosen if obj not in object_list]
-                raise ValueError(f"Objects not in list: {invalid}")
+                logger.warning(f"Validation failed: objects not in list: {invalid}, attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    # Retry with stricter prompt
+                    logger.info(f"Retrying with stricter prompt (attempt {attempt + 2}/{max_retries})")
+                    continue
+                else:
+                    raise ValueError(f"Objects not in list after {max_retries} attempts: {invalid}")
             
             if result["chosen_objects"][0] == result["chosen_objects"][1]:
                 raise ValueError("chosen_objects must be different")
@@ -205,7 +246,7 @@ def call_openai_model(
             if not result.get("headline") or not result.get("ad_goal"):
                 raise ValueError("Missing headline or ad_goal")
             
-            logger.info(f"OpenAI call succeeded on attempt {attempt + 1}")
+            logger.info(f"OpenAI call succeeded on attempt {attempt + 1}, selected objects={chosen}, validation_passed=true")
             return result
             
         except Exception as e:
@@ -540,7 +581,11 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     product_name = payload_dict.get("productName", "")
     product_description = payload_dict.get("productDescription", "")
     image_size_str = payload_dict.get("imageSize", "1536x1024")
-    language = payload_dict.get("language", "he")
+    # Force English-only: default to "en", override "he" to "en"
+    language = payload_dict.get("language", "en")
+    if language == "he":
+        language = "en"
+        logger.info(f"[{request_id}] Overriding language=he to language=en (English-only mode)")
     ad_index = payload_dict.get("adIndex", 0)
     
     # Normalize ad_index (0 -> 1, ensure 1-3)
@@ -647,7 +692,11 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     product_name = payload_dict.get("productName", "")
     product_description = payload_dict.get("productDescription", "")
     image_size_str = payload_dict.get("imageSize", "1536x1024")
-    language = payload_dict.get("language", "he")
+    # Force English-only: default to "en", override "he" to "en"
+    language = payload_dict.get("language", "en")
+    if language == "he":
+        language = "en"
+        logger.info(f"[{request_id}] Overriding language=he to language=en (English-only mode)")
     ad_index = payload_dict.get("adIndex", 0)
     
     # Normalize ad_index (0 -> 1, ensure 1-3)
