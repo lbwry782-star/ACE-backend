@@ -86,6 +86,14 @@ def generate():
         
         payload = request.get_json()
         
+        # Check for dryRun mode
+        if payload.get("dryRun") is True:
+            logger.info(f"[{request_id}] DRY RUN mode: skipping OpenAI calls, returning mock response")
+            return jsonify({
+                'dryRun': True,
+                'ok': True
+            }), 200
+        
         # Validate required fields
         if not payload.get("productName"):
             logger.warning(f"[{request_id}] Missing productName")
@@ -195,6 +203,14 @@ def preview():
             }), 400
         
         payload = request.get_json()
+        
+        # Check for dryRun mode
+        if payload.get("dryRun") is True:
+            logger.info(f"[{request_id}] DRY RUN mode: skipping OpenAI calls, returning mock response")
+            return jsonify({
+                'dryRun': True,
+                'ok': True
+            }), 200
         
         # Validate required fields
         if not payload.get("productName"):
