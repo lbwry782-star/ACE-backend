@@ -1001,36 +1001,39 @@ def generate_hybrid_context_plan(
     
     Returns:
         dict: {
-            "mode": "HYBRID_SINGLE_OBJECT",
             "hero_object": "object_a" | "object_b",
-            "context_object": "object_a" | "object_b",
-            "context_mechanic": "attached|inserted|replaced|held|growing_from|wrapped_by|filled_with",
-            "context_description": str (max 10 words),
-            "do_not_show_full_context_object": true,
-            "headline_placement": "BOTTOM" | "SIDE"
+            "environment_from": "object_a" | "object_b",
+            "environment_description": str (max 15 words),
+            "environment_is_classic": bool,
+            "single_object_confirmed": bool
         }
     
     Rules:
     - Show ONLY hero_object as full object
-    - context_object appears only as physical context/mechanism, NOT as full object
-    - Physical and tangible: connected/touching/stuck/replaced/wrapped/filled
+    - environment_from object must NOT appear
+    - Only the classic natural environment of environment_from is shown
+    - No physical merging, no structural integration, no inserted mechanisms
     - No decorative background, no extra elements
     - English only
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
-    prompt = f"""You are planning a HYBRID_SINGLE_OBJECT advertisement composition.
+    prompt = f"""You are planning an ENVIRONMENT SWAP advertisement composition.
 
 CORE RULE:
-"Show ONE object placed inside the CLASSIC ENVIRONMENT of the other object."
+- Show ONLY one object (hero_object).
+- Place it inside the CLASSIC NATURAL ENVIRONMENT of the second object.
+- Do NOT show the second object.
+- No physical merging.
+- No structural integration.
+- No inserted mechanisms.
 
 Definition of classic environment:
-- The natural, iconic, immediately recognizable setting where the second object is normally found.
-- Not decorative.
-- Not symbolic.
-- Physically plausible.
-- Real-world photographable context.
+- The natural, iconic setting where the second object normally exists.
+- Physically realistic.
+- Immediately recognizable.
+- Real-world photographable environment.
 
 Objects:
 - Object A: {object_a}
@@ -1040,21 +1043,12 @@ Objects:
 - Image size: {image_size}
 
 Rules:
-- Only one full object (hero_object) may be visible.
-- The second object must NOT appear as a full object.
-- Only its classic environment may be shown.
-- The environment must feel natural and physically real.
-- No decorative background elements.
-- No logos.
-- No text on objects.
+- Only one full object allowed.
+- The second object must NOT appear.
+- No decorative elements unrelated to the environment.
 - Photorealistic only.
-
-Instructions:
-- Identify the classic environment of environment_based_on.
-- Place hero_object inside that environment.
-- Do NOT show environment_based_on object itself.
-- Ensure the result is physically believable.
 - English only.
+- The environment must be natural and physically plausible.
 
 VISUAL RULES (apply always):
 - Photorealistic photography only.
@@ -1072,16 +1066,16 @@ Return JSON only:
 
 {{
   "hero_object": "{object_a}" | "{object_b}",
-  "environment_based_on": "{object_a}" | "{object_b}",
-  "classic_environment_description": "short concrete description (max 12 words)",
-  "environment_is_iconic": true,
+  "environment_from": "{object_a}" | "{object_b}",
+  "environment_description": "short concrete natural environment description (max 15 words)",
+  "environment_is_classic": true,
   "single_object_confirmed": true
 }}
 
 Rules:
-- hero_object and environment_based_on must be different.
-- classic_environment_description must be concrete and describe the natural/iconic setting (max 12 words).
-- environment_is_iconic must be true.
+- hero_object and environment_from must be different.
+- environment_description must be concrete and describe the natural/iconic setting (max 15 words).
+- environment_is_classic must be true.
 - single_object_confirmed must be true.
 
 JSON:"""
@@ -1090,7 +1084,7 @@ JSON:"""
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
     using_responses_api = is_o_model
     
-    logger.info(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN: shape_model={model_name}, object_a={object_a}, object_b={object_b}, ad_goal={ad_goal[:50]}, using_responses_api={using_responses_api}")
+    logger.info(f"STEP 1.75 - ENVIRONMENT SWAP PLAN: shape_model={model_name}, object_a={object_a}, object_b={object_b}, ad_goal={ad_goal[:50]}, using_responses_api={using_responses_api}")
     
     for attempt in range(max_retries):
         try:
@@ -1128,22 +1122,22 @@ JSON:"""
             # Validate response structure
             if data.get("hero_object") not in [object_a, object_b]:
                 raise ValueError(f"hero_object must be '{object_a}' or '{object_b}'")
-            if data.get("environment_based_on") not in [object_a, object_b]:
-                raise ValueError(f"environment_based_on must be '{object_a}' or '{object_b}'")
-            if data.get("hero_object") == data.get("environment_based_on"):
-                raise ValueError("hero_object and environment_based_on must be different")
+            if data.get("environment_from") not in [object_a, object_b]:
+                raise ValueError(f"environment_from must be '{object_a}' or '{object_b}'")
+            if data.get("hero_object") == data.get("environment_from"):
+                raise ValueError("hero_object and environment_from must be different")
             
-            if not data.get("environment_is_iconic", False):
-                raise ValueError("environment_is_iconic must be true")
+            if not data.get("environment_is_classic", False):
+                raise ValueError("environment_is_classic must be true")
             if not data.get("single_object_confirmed", False):
                 raise ValueError("single_object_confirmed must be true")
             
             # Determine actual object names
             hero_name = data["hero_object"]
-            environment_name = data["environment_based_on"]
-            env_description = data.get("classic_environment_description", "")
+            environment_name = data["environment_from"]
+            env_description = data.get("environment_description", "")
             
-            logger.info(f"STEP 1.75 - HYBRID CLASSIC ENVIRONMENT PLAN SUCCESS: hero={hero_name}, environment_based_on={environment_name}, classic_environment=\"{env_description}\"")
+            logger.info(f"STEP 1.75 - ENVIRONMENT SWAP PLAN SUCCESS: hero={hero_name}, environment_from={environment_name}, environment=\"{env_description}\"")
             
             return data
             
@@ -1305,31 +1299,41 @@ def create_image_prompt(
     """
     # Check if we're in HYBRID_SINGLE_OBJECT mode
     if hybrid_plan and ("hero_object" in hybrid_plan or hybrid_plan.get("mode") == "HYBRID_SINGLE_OBJECT"):
-        # HYBRID_SINGLE_OBJECT mode
+        # HYBRID_SINGLE_OBJECT mode (ENVIRONMENT SWAP)
         hero_object = hybrid_plan.get("hero_object", object_a)
-        environment_based_on = hybrid_plan.get("environment_based_on", object_b)
-        classic_environment_description = hybrid_plan.get("classic_environment_description", "")
+        environment_from = hybrid_plan.get("environment_from", object_b)
+        environment_description = hybrid_plan.get("environment_description", "")
         
-        # Default headline placement (BOTTOM)
-        headline_instruction = "Place the headline under the object on clean space."
+        # Determine headline placement based on image dimensions
+        # Default is BOTTOM, but can be SIDE for landscape
+        headline_instruction = "Place the headline below the object on clean space."
         
-        return f"""Create a professional advertisement image in HYBRID_SINGLE_OBJECT mode.
+        return f"""Create a professional advertisement image using ENVIRONMENT SWAP logic.
 
 CORE RULE:
-"Show ONE object placed inside the CLASSIC ENVIRONMENT of the other object."
+- Show ONLY one object (hero_object).
+- Place it inside the CLASSIC NATURAL ENVIRONMENT of the second object.
+- Do NOT show the second object.
+- No physical merging.
+- No structural integration.
+- No inserted mechanisms.
 
 COMPOSITION:
 - Show ONLY the hero object: {hero_object}
-- Do NOT show the environment_based_on object ({environment_based_on}) as a full object.
-- Place the hero object inside the classic environment: {classic_environment_description}
-- The environment must be the natural, iconic, immediately recognizable setting where {environment_based_on} is normally found.
-- The environment must feel natural and physically real.
-- No decorative background elements.
+- Place it inside this natural environment: {environment_description}
+- Do NOT show the second object ({environment_from}).
+- Single centered object.
+- Clean frame.
 - Ultra realistic photography.
-- Clean minimal background.
+- Natural lighting.
+- Real materials.
+- No illustration.
+- No CGI look.
 - No logos.
 - No object text.
-- Headline placed under the object (default) or side if landscape.
+- The only readable text allowed is the headline.
+- Headline below the object (default).
+- If landscape format and space allows, headline may be placed to the side.
 
 VISUAL STYLE CONSTRAINTS:
 - Photorealistic photography only.
@@ -1537,12 +1541,12 @@ def generate_image_with_dalle(
         logger.info(f"STEP 3 COMPOSITION: near_touching=true, overlap=false_expected")
     else:
         hero_name = hybrid_plan.get("hero_object", object_a)
-        environment_name = hybrid_plan.get("environment_based_on", object_b)
-        env_description = hybrid_plan.get("classic_environment_description", "")
+        environment_name = hybrid_plan.get("environment_from", object_b)
+        env_description = hybrid_plan.get("environment_description", "")
         logger.info(f"STEP 3 HYBRID_MODE_ACTIVE=true")
         logger.info(f"STEP 3 HERO={hero_name}")
-        logger.info(f"STEP 3 ENVIRONMENT_BASED_ON={environment_name}")
-        logger.info(f"STEP 3 CLASSIC_ENVIRONMENT=\"{env_description}\"")
+        logger.info(f"STEP 3 ENVIRONMENT_FROM={environment_name}")
+        logger.info(f"STEP 3 ENVIRONMENT_DESCRIPTION=\"{env_description}\"")
         logger.info(f"STEP 3 SINGLE_OBJECT_CONFIRMED=true")
         logger.info(f"STEP 3 NO_LOGOS_RULE=true")
         logger.info(f"STEP 3 PHOTO_REALISM_RULE=true")
