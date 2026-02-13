@@ -119,6 +119,27 @@ def generate():
             download_name='ad.zip'
         )
         
+    except ValueError as e:
+        # Handle 400 errors (invalid_request from OpenAI)
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Generation failed (400): {error_msg}", exc_info=True)
+        
+        if "invalid_request" in error_msg.lower():
+            # Extract the actual error message (after "invalid_request: ")
+            actual_error = error_msg.split("invalid_request:", 1)[-1].strip() if "invalid_request:" in error_msg else error_msg
+            return jsonify({
+                'ok': False,
+                'error': 'invalid_request',
+                'message': f'Invalid request to OpenAI: {actual_error}'
+            }), 400
+        else:
+            # Other ValueError - still 400
+            return jsonify({
+                'ok': False,
+                'error': 'validation_error',
+                'message': error_msg
+            }), 400
+            
     except Exception as e:
         error_msg = str(e)
         logger.error(f"[{request_id}] Generation failed: {error_msg}", exc_info=True)
@@ -208,6 +229,27 @@ def preview():
             download_name='preview.zip'
         )
         
+    except ValueError as e:
+        # Handle 400 errors (invalid_request from OpenAI)
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Preview generation failed (400): {error_msg}", exc_info=True)
+        
+        if "invalid_request" in error_msg.lower():
+            # Extract the actual error message (after "invalid_request: ")
+            actual_error = error_msg.split("invalid_request:", 1)[-1].strip() if "invalid_request:" in error_msg else error_msg
+            return jsonify({
+                'ok': False,
+                'error': 'invalid_request',
+                'message': f'Invalid request to OpenAI: {actual_error}'
+            }), 400
+        else:
+            # Other ValueError - still 400
+            return jsonify({
+                'ok': False,
+                'error': 'validation_error',
+                'message': error_msg
+            }), 400
+            
     except Exception as e:
         error_msg = str(e)
         logger.error(f"[{request_id}] Preview generation failed: {error_msg}", exc_info=True)

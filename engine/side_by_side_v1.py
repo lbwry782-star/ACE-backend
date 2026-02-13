@@ -153,17 +153,31 @@ def call_openai_model(
   "chosen_objects": ["אובייקט1", "אובייקט2"]
 }}"""
 
+    # Check if model is o* type (o4-mini, o3, o1-mini, etc.) - these don't support temperature
+    # Pattern: starts with "o" followed by a digit
+    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+    use_temperature = not is_o_model
+    
+    # Build request parameters
+    request_params = {
+        "model": model_name,
+        "messages": [
+            {"role": "system", "content": "אתה עוזר ליצירת מודעות פרסומיות. החזר JSON בלבד ללא טקסט נוסף."},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
+    
+    # Only add temperature for non-o* models
+    if use_temperature:
+        request_params["temperature"] = 0.7
+        logger.info(f"Using temperature=0.7 for model {model_name}")
+    else:
+        logger.info(f"Omitting temperature parameter for o* model {model_name}")
+    
     for attempt in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": "אתה עוזר ליצירת מודעות פרסומיות. החזר JSON בלבד ללא טקסט נוסף."},
-                    {"role": "user", "content": prompt}
-                ],
-                response_format={"type": "json_object"},
-                temperature=0.7
-            )
+            response = client.chat.completions.create(**request_params)
             
             content = response.choices[0].message.content
             result = json.loads(content)
@@ -195,9 +209,30 @@ def call_openai_model(
             
         except Exception as e:
             error_str = str(e)
+            error_lower = error_str.lower()
             
-            # Check for rate limit (429)
-            if "429" in error_str or "rate_limit" in error_str.lower() or "quota" in error_str.lower():
+            # Check for 400 errors (invalid_request, unsupported_value, etc.) - DO NOT RETRY
+            is_400_error = (
+                "400" in error_str or 
+                "invalid_request" in error_lower or 
+                "unsupported_value" in error_lower or
+                "bad_request" in error_lower
+            )
+            
+            if is_400_error:
+                logger.error(f"OpenAI 400 error (no retry): {error_str}")
+                # Wrap in a specific exception type for 400 errors
+                raise ValueError(f"invalid_request: {error_str}")
+            
+            # Check for rate limit (429) - RETRY with backoff
+            is_rate_limit = (
+                "429" in error_str or 
+                "rate_limit" in error_lower or 
+                "quota" in error_lower or
+                "rate limit" in error_lower
+            )
+            
+            if is_rate_limit:
                 if attempt < max_retries - 1:
                     # Exponential backoff + jitter
                     base_delay = 2 ** attempt
@@ -210,14 +245,29 @@ def call_openai_model(
                     logger.error(f"Rate limit exceeded after {max_retries} attempts")
                     raise Exception("rate_limited")
             
-            # Other errors - if last attempt, raise; otherwise retry once
-            if attempt < max_retries - 1:
-                logger.warning(f"OpenAI call failed (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
-                time.sleep(1)
-                continue
-            else:
-                logger.error(f"OpenAI call failed after {max_retries} attempts: {error_str}")
-                raise
+            # Check for server errors (500-599) or connection errors - RETRY
+            is_server_error = (
+                "500" in error_str or 
+                "502" in error_str or 
+                "503" in error_str or
+                "504" in error_str or
+                "timeout" in error_lower or
+                "connection" in error_lower or
+                "network" in error_lower
+            )
+            
+            if is_server_error:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Server/connection error (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
+                    time.sleep(1 + attempt)  # Progressive delay
+                    continue
+                else:
+                    logger.error(f"Server/connection error after {max_retries} attempts: {error_str}")
+                    raise
+            
+            # Other errors - don't retry, raise immediately
+            logger.error(f"OpenAI call failed (non-retryable, attempt {attempt + 1}): {error_str}")
+            raise
     
     raise Exception("Failed to get valid response from OpenAI")
 
