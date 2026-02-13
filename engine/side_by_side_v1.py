@@ -95,34 +95,269 @@ def get_used_ad_goals(history: Optional[List[Dict]]) -> set:
     return used
 
 
+def select_similar_pair_shape_only(
+    object_list: List[str],
+    used_objects: set,
+    max_retries: int = 3
+) -> Dict:
+    """
+    Select two objects based ONLY on geometric shape similarity.
+    Uses OPENAI_SHAPE_MODEL (default: o3-pro).
+    
+    Returns: {
+        "object_a": str,
+        "object_b": str,
+        "shape_similarity_score": int (0-100),
+        "shape_hint": str,
+        "why": str
+    }
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    
+    # Filter out used objects
+    available_objects = [obj for obj in object_list if obj not in used_objects]
+    if len(available_objects) < 2:
+        available_objects = object_list
+        logger.warning("Not enough unused objects for shape selection, allowing reuse")
+    
+    logger.info(f"select_similar_pair_shape_only: objectList_size={len(object_list)}, available={len(available_objects)}")
+    
+    # Check if model is o* type - these don't support temperature
+    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+    use_temperature = not is_o_model
+    
+    for attempt in range(max_retries):
+        is_strict = attempt > 0
+        
+        prompt = f"""Task: Choose TWO items from the provided list.
+
+ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
+
+Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
+
+Return EXACT strings from the list (no synonyms, no new words).
+
+Available object list:
+{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+
+Output JSON only:
+{{
+  "object_a": "<exact match>",
+  "object_b": "<exact match>",
+  "shape_similarity_score": 0-100,
+  "shape_hint": "very short (e.g., tall-vertical, round-flat, spiral, crescent, oval)",
+  "why": "one short sentence focused on shape"
+}}"""
+        
+        if is_strict:
+            prompt = f"""Task: Choose TWO items from the provided list.
+
+ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
+
+Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
+
+Return exact strings from the list only. Return EXACT strings from the list (no synonyms, no new words).
+
+Available object list:
+{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+
+Output JSON only:
+{{
+  "object_a": "<exact match>",
+  "object_b": "<exact match>",
+  "shape_similarity_score": 0-100,
+  "shape_hint": "very short (e.g., tall-vertical, round-flat, spiral, crescent, oval)",
+  "why": "one short sentence focused on shape"
+}}"""
+        
+        # Build request parameters
+        request_params = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
+                {"role": "user", "content": prompt}
+            ],
+            "response_format": {"type": "json_object"}
+        }
+        
+        if use_temperature:
+            request_params["temperature"] = 0.7
+        
+        try:
+            if attempt == 0:
+                logger.info(f"Shape selection: using model={model_name}, temperature={'0.7' if use_temperature else 'omitted'}")
+            
+            response = client.chat.completions.create(**request_params)
+            
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            
+            # Validate result structure
+            if not isinstance(result, dict):
+                raise ValueError("Response is not a dict")
+            
+            required_fields = ["object_a", "object_b", "shape_similarity_score"]
+            if not all(field in result for field in required_fields):
+                raise ValueError(f"Missing required fields: {required_fields}")
+            
+            object_a = result["object_a"]
+            object_b = result["object_b"]
+            
+            # Guardrail: Validate objects are exact members of the list
+            if object_a not in object_list or object_b not in object_list:
+                invalid = [obj for obj in [object_a, object_b] if obj not in object_list]
+                logger.warning(f"Shape selection validation failed: objects not in list: {invalid}, attempt {attempt + 1}/{max_retries}")
+                if attempt < max_retries - 1:
+                    logger.info(f"Retrying with stricter instruction (attempt {attempt + 2}/{max_retries})")
+                    continue
+                else:
+                    raise ValueError(f"Objects not in list after {max_retries} attempts: {invalid}")
+            
+            if object_a == object_b:
+                raise ValueError("object_a and object_b must be different")
+            
+            score = result.get("shape_similarity_score", 0)
+            if not isinstance(score, (int, float)):
+                try:
+                    score = int(score)
+                except:
+                    score = 0
+            
+            # Guardrail: If score < 80, ask for 5 candidates
+            if score < 80 and attempt < max_retries - 1:
+                logger.warning(f"Shape similarity score too low ({score} < 80), requesting 5 candidates...")
+                candidates_prompt = f"""Task: Choose FIVE candidate pairs from the provided list, ranked by shape similarity.
+
+ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
+
+Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
+
+Return EXACT strings from the list only.
+
+Available object list:
+{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+
+Output JSON only:
+{{
+  "candidates": [
+    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
+    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
+    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
+    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}},
+    {{"object_a": "<exact>", "object_b": "<exact>", "shape_similarity_score": 0-100}}
+  ]
+}}"""
+                
+                candidates_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
+                        {"role": "user", "content": candidates_prompt}
+                    ],
+                    "response_format": {"type": "json_object"}
+                }
+                
+                if use_temperature:
+                    candidates_params["temperature"] = 0.7
+                
+                candidates_response = client.chat.completions.create(**candidates_params)
+                candidates_content = candidates_response.choices[0].message.content
+                candidates_result = json.loads(candidates_content)
+                
+                if "candidates" in candidates_result and isinstance(candidates_result["candidates"], list):
+                    # Pick highest scoring candidate
+                    valid_candidates = [
+                        c for c in candidates_result["candidates"]
+                        if isinstance(c, dict) and 
+                        c.get("object_a") in object_list and 
+                        c.get("object_b") in object_list and
+                        c.get("object_a") != c.get("object_b")
+                    ]
+                    
+                    if valid_candidates:
+                        best = max(valid_candidates, key=lambda x: x.get("shape_similarity_score", 0))
+                        result = {
+                            "object_a": best["object_a"],
+                            "object_b": best["object_b"],
+                            "shape_similarity_score": best.get("shape_similarity_score", 0),
+                            "shape_hint": best.get("shape_hint", ""),
+                            "why": best.get("why", "")
+                        }
+                        logger.info(f"Selected best candidate from 5: {result['object_a']} + {result['object_b']}, score={result['shape_similarity_score']}")
+            
+            logger.info(f"Shape selection succeeded: object_a={object_a}, object_b={object_b}, score={score}, validation_passed=true")
+            return result
+            
+        except Exception as e:
+            error_str = str(e)
+            error_lower = error_str.lower()
+            
+            # Check for 400 errors - DO NOT RETRY
+            is_400_error = (
+                "400" in error_str or 
+                "invalid_request" in error_lower or 
+                "unsupported_value" in error_lower or
+                "bad_request" in error_lower
+            )
+            
+            if is_400_error:
+                logger.error(f"Shape selection 400 error (no retry): {error_str}")
+                raise ValueError(f"invalid_request: {error_str}")
+            
+            # Check for rate limit - RETRY
+            is_rate_limit = (
+                "429" in error_str or 
+                "rate_limit" in error_lower or 
+                "quota" in error_lower or
+                "rate limit" in error_lower
+            )
+            
+            if is_rate_limit:
+                if attempt < max_retries - 1:
+                    base_delay = 2 ** attempt
+                    jitter = random.uniform(0, 1)
+                    delay = base_delay + jitter
+                    logger.warning(f"Shape selection rate limit (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"Shape selection rate limit exceeded after {max_retries} attempts")
+                    raise Exception("rate_limited")
+            
+            # Other errors
+            if attempt < max_retries - 1:
+                logger.warning(f"Shape selection failed (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
+                time.sleep(1 + attempt)
+                continue
+            else:
+                logger.error(f"Shape selection failed after {max_retries} attempts: {error_str}")
+                raise
+    
+    raise Exception("Failed to select shape pair after retries")
+
+
 def call_openai_model(
     product_name: str,
     product_description: str,
     language: str,
-    object_list: List[str],
+    chosen_objects: List[str],  # Already selected objects (from shape selection)
     history: Optional[List[Dict]],
     model_name: str,
     max_retries: int = 3
 ) -> Dict:
     """
-    Call OpenAI model to generate ad content.
-    Returns: {"ad_goal": str, "headline": str, "chosen_objects": [str, str]}
+    Call OpenAI model to generate ad content (headline and ad_goal).
+    Objects are already selected by select_similar_pair_shape_only.
+    Returns: {"ad_goal": str, "headline": str}
     
     Implements retry logic with exponential backoff + jitter for 429 errors.
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     
-    used_objects = get_used_objects(history)
     used_goals = get_used_ad_goals(history)
     
-    # Filter out used objects
-    available_objects = [obj for obj in object_list if obj not in used_objects]
-    if len(available_objects) < 2:
-        # If not enough unused objects, allow reuse but prefer unused
-        available_objects = object_list
-        logger.warning("Not enough unused objects, allowing reuse")
-    
-    # Build prompt in English only
+    # Build prompt in English only (objects already chosen)
     history_context = ""
     if history:
         history_context = f"\n\nPrevious ads:\n"
@@ -130,7 +365,7 @@ def call_openai_model(
             goal = item.get("ad_goal", "")
             objs = item.get("chosen_objects", [])
             history_context += f"{i}. ad_goal: {goal}, chosen_objects: {', '.join(objs) if isinstance(objs, list) else str(objs)}\n"
-        history_context += "\nImportant: Do not choose objects that already appeared, and give a different ad_goal from previous ones."
+        history_context += "\nImportant: Give a different ad_goal from previous ones."
     
     prompt = f"""You are creating an advertisement for a product.
 
@@ -138,67 +373,33 @@ Product: {product_name}
 Description: {product_description}
 Language: English only (output must be in English only)
 
-Available object list (choose EXACTLY 2 different items):
-{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+Selected objects (already chosen based on shape similarity):
+- {chosen_objects[0]}
+- {chosen_objects[1]}
 {history_context}
 
 Requirements:
-1. Choose EXACTLY 2 different objects from the list above. Return EXACTLY two items from the provided list. No new words. No categories.
-2. Choose two objects with similar silhouette/shape (e.g., ear~shell, leaf~tree, bottle~candle). Do NOT choose conceptual categories.
-3. Write a headline in English (5-8 words) that includes the product name or brand name.
-4. Give a clear and compelling ad_goal.
-5. Layout is always SIDE_BY_SIDE (do not mention layout in response).
+1. Write a headline in English (5-8 words) that includes the product name or brand name.
+2. Give a clear and compelling ad_goal.
+3. Layout is always SIDE_BY_SIDE (do not mention layout in response).
 
 Return JSON only in this format:
 {{
   "ad_goal": "...",
-  "headline": "...",
-  "chosen_objects": ["object1", "object2"]
+  "headline": "..."
 }}"""
 
     # Check if model is o* type (o4-mini, o3, o1-mini, etc.) - these don't support temperature
-    # Pattern: starts with "o" followed by a digit
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
     use_temperature = not is_o_model
     
-    logger.info(f"objectList_size={len(object_list)}, selected objects will be validated against this list")
-    
     for attempt in range(max_retries):
-        is_strict_validation = attempt > 0  # Use stricter prompt on retries
-        
-        # Build prompt (stricter on retries)
-        current_prompt = prompt
-        if is_strict_validation:
-            current_prompt = f"""You are creating an advertisement for a product.
-
-Product: {product_name}
-Description: {product_description}
-Language: English only (output must be in English only)
-
-Available object list (choose EXACTLY 2 different items):
-{json.dumps(available_objects, ensure_ascii=False, indent=2)}
-{history_context}
-
-Requirements (STRICT):
-1. Return EXACTLY two items from the provided list. No new words. No categories.
-2. Choose two objects with similar silhouette/shape (e.g., ear~shell, leaf~tree, bottle~candle). Do NOT choose conceptual categories.
-3. Write a headline in English (5-8 words) that includes the product name or brand name.
-4. Give a clear and compelling ad_goal.
-5. Layout is always SIDE_BY_SIDE (do not mention layout in response).
-
-Return JSON only in this format:
-{{
-  "ad_goal": "...",
-  "headline": "...",
-  "chosen_objects": ["object1", "object2"]
-}}"""
-        
         # Build request parameters
         request_params = {
             "model": model_name,
             "messages": [
                 {"role": "system", "content": "You are an assistant for creating advertisements. Output must be in English only. Return JSON only without additional text."},
-                {"role": "user", "content": current_prompt}
+                {"role": "user", "content": prompt}
             ],
             "response_format": {"type": "json_object"}
         }
@@ -209,7 +410,7 @@ Return JSON only in this format:
         
         try:
             if attempt == 0:
-                logger.info(f"Using temperature={'0.7' if use_temperature else 'omitted'} for model {model_name}")
+                logger.info(f"Text generation: using model={model_name}, temperature={'0.7' if use_temperature else 'omitted'}")
             
             response = client.chat.completions.create(**request_params)
             
@@ -220,33 +421,10 @@ Return JSON only in this format:
             if not isinstance(result, dict):
                 raise ValueError("Response is not a dict")
             
-            if "chosen_objects" not in result or not isinstance(result["chosen_objects"], list):
-                raise ValueError("Missing or invalid chosen_objects")
-            
-            if len(result["chosen_objects"]) != 2:
-                raise ValueError("chosen_objects must contain exactly 2 items")
-            
-            # STRICT VALIDATION: objects must be EXACTLY in the list
-            chosen = result["chosen_objects"]
-            validation_passed = all(obj in object_list for obj in chosen)
-            
-            if not validation_passed:
-                invalid = [obj for obj in chosen if obj not in object_list]
-                logger.warning(f"Validation failed: objects not in list: {invalid}, attempt {attempt + 1}/{max_retries}")
-                if attempt < max_retries - 1:
-                    # Retry with stricter prompt
-                    logger.info(f"Retrying with stricter prompt (attempt {attempt + 2}/{max_retries})")
-                    continue
-                else:
-                    raise ValueError(f"Objects not in list after {max_retries} attempts: {invalid}")
-            
-            if result["chosen_objects"][0] == result["chosen_objects"][1]:
-                raise ValueError("chosen_objects must be different")
-            
             if not result.get("headline") or not result.get("ad_goal"):
                 raise ValueError("Missing headline or ad_goal")
             
-            logger.info(f"OpenAI call succeeded on attempt {attempt + 1}, selected objects={chosen}, validation_passed=true")
+            logger.info(f"Text generation succeeded on attempt {attempt + 1}")
             return result
             
         except Exception as e:
@@ -606,32 +784,48 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}")
     
-    # Get model name
-    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o1-mini")
-    
-    # Call OpenAI model
+    # Step 1: Select objects based on shape similarity only
+    used_objects = get_used_objects(history)
     try:
-        result = call_openai_model(
+        shape_result = select_similar_pair_shape_only(
+            object_list=object_list,
+            used_objects=used_objects,
+            max_retries=3
+        )
+        chosen_objects = [shape_result["object_a"], shape_result["object_b"]]
+        logger.info(f"[{request_id}] Shape selection: object_a={chosen_objects[0]}, object_b={chosen_objects[1]}, score={shape_result.get('shape_similarity_score', 0)}")
+    except Exception as e:
+        error_msg = str(e)
+        if "rate_limited" in error_msg:
+            logger.error(f"[{request_id}] Shape selection rate limited after retries")
+            raise Exception("rate_limited")
+        else:
+            logger.error(f"[{request_id}] Shape selection failed: {error_msg}")
+            raise
+    
+    # Step 2: Generate headline and ad_goal using selected objects
+    text_model_name = os.environ.get("OPENAI_TEXT_MODEL", "o1-mini")
+    try:
+        text_result = call_openai_model(
             product_name=product_name,
             product_description=product_description,
             language=language,
-            object_list=object_list,
+            chosen_objects=chosen_objects,
             history=history,
-            model_name=model_name,
+            model_name=text_model_name,
             max_retries=3
         )
     except Exception as e:
         error_msg = str(e)
         if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] Rate limited after retries")
+            logger.error(f"[{request_id}] Text generation rate limited after retries")
             raise Exception("rate_limited")
         else:
-            logger.error(f"[{request_id}] OpenAI call failed: {error_msg}")
+            logger.error(f"[{request_id}] Text generation failed: {error_msg}")
             raise
     
-    ad_goal = result["ad_goal"]
-    headline = result["headline"]
-    chosen_objects = result["chosen_objects"]
+    ad_goal = text_result["ad_goal"]
+    headline = text_result["headline"]
     
     # Log result
     logger.info(f"[{request_id}] Model response: ad_goal={ad_goal[:50]}, "
@@ -717,39 +911,52 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}, is_preview={is_preview}")
     
-    # Get model name
-    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o1-mini")
-    # Use o4-mini if specified, otherwise fallback to o1-mini
-    # OpenAI will handle model validation
-    
-    # Call OpenAI model
+    # Step 1: Select objects based on shape similarity only
+    used_objects = get_used_objects(history)
     try:
-        result = call_openai_model(
+        shape_result = select_similar_pair_shape_only(
+            object_list=object_list,
+            used_objects=used_objects,
+            max_retries=3
+        )
+        chosen_objects = [shape_result["object_a"], shape_result["object_b"]]
+        logger.info(f"[{request_id}] Shape selection: object_a={chosen_objects[0]}, object_b={chosen_objects[1]}, score={shape_result.get('shape_similarity_score', 0)}")
+    except Exception as e:
+        error_msg = str(e)
+        if "rate_limited" in error_msg:
+            logger.error(f"[{request_id}] Shape selection rate limited after retries")
+            raise Exception("rate_limited")
+        else:
+            logger.error(f"[{request_id}] Shape selection failed: {error_msg}")
+            raise
+    
+    # Step 2: Generate headline and ad_goal using selected objects
+    text_model_name = os.environ.get("OPENAI_TEXT_MODEL", "o1-mini")
+    try:
+        text_result = call_openai_model(
             product_name=product_name,
             product_description=product_description,
             language=language,
-            object_list=object_list,
+            chosen_objects=chosen_objects,
             history=history,
-            model_name=model_name,
+            model_name=text_model_name,
             max_retries=3
         )
     except Exception as e:
         error_msg = str(e)
         if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] Rate limited after retries")
+            logger.error(f"[{request_id}] Text generation rate limited after retries")
             raise Exception("rate_limited")
         else:
-            logger.error(f"[{request_id}] OpenAI call failed: {error_msg}")
+            logger.error(f"[{request_id}] Text generation failed: {error_msg}")
             raise
     
-    ad_goal = result["ad_goal"]
-    headline = result["headline"]
-    chosen_objects = result["chosen_objects"]
+    ad_goal = text_result["ad_goal"]
+    headline = text_result["headline"]
     
-    # Log result (retries are logged inside call_openai_model)
-    logger.info(f"[{request_id}] Model response: ad_goal={ad_goal[:50]}, "
-                f"headline={headline[:50]}, chosen_objects={chosen_objects}, "
-                f"model={model_name}")
+    # Log result
+    logger.info(f"[{request_id}] Text generation: ad_goal={ad_goal[:50]}, "
+                f"headline={headline[:50]}, model={text_model_name}")
     
     # Generate short headline from product name (for image text)
     image_headline = generate_short_phrase(product_name)
