@@ -47,6 +47,11 @@ STEP0_CACHE_TTL_SECONDS = int(os.environ.get("STEP0_CACHE_TTL_SECONDS", "3600"))
 ENABLE_STEP1_CACHE = os.environ.get("ENABLE_STEP1_CACHE", "1") == "1"  # Cache STEP 1 (shape match)
 STEP1_CACHE_TTL_SECONDS = int(os.environ.get("STEP1_CACHE_TTL_SECONDS", "1800"))  # STEP 1 cache TTL
 
+# Cache key versioning and diversity
+CACHE_KEY_VERSION = os.environ.get("CACHE_KEY_VERSION", "v2")  # Cache key version
+ENABLE_DIVERSITY_GUARD = os.environ.get("ENABLE_DIVERSITY_GUARD", "1") == "1"  # Diversity guard to prevent repetition
+DIVERSITY_GUARD_TTL_SECONDS = 1800  # 30 minutes TTL for diversity guard
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -71,18 +76,23 @@ _step0_cache_lock = Lock()
 _step1_cache: Dict[str, Tuple[Dict, float]] = {}
 _step1_cache_lock = Lock()
 
+# Diversity guard: (session_seed, productName) -> set of (object_a, object_b) pairs with timestamp
+_diversity_guard: Dict[str, Tuple[set, float]] = {}  # key: f"{session_seed}|{productName}", value: (set of tuples, timestamp)
+_diversity_guard_lock = Lock()
 
-def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], engine_mode: str, mode: str) -> str:
+
+def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], engine_mode: str, mode: str, language: str = "en", session_seed: Optional[str] = None) -> str:
     """Generate cache key for plan."""
-    key_str = f"{product_name}|{message}|{ad_goal}|{ad_index}|{json.dumps(object_list or [], sort_keys=True)}|{engine_mode}|{mode}"
+    object_list_hash = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:16]
+    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{mode}|{object_list_hash}|PLAN_{CACHE_KEY_VERSION}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
-def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]]) -> str:
+def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], language: str = "en", session_seed: Optional[str] = None, engine_mode: str = "legacy", preview_mode: str = "image") -> str:
     """Generate cache key for preview plan."""
     # Include objectList version (hash of sorted list) for cache invalidation
-    object_list_version = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:8]
-    key_str = f"{product_name}|{message}|{ad_goal}|{ad_index}|{object_list_version}|preview"
+    object_list_hash = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:16]
+    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{object_list_hash}|PREVIEW_{CACHE_KEY_VERSION}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -203,12 +213,12 @@ def _set_to_step0_cache(key: str, value: List[str]):
         _step0_cache[key] = (value, time.time())
 
 
-def _get_cache_key_step1(object_list: List[str], min_shape_score: int, min_env_diff_score: int, used_objects: set) -> str:
+def _get_cache_key_step1(object_list: List[str], min_shape_score: int, min_env_diff_score: int, used_objects: set, product_name: str = "", ad_goal: str = "", language: str = "en", ad_index: int = 1, session_seed: Optional[str] = None, engine_mode: str = "legacy", preview_mode: str = "image") -> str:
     """Generate cache key for STEP 1 (shape match)."""
-    # Include objectList hash, gate parameters, and used_objects
+    # Include objectList hash, gate parameters, used_objects, and context
     object_list_hash = hashlib.md5(json.dumps(sorted(object_list), sort_keys=True).encode()).hexdigest()[:16]
     used_objects_str = "|".join(sorted(used_objects)) if used_objects else ""
-    key_str = f"{object_list_hash}|PAIR_GATE(min_shape={min_shape_score},min_env_diff={min_env_diff_score})|{used_objects_str}|STEP1_V2"
+    key_str = f"{product_name}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{object_list_hash}|PAIR_GATE(min_shape={min_shape_score},min_env_diff={min_env_diff_score})|{used_objects_str}|STEP1_{CACHE_KEY_VERSION}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -240,6 +250,60 @@ def _set_to_step1_cache(key: str, value: Dict):
     
     with _step1_cache_lock:
         _step1_cache[key] = (value, time.time())
+
+
+def _get_diversity_guard_key(session_seed: Optional[str], product_name: str) -> str:
+    """Generate diversity guard key."""
+    return f"{session_seed or 'no_session'}|{product_name}"
+
+
+def _check_diversity_guard(session_seed: Optional[str], product_name: str, object_a: str, object_b: str) -> bool:
+    """Check if pair was already used in this session. Returns True if pair is new (allowed), False if already used (blocked)."""
+    if not ENABLE_DIVERSITY_GUARD:
+        return True  # Diversity guard disabled, allow all
+    
+    guard_key = _get_diversity_guard_key(session_seed, product_name)
+    pair_tuple = tuple(sorted([object_a, object_b]))  # Normalize order
+    
+    with _diversity_guard_lock:
+        if guard_key in _diversity_guard:
+            pairs_set, timestamp = _diversity_guard[guard_key]
+            # Check if expired
+            if time.time() - timestamp >= DIVERSITY_GUARD_TTL_SECONDS:
+                # Expired, clear and allow
+                del _diversity_guard[guard_key]
+                return True
+            
+            # Check if pair already exists
+            if pair_tuple in pairs_set:
+                return False  # Pair already used, block
+            else:
+                return True  # Pair is new, allow
+        else:
+            return True  # No history, allow
+
+
+def _add_to_diversity_guard(session_seed: Optional[str], product_name: str, object_a: str, object_b: str):
+    """Add pair to diversity guard."""
+    if not ENABLE_DIVERSITY_GUARD:
+        return
+    
+    guard_key = _get_diversity_guard_key(session_seed, product_name)
+    pair_tuple = tuple(sorted([object_a, object_b]))  # Normalize order
+    
+    with _diversity_guard_lock:
+        if guard_key in _diversity_guard:
+            pairs_set, timestamp = _diversity_guard[guard_key]
+            # Check if expired
+            if time.time() - timestamp >= DIVERSITY_GUARD_TTL_SECONDS:
+                # Expired, reset
+                _diversity_guard[guard_key] = ({pair_tuple}, time.time())
+            else:
+                # Add to existing set
+                pairs_set.add(pair_tuple)
+        else:
+            # Create new entry
+            _diversity_guard[guard_key] = ({pair_tuple}, time.time())
 
 # Default object list - concrete nouns in English (for shape similarity)
 DEFAULT_OBJECT_LIST = [
