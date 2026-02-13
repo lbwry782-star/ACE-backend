@@ -15,11 +15,98 @@ import io
 import zipfile
 import base64
 import string
+import hashlib
 from typing import Dict, List, Optional, Tuple
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
+from threading import Lock
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Feature Flags (from ENV, with safe defaults = legacy behavior)
+# ============================================================================
+
+ENGINE_MODE = os.environ.get("ENGINE_MODE", "legacy")  # "legacy" | "optimized"
+PREVIEW_MODE = os.environ.get("PREVIEW_MODE", "image")  # "image" | "plan_only"
+ENABLE_PLAN_CACHE = os.environ.get("ENABLE_PLAN_CACHE", "0") == "1"
+PLAN_CACHE_TTL_SECONDS = int(os.environ.get("PLAN_CACHE_TTL_SECONDS", "900"))
+ENABLE_IMAGE_CACHE = os.environ.get("ENABLE_IMAGE_CACHE", "0") == "1"
+IMAGE_CACHE_TTL_SECONDS = int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "900"))
+
+# ============================================================================
+# In-Memory Caches (with TTL)
+# ============================================================================
+
+# Plan cache: key -> (value, timestamp)
+_plan_cache: Dict[str, Tuple[Dict, float]] = {}
+_plan_cache_lock = Lock()
+
+# Image cache: key -> (value_bytes, timestamp)
+_image_cache: Dict[str, Tuple[bytes, float]] = {}
+_image_cache_lock = Lock()
+
+
+def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], engine_mode: str, mode: str) -> str:
+    """Generate cache key for plan."""
+    key_str = f"{product_name}|{message}|{ad_goal}|{ad_index}|{json.dumps(object_list or [], sort_keys=True)}|{engine_mode}|{mode}"
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+
+def _get_cache_key_image(prompt: str, image_size: str, model: str) -> str:
+    """Generate cache key for image."""
+    key_str = f"{prompt}|{image_size}|{model}"
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+
+def _get_from_plan_cache(key: str) -> Optional[Dict]:
+    """Get from plan cache if valid."""
+    if not ENABLE_PLAN_CACHE:
+        return None
+    
+    with _plan_cache_lock:
+        if key in _plan_cache:
+            value, timestamp = _plan_cache[key]
+            if time.time() - timestamp < PLAN_CACHE_TTL_SECONDS:
+                return value
+            else:
+                # Expired, remove
+                del _plan_cache[key]
+    return None
+
+
+def _set_to_plan_cache(key: str, value: Dict):
+    """Set to plan cache."""
+    if not ENABLE_PLAN_CACHE:
+        return
+    
+    with _plan_cache_lock:
+        _plan_cache[key] = (value, time.time())
+
+
+def _get_from_image_cache(key: str) -> Optional[bytes]:
+    """Get from image cache if valid."""
+    if not ENABLE_IMAGE_CACHE:
+        return None
+    
+    with _image_cache_lock:
+        if key in _image_cache:
+            value_bytes, timestamp = _image_cache[key]
+            if time.time() - timestamp < IMAGE_CACHE_TTL_SECONDS:
+                return value_bytes
+            else:
+                # Expired, remove
+                del _image_cache[key]
+    return None
+
+
+def _set_to_image_cache(key: str, value_bytes: bytes):
+    """Set to image cache."""
+    if not ENABLE_IMAGE_CACHE:
+        return
+    
+    with _image_cache_lock:
+        _image_cache[key] = (value_bytes, time.time())
 
 # Default object list - concrete nouns in English (for shape similarity)
 DEFAULT_OBJECT_LIST = [
@@ -978,6 +1065,222 @@ JSON:"""
     raise Exception("Failed to generate physical context extensions")
 
 
+def select_shape_and_environment_plan_optimized(
+    object_list: List[str],
+    used_objects: set,
+    ad_goal: str,
+    message: str,
+    image_size: str,
+    max_retries: int = 2
+) -> Dict:
+    """
+    OPTIMIZED MODE: Combined shape selection + environment swap plan in one call.
+    
+    Returns unified JSON with both shape selection and environment plan.
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    
+    # Filter out used objects
+    available_objects = [obj for obj in object_list if obj not in used_objects]
+    if len(available_objects) < 2:
+        available_objects = object_list
+    
+    prompt = f"""You are planning an advertisement composition with shape selection and environment swap.
+
+Task 1 - SHAPE SELECTION:
+Find a pair of items from the provided list with similar geometric shapes (outer contour/outline).
+ONLY criterion: geometric shape similarity of the objects' outer contour (outline).
+Ignore meaning, category, theme, symbolism, relevance, marketing, color, material, texture.
+Return EXACT strings from the list (no synonyms, no new words).
+
+GLOBAL VISUAL RULES (MANDATORY):
+- Do NOT select objects that inherently contain printed text or branding.
+- Avoid packaging, labels, posters, signs, billboards.
+- Only physical objects without visible text surfaces.
+- Must be photographable in real life.
+- Exception: objects where text is an integral structural part (e.g., playing cards, compass dial, measuring scale) are allowed.
+
+Available object list:
+{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+
+Task 2 - ENVIRONMENT SWAP PLAN:
+For the selected pair from Task 1, determine which object is the hero and which provides the classic natural environment.
+
+CORE RULE:
+- Show ONLY one object (hero_object).
+- Place it inside the CLASSIC NATURAL ENVIRONMENT of the second object.
+- Do NOT show the second object.
+- No physical merging.
+- No structural integration.
+- No inserted mechanisms.
+
+Definition of classic environment:
+- The natural, iconic setting where the second object normally exists.
+- Physically realistic.
+- Immediately recognizable.
+- Real-world photographable environment.
+
+Context:
+- Advertising goal: {ad_goal}
+- Message: {message}
+- Image size: {image_size}
+
+Return JSON only:
+
+{{
+  "shape_selection": {{
+    "object_a": "OBJECT_NAME",
+    "object_b": "OBJECT_NAME",
+    "shape_similarity_score": 0-100,
+    "shape_hint": "short shape hint",
+    "why": "one short sentence focused on shape"
+  }},
+  "environment_plan": {{
+    "hero_object": "<selected_object_a>" | "<selected_object_b>",
+    "environment_from": "<selected_object_a>" | "<selected_object_b>",
+    "environment_description": "short concrete natural environment description (max 15 words)",
+    "environment_is_classic": true,
+    "single_object_confirmed": true
+  }},
+  "headline_placement_suggestion": "BOTTOM" | "SIDE"
+}}
+
+Rules:
+- shape_selection.object_a and object_b must be EXACT matches from the object list.
+- environment_plan.hero_object and environment_from must be different.
+- environment_description must be concrete and natural (max 15 words).
+- environment_is_classic and single_object_confirmed must be true.
+
+JSON:"""
+
+    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+    using_responses_api = is_o_model
+    
+    logger.info(f"OPTIMIZED MODE - COMBINED SHAPE+ENV PLAN: shape_model={model_name}, using_responses_api={using_responses_api}")
+    
+    for attempt in range(max_retries):
+        try:
+            if using_responses_api:
+                response = client.responses.create(
+                    model=model_name,
+                    input=prompt
+                )
+                response_text = response.output_text.strip()
+            else:
+                request_params = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "user", "content": prompt}
+                    ],
+                    "temperature": 0.7
+                }
+                response = client.chat.completions.create(**request_params)
+                response_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON response
+            response_text = response_text.strip()
+            if response_text.startswith("```"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            if response_text.startswith("```json"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            
+            data = json.loads(response_text)
+            
+            # Validate shape_selection
+            if "shape_selection" not in data:
+                raise ValueError("Missing shape_selection in response")
+            shape_sel = data["shape_selection"]
+            if shape_sel.get("object_a") not in available_objects or shape_sel.get("object_b") not in available_objects:
+                raise ValueError("Shape selection objects not in available list")
+            
+            # Validate environment_plan
+            if "environment_plan" not in data:
+                raise ValueError("Missing environment_plan in response")
+            env_plan = data["environment_plan"]
+            selected_a = shape_sel.get("object_a")
+            selected_b = shape_sel.get("object_b")
+            if env_plan.get("hero_object") not in [selected_a, selected_b]:
+                raise ValueError(f"hero_object must be '{selected_a}' or '{selected_b}'")
+            if env_plan.get("environment_from") not in [selected_a, selected_b]:
+                raise ValueError(f"environment_from must be '{selected_a}' or '{selected_b}'")
+            if env_plan.get("hero_object") == env_plan.get("environment_from"):
+                raise ValueError("hero_object and environment_from must be different")
+            if not env_plan.get("environment_is_classic", False):
+                raise ValueError("environment_is_classic must be true")
+            if not env_plan.get("single_object_confirmed", False):
+                raise ValueError("single_object_confirmed must be true")
+            
+            logger.info(f"OPTIMIZED MODE - COMBINED SHAPE+ENV PLAN SUCCESS: shape_pair=[{shape_sel.get('object_a')}, {shape_sel.get('object_b')}], hero={env_plan.get('hero_object')}, env_from={env_plan.get('environment_from')}")
+            
+            return data
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"OPTIMIZED MODE - COMBINED PLAN: JSON parse error: {e}")
+            if attempt < max_retries - 1:
+                continue
+            raise ValueError(f"Failed to parse combined plan JSON: {e}")
+        except Exception as e:
+            error_str = str(e)
+            error_lower = error_str.lower()
+            
+            is_400_error = (
+                "400" in error_str or 
+                "invalid_request" in error_lower or 
+                "unsupported_value" in error_lower or
+                "bad_request" in error_lower
+            )
+            
+            if is_400_error:
+                logger.error(f"OPTIMIZED MODE - COMBINED PLAN: OpenAI 400 error (no retry): {error_str}")
+                raise ValueError(f"invalid_request: {error_str}")
+            
+            is_rate_limit = (
+                "429" in error_str or 
+                "rate_limit" in error_lower or 
+                "quota" in error_lower or
+                "rate limit" in error_lower
+            )
+            
+            if is_rate_limit:
+                if attempt < max_retries - 1:
+                    base_delay = 2 ** attempt
+                    jitter = random.uniform(0, 1)
+                    delay = base_delay + jitter
+                    logger.warning(f"OPTIMIZED MODE - COMBINED PLAN: Rate limit hit (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s")
+                    time.sleep(delay)
+                    continue
+                else:
+                    logger.error(f"OPTIMIZED MODE - COMBINED PLAN: Rate limit exceeded after {max_retries} attempts")
+                    raise Exception("rate_limited")
+            
+            is_server_error = (
+                "500" in error_str or 
+                "502" in error_str or 
+                "503" in error_str or
+                "504" in error_str or
+                "timeout" in error_lower or
+                "connection" in error_lower or
+                "network" in error_lower
+            )
+            
+            if is_server_error:
+                if attempt < max_retries - 1:
+                    logger.warning(f"OPTIMIZED MODE - COMBINED PLAN: Server/connection error (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
+                    time.sleep(1 + attempt)
+                    continue
+                else:
+                    logger.error(f"OPTIMIZED MODE - COMBINED PLAN: Server/connection error after {max_retries} attempts: {error_str}")
+                    raise
+            
+            logger.error(f"OPTIMIZED MODE - COMBINED PLAN: OpenAI call failed (non-retryable, attempt {attempt + 1}): {error_str}")
+            raise
+    
+    raise Exception("Failed to generate combined shape+environment plan")
+
+
 def generate_hybrid_context_plan(
     object_a: str,
     object_b: str,
@@ -1629,19 +1932,33 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     """
     Generate preview data and return as dictionary (for JSON response).
     
+    Supports:
+    - PREVIEW_MODE=plan_only: Returns plan JSON without image (fast)
+    - PREVIEW_MODE=image: Returns imageBase64 (legacy behavior)
+    - ENGINE_MODE=optimized: Uses combined LLM calls
+    - ENGINE_MODE=legacy: Uses separate calls (legacy behavior)
+    - Caching: Plan cache and image cache (if enabled)
+    
     Args:
         payload_dict: Request payload with productName, productDescription, etc.
     
     Returns:
         dict: {
-            "imageBase64": str (base64 encoded JPG),
-            "ad_goal": str,
-            "headline": str,
-            "chosen_objects": [str, str],
-            "layout": "SIDE_BY_SIDE"
+            "imageBase64": str (if PREVIEW_MODE=image),
+            OR
+            "mode": "ENV_SWAP",
+            "hero_object": "...",
+            "environment_from": "...",
+            "environment_description": "...",
+            "headline": "...",
+            "headline_placement": "BOTTOM|SIDE",
+            "shape_similarity_score": ...,
+            "shape_hint": "..."
+            (if PREVIEW_MODE=plan_only)
         }
     """
     request_id = str(uuid.uuid4())
+    t_start = time.time()
     
     # Extract and validate required fields
     product_name = payload_dict.get("productName", "")
@@ -1678,6 +1995,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     if not ad_goal:
         ad_goal = product_description if product_description else "Make a difference"
     
+    message = product_description if product_description else "Make a difference"
+    
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
@@ -1687,127 +2006,271 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     
     # Log request
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
-                f"productName={product_name[:50]}, language={language}, ad_goal={ad_goal[:50]}")
+                f"productName={product_name[:50]}, language={language}, ad_goal={ad_goal[:50]}, "
+                f"ENGINE_MODE={ENGINE_MODE}, PREVIEW_MODE={PREVIEW_MODE}")
     
-    # STEP 1 - SHAPE SELECTION (ONLY SHAPE)
-    used_objects = get_used_objects(history)
-    try:
-        shape_result = select_similar_pair_shape_only(
-            object_list=object_list,
-            used_objects=used_objects,
-            max_retries=2
-        )
-        object_a = shape_result["object_a"]
-        object_b = shape_result["object_b"]
-        shape_hint = shape_result.get("shape_hint", "")
-        shape_score = shape_result.get("shape_similarity_score", 0)
+    # Check plan cache (if enabled)
+    plan_cache_key = None
+    plan_cache_hit = False
+    cached_plan = None
+    
+    if ENABLE_PLAN_CACHE:
+        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "ENV_SWAP")
+        cached_plan = _get_from_plan_cache(plan_cache_key)
+        if cached_plan:
+            plan_cache_hit = True
+            logger.info(f"[{request_id}] PLAN_CACHE hit=true key={plan_cache_key[:16]}...")
+            
+            # If plan_only mode, return cached plan immediately
+            if PREVIEW_MODE == "plan_only":
+                return cached_plan
+            
+            # If image mode, use cached plan data
+            object_a = cached_plan.get("chosen_objects", [None, None])[0]
+            object_b = cached_plan.get("chosen_objects", [None, None])[1]
+            shape_hint = cached_plan.get("shape_hint", "")
+            shape_score = cached_plan.get("shape_similarity_score", 0)
+            headline = cached_plan.get("headline", "")
+            hybrid_plan = {
+                "hero_object": cached_plan.get("hero_object"),
+                "environment_from": cached_plan.get("environment_from"),
+                "environment_description": cached_plan.get("environment_description"),
+                "headline_placement": cached_plan.get("headline_placement")
+            }
+            physical_context = None  # Not cached for now
+        else:
+            logger.info(f"[{request_id}] PLAN_CACHE hit=false key={plan_cache_key[:16]}...")
+    
+    # Timing variables
+    t_shape_ms = 0
+    t_envswap_ms = 0
+    t_headline_ms = 0
+    t_image_ms = 0
+    image_cache_hit = False
+    
+    # If not cached, generate plan
+    if not plan_cache_hit:
+        used_objects = get_used_objects(history)
         
-        logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
-            raise Exception("rate_limited")
+        if ENGINE_MODE == "optimized":
+            # OPTIMIZED MODE: Combined shape selection + environment swap plan
+            t_shape_start = time.time()
+            try:
+                combined_result = select_shape_and_environment_plan_optimized(
+                    object_list=object_list,
+                    used_objects=used_objects,
+                    ad_goal=ad_goal,
+                    message=message,
+                    image_size=image_size_str,
+                    max_retries=2
+                )
+                t_shape_ms = int((time.time() - t_shape_start) * 1000)
+                
+                shape_sel = combined_result["shape_selection"]
+                object_a = shape_sel["object_a"]
+                object_b = shape_sel["object_b"]
+                shape_hint = shape_sel.get("shape_hint", "")
+                shape_score = shape_sel.get("shape_similarity_score", 0)
+                
+                env_plan = combined_result["environment_plan"]
+                hybrid_plan = {
+                    "hero_object": env_plan.get("hero_object"),
+                    "environment_from": env_plan.get("environment_from"),
+                    "environment_description": env_plan.get("environment_description"),
+                    "headline_placement": combined_result.get("headline_placement_suggestion", "BOTTOM")
+                }
+                
+                logger.info(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN SUCCESS: shape_pair=[{object_a}, {object_b}], score={shape_score}, hero={hybrid_plan['hero_object']}")
+                
+                # Skip STEP 1.5 in optimized mode (physical context not needed for plan_only)
+                physical_context = None
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: Rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: {error_msg}")
+                    raise
         else:
-            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
-            raise
+            # LEGACY MODE: Separate calls
+            # STEP 1 - SHAPE SELECTION
+            t_shape_start = time.time()
+            try:
+                shape_result = select_similar_pair_shape_only(
+                    object_list=object_list,
+                    used_objects=used_objects,
+                    max_retries=2
+                )
+                t_shape_ms = int((time.time() - t_shape_start) * 1000)
+                
+                object_a = shape_result["object_a"]
+                object_b = shape_result["object_b"]
+                shape_hint = shape_result.get("shape_hint", "")
+                shape_score = shape_result.get("shape_similarity_score", 0)
+                
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
+                    raise
+            
+            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
+            try:
+                physical_context = generate_physical_context_extensions(
+                    object_a=object_a,
+                    object_b=object_b,
+                    ad_goal=ad_goal,
+                    max_retries=2
+                )
+                logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
+                    raise
+            
+            # STEP 1.75 - ENVIRONMENT SWAP PLAN
+            t_envswap_start = time.time()
+            try:
+                hybrid_plan = generate_hybrid_context_plan(
+                    object_a=object_a,
+                    object_b=object_b,
+                    ad_goal=ad_goal,
+                    message=message,
+                    image_size=image_size_str,
+                    max_retries=2
+                )
+                t_envswap_ms = int((time.time() - t_envswap_start) * 1000)
+                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated")
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan error: {error_msg}")
+                    raise
+        
+        # STEP 2 - HEADLINE GENERATION
+        t_headline_start = time.time()
+        headline_placement = hybrid_plan.get("headline_placement") if hybrid_plan else None
+        try:
+            headline = generate_headline_only(
+                product_name=product_name,
+                message=message,
+                object_a=object_a,
+                object_b=object_b,
+                headline_placement=headline_placement,
+                max_retries=3
+            )
+            t_headline_ms = int((time.time() - t_headline_start) * 1000)
+            logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
+        except Exception as e:
+            error_msg = str(e)
+            if "rate_limited" in error_msg:
+                logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
+                raise Exception("rate_limited")
+            else:
+                logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
+                raise
+        
+        # Save to plan cache
+        plan_data = {
+            "mode": "ENV_SWAP",
+            "hero_object": hybrid_plan.get("hero_object"),
+            "environment_from": hybrid_plan.get("environment_from"),
+            "environment_description": hybrid_plan.get("environment_description"),
+            "headline": headline,
+            "headline_placement": hybrid_plan.get("headline_placement", "BOTTOM"),
+            "shape_similarity_score": shape_score,
+            "shape_hint": shape_hint,
+            "chosen_objects": [object_a, object_b]
+        }
+        
+        if ENABLE_PLAN_CACHE and plan_cache_key:
+            _set_to_plan_cache(plan_cache_key, plan_data)
     
-    # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
-    try:
-        physical_context = generate_physical_context_extensions(
-            object_a=object_a,
-            object_b=object_b,
-            ad_goal=ad_goal,
-            max_retries=2
-        )
-        logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
-            raise Exception("rate_limited")
-        else:
-            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
-            raise
+    # If plan_only mode, return plan immediately (no image generation)
+    if PREVIEW_MODE == "plan_only":
+        t_total_ms = int((time.time() - t_start) * 1000)
+        logger.info(f"[{request_id}] PERF total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms=0 cache_plan_hit={plan_cache_hit} cache_image_hit=false")
+        return plan_data if not plan_cache_hit else cached_plan
     
-    # STEP 1.75 - HYBRID CONTEXT PLAN
-    message = product_description if product_description else "Make a difference"
-    try:
-        hybrid_plan = generate_hybrid_context_plan(
-            object_a=object_a,
-            object_b=object_b,
-            ad_goal=ad_goal,
-            message=message,
-            image_size=image_size_str,
-            max_retries=2
-        )
-        logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan rate limited")
-            raise Exception("rate_limited")
-        else:
-            logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan error: {error_msg}")
-            raise
-    
-    # STEP 2 - HEADLINE GENERATION
-    # Use headline_placement from hybrid_plan
-    headline_placement = hybrid_plan.get("headline_placement") if hybrid_plan else None
-    try:
-        headline = generate_headline_only(
-            product_name=product_name,
-            message=message,
-            object_a=object_a,
-            object_b=object_b,
-            headline_placement=headline_placement,
-            max_retries=3
-        )
-        logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
-            raise Exception("rate_limited")
-        else:
-            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
-            raise
-    
-    # STEP 4 - FINAL VALIDATION
-    # Ensure objects haven't changed
-    if object_a != shape_result["object_a"] or object_b != shape_result["object_b"]:
-        logger.error(f"[{request_id}] STEP 4 VALIDATION FAILED: Objects changed after STEP 1")
-        raise ValueError("Objects changed after shape selection")
-    
-    logger.info(f"[{request_id}] STEP 4 VALIDATION PASSED: object_a={object_a}, object_b={object_b} (unchanged)")
-    
-    # STEP 3 - IMAGE GENERATION
+    # STEP 3 - IMAGE GENERATION (only if PREVIEW_MODE=image)
+    t_image_start = time.time()
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    try:
-        image_bytes = generate_image_with_dalle(
-            client=client,
+    
+    # Check image cache
+    image_cache_key = None
+    image_bytes = None
+    
+    if ENABLE_IMAGE_CACHE:
+        # Create prompt for cache key
+        prompt_for_cache = create_image_prompt(
             object_a=object_a,
             object_b=object_b,
+            headline=headline,
             shape_hint=shape_hint,
             physical_context=physical_context,
             hybrid_plan=hybrid_plan,
-            headline=headline,
-            width=width,
-            height=height,
-            max_retries=3
+            is_strict=False
         )
-    except Exception as e:
-        logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
-        raise
+        image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
+        image_cache_key = _get_cache_key_image(prompt_for_cache, image_size_str, image_model)
+        cached_image_bytes = _get_from_image_cache(image_cache_key)
+        if cached_image_bytes:
+            image_bytes = cached_image_bytes
+            image_cache_hit = True
+            logger.info(f"[{request_id}] IMAGE_CACHE hit=true key={image_cache_key[:16]}...")
+        else:
+            logger.info(f"[{request_id}] IMAGE_CACHE hit=false key={image_cache_key[:16]}...")
+    
+    if not image_cache_hit:
+        try:
+            # Determine max_retries based on mode
+            max_img_retries = 1 if ENGINE_MODE == "optimized" else 3
+            
+            image_bytes = generate_image_with_dalle(
+                client=client,
+                object_a=object_a,
+                object_b=object_b,
+                shape_hint=shape_hint,
+                physical_context=physical_context,
+                hybrid_plan=hybrid_plan,
+                headline=headline,
+                width=width,
+                height=height,
+                max_retries=max_img_retries
+            )
+            
+            # Save to image cache
+            if ENABLE_IMAGE_CACHE and image_cache_key:
+                _set_to_image_cache(image_cache_key, image_bytes)
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
+            raise
+    
+    t_image_ms = int((time.time() - t_image_start) * 1000)
     
     # Convert image to base64 (without data URI header)
     image_base64 = base64.b64encode(image_bytes).decode('utf-8')
     
     # Get image model and size for logging
     image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
-    image_size_str = payload_dict.get("imageSize", "1536x1024")
     
+    t_total_ms = int((time.time() - t_start) * 1000)
     logger.info(f"[{request_id}] STEP 3 SUCCESS: image_model={image_model}, image_size={image_size_str}, preview_success=true")
+    logger.info(f"[{request_id}] PERF total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_plan_hit={plan_cache_hit} cache_image_hit={image_cache_hit}")
     
     # Return only imageBase64 (all text is in the image)
     return {
@@ -1819,6 +2282,11 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     """
     Generate ZIP file with image.jpg and text.txt.
     
+    Supports:
+    - ENGINE_MODE=optimized: Uses combined LLM calls
+    - ENGINE_MODE=legacy: Uses separate calls (legacy behavior)
+    - Caching: Plan cache and image cache (if enabled)
+    
     Args:
         payload_dict: Request payload with productName, productDescription, etc.
         is_preview: If True, this is a preview request (same logic, but can be optimized)
@@ -1827,6 +2295,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         bytes: ZIP file content
     """
     request_id = str(uuid.uuid4())
+    t_start = time.time()
     
     # Extract and validate required fields
     product_name = payload_dict.get("productName", "")
@@ -1863,6 +2332,8 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     if not ad_goal:
         ad_goal = product_description if product_description else "Make a difference"
     
+    message = product_description if product_description else "Make a difference"
+    
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
@@ -1872,118 +2343,260 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     
     # Log request
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
-                f"productName={product_name[:50]}, language={language}, is_preview={is_preview}, ad_goal={ad_goal[:50]}")
+                f"productName={product_name[:50]}, language={language}, is_preview={is_preview}, ad_goal={ad_goal[:50]}, "
+                f"ENGINE_MODE={ENGINE_MODE}")
     
-    # STEP 1 - SHAPE SELECTION (ONLY SHAPE)
-    used_objects = get_used_objects(history)
-    try:
-        shape_result = select_similar_pair_shape_only(
-            object_list=object_list,
-            used_objects=used_objects,
-            max_retries=2
-        )
-        object_a = shape_result["object_a"]
-        object_b = shape_result["object_b"]
-        shape_hint = shape_result.get("shape_hint", "")
-        shape_score = shape_result.get("shape_similarity_score", 0)
+    # Check plan cache (if enabled)
+    plan_cache_key = None
+    plan_cache_hit = False
+    cached_plan = None
+    
+    if ENABLE_PLAN_CACHE:
+        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "ENV_SWAP")
+        cached_plan = _get_from_plan_cache(plan_cache_key)
+        if cached_plan:
+            plan_cache_hit = True
+            logger.info(f"[{request_id}] PLAN_CACHE hit=true key={plan_cache_key[:16]}...")
+            # Use cached plan data
+            object_a = cached_plan.get("chosen_objects", [None, None])[0]
+            object_b = cached_plan.get("chosen_objects", [None, None])[1]
+            shape_hint = cached_plan.get("shape_hint", "")
+            shape_score = cached_plan.get("shape_similarity_score", 0)
+            headline = cached_plan.get("headline", "")
+            hybrid_plan = {
+                "hero_object": cached_plan.get("hero_object"),
+                "environment_from": cached_plan.get("environment_from"),
+                "environment_description": cached_plan.get("environment_description"),
+                "headline_placement": cached_plan.get("headline_placement")
+            }
+            physical_context = None  # Not cached for now
+        else:
+            logger.info(f"[{request_id}] PLAN_CACHE hit=false key={plan_cache_key[:16]}...")
+    
+    # Timing variables
+    t_shape_ms = 0
+    t_envswap_ms = 0
+    t_headline_ms = 0
+    t_image_ms = 0
+    image_cache_hit = False
+    
+    # If not cached, generate plan
+    if not plan_cache_hit:
+        used_objects = get_used_objects(history)
         
-        logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
-            raise Exception("rate_limited")
+        if ENGINE_MODE == "optimized":
+            # OPTIMIZED MODE: Combined shape selection + environment swap plan
+            t_shape_start = time.time()
+            try:
+                combined_result = select_shape_and_environment_plan_optimized(
+                    object_list=object_list,
+                    used_objects=used_objects,
+                    ad_goal=ad_goal,
+                    message=message,
+                    image_size=image_size_str,
+                    max_retries=2
+                )
+                t_shape_ms = int((time.time() - t_shape_start) * 1000)
+                
+                shape_sel = combined_result["shape_selection"]
+                object_a = shape_sel["object_a"]
+                object_b = shape_sel["object_b"]
+                shape_hint = shape_sel.get("shape_hint", "")
+                shape_score = shape_sel.get("shape_similarity_score", 0)
+                
+                env_plan = combined_result["environment_plan"]
+                hybrid_plan = {
+                    "hero_object": env_plan.get("hero_object"),
+                    "environment_from": env_plan.get("environment_from"),
+                    "environment_description": env_plan.get("environment_description"),
+                    "headline_placement": combined_result.get("headline_placement_suggestion", "BOTTOM")
+                }
+                
+                logger.info(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN SUCCESS: shape_pair=[{object_a}, {object_b}], score={shape_score}, hero={hybrid_plan['hero_object']}")
+                
+                # Skip STEP 1.5 in optimized mode (physical context not needed)
+                physical_context = None
+                
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: Rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] OPTIMIZED MODE - COMBINED PLAN FAILED: {error_msg}")
+                    raise
         else:
-            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
-            raise
-    
-    # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
-    try:
-        physical_context = generate_physical_context_extensions(
-            object_a=object_a,
-            object_b=object_b,
-            ad_goal=ad_goal,
-            max_retries=2
-        )
-        logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
-            raise Exception("rate_limited")
-        else:
-            logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
-            raise
-    
-    # STEP 1.75 - HYBRID CONTEXT PLAN
-    message = product_description if product_description else "Make a difference"
-    try:
-        hybrid_plan = generate_hybrid_context_plan(
-            object_a=object_a,
-            object_b=object_b,
-            ad_goal=ad_goal,
-            message=message,
-            image_size=image_size_str,
-            max_retries=2
-        )
-        logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan rate limited")
-            raise Exception("rate_limited")
-        else:
-            logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan error: {error_msg}")
-            raise
-    
-    # STEP 2 - HEADLINE GENERATION
-    # Use headline_placement from hybrid_plan
-    headline_placement = hybrid_plan.get("headline_placement") if hybrid_plan else None
-    try:
-        headline = generate_headline_only(
-            product_name=product_name,
-            message=message,
-            object_a=object_a,
-            object_b=object_b,
-            headline_placement=headline_placement,
-            max_retries=3
-        )
-        logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
-    except Exception as e:
-        error_msg = str(e)
-        if "rate_limited" in error_msg:
-            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
-            raise Exception("rate_limited")
-        else:
-            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
-            raise
+            # LEGACY MODE: Separate calls
+            # STEP 1 - SHAPE SELECTION
+            t_shape_start = time.time()
+            try:
+                shape_result = select_similar_pair_shape_only(
+                    object_list=object_list,
+                    used_objects=used_objects,
+                    max_retries=2
+                )
+                t_shape_ms = int((time.time() - t_shape_start) * 1000)
+                
+                object_a = shape_result["object_a"]
+                object_b = shape_result["object_b"]
+                shape_hint = shape_result.get("shape_hint", "")
+                shape_score = shape_result.get("shape_similarity_score", 0)
+                
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}")
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
+                    raise
+            
+            # STEP 1.5 - PHYSICAL CONTEXT EXTENSION
+            try:
+                physical_context = generate_physical_context_extensions(
+                    object_a=object_a,
+                    object_b=object_b,
+                    ad_goal=ad_goal,
+                    max_retries=2
+                )
+                logger.info(f"[{request_id}] STEP 1.5 SUCCESS: physical_context_extensions generated")
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] STEP 1.5 FAILED: Physical context extension error: {error_msg}")
+                    raise
+            
+            # STEP 1.75 - ENVIRONMENT SWAP PLAN
+            t_envswap_start = time.time()
+            try:
+                hybrid_plan = generate_hybrid_context_plan(
+                    object_a=object_a,
+                    object_b=object_b,
+                    ad_goal=ad_goal,
+                    message=message,
+                    image_size=image_size_str,
+                    max_retries=2
+                )
+                t_envswap_ms = int((time.time() - t_envswap_start) * 1000)
+                logger.info(f"[{request_id}] STEP 1.75 SUCCESS: hybrid_context_plan generated")
+            except Exception as e:
+                error_msg = str(e)
+                if "rate_limited" in error_msg:
+                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan rate limited")
+                    raise Exception("rate_limited")
+                else:
+                    logger.error(f"[{request_id}] STEP 1.75 FAILED: Hybrid context plan error: {error_msg}")
+                    raise
+        
+        # STEP 2 - HEADLINE GENERATION
+        t_headline_start = time.time()
+        headline_placement = hybrid_plan.get("headline_placement") if hybrid_plan else None
+        try:
+            headline = generate_headline_only(
+                product_name=product_name,
+                message=message,
+                object_a=object_a,
+                object_b=object_b,
+                headline_placement=headline_placement,
+                max_retries=3
+            )
+            t_headline_ms = int((time.time() - t_headline_start) * 1000)
+            logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
+        except Exception as e:
+            error_msg = str(e)
+            if "rate_limited" in error_msg:
+                logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
+                raise Exception("rate_limited")
+            else:
+                logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
+                raise
+        
+        # Save to plan cache
+        plan_data = {
+            "mode": "ENV_SWAP",
+            "hero_object": hybrid_plan.get("hero_object"),
+            "environment_from": hybrid_plan.get("environment_from"),
+            "environment_description": hybrid_plan.get("environment_description"),
+            "headline": headline,
+            "headline_placement": hybrid_plan.get("headline_placement", "BOTTOM"),
+            "shape_similarity_score": shape_score,
+            "shape_hint": shape_hint,
+            "chosen_objects": [object_a, object_b]
+        }
+        
+        if ENABLE_PLAN_CACHE and plan_cache_key:
+            _set_to_plan_cache(plan_cache_key, plan_data)
     
     # STEP 4 - FINAL VALIDATION
     # Ensure objects haven't changed
-    if object_a != shape_result["object_a"] or object_b != shape_result["object_b"]:
-        logger.error(f"[{request_id}] STEP 4 VALIDATION FAILED: Objects changed after STEP 1")
-        raise ValueError("Objects changed after shape selection")
+    if not plan_cache_hit:
+        if ENGINE_MODE == "legacy" and "shape_result" in locals():
+            if object_a != shape_result["object_a"] or object_b != shape_result["object_b"]:
+                logger.error(f"[{request_id}] STEP 4 VALIDATION FAILED: Objects changed after STEP 1")
+                raise ValueError("Objects changed after shape selection")
     
     logger.info(f"[{request_id}] STEP 4 VALIDATION PASSED: object_a={object_a}, object_b={object_b} (unchanged)")
     
     # STEP 3 - IMAGE GENERATION
+    t_image_start = time.time()
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    try:
-        image_bytes = generate_image_with_dalle(
-            client=client,
+    
+    # Check image cache
+    image_cache_key = None
+    image_bytes = None
+    
+    if ENABLE_IMAGE_CACHE:
+        # Create prompt for cache key
+        prompt_for_cache = create_image_prompt(
             object_a=object_a,
             object_b=object_b,
+            headline=headline,
             shape_hint=shape_hint,
             physical_context=physical_context,
             hybrid_plan=hybrid_plan,
-            headline=headline,
-            width=width,
-            height=height,
-            max_retries=3
+            is_strict=False
         )
-    except Exception as e:
-        logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
-        raise
+        image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
+        image_cache_key = _get_cache_key_image(prompt_for_cache, image_size_str, image_model)
+        cached_image_bytes = _get_from_image_cache(image_cache_key)
+        if cached_image_bytes:
+            image_bytes = cached_image_bytes
+            image_cache_hit = True
+            logger.info(f"[{request_id}] IMAGE_CACHE hit=true key={image_cache_key[:16]}...")
+        else:
+            logger.info(f"[{request_id}] IMAGE_CACHE hit=false key={image_cache_key[:16]}...")
+    
+    if not image_cache_hit:
+        try:
+            # Determine max_retries based on mode
+            max_img_retries = 2 if ENGINE_MODE == "optimized" else 3
+            
+            image_bytes = generate_image_with_dalle(
+                client=client,
+                object_a=object_a,
+                object_b=object_b,
+                shape_hint=shape_hint,
+                physical_context=physical_context,
+                hybrid_plan=hybrid_plan,
+                headline=headline,
+                width=width,
+                height=height,
+                max_retries=max_img_retries
+            )
+            
+            # Save to image cache
+            if ENABLE_IMAGE_CACHE and image_cache_key:
+                _set_to_image_cache(image_cache_key, image_bytes)
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] STEP 3 FAILED: Image generation error: {str(e)}")
+            raise
+    
+    t_image_ms = int((time.time() - t_image_start) * 1000)
     
     # Create minimal text file (optional, for documentation)
     text_content = create_text_file(
@@ -2002,7 +2615,9 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         # Optional: include minimal text.txt for documentation
         zip_file.writestr("text.txt", text_content.encode('utf-8'))
     
+    t_total_ms = int((time.time() - t_start) * 1000)
     logger.info(f"[{request_id}] ZIP created successfully: {len(zip_buffer.getvalue())} bytes")
+    logger.info(f"[{request_id}] PERF total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_plan_hit={plan_cache_hit} cache_image_hit={image_cache_hit}")
     
     return zip_buffer.getvalue()
 
