@@ -55,6 +55,11 @@ DIVERSITY_GUARD_TTL_SECONDS = 1800  # 30 minutes TTL for diversity guard
 # Layout mode
 ACE_LAYOUT_MODE = os.environ.get("ACE_LAYOUT_MODE", "side_by_side")  # "side_by_side" | "hybrid" (default: side_by_side, hybrid ignored)
 
+# Shape matching parameters
+SHAPE_MIN_SCORE = float(os.environ.get("SHAPE_MIN_SCORE", "0.80"))  # Minimum shape similarity score (0-1)
+SHAPE_SEARCH_K = int(os.environ.get("SHAPE_SEARCH_K", "40"))  # Number of candidates to check per object (K=35-50)
+MAX_CHECKED_PAIRS = int(os.environ.get("MAX_CHECKED_PAIRS", "500"))  # Maximum pairs to check before stopping
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -83,6 +88,10 @@ _step1_cache_lock = Lock()
 _diversity_guard: Dict[str, Tuple[set, float]] = {}  # key: f"{session_seed}|{productName}", value: (set of tuples, timestamp)
 _diversity_guard_lock = Lock()
 
+# Session-based anti-repeat: sid -> (used_pairs, used_objects, timestamp)
+_session_used_pairs: Dict[str, Tuple[set, set, float]] = {}  # key: sid, value: (set of pair_hashes, set of object_ids, timestamp)
+_session_used_lock = Lock()
+
 
 def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], engine_mode: str, mode: str, language: str = "en", session_seed: Optional[str] = None) -> str:
     """Generate cache key for plan."""
@@ -92,13 +101,15 @@ def _get_cache_key_plan(product_name: str, message: str, ad_goal: str, ad_index:
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
-def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List[str]], language: str = "en", session_seed: Optional[str] = None, engine_mode: str = "legacy", preview_mode: str = "image") -> str:
-    """Generate cache key for preview plan."""
-    # Include objectList version (hash of sorted list) for cache invalidation
-    object_list_hash = hashlib.md5(json.dumps(object_list or [], sort_keys=True).encode()).hexdigest()[:16]
-    layout_mode = ACE_LAYOUT_MODE  # Include layout mode in cache key
-    key_str = f"{product_name}|{message}|{ad_goal}|{language}|{ad_index}|{session_seed or ''}|{engine_mode}|{preview_mode}|{layout_mode}|{object_list_hash}|PREVIEW_{CACHE_KEY_VERSION}"
-    return hashlib.md5(key_str.encode()).hexdigest()
+def _get_cache_key_preview(product_name: str, message: str, ad_goal: str, ad_index: int, object_list: Optional[List], language: str = "en", session_seed: Optional[str] = None, engine_mode: str = "legacy", preview_mode: str = "image", image_size: Optional[str] = None) -> str:
+    """Generate cache key for preview plan. Includes sid + ad_index to prevent repetition."""
+    # Hash productName + productDescription (or ad_goal as fallback)
+    hash_inp = hashlib.sha256(f"{product_name}|{message}".encode()).hexdigest()[:16]
+    object_list_hash = hashlib.md5(json.dumps([describe_item(item) for item in (object_list or [])], sort_keys=True).encode()).hexdigest()[:16]
+    layout_mode = ACE_LAYOUT_MODE
+    image_size_str = image_size or "1536x1024"
+    key_str = f"{session_seed or 'no_session'}|{ad_index}|{image_size_str}|{layout_mode}|{engine_mode}|{preview_mode}|{hash_inp}|{object_list_hash}|PREVIEW_{CACHE_KEY_VERSION}"
+    return hashlib.sha256(key_str.encode()).hexdigest()
 
 
 def _get_from_preview_cache(key: str) -> Optional[Dict]:
@@ -325,6 +336,169 @@ DEFAULT_OBJECT_LIST = [
 ALLOWED_SIZES = ["1024x1024", "1536x1024", "1024x1536"]
 
 
+def build_ad_goal(product_name: str, product_description: str) -> str:
+    """
+    STEP 0.5 - BUILD_AD_GOAL
+    
+    Generate advertising goal (ad_goal) from productName + productDescription.
+    
+    Args:
+        product_name: Product name
+        product_description: Product description
+    
+    Returns:
+        str: Single English sentence (6-12 words) defining intent, not a slogan.
+    
+    Example:
+        "Protect natural ecosystems and wildlife habitats"
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    
+    prompt = f"""Generate a single advertising goal (ad_goal) from the product information below.
+
+Product Name: {product_name}
+Product Description: {product_description}
+
+Requirements:
+- Output EXACTLY one English sentence.
+- 6-12 words only.
+- Define the intent/purpose, NOT a slogan or tagline.
+- Focus on the core message or action.
+- No punctuation at the end (unless necessary).
+
+Example outputs:
+- "Protect natural ecosystems and wildlife habitats"
+- "Reduce plastic waste in oceans"
+- "Support renewable energy adoption"
+- "Promote sustainable agriculture practices"
+
+Output ONLY the ad_goal sentence, nothing else:"""
+    
+    try:
+        if model.startswith("o"):
+            # Use Responses API for o* models
+            response = client.responses.create(model=model, input=prompt)
+            ad_goal = response.output_text.strip()
+        else:
+            # Use Chat Completions for other models
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a marketing strategist. Generate concise advertising goals."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=50
+            )
+            ad_goal = response.choices[0].message.content.strip()
+        
+        # Clean up: remove quotes, extra whitespace
+        ad_goal = ad_goal.strip('"\'')
+        ad_goal = ' '.join(ad_goal.split())
+        
+        logger.info(f"AD_GOAL={ad_goal}")
+        return ad_goal
+    
+    except Exception as e:
+        logger.error(f"Failed to generate ad_goal: {str(e)}")
+        # Fallback
+        fallback = f"Support {product_name.lower()}" if product_name else "Make a positive difference"
+        logger.warning(f"Using fallback ad_goal: {fallback}")
+        return fallback
+
+
+def uniform_shuffle(items: List, seed: int) -> List:
+    """
+    Fisher-Yates shuffle with deterministic seed.
+    
+    Args:
+        items: List to shuffle
+        seed: Integer seed for reproducibility
+    
+    Returns:
+        List: Shuffled list (new list, original unchanged)
+    """
+    rng = random.Random(seed)
+    shuffled = list(items)  # Copy
+    n = len(shuffled)
+    for i in range(n - 1, 0, -1):
+        j = rng.randint(0, i)
+        shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+    return shuffled
+
+
+def validate_object_item(item: Dict, forbidden_words: List[str]) -> Tuple[bool, Optional[str]]:
+    """
+    Validate a single object item with CRITICAL classic_context quality checks.
+    
+    Args:
+        item: Dict with keys: id, object, classic_context, theme_link, category, shape_hint, theme_tag
+        forbidden_words: List of forbidden words to check
+    
+    Returns:
+        Tuple[bool, Optional[str]]: (is_valid, error_message)
+    """
+    # Check required fields
+    if not item.get("id") or not item.get("object") or not item.get("classic_context"):
+        return False, "Missing required fields (id, object, classic_context)"
+    
+    classic_context = item.get("classic_context", "").strip()
+    
+    # B) CRITICAL CLASSIC_CONTEXT VALIDATION
+    
+    # 1. Check minimum length (3 words minimum)
+    words = classic_context.split()
+    if len(words) < 3:
+        return False, f"classic_context too short ({len(words)} words, need >=3): '{classic_context}'"
+    
+    # 2. Check for forbidden abstract/marketing words in classic_context
+    forbidden_context_words = [
+        "eco", "sustainable", "meaningful", "modern", "creative",
+        "concept", "awareness", "symbol", "campaign", "environmental",
+        "green", "ethical", "conscious", "responsible", "impact",
+        "change", "future", "vision", "mission", "purpose"
+    ]
+    context_lower = classic_context.lower()
+    for word in forbidden_context_words:
+        if word in context_lower:
+            return False, f"classic_context contains forbidden abstract/marketing word '{word}': '{classic_context}'"
+    
+    # 3. Check for required physical preposition/relationship
+    physical_prepositions = [
+        "on", "in", "under", "next to", "attached to", "inside", "resting on",
+        "landing on", "with", "lying on", "sitting on", "placed on", "hanging from",
+        "growing from", "emerging from", "surrounded by", "near", "beside", "against",
+        "within", "among", "between", "alongside", "above", "below", "over", "underneath"
+    ]
+    has_physical_relationship = any(prep in context_lower for prep in physical_prepositions)
+    if not has_physical_relationship:
+        return False, f"classic_context missing physical preposition/relationship: '{classic_context}'"
+    
+    # 4. Check for forbidden generic phrases
+    forbidden_phrases = [
+        "in nature", "in the wild", "in its habitat", "in natural setting",
+        "in environment", "in context", "in setting", "in scene"
+    ]
+    for phrase in forbidden_phrases:
+        if phrase in context_lower:
+            return False, f"classic_context contains forbidden generic phrase '{phrase}': '{classic_context}'"
+    
+    # 5. Check maximum length (12 words maximum)
+    if len(words) > 12:
+        return False, f"classic_context too long ({len(words)} words, max 12): '{classic_context}'"
+    
+    # Check other fields for forbidden words (object, theme_link, etc.)
+    text = f"{item.get('object', '')} {item.get('theme_link', '')}".lower()
+    
+    # Check for forbidden words in object/theme_link
+    for word in forbidden_words:
+        if word in text:
+            return False, f"Contains forbidden word '{word}' in object/theme_link"
+    
+    return True, None
+
+
 def parse_image_size(image_size: str) -> Tuple[int, int]:
     """
     Parse image size string to (width, height).
@@ -349,11 +523,12 @@ def build_object_list_from_ad_goal(
     product_name: Optional[str] = None,
     max_retries: int = 2,
     language: str = "en"
-) -> List[str]:
+) -> List[Dict]:
     """
     STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL
     
-    Build a list of 200 concrete visual objects related to ad_goal.
+    Build a list of EXACTLY 200 object items related to ad_goal.
+    Each item includes: id, object, sub_object, classic_context, theme_link, category, shape_hint, theme_tag.
     
     Args:
         ad_goal: The advertising goal (e.g., "protect nature", "climate action")
@@ -362,13 +537,25 @@ def build_object_list_from_ad_goal(
         language: Language (default: "en")
     
     Returns:
-        List[str]: List of 200 concrete nouns (visual objects)
+        List[Dict]: List of 200 items, each with keys:
+            - id: unique identifier
+            - object: main physical object name
+            - sub_object: secondary physical object (REQUIRED - not environment)
+            - classic_context: 3-12 words describing PHYSICAL INTERACTION between object and sub_object
+            - theme_link: 5-12 words explaining connection to ad_goal
+            - category: object category
+            - shape_hint: very short shape description
+            - theme_tag: single word theme tag
     
     Rules:
-    - Each item is a concrete noun that can be drawn (visual object)
-    - Must be directly related to ad_goal
-    - NO generic shapes: circle, cylinder, square, triangle, sphere, etc.
-    - English only, single words or short noun phrases
+    - EXACTLY 200 ITEMS
+    - PHYSICAL CLASSIC OBJECTS ONLY
+    - Every item must follow: MAIN_OBJECT interacting with SUB_OBJECT
+    - sub_object MUST be concrete physical object, NOT environment (forbidden: nature, forest, water, etc.)
+    - classic_context MUST describe physical interaction between object and sub_object
+    - classic_context MUST include physical preposition (on/in/next to/attached to/inserted into/etc.)
+    - classic_context FORBIDDEN: abstract settings, symbolic language, marketing language, generic phrases
+    - NO brand names, NO logos, NO labels, NO printed text, NO numbers, NO signs, NO screens, NO packaging
     """
     # Check STEP 0 cache first
     step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language)
@@ -380,26 +567,117 @@ def build_object_list_from_ad_goal(
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
     
-    # Build prompt
+    # Build prompt for new format (200 items with classic_context and theme_link)
     product_context = f"\nProduct name (optional context): {product_name}" if product_name else ""
     
-    prompt = f"""Generate a list of 200 concrete visual objects (nouns) that are directly related to this advertising goal.
+    forbidden_patterns = "logo, brand, label, text, number, sign, screen, packaging, barcode, sticker, poster, billboard, phone screen, book cover, receipt, newspaper"
+    
+    prompt = f"""Generate EXACTLY 200 physical classic objects related to this advertising goal.
 
 Advertising goal: {ad_goal}{product_context}
 
-Requirements:
-- Each item must be a concrete noun that can be drawn/visualized (visual object)
-- All items must be directly related to the advertising goal
-- English only
-- Single words or short noun phrases (max 2-3 words)
-- NO generic geometric shapes: circle, cylinder, square, triangle, sphere, cube, rectangle, oval, etc.
-- NO abstract concepts
-- Focus on tangible, drawable objects
+CRITICAL REQUIREMENTS:
+- EXACTLY 200 ITEMS (no more, no less).
+- PHYSICAL CLASSIC OBJECTS ONLY (concrete, tangible, drawable).
+- Each item MUST include:
+  * id: unique identifier (e.g., "bee_flower", "can_opener", "mouse_cheese")
+  * object: the main physical object name (e.g., "bee", "tin can", "mouse")
+  * sub_object: a secondary physical object (e.g., "flower", "manual can opener", "wedge of cheese")
+  * classic_context: 3-12 words describing the PHYSICAL INTERACTION between object and sub_object (e.g., "landing on a flower", "being opened with a manual can opener", "next to a wedge of cheese")
+  * theme_link: 5-12 words explaining how it supports the ad_goal theme (e.g., "pollination supports healthy ecosystems", "photosynthesis produces oxygen")
+  * category: object category (e.g., "insect", "container", "rodent", "tool", "plant")
+  * shape_hint: very short shape description (e.g., "curved organic", "cylindrical", "small round", "tall vertical")
+  * theme_tag: single word theme tag (e.g., "nature", "ocean", "kitchen", "wildlife")
 
-Return ONLY a JSON object with this exact format:
-{{"objectList": ["item1", "item2", ..., "item200"]}}
+🔴 CRITICAL RULE: Every item must follow the pattern: MAIN_OBJECT interacting with SUB_OBJECT.
 
-JSON:"""
+SUB_OBJECT RULES (ABSOLUTE - MUST BE FOLLOWED):
+- sub_object MUST be a concrete physical object, NOT an environment
+- sub_object MUST be a specific, tangible item
+- FORBIDDEN as sub_object:
+  * General environments: "nature", "environment", "world", "background", "scene", "forest", "ocean", "sky", "space", "ecosystem", "habitat", "setting", "context"
+  * Abstract concepts: "life", "existence", "reality", "concept"
+  * Generic surfaces without specificity: "ground", "floor", "surface" (unless very specific like "wooden floor")
+- CORRECT sub_object examples:
+  * "flower" (for bee)
+  * "manual can opener" (for tin can)
+  * "straw" (for soda can)
+  * "wedge of cheese" (for mouse)
+  * "bed" (for pillow)
+  * "soil" (for tree)
+  * "bookshelf" (for book)
+  * "nail" (for hammer)
+  * "lock" (for key)
+  * "fork" (for plate)
+  * "saucer" (for coffee cup)
+- INCORRECT sub_object examples (DO NOT USE):
+  * "forest" (too general - use "tree trunk" or "soil" instead)
+  * "water" (too general - use "fish tank" or "pond surface" instead)
+  * "nature" (forbidden)
+  * "environment" (forbidden)
+  * "road" (too general - use "parking meter" or "traffic cone" instead)
+
+CLASSIC_CONTEXT RULES (CRITICAL - MUST BE FOLLOWED):
+- classic_context MUST describe the PHYSICAL INTERACTION between object and sub_object
+- MUST include a clear physical preposition/relationship: "on", "in", "under", "next to", "attached to", "inside", "resting on", "landing on", "with", "lying on", "inserted into", "hanging from", "touching", "holding", "opening", "closing"
+- MUST be concrete and specific (3-12 words)
+- MUST mention both object and sub_object (implicitly or explicitly)
+- MUST be a natural, expected, real-world interaction
+- FORBIDDEN in classic_context:
+  * Abstract settings: "in an eco-friendly setting", "in a meaningful environment"
+  * Symbolic language: "symbolizing sustainability", "representing change"
+  * Marketing language: "in a modern context", "for awareness"
+  * Generic phrases: "in nature", "in the wild", "in its habitat" (too vague)
+  * Words: "eco", "sustainable", "meaningful", "modern", "creative", "concept", "awareness", "symbol", "campaign"
+- CORRECT examples:
+  * "landing on a flower" (bee + flower)
+  * "being opened with a manual can opener" (tin can + can opener)
+  * "next to a wedge of cheese" (mouse + cheese)
+  * "resting on a bed" (pillow + bed)
+  * "growing from soil" (tree + soil)
+  * "sitting on a bookshelf" (book + bookshelf)
+  * "driving a nail" (hammer + nail)
+  * "inserted into a lock" (key + lock)
+  * "placed next to a fork" (plate + fork)
+- INCORRECT examples (DO NOT USE):
+  * "in an eco-friendly setting"
+  * "in a meaningful environment"
+  * "symbolizing sustainability"
+  * "in a modern context"
+  * "in nature" (too vague, no sub_object)
+  * "in forest" (forest is environment, not sub_object)
+  * "in water" (water is too general)
+
+NO brand names, NO logos, NO labels, NO printed text, NO numbers, NO signs, NO screens, NO packaging with writing.
+Avoid: "bottle label", "poster", "billboard", "phone screen", "book cover", "receipt", "newspaper".
+Keep objects concrete and timeless (everyday, nature, kitchen, tools, etc.).
+
+Return ONLY a JSON array with this exact format:
+[
+  {{
+    "id": "bee_flower",
+    "object": "bee",
+    "sub_object": "flower",
+    "classic_context": "landing on a flower",
+    "theme_link": "pollination supports healthy ecosystems",
+    "category": "insect",
+    "shape_hint": "small round",
+    "theme_tag": "nature"
+  }},
+  {{
+    "id": "can_opener",
+    "object": "tin can",
+    "sub_object": "manual can opener",
+    "classic_context": "being opened with a manual can opener",
+    "theme_link": "reusable containers reduce waste",
+    "category": "container",
+    "shape_hint": "cylindrical",
+    "theme_tag": "kitchen"
+  }},
+  ...
+]
+
+EXACTLY 200 items. JSON array only:"""
 
     # Check if model is o* type - these use Responses API
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
@@ -440,51 +718,115 @@ JSON:"""
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
             
-            # Parse JSON
+            # Parse JSON - expect array of objects
             data = json.loads(response_text)
-            object_list = data.get("objectList", [])
+            if isinstance(data, list):
+                object_list = data
+            elif isinstance(data, dict) and "objectList" in data:
+                # Fallback for old format - convert to new format
+                old_list = data.get("objectList", [])
+                object_list = [{"id": f"item_{i}", "object": obj, "classic_context": "", "theme_link": ""} for i, obj in enumerate(old_list)]
+            else:
+                raise ValueError("Invalid JSON format: expected array or object with 'objectList' key")
             
-            # Validate: must have at least 120 items
-            if len(object_list) < 120:
+            # Validate items with CRITICAL classic_context quality checks
+            forbidden_words = ["logo", "brand", "label", "text", "number", "sign", "screen", "packaging", "barcode", "sticker", "poster", "billboard", "phone", "book cover", "receipt", "newspaper"]
+            valid_items = []
+            rejected_count = 0
+            rejection_reasons = {}
+            
+            for item in object_list:
+                is_valid, error_msg = validate_object_item(item, forbidden_words)
+                if is_valid:
+                    valid_items.append(item)
+                else:
+                    rejected_count += 1
+                    # Extract rejection reason category for statistics
+                    reason_key = error_msg.split(":")[0] if ":" in error_msg else error_msg
+                    if len(reason_key) > 50:  # Truncate long reasons
+                        reason_key = reason_key[:50]
+                    rejection_reasons[reason_key] = rejection_reasons.get(reason_key, 0) + 1
+                    if attempt == 0:  # Log first attempt rejections
+                        logger.debug(f"STEP 0 - Rejected item: {item.get('id', 'unknown')} - {error_msg}")
+            
+            # Must have exactly 200 valid items
+            if len(valid_items) < 200:
+                logger.warning(f"STEP 0 - Only {len(valid_items)} valid items (need 200), rejected={rejected_count}, reasons={dict(list(rejection_reasons.items())[:5])}")
                 if attempt < max_retries - 1:
-                    logger.warning(f"STEP 0 - BUILD_OBJECT_LIST: Only {len(object_list)} items returned (need >=120), retrying with stricter prompt...")
-                    # Stricter prompt for retry
-                    prompt = f"""Generate a list of 200 concrete visual objects (nouns) that are directly related to this advertising goal.
+                    # Retry with stricter prompt focusing on classic_context quality
+                    top_reasons = sorted(rejection_reasons.items(), key=lambda x: x[1], reverse=True)[:3]
+                    reasons_text = ", ".join([f"{reason}({count})" for reason, count in top_reasons])
+                    feedback = f"""You generated {rejected_count} rejected items. Common issues:
+- classic_context must be 3-12 words with a physical preposition (on/in/next to/attached to/etc.)
+- classic_context must NOT contain: eco, sustainable, meaningful, modern, creative, concept, awareness, symbol, campaign
+- classic_context must NOT use generic phrases like "in nature", "in the wild", "in its habitat"
+- classic_context must describe a NATURAL, EXPECTED, REAL-WORLD PHYSICAL SITUATION
+- Examples of CORRECT classic_context: "landing on a flower", "with a metal straw inserted", "next to a wedge of cheese", "attached to a tree branch"
+- Examples of INCORRECT classic_context: "in an eco-friendly setting", "symbolizing sustainability", "in nature" (too vague)
+
+Top rejection reasons: {reasons_text}
+
+Ensure EXACTLY 200 valid items with proper classic_context."""
+                    prompt = f"""Generate EXACTLY 200 physical classic objects related to this advertising goal.
 
 Advertising goal: {ad_goal}{product_context}
 
 CRITICAL REQUIREMENTS:
-- Return EXACTLY 200 items (no fewer)
-- Each item must be a concrete noun that can be drawn/visualized
-- All items must be directly related to the advertising goal
-- English only
-- Single words or short noun phrases (max 2-3 words)
-- NO generic geometric shapes: circle, cylinder, square, triangle, sphere, cube, rectangle, oval, etc.
-- NO abstract concepts
-- Focus on tangible, drawable objects
+- EXACTLY 200 ITEMS (no more, no less).
+- PHYSICAL CLASSIC OBJECTS ONLY (concrete, tangible, drawable).
+- Each item MUST include:
+  * id: unique identifier (e.g., "bee_flower", "can_straw", "mouse_cheese")
+  * object: the physical object name (e.g., "bee", "can", "mouse")
+  * classic_context: 3-12 words describing a NATURAL, EXPECTED, REAL-WORLD PHYSICAL SITUATION (e.g., "landing on a flower", "with a metal straw inserted", "next to a wedge of cheese", "attached to a tree branch", "lying on ocean beach sand", "on a wooden kitchen table", "resting in a toolbox")
+  * theme_link: 5-12 words explaining how it supports the ad_goal theme
+  * category: object category (e.g., "insect", "container", "rodent", "tool", "plant")
+  * shape_hint: very short shape description (e.g., "curved organic", "cylindrical", "small round")
+  * theme_tag: single word theme tag (e.g., "nature", "ocean", "kitchen", "wildlife")
 
-Return ONLY a JSON object with this exact format:
-{{"objectList": ["item1", "item2", ..., "item200"]}}
+CLASSIC_CONTEXT RULES (CRITICAL - MUST BE FOLLOWED):
+- classic_context MUST describe a PHYSICAL CLASSIC SITUATION
+- MUST include a clear physical preposition: "on", "in", "under", "next to", "attached to", "inside", "resting on", "landing on", "with", "lying on", etc.
+- MUST be concrete and specific (3-12 words)
+- MUST be a natural, expected, real-world scene
+- FORBIDDEN in classic_context:
+  * Abstract settings: "in an eco-friendly setting", "in a meaningful environment"
+  * Symbolic language: "symbolizing sustainability", "representing change"
+  * Marketing language: "in a modern context", "for awareness"
+  * Generic phrases: "in nature", "in the wild", "in its habitat" (too vague)
+  * Words: "eco", "sustainable", "meaningful", "modern", "creative", "concept", "awareness", "symbol", "campaign"
+- CORRECT examples:
+  * "landing on a flower" (bee)
+  * "with a metal straw inserted" (can)
+  * "next to a wedge of cheese" (mouse)
+  * "attached to a tree branch" (leaf)
+  * "lying on ocean beach sand" (shell)
+  * "on a wooden kitchen table" (spoon)
+  * "resting in a toolbox" (hammer)
 
-JSON:"""
+FEEDBACK: {feedback}
+
+Return ONLY a JSON array with EXACTLY 200 items:"""
                     continue
                 else:
-                    logger.error(f"STEP 0 - BUILD_OBJECT_LIST: Only {len(object_list)} items returned after {max_retries} attempts (need >=120)")
-                    raise ValueError(f"Failed to generate sufficient object list: got {len(object_list)} items, need >=120")
+                    raise ValueError(f"Failed to generate 200 valid items after {max_retries} attempts. Got {len(valid_items)} valid items. Rejection reasons: {dict(list(rejection_reasons.items())[:5])}")
             
-            # Filter out generic shapes
-            generic_shapes = {"circle", "cylinder", "square", "triangle", "sphere", "cube", "rectangle", "oval", "cone", "pyramid", "hexagon", "pentagon", "octagon", "diamond", "trapezoid"}
-            filtered_list = [obj for obj in object_list if obj.lower().strip() not in generic_shapes]
+            # Take exactly 200 items
+            object_list = valid_items[:200]
             
-            # Log sample
-            sample_size = min(10, len(filtered_list))
-            sample = filtered_list[:sample_size]
-            logger.info(f"STEP 0 OBJECTLIST: size={len(filtered_list)}, sample10={sample}")
+            # Calculate SHA for logging
+            object_list_str = json.dumps(object_list, sort_keys=True)
+            object_list_sha = hashlib.sha256(object_list_str.encode()).hexdigest()[:16]
             
-            # Save to STEP 0 cache
-            _set_to_step0_cache(step0_cache_key, filtered_list)
+            logger.info(f"OBJECTLIST_SHA={object_list_sha} total=200 rejected={rejected_count} retry={attempt}")
             
-            return filtered_list
+            # Log sample (first 5 items)
+            sample = object_list[:5]
+            logger.info(f"STEP 0 OBJECTLIST: size=200, sample5={json.dumps(sample, indent=2)}")
+            
+            # Save to cache
+            _set_to_step0_cache(step0_cache_key, object_list)
+            
+            return object_list
             
         except json.JSONDecodeError as e:
             logger.error(f"STEP 0 - BUILD_OBJECT_LIST: JSON parse error: {e}")
@@ -554,12 +896,18 @@ JSON:"""
     raise Exception("Failed to build object list from ad_goal")
 
 
-def validate_object_list(object_list: Optional[List[str]], ad_goal: Optional[str] = None, product_name: Optional[str] = None, language: str = "en") -> List[str]:
+def validate_object_list(object_list: Optional[List], ad_goal: Optional[str] = None, product_name: Optional[str] = None, language: str = "en") -> List[Dict]:
     """
-    Validate and return object list.
+    Validate and return object list (new format: List[Dict] with id, object, classic_context, theme_link).
     If None or too small, and ad_goal is provided, use STEP 0 to build list.
-    Otherwise, return default concrete objects list.
+    Otherwise, return default concrete objects list (converted to new format).
     """
+    # Check if old format (List[str]) and convert
+    if object_list and len(object_list) > 0 and isinstance(object_list[0], str):
+        # Old format - convert to new format
+        logger.info(f"Converting old format objectList (List[str]) to new format (List[Dict])")
+        object_list = [{"id": f"item_{i}", "object": obj, "classic_context": "", "theme_link": ""} for i, obj in enumerate(object_list)]
+    
     if not object_list or len(object_list) < 2:
         # If ad_goal is provided, use STEP 0 to build list
         if ad_goal:
@@ -567,7 +915,8 @@ def validate_object_list(object_list: Optional[List[str]], ad_goal: Optional[str
             return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name, language=language)
         else:
             logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), using default concrete objects list (size={len(DEFAULT_OBJECT_LIST)})")
-            return DEFAULT_OBJECT_LIST
+            # Convert DEFAULT_OBJECT_LIST to new format
+            return [{"id": f"default_{i}", "object": obj, "classic_context": "", "theme_link": ""} for i, obj in enumerate(DEFAULT_OBJECT_LIST)]
     
     # If object_list is provided but small (<120), and ad_goal is provided, use STEP 0
     if len(object_list) < 120 and ad_goal:
@@ -608,8 +957,201 @@ def get_used_ad_goals(history: Optional[List[Dict]]) -> set:
     return used
 
 
+def select_pair_with_limited_shape_search(
+    object_list: List[Dict],
+    sid: str,
+    ad_index: int,
+    ad_goal: str,
+    image_size: str,
+    used_objects: Optional[set] = None,
+    model_name: Optional[str] = None
+) -> Dict:
+    """
+    STEP 1 - SELECT PAIR WITH LIMITED SHAPE SEARCH
+    
+    Select a pair of objects with shape similarity using limited search (K=35-50, MAX_CHECKED_PAIRS).
+    Includes uniform shuffle for fairness and anti-repeat logic per session.
+    
+    Args:
+        object_list: List[Dict] with keys: id, object, classic_context, theme_link
+        sid: Session ID
+        ad_index: Ad index (1-3)
+        ad_goal: Advertising goal (for seed)
+        image_size: Image size (for seed)
+        used_objects: Set of already used object IDs (optional)
+        model_name: Model name (optional, defaults to OPENAI_SHAPE_MODEL)
+    
+    Returns:
+        Dict with keys: object_a, object_b, object_a_id, object_b_id, shape_similarity_score, shape_hint
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    if model_name is None:
+        model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    
+    # Generate seed for uniform shuffle
+    seed_str = f"{sid}|{ad_index}|{ad_goal}|{image_size}|side_by_side"
+    seed_int = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16) % (2**31)
+    
+    # Uniform shuffle for fairness
+    shuffled_objects = uniform_shuffle(object_list, seed_int)
+    
+    # Get used pairs and objects for this session
+    used_objects_set = used_objects or set()
+    with _session_used_lock:
+        if sid in _session_used_pairs:
+            used_pairs_set, used_objects_session, timestamp = _session_used_pairs[sid]
+            # Check TTL
+            if time.time() - timestamp >= CACHE_TTL_SECONDS:
+                # Expired, reset
+                _session_used_pairs[sid] = (set(), set(), time.time())
+                used_pairs_set = set()
+                used_objects_session = set()
+        else:
+            used_pairs_set = set()
+            used_objects_session = set()
+            _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
+    
+    # Limited search: for each i, check j=i+1..i+K
+    K = SHAPE_SEARCH_K
+    max_checked = MAX_CHECKED_PAIRS
+    checked_pairs = 0
+    best_pair = None
+    best_score = 0.0
+    
+    for i in range(len(shuffled_objects)):
+        if checked_pairs >= max_checked:
+            break
+        
+        obj_a_item = shuffled_objects[i]
+        obj_a_id = obj_a_item["id"]
+        obj_a_name = obj_a_item["object"]
+        
+        # Skip if already used in session (prefer diversity)
+        if obj_a_id in used_objects_session and len(used_objects_session) < len(shuffled_objects) * 0.8:
+            continue
+        
+        # Check candidates j=i+1..i+K
+        for j in range(i + 1, min(i + 1 + K, len(shuffled_objects))):
+            if checked_pairs >= max_checked:
+                break
+            
+            obj_b_item = shuffled_objects[j]
+            obj_b_id = obj_b_item["id"]
+            obj_b_name = obj_b_item["object"]
+            
+            # Skip if already used in session
+            if obj_b_id in used_objects_session and len(used_objects_session) < len(shuffled_objects) * 0.8:
+                continue
+            
+            # Check if pair already used
+            pair_hash = hashlib.sha256("|".join(sorted([obj_a_id, obj_b_id])).encode()).hexdigest()
+            if pair_hash in used_pairs_set:
+                logger.info(f"PAIR_SKIP_USED sid={sid} ad={ad_index} reason=pair A={obj_a_id} B={obj_b_id}")
+                continue
+            
+            checked_pairs += 1
+            
+            # Call shape model to get similarity score (simplified - in production, batch or cache)
+            try:
+                prompt = f"""Compare geometric shape similarity:
+
+Object A: {obj_a_name}
+Object B: {obj_b_name}
+
+Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
+
+                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+                if is_o_model:
+                    response = client.responses.create(model=model_name, input=prompt)
+                    response_text = response.output_text.strip()
+                else:
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.3,
+                        max_tokens=100
+                    )
+                    response_text = response.choices[0].message.content.strip()
+                
+                # Parse JSON
+                if response_text.startswith("```"):
+                    lines = response_text.split('\n')
+                    response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+                if response_text.startswith("```json"):
+                    lines = response_text.split('\n')
+                    response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+                
+                result = json.loads(response_text)
+                shape_score = float(result.get("shape_score", 0)) / 100.0
+                hint = result.get("hint", "")
+                
+                if shape_score >= SHAPE_MIN_SCORE:
+                    best_pair = {
+                        "object_a": obj_a_name,
+                        "object_b": obj_b_name,
+                        "object_a_id": obj_a_id,
+                        "object_b_id": obj_b_id,
+                        "shape_similarity_score": int(shape_score * 100),
+                        "shape_hint": hint
+                    }
+                    
+                    # Update session tracking
+                    with _session_used_lock:
+                        if sid in _session_used_pairs:
+                            used_pairs_set, used_objects_session, _ = _session_used_pairs[sid]
+                            used_pairs_set.add(pair_hash)
+                            used_objects_session.add(obj_a_id)
+                            used_objects_session.add(obj_b_id)
+                            _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
+                    
+                    logger.info(f"PAIR_PICK sid={sid} ad={ad_index} A={obj_a_id} B={obj_b_id} shape={int(shape_score*100)} checked_pairs={checked_pairs} cache_hit_plan=0")
+                    return best_pair
+                
+                if shape_score > best_score:
+                    best_score = shape_score
+                    best_pair = {
+                        "object_a": obj_a_name,
+                        "object_b": obj_b_name,
+                        "object_a_id": obj_a_id,
+                        "object_b_id": obj_b_id,
+                        "shape_similarity_score": int(shape_score * 100),
+                        "shape_hint": hint
+                    }
+            
+            except Exception as e:
+                logger.debug(f"Shape matching error: {e}")
+                continue
+    
+    # Fallback: use best pair if >= 0.70
+    if best_pair and best_score >= 0.70:
+        pair_hash = hashlib.sha256("|".join(sorted([best_pair["object_a_id"], best_pair["object_b_id"]])).encode()).hexdigest()
+        with _session_used_lock:
+            if sid in _session_used_pairs:
+                used_pairs_set, used_objects_session, _ = _session_used_pairs[sid]
+                used_pairs_set.add(pair_hash)
+                used_objects_session.add(best_pair["object_a_id"])
+                used_objects_session.add(best_pair["object_b_id"])
+                _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
+        
+        logger.warning(f"PAIR_PICK sid={sid} ad={ad_index} A={best_pair['object_a_id']} B={best_pair['object_b_id']} shape={best_pair['shape_similarity_score']} checked_pairs={checked_pairs} cache_hit_plan=0 (fallback)")
+        return best_pair
+    
+    raise ValueError(f"No valid pair found after {checked_pairs} checks")
+
+
+def describe_item(item) -> str:
+    """Helper to describe an item (supports both Dict and str formats)."""
+    if isinstance(item, dict):
+        obj = item.get("object", "")
+        ctx = item.get("classic_context", "")
+        if ctx:
+            return f'{obj} ({ctx})'
+        return obj
+    return str(item)
+
+
 def select_similar_pair_shape_only(
-    object_list: List[str],
+    object_list: List,
     used_objects: set,
     max_retries: int = 2,
     model_name: Optional[str] = None
@@ -1924,7 +2466,9 @@ def create_image_prompt(
     shape_hint: Optional[str] = None,
     physical_context: Optional[Dict] = None,
     hybrid_plan: Optional[Dict] = None,
-    is_strict: bool = False
+    is_strict: bool = False,
+    object_a_context: Optional[str] = None,
+    object_b_context: Optional[str] = None
 ) -> str:
     """
     STEP 3 - IMAGE GENERATION PROMPT
@@ -1939,6 +2483,8 @@ def create_image_prompt(
         physical_context: Physical context extensions (ignored, kept for compatibility), optional
         hybrid_plan: Hybrid context plan (ignored, kept for compatibility), optional
         is_strict: If True, use stricter prompt for retry
+        object_a_context: Classic context for object_a (optional)
+        object_b_context: Classic context for object_b (optional)
     """
     # Force SIDE BY SIDE mode only (ignore hybrid_plan and physical_context)
     # ACE_LAYOUT_MODE is always "side_by_side" or ignored
@@ -1950,10 +2496,23 @@ def create_image_prompt(
         shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
     
     # Build composition rules section (SIDE BY SIDE only - two full panels)
+    # Include classic_context as photography hints (not text on image)
+    context_a_hint = ""
+    if object_a_context is not None and object_a_context:
+        context_a_hint = f", shown {object_a_context}"
+    context_b_hint = ""
+    if object_b_context is not None and object_b_context:
+        context_b_hint = f", shown {object_b_context}"
+    
     composition_rules = f"""COMPOSITION RULES (CRITICAL):
-- Two panels: left panel shows FULL {object_a}, right panel shows FULL {object_b}.
+- Two panels: left panel shows FULL {object_a}{context_a_hint}, right panel shows FULL {object_b}{context_b_hint}.
 - Both objects are FULL objects, completely visible in their respective panels.
-- No overlap between the objects.
+- Each object must be shown interacting with its sub_object as described in classic_context.
+- The sub_object is part of the composition, not just background.
+- VISUAL DOMINANCE RULE: The main object ({object_a} and {object_b}) must be visually dominant in each panel.
+- The sub_object must support the scene but must not dominate the silhouette.
+- The overall outline similarity should be determined by the main objects, not the secondary objects.
+- Two separate objects side by side, no overlap.
 - Clear separation between left and right panels.
 - Same vertical alignment (same baseline alignment).
 - Center of the composition is between the two objects.
@@ -2070,7 +2629,9 @@ def generate_image_with_dalle(
     shape_hint: Optional[str] = None,
     physical_context: Optional[Dict] = None,
     hybrid_plan: Optional[Dict] = None,
-    max_retries: int = 3
+    max_retries: int = 3,
+    object_a_context: Optional[str] = None,
+    object_b_context: Optional[str] = None
 ) -> bytes:
     """
     STEP 3 - IMAGE GENERATION
@@ -2117,7 +2678,9 @@ def generate_image_with_dalle(
             shape_hint=shape_hint,
             physical_context=physical_context,
             hybrid_plan=hybrid_plan,
-            is_strict=is_strict
+            is_strict=is_strict,
+            object_a_context=object_a_context,
+            object_b_context=object_b_context
         )
         
         try:
@@ -2230,49 +2793,39 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     ad_index = max(1, min(3, ad_index))
     
     # Optional fields
-    session_id = payload_dict.get("sessionId")
+    session_id = payload_dict.get("sessionId") or "no_session"
     session_seed = session_id  # Use session_id as session_seed for cache key
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
-    # Determine ad_goal (from history or from productDescription)
-    ad_goal = None
-    if history:
-        # Try to get ad_goal from most recent history item
-        for item in reversed(history):
-            if isinstance(item, dict) and "ad_goal" in item:
-                ad_goal = item.get("ad_goal", "")
-                if ad_goal:
-                    break
-    
-    # If no ad_goal from history, use productDescription as ad_goal
-    if not ad_goal:
-        ad_goal = product_description if product_description else "Make a difference"
+    # A) Build ad_goal from productName + productDescription (NEW - not from history)
+    ad_goal = build_ad_goal(product_name, product_description)
+    logger.info(f"AD_GOAL={ad_goal}")
     
     message = product_description if product_description else "Make a difference"
     
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
-    # STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL (if needed)
-    # Use validate_object_list which will call STEP 0 if object_list is missing/small and ad_goal exists
-    # STEP 0 - Check cache before calling validate_object_list
+    # B) Build object_list in new format (200 items with id/object/classic_context/theme_link)
     step0_cache_hit = False
     if not object_list or len(object_list) < 120:
-        if ad_goal:
-            step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, ad_index=ad_index, session_seed=session_seed)
-            cached_step0_list = _get_from_step0_cache(step0_cache_key)
-            if cached_step0_list:
-                step0_cache_hit = True
-                object_list = cached_step0_list
-                logger.info(f"[{request_id}] STEP 0 - Using cached objectList (size={len(object_list)})")
-            else:
-                # Will be called by validate_object_list, and will cache there
-                object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+        # Build from ad_goal
+        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, ad_index=1, session_seed=session_id)  # Shared across ads in same session
+        cached_step0_list = _get_from_step0_cache(step0_cache_key)
+        if cached_step0_list:
+            step0_cache_hit = True
+            object_list = cached_step0_list
+            logger.info(f"[{request_id}] STEP 0 - Using cached objectList (size={len(object_list)})")
         else:
-            object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+            object_list = build_object_list_from_ad_goal(ad_goal, product_name, language=language)
     else:
+        # Validate existing object_list (convert if needed)
         object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+    
+    # Log objectList stats
+    object_list_sha = hashlib.sha256(json.dumps(object_list, sort_keys=True).encode()).hexdigest()[:16]
+    logger.info(f"OBJECTLIST_SHA={object_list_sha} total={len(object_list)} cache_hit_list={1 if step0_cache_hit else 0}")
     
     # Log request with preview flags
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
@@ -2286,7 +2839,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     cached_plan = None
     
     if PREVIEW_USE_CACHE:
-        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list, language=language, session_seed=session_seed, engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE)
+        preview_cache_key = _get_cache_key_preview(product_name, message, ad_goal, ad_index, object_list, language=language, session_seed=session_seed, engine_mode=ENGINE_MODE, preview_mode=PREVIEW_MODE, image_size=image_size_str)
         cached_plan = _get_from_preview_cache(preview_cache_key)
         if cached_plan:
             preview_cache_hit = True
@@ -2300,18 +2853,15 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 return cached_plan
             
             # If image mode, use cached plan data
-            object_a = cached_plan.get("chosen_objects", [None, None])[0]
-            object_b = cached_plan.get("chosen_objects", [None, None])[1]
+            object_a_name = cached_plan.get("chosen_objects", [None, None])[0]
+            object_b_name = cached_plan.get("chosen_objects", [None, None])[1]
+            object_a_item = cached_plan.get("object_a_item")
+            object_b_item = cached_plan.get("object_b_item")
             shape_hint = cached_plan.get("shape_hint", "")
             shape_score = cached_plan.get("shape_similarity_score", 0)
             headline = cached_plan.get("headline", "")
-            hybrid_plan = {
-                "hero_object": cached_plan.get("hero_object"),
-                "environment_from": cached_plan.get("environment_from"),
-                "environment_description": cached_plan.get("environment_description"),
-                "headline_placement": cached_plan.get("headline_placement")
-            }
-            physical_context = None  # Not cached for now
+            hybrid_plan = None
+            physical_context = None
         else:
             logger.info(f"[{request_id}] PREVIEW_CACHE hit=false ttl={CACHE_TTL_SECONDS}s key={preview_cache_key[:16]}...")
     
@@ -2319,7 +2869,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     plan_cache_key = None
     plan_cache_hit = False
     if ENABLE_PLAN_CACHE and not preview_cache_hit:
-        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "SIDE_BY_SIDE", language=language, session_seed=session_seed)
+        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "SIDE_BY_SIDE", language=language, session_seed=session_seed, image_size=image_size_str)
         cached_plan = _get_from_plan_cache(plan_cache_key)
         if cached_plan:
             plan_cache_hit = True
@@ -2332,18 +2882,15 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 return cached_plan
             
             # If image mode, use cached plan data
-            object_a = cached_plan.get("chosen_objects", [None, None])[0]
-            object_b = cached_plan.get("chosen_objects", [None, None])[1]
+            object_a_name = cached_plan.get("chosen_objects", [None, None])[0]
+            object_b_name = cached_plan.get("chosen_objects", [None, None])[1]
+            object_a_item = cached_plan.get("object_a_item")
+            object_b_item = cached_plan.get("object_b_item")
             shape_hint = cached_plan.get("shape_hint", "")
             shape_score = cached_plan.get("shape_similarity_score", 0)
             headline = cached_plan.get("headline", "")
-            hybrid_plan = {
-                "hero_object": cached_plan.get("hero_object"),
-                "environment_from": cached_plan.get("environment_from"),
-                "environment_description": cached_plan.get("environment_description"),
-                "headline_placement": cached_plan.get("headline_placement")
-            }
-            physical_context = None  # Not cached for now
+            hybrid_plan = None
+            physical_context = None
         else:
             logger.info(f"[{request_id}] PLAN_CACHE hit=false key={plan_cache_key[:16]}...")
     
@@ -2506,10 +3053,23 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             # Determine max_retries based on mode
             max_img_retries = 1 if ENGINE_MODE == "optimized" else 3
             
+            # D) Update image prompt to use new format with classic_context
+            # Get context from items if available
+            if 'object_a_item' in locals() and object_a_item:
+                object_a_context = object_a_item.get("classic_context", "")
+            else:
+                object_a_context = ""
+            if 'object_b_item' in locals() and object_b_item:
+                object_b_context = object_b_item.get("classic_context", "")
+            else:
+                object_b_context = ""
+            
             image_bytes = generate_image_with_dalle(
                 client=client,
-                object_a=object_a,
-                object_b=object_b,
+                object_a=object_a_name,
+                object_b=object_b_name,
+                object_a_context=object_a_context,
+                object_b_context=object_b_context,
                 shape_hint=shape_hint,
                 physical_context=None,  # No physical context in SIDE BY SIDE mode
                 hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
@@ -2582,33 +3142,39 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     ad_index = max(1, min(3, ad_index))
     
     # Optional fields
-    session_id = payload_dict.get("sessionId")
+    session_id = payload_dict.get("sessionId") or "no_session"
     session_seed = session_id  # Use session_id as session_seed for cache key
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
     
-    # Determine ad_goal (from history or from productDescription)
-    ad_goal = None
-    if history:
-        # Try to get ad_goal from most recent history item
-        for item in reversed(history):
-            if isinstance(item, dict) and "ad_goal" in item:
-                ad_goal = item.get("ad_goal", "")
-                if ad_goal:
-                    break
-    
-    # If no ad_goal from history, use productDescription as ad_goal
-    if not ad_goal:
-        ad_goal = product_description if product_description else "Make a difference"
+    # A) Build ad_goal from productName + productDescription (NEW - not from history)
+    ad_goal = build_ad_goal(product_name, product_description)
+    logger.info(f"AD_GOAL={ad_goal}")
     
     message = product_description if product_description else "Make a difference"
     
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
-    # STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL (if needed)
-    # Use validate_object_list which will call STEP 0 if object_list is missing/small and ad_goal exists
-    object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name)
+    # B) Build object_list in new format (200 items with id/object/classic_context/theme_link)
+    step0_cache_hit = False
+    if not object_list or len(object_list) < 120:
+        # Build from ad_goal
+        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, ad_index=1, session_seed=session_id)  # Shared across ads
+        cached_step0_list = _get_from_step0_cache(step0_cache_key)
+        if cached_step0_list:
+            step0_cache_hit = True
+            object_list = cached_step0_list
+            logger.info(f"[{request_id}] STEP 0 - Using cached objectList (size={len(object_list)})")
+        else:
+            object_list = build_object_list_from_ad_goal(ad_goal, product_name, language=language)
+    else:
+        # Validate existing object_list (convert if needed)
+        object_list = validate_object_list(object_list, ad_goal=ad_goal, product_name=product_name, language=language)
+    
+    # Log objectList stats
+    object_list_sha = hashlib.sha256(json.dumps(object_list, sort_keys=True).encode()).hexdigest()[:16]
+    logger.info(f"OBJECTLIST_SHA={object_list_sha} total={len(object_list)} cache_hit_list={1 if step0_cache_hit else 0}")
     
     # Log request
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
@@ -2621,24 +3187,21 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     cached_plan = None
     
     if ENABLE_PLAN_CACHE:
-        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "SIDE_BY_SIDE", language=language, session_seed=session_seed)
+        plan_cache_key = _get_cache_key_plan(product_name, message, ad_goal, ad_index, object_list, ENGINE_MODE, "SIDE_BY_SIDE", language=language, session_seed=session_seed, image_size=image_size_str)
         cached_plan = _get_from_plan_cache(plan_cache_key)
         if cached_plan:
             plan_cache_hit = True
             logger.info(f"[{request_id}] PLAN_CACHE hit=true key={plan_cache_key[:16]}...")
             # Use cached plan data
-            object_a = cached_plan.get("chosen_objects", [None, None])[0]
-            object_b = cached_plan.get("chosen_objects", [None, None])[1]
+            object_a_name = cached_plan.get("chosen_objects", [None, None])[0]
+            object_b_name = cached_plan.get("chosen_objects", [None, None])[1]
+            object_a_item = cached_plan.get("object_a_item")
+            object_b_item = cached_plan.get("object_b_item")
             shape_hint = cached_plan.get("shape_hint", "")
             shape_score = cached_plan.get("shape_similarity_score", 0)
             headline = cached_plan.get("headline", "")
-            hybrid_plan = {
-                "hero_object": cached_plan.get("hero_object"),
-                "environment_from": cached_plan.get("environment_from"),
-                "environment_description": cached_plan.get("environment_description"),
-                "headline_placement": cached_plan.get("headline_placement")
-            }
-            physical_context = None  # Not cached for now
+            hybrid_plan = None
+            physical_context = None
         else:
             logger.info(f"[{request_id}] PLAN_CACHE hit=false key={plan_cache_key[:16]}...")
     
@@ -2660,23 +3223,35 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         physical_context = None  # No physical context in SIDE BY SIDE mode
         hybrid_plan = None  # No hybrid plan in SIDE BY SIDE mode
         
-        # STEP 1 - SHAPE SELECTION (using GENERATE_PLANNER_MODEL)
+        # C) Select pair using select_pair_with_limited_shape_search
         t_shape_start = time.time()
         try:
-            shape_result = select_similar_pair_shape_only(
+            pair_result = select_pair_with_limited_shape_search(
                 object_list=object_list,
-                used_objects=used_objects,
-                max_retries=2,
+                sid=session_id,
+                ad_index=ad_index,
+                ad_goal=ad_goal,
+                image_size=image_size_str,
+                used_objects=None,  # Anti-repeat handled internally
                 model_name=planner_model
             )
             t_shape_ms = int((time.time() - t_shape_start) * 1000)
             
-            object_a = shape_result["object_a"]
-            object_b = shape_result["object_b"]
-            shape_hint = shape_result.get("shape_hint", "")
-            shape_score = shape_result.get("shape_similarity_score", 0)
+            object_a_name = pair_result["object_a"]
+            object_b_name = pair_result["object_b"]
+            object_a_id = pair_result["object_a_id"]
+            object_b_id = pair_result["object_b_id"]
+            shape_hint = pair_result.get("shape_hint", "")
+            shape_score = pair_result.get("shape_similarity_score", 0)
             
-            logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
+            # Get full item objects for context
+            object_a_item = next((item for item in object_list if item.get("id") == object_a_id), None)
+            object_b_item = next((item for item in object_list if item.get("id") == object_b_id), None)
+            
+            if not object_a_item or not object_b_item:
+                raise ValueError(f"Could not find items for ids: {object_a_id}, {object_b_id}")
+            
+            logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a_name}, {object_b_name}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
         except Exception as e:
             error_msg = str(e)
             if "rate_limited" in error_msg:
@@ -2692,8 +3267,8 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             headline = generate_headline_only(
                 product_name=product_name,
                 message=message,
-                object_a=object_a,
-                object_b=object_b,
+                object_a=object_a_name,
+                object_b=object_b_name,
                 headline_placement=None,  # No headline_placement in SIDE BY SIDE mode
                 max_retries=3
             )
@@ -2715,21 +3290,18 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             "headline": headline,
             "shape_similarity_score": shape_score,
             "shape_hint": shape_hint,
-            "chosen_objects": [object_a, object_b]
+            "chosen_objects": [object_a_name, object_b_name],
+            "chosen_object_ids": [object_a_id, object_b_id],
+            "object_a_item": object_a_item,
+            "object_b_item": object_b_item
         }
         
         if ENABLE_PLAN_CACHE and plan_cache_key:
             _set_to_plan_cache(plan_cache_key, plan_data)
     
-    # STEP 4 - FINAL VALIDATION
-    # Ensure objects haven't changed
+    # STEP 4 - FINAL VALIDATION (skip if cached)
     if not plan_cache_hit:
-        if ENGINE_MODE == "legacy" and "shape_result" in locals():
-            if object_a != shape_result["object_a"] or object_b != shape_result["object_b"]:
-                logger.error(f"[{request_id}] STEP 4 VALIDATION FAILED: Objects changed after STEP 1")
-                raise ValueError("Objects changed after shape selection")
-    
-    logger.info(f"[{request_id}] STEP 4 VALIDATION PASSED: object_a={object_a}, object_b={object_b} (unchanged)")
+        logger.info(f"[{request_id}] STEP 4 VALIDATION PASSED: object_a={object_a_name}, object_b={object_b_name} (unchanged)")
     
     # STEP 3 - IMAGE GENERATION
     t_image_start = time.time()
@@ -2741,14 +3313,18 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     
     if ENABLE_IMAGE_CACHE:
         # Create prompt for cache key
+        object_a_context = object_a_item.get("classic_context", "") if object_a_item else ""
+        object_b_context = object_b_item.get("classic_context", "") if object_b_item else ""
         prompt_for_cache = create_image_prompt(
-            object_a=object_a,
-            object_b=object_b,
+            object_a=object_a_name,
+            object_b=object_b_name,
             headline=headline,
             shape_hint=shape_hint,
             physical_context=physical_context,
             hybrid_plan=hybrid_plan,
-            is_strict=False
+            is_strict=False,
+            object_a_context=object_a_context,
+            object_b_context=object_b_context
         )
         image_model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
         image_cache_key = _get_cache_key_image(prompt_for_cache, image_size_str, image_model)
@@ -2765,10 +3341,23 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             # Determine max_retries based on mode
             max_img_retries = 2 if ENGINE_MODE == "optimized" else 3
             
+            # D) Update image prompt to use new format with classic_context
+            # Get context from items if available
+            if 'object_a_item' in locals() and object_a_item:
+                object_a_context = object_a_item.get("classic_context", "")
+            else:
+                object_a_context = ""
+            if 'object_b_item' in locals() and object_b_item:
+                object_b_context = object_b_item.get("classic_context", "")
+            else:
+                object_b_context = ""
+            
             image_bytes = generate_image_with_dalle(
                 client=client,
-                object_a=object_a,
-                object_b=object_b,
+                object_a=object_a_name,
+                object_b=object_b_name,
+                object_a_context=object_a_context,
+                object_b_context=object_b_context,
                 shape_hint=shape_hint,
                 physical_context=None,  # No physical context in SIDE BY SIDE mode
                 hybrid_plan=None,  # No hybrid plan in SIDE BY SIDE mode
@@ -2793,9 +3382,9 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
         session_id=session_id,
         ad_index=ad_index,
         product_name=product_name,
-        ad_goal="",  # No ad_goal in new architecture
+        ad_goal=ad_goal,  # Use ad_goal from build_ad_goal
         headline=headline,  # Use headline from STEP 2
-        chosen_objects=[object_a, object_b]
+        chosen_objects=[object_a_name, object_b_name]
     )
     
     # Create ZIP with image.jpg only (text.txt is optional)
