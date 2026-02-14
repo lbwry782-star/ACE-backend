@@ -1206,6 +1206,15 @@ def describe_item(item) -> str:
     return str(item)
 
 
+def _obj_key(obj) -> str:
+    """
+    Helper to get hashable key from object (supports both dict and str).
+    """
+    if isinstance(obj, dict):
+        return obj.get("id") or f'{obj.get("object","")}::{obj.get("sub_object","")}'
+    return str(obj)
+
+
 def select_similar_pair_shape_only(
     object_list: List,
     used_objects: set,
@@ -1239,8 +1248,9 @@ def select_similar_pair_shape_only(
     if model_name is None:
         model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
-    # Filter out used objects
-    available_objects = [obj for obj in object_list if obj not in used_objects]
+    # Filter out used objects - use hashable keys, not dicts
+    used_objects_keys = {_obj_key(obj) for obj in used_objects} if used_objects else set()
+    available_objects = [obj for obj in object_list if _obj_key(obj) not in used_objects_keys]
     if len(available_objects) < 2:
         available_objects = object_list
         logger.warning("Not enough unused objects for shape selection, allowing reuse")
@@ -1258,6 +1268,12 @@ def select_similar_pair_shape_only(
         system_instruction = "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text.\n\n"
         
         # Request list of candidates (12 pairs, minimum 5) with environment difference scoring
+        # Format available_objects for prompt (handle both List[str] and List[Dict])
+        if available_objects and isinstance(available_objects[0], dict):
+            available_objects_formatted = [describe_item(obj) for obj in available_objects]
+        else:
+            available_objects_formatted = available_objects
+        
         prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline) BUT with clearly different classic natural environments.
 
 CRITERIA:
@@ -1281,7 +1297,7 @@ ENVIRONMENT RULES (CRITICAL):
 - Prefer pairs where environments are clearly different (e.g., leaf in "forest floor" vs. shell in "ocean beach").
 
 Available object list:
-{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+{json.dumps(available_objects_formatted, ensure_ascii=False, indent=2)}
 
 Output JSON only with a list of candidate pairs:
 {{
@@ -1309,6 +1325,12 @@ Requirements:
 - Exclude objects with visible text or branding"""
         
         if is_strict:
+            # Format available_objects for prompt (handle both List[str] and List[Dict])
+            if available_objects and isinstance(available_objects[0], dict):
+                available_objects_formatted = [describe_item(obj) for obj in available_objects]
+            else:
+                available_objects_formatted = available_objects
+            
             prompt = f"""{system_instruction}Task: Find pairs of items from the provided list with similar geometric shapes (outer contour/outline) BUT with clearly different classic natural environments.
 
 CRITERIA:
@@ -1332,7 +1354,7 @@ ENVIRONMENT RULES (CRITICAL):
 - Prefer pairs where environments are clearly different.
 
 Available object list:
-{json.dumps(available_objects, ensure_ascii=False, indent=2)}
+{json.dumps(available_objects_formatted, ensure_ascii=False, indent=2)}
 
 Output JSON only with a list of candidate pairs:
 {{
@@ -1409,7 +1431,25 @@ Requirements:
                 if not obj_a or not obj_b:
                     continue
                 
-                if obj_a not in object_list or obj_b not in object_list:
+                # Validate that obj_a and obj_b exist in object_list
+                # Handle both List[str] and List[Dict]
+                obj_a_found = False
+                obj_b_found = False
+                if isinstance(object_list[0] if object_list else None, dict):
+                    # List[Dict] - check by id or object name
+                    for item in object_list:
+                        item_id = item.get("id", "")
+                        item_obj = item.get("object", "")
+                        if obj_a == item_id or obj_a == item_obj:
+                            obj_a_found = True
+                        if obj_b == item_id or obj_b == item_obj:
+                            obj_b_found = True
+                else:
+                    # List[str] - direct comparison
+                    obj_a_found = obj_a in object_list
+                    obj_b_found = obj_b in object_list
+                
+                if not obj_a_found or not obj_b_found:
                     continue
                 
                 if obj_a == obj_b:
@@ -2991,37 +3031,67 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 shape_result = cached_step1_result
                 t_shape_ms = 0  # Cache hit, no time spent
             else:
+                # Add verification log
+                logger.info(f"SELECTOR=limited_shape_search object_list_type={type(object_list[0]).__name__ if object_list else 'empty'}")
                 t_shape_start = time.time()
-                shape_result = select_similar_pair_shape_only(
+                shape_result = select_pair_with_limited_shape_search(
+                    sid=session_seed or session_id or "no_session",
+                    ad_index=ad_index,
+                    ad_goal=ad_goal,
+                    image_size=PREVIEW_IMAGE_SIZE_DEFAULT,
                     object_list=object_list,
                     used_objects=used_objects,
-                    max_retries=2,
-                    model_name=planner_model
+                    model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
                 )
                 t_shape_ms = int((time.time() - t_shape_start) * 1000)
                 # Save to cache
                 if ENABLE_STEP1_CACHE:
                     _set_to_step1_cache(step1_cache_key, shape_result)
         else:
+            # Add verification log
+            logger.info(f"SELECTOR=limited_shape_search object_list_type={type(object_list[0]).__name__ if object_list else 'empty'}")
             t_shape_start = time.time()
-            shape_result = select_similar_pair_shape_only(
+            shape_result = select_pair_with_limited_shape_search(
+                sid=session_seed or session_id or "no_session",
+                ad_index=ad_index,
+                ad_goal=ad_goal,
+                image_size=PREVIEW_IMAGE_SIZE_DEFAULT,
                 object_list=object_list,
                 used_objects=used_objects,
-                max_retries=2,
-                model_name=planner_model
+                model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
             )
             t_shape_ms = int((time.time() - t_shape_start) * 1000)
         
         try:
-            object_a = shape_result["object_a"]
-            object_b = shape_result["object_b"]
+            object_a_name = shape_result["object_a"]
+            object_b_name = shape_result["object_b"]
+            object_a_id = shape_result.get("object_a_id")
+            object_b_id = shape_result.get("object_b_id")
             shape_hint = shape_result.get("shape_hint", "")
             shape_score = shape_result.get("shape_similarity_score", 0)
             
+            # Get full item objects for context (if List[Dict] format)
+            object_a_item = None
+            object_b_item = None
+            if object_list and isinstance(object_list[0], dict):
+                if object_a_id:
+                    object_a_item = next((item for item in object_list if item.get("id") == object_a_id), None)
+                if object_b_id:
+                    object_b_item = next((item for item in object_list if item.get("id") == object_b_id), None)
+                # Fallback to name matching if id not found
+                if not object_a_item:
+                    object_a_item = next((item for item in object_list if item.get("object") == object_a_name), None)
+                if not object_b_item:
+                    object_b_item = next((item for item in object_list if item.get("object") == object_b_name), None)
+            
+            # For compatibility with legacy code
+            object_a = object_a_name
+            object_b = object_b_name
+            
             if step1_cache_hit:
-                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model} (from cache)")
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a_name}, {object_b_name}], score={shape_score}, shape_hint={shape_hint}, model={planner_model} (from cache)")
             else:
-                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a}, {object_b}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
+                logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a_name}, {object_b_name}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
         except Exception as e:
             error_msg = str(e)
             if "rate_limited" in error_msg:
