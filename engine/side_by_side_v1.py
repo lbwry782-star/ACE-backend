@@ -79,6 +79,8 @@ ALLOWED_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024"}  # Supported by gp
 # Plan cache: key -> (value, timestamp)
 _plan_cache: Dict[str, Tuple[Dict, float]] = {}
 _plan_cache_lock = Lock()
+_session_plan_cache: Dict[str, Tuple[Dict, float]] = {}  # Cache for one-call session plans
+_session_plan_cache_lock = Lock()
 
 # Preview cache: key -> (value, timestamp)
 _preview_cache: Dict[str, Tuple[Dict, float]] = {}
@@ -1126,6 +1128,170 @@ def get_used_ad_goals(history: Optional[List[Dict]]) -> set:
                 used.add(goal)
     
     return used
+
+
+def plan_session_one_call(
+    product_name: str,
+    product_description: str,
+    language: str,
+    session_seed: str,
+    image_size: str
+) -> Dict:
+    """
+    Generate complete session plan in a SINGLE o3-pro call.
+    
+    Returns a JSON plan with:
+    - ad_goal: string (6-12 words, English)
+    - theme_tags: list of 8-12 tags
+    - object_list: list of 150 items with id/object/sub_object/classic_context/theme_tag/theme_link/shape_hint
+    - ads: list of 3 ads, each with ad_index, a_id, b_id, shape_score, shape_reason, headline
+    
+    Args:
+        product_name: Product name
+        product_description: Product description
+        language: Language (should be "en")
+        session_seed: Session seed for cache key
+        image_size: Image size (e.g., "1536x1024")
+    
+    Returns:
+        Dict with complete plan structure
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    
+    prompt = f"""You are planning a complete advertising session for a SIDE BY SIDE ad campaign.
+
+Product Name: {product_name}
+Product Description: {product_description}
+
+Generate a COMPLETE plan in STRICT JSON format. Return ONLY valid JSON, no additional text.
+
+Required JSON schema:
+{{
+  "ad_goal": "string (6-12 words, English, defines intent/purpose, not a slogan)",
+  "theme_tags": ["tag1", "tag2", ... exactly 8-12 tags, lowercase, 1-2 words each],
+  "object_list": [
+    {{
+      "id": "unique_id_1",
+      "object": "main physical object (concrete noun, drawable)",
+      "sub_object": "secondary physical object (concrete noun, not generic)",
+      "classic_context": "3-12 words describing physical interaction between object and sub_object (MUST include preposition: on/in/next to/attached to/inserted into/being opened with/resting on/holding/wrapped by)",
+      "theme_tag": "must be EXACTLY one of the theme_tags from above",
+      "theme_link": "5-12 words explaining relevance to ad_goal",
+      "shape_hint": "one of: round,oval,elongated,rectangular,triangular,irregular,curved_organic,cylindrical"
+    }},
+    ... exactly 150 items
+  ],
+  "ads": [
+    {{
+      "ad_index": 1,
+      "a_id": "id from object_list",
+      "b_id": "id from object_list",
+      "shape_score": 85,
+      "shape_reason": "one sentence describing MAIN object silhouette similarity only (ignore sub_object)",
+      "headline": "ENGLISH, ALL CAPS, <=7 words total INCLUDING product name, no punctuation"
+    }},
+    {{ "ad_index": 2, ... }},
+    {{ "ad_index": 3, ... }}
+  ]
+}}
+
+CRITICAL RULES:
+
+1. SIDE_BY_SIDE ONLY:
+   - Layout is always two panels side by side, no overlap.
+   - Each panel shows one FULL object with its sub_object.
+
+2. object_list (150 items):
+   - Each item MUST be MAIN_OBJECT + SUB_OBJECT (no environments like forest/water/nature/background).
+   - classic_context MUST include a physical relation (on/in/next to/attached to/inserted into/being opened with/resting on/holding/wrapped by).
+   - theme_tag MUST be exactly one of the theme_tags you generated.
+   - All objects must be concrete, drawable, physical nouns.
+   - No branding, no logos, no text on objects.
+
+3. Pairing rules (for ads array):
+   - A.object != B.object (no same main object type on both sides).
+   - A and B must have similar MAIN object silhouette (ignore sub_object for shape comparison).
+   - shape_score should be high (aim 85+).
+   - Do not reuse the same main object across the 3 ads if possible.
+   - a_id and b_id must be valid IDs from object_list.
+
+4. Headlines:
+   - English only, ALL CAPS.
+   - Maximum 7 words total INCLUDING product name.
+   - No punctuation (no colons, periods, etc.).
+   - Must include product name.
+
+5. Output:
+   - Return ONLY valid JSON.
+   - No markdown, no code blocks, no explanations.
+   - JSON must be parseable.
+
+Generate the complete plan now:"""
+    
+    try:
+        # Use Responses API for o3-pro
+        response = client.responses.create(model=model, input=prompt)
+        response_text = response.output_text.strip()
+        
+        # Parse JSON
+        if response_text.startswith("```"):
+            lines = response_text.split('\n')
+            response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+        if response_text.startswith("```json"):
+            lines = response_text.split('\n')
+            response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+        
+        plan = json.loads(response_text)
+        
+        # Validate structure
+        if not isinstance(plan, dict):
+            raise ValueError("Plan is not a dict")
+        if "ad_goal" not in plan or "theme_tags" not in plan or "object_list" not in plan or "ads" not in plan:
+            raise ValueError("Plan missing required fields")
+        if not isinstance(plan["object_list"], list) or len(plan["object_list"]) != OBJECT_LIST_TARGET:
+            raise ValueError(f"object_list must have exactly {OBJECT_LIST_TARGET} items")
+        if not isinstance(plan["ads"], list) or len(plan["ads"]) != 3:
+            raise ValueError("ads must have exactly 3 items")
+        
+        logger.info(f"PLAN_ONE_CALL used=true model={model} ad_goal={plan.get('ad_goal', '')[:50]} object_list_size={len(plan.get('object_list', []))} ads_count={len(plan.get('ads', []))}")
+        return plan
+        
+    except Exception as e:
+        logger.error(f"plan_session_one_call failed: {e}")
+        raise
+
+
+def _get_cache_key_session_plan(
+    product_name: str,
+    product_description: str,
+    session_seed: str,
+    image_size: str
+) -> str:
+    """Generate cache key for session plan."""
+    product_hash = hashlib.md5(f"{product_name}|{product_description}".encode()).hexdigest()[:16]
+    layout_mode = ACE_LAYOUT_MODE
+    key_str = f"SESSION_PLAN_V1|{session_seed}|{product_hash}|{image_size}|{layout_mode}"
+    return hashlib.md5(key_str.encode()).hexdigest()
+
+
+def _get_from_session_plan_cache(key: str) -> Optional[Dict]:
+    """Get session plan from cache."""
+    with _session_plan_cache_lock:
+        if key in _session_plan_cache:
+            value, timestamp = _session_plan_cache[key]
+            if time.time() - timestamp < PLAN_CACHE_TTL_SECONDS:
+                return value
+            else:
+                # Expired, remove
+                del _session_plan_cache[key]
+    return None
+
+
+def _set_to_session_plan_cache(key: str, value: Dict):
+    """Store session plan in cache."""
+    with _session_plan_cache_lock:
+        _session_plan_cache[key] = (value, time.time())
 
 
 def score_pairs_batch_o3_pro(
