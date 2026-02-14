@@ -460,6 +460,91 @@ Output ONLY the ad_goal sentence, nothing else:"""
         return fallback
 
 
+def build_theme_tags(ad_goal: str) -> List[str]:
+    """
+    Build theme tags from ad_goal.
+    
+    Generates 8-12 short tags (1-2 words) that represent the themes of the ad_goal.
+    
+    Args:
+        ad_goal: Advertising goal string
+    
+    Returns:
+        List[str]: List of theme tags (e.g., ["marketing", "ads", "campaigns", ...])
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    model = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    
+    prompt = f"""Generate 8-12 short theme tags (1-2 words each) that represent the key themes and topics related to this advertising goal.
+
+Advertising goal: {ad_goal}
+
+Requirements:
+- Return EXACTLY 8-12 tags
+- Each tag is 1-2 words only
+- Tags should be relevant to the ad_goal's themes and topics
+- Use lowercase, single words or short phrases
+- No punctuation, no special characters
+- Focus on core concepts, not specific products
+
+Example for "AI advertising platform":
+["marketing", "ads", "campaigns", "analytics", "optimization", "creativity", "branding", "targeting", "automation", "conversion"]
+
+Example for "Protect natural ecosystems":
+["nature", "conservation", "wildlife", "environment", "sustainability", "ecology", "habitat", "biodiversity", "preservation", "ecosystem"]
+
+Output ONLY a JSON array of strings, nothing else:"""
+    
+    try:
+        if model.startswith("o"):
+            # Use Responses API for o* models
+            response = client.responses.create(model=model, input=prompt)
+            response_text = response.output_text.strip()
+        else:
+            # Use Chat Completions for other models
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a marketing analyst. Generate concise theme tags."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=200
+            )
+            response_text = response.choices[0].message.content.strip()
+        
+        # Parse JSON array
+        if response_text.startswith("```"):
+            lines = response_text.split('\n')
+            response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+        if response_text.startswith("```json"):
+            lines = response_text.split('\n')
+            response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+        
+        theme_tags = json.loads(response_text)
+        if not isinstance(theme_tags, list):
+            raise ValueError("Response is not a list")
+        
+        # Normalize tags: lowercase, strip, filter empty
+        theme_tags = [str(tag).lower().strip() for tag in theme_tags if tag]
+        
+        # Ensure we have at least 8 tags, pad if needed
+        if len(theme_tags) < 8:
+            logger.warning(f"Only {len(theme_tags)} theme tags generated, expected 8-12")
+            # Could add fallback logic here if needed
+        
+        # Limit to 12 tags max
+        theme_tags = theme_tags[:12]
+        
+        logger.info(f"THEME_TAGS={','.join(theme_tags)}")
+        return theme_tags
+        
+    except Exception as e:
+        logger.error(f"Failed to build theme tags: {e}")
+        # Fallback to generic tags
+        return ["marketing", "advertising", "campaigns", "branding", "targeting", "optimization", "creativity", "analytics"]
+
+
 def uniform_shuffle(items: List, seed: int) -> List:
     """
     Fisher-Yates shuffle with deterministic seed.
@@ -1020,7 +1105,8 @@ def select_pair_with_limited_shape_search(
     ad_goal: str,
     image_size: str,
     used_objects: Optional[set] = None,
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None,
+    allowed_theme_tags: Optional[List[str]] = None
 ) -> Dict:
     """
     STEP 1 - SELECT PAIR WITH LIMITED SHAPE SEARCH
@@ -1029,13 +1115,14 @@ def select_pair_with_limited_shape_search(
     Includes uniform shuffle for fairness and anti-repeat logic per session.
     
     Args:
-        object_list: List[Dict] with keys: id, object, classic_context, theme_link
+        object_list: List[Dict] with keys: id, object, classic_context, theme_link, theme_tag
         sid: Session ID
         ad_index: Ad index (1-3)
         ad_goal: Advertising goal (for seed)
         image_size: Image size (for seed)
         used_objects: Set of already used object IDs (optional)
         model_name: Model name (optional, defaults to OPENAI_SHAPE_MODEL)
+        allowed_theme_tags: Optional list of theme tags to filter by (if provided, prefer objects with matching theme_tag)
     
     Returns:
         Dict with keys: object_a, object_b, object_a_id, object_b_id, shape_similarity_score, shape_hint
@@ -1044,12 +1131,25 @@ def select_pair_with_limited_shape_search(
     if model_name is None:
         model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
+    # Filter by theme tags if provided
+    if allowed_theme_tags and len(allowed_theme_tags) > 0:
+        themed_pool = [it for it in object_list if it.get("theme_tag") in allowed_theme_tags]
+        # Use themed_pool if it's large enough (>= 60), otherwise fallback to full object_list
+        if len(themed_pool) >= 60:
+            search_objects = themed_pool
+            logger.info(f"THEME_FILTER: using themed_pool size={len(themed_pool)} (from {len(object_list)} total)")
+        else:
+            search_objects = object_list
+            logger.warning(f"THEME_FILTER: themed_pool too small ({len(themed_pool)}), using full object_list ({len(object_list)})")
+    else:
+        search_objects = object_list
+    
     # Generate seed for uniform shuffle
     seed_str = f"{sid}|{ad_index}|{ad_goal}|{image_size}|side_by_side"
     seed_int = int(hashlib.sha256(seed_str.encode()).hexdigest(), 16) % (2**31)
     
     # Uniform shuffle for fairness
-    shuffled_objects = uniform_shuffle(object_list, seed_int)
+    shuffled_objects = uniform_shuffle(search_objects, seed_int)
     
     # Get used pairs and objects for this session
     used_objects_set = used_objects or set()
@@ -1180,6 +1280,21 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
     
     # Fallback: use best pair if >= 0.70
     if best_pair and best_score >= 0.70:
+        # Find theme info for best_pair
+        obj_a_item_fallback = next((it for it in search_objects if it.get("id") == best_pair["object_a_id"]), None)
+        obj_b_item_fallback = next((it for it in search_objects if it.get("id") == best_pair["object_b_id"]), None)
+        
+        obj_a_theme = obj_a_item_fallback.get("theme_tag", "") if obj_a_item_fallback else ""
+        obj_b_theme = obj_b_item_fallback.get("theme_tag", "") if obj_b_item_fallback else ""
+        obj_a_link = obj_a_item_fallback.get("theme_link", "") if obj_a_item_fallback else ""
+        obj_b_link = obj_b_item_fallback.get("theme_link", "") if obj_b_item_fallback else ""
+        
+        # Check theme relevance for fallback too
+        if allowed_theme_tags and len(allowed_theme_tags) > 0 and len(themed_pool) >= 60:
+            if obj_a_theme not in allowed_theme_tags or obj_b_theme not in allowed_theme_tags:
+                logger.warning(f"PAIR_REJECT_THEME_FALLBACK sid={sid} ad={ad_index} A={best_pair['object_a_id']}(theme={obj_a_theme}) B={best_pair['object_b_id']}(theme={obj_b_theme}) not in allowed_tags")
+                # Still return it as fallback, but log the issue
+        
         pair_hash = hashlib.sha256("|".join(sorted([best_pair["object_a_id"], best_pair["object_b_id"]])).encode()).hexdigest()
         with _session_used_lock:
             if sid in _session_used_pairs:
@@ -1189,7 +1304,14 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
                 used_objects_session.add(best_pair["object_b_id"])
                 _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
         
-        logger.warning(f"PAIR_PICK sid={sid} ad={ad_index} A={best_pair['object_a_id']} B={best_pair['object_b_id']} shape={best_pair['shape_similarity_score']} checked_pairs={checked_pairs} cache_hit_plan=0 (fallback)")
+        # Log with theme information
+        theme_info = ""
+        if obj_a_theme or obj_b_theme:
+            a_link_short = obj_a_link[:30] + "..." if len(obj_a_link) > 30 else obj_a_link
+            b_link_short = obj_b_link[:30] + "..." if len(obj_b_link) > 30 else obj_b_link
+            theme_info = f" A_theme={obj_a_theme} B_theme={obj_b_theme} A_link={a_link_short} B_link={b_link_short}"
+        
+        logger.warning(f"PAIR_PICK sid={sid} ad={ad_index} A={best_pair['object_a_id']} B={best_pair['object_b_id']} shape={best_pair['shape_similarity_score']} checked_pairs={checked_pairs} cache_hit_plan=0 (fallback){theme_info}")
         return best_pair
     
     raise ValueError(f"No valid pair found after {checked_pairs} checks")
@@ -2926,6 +3048,17 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     object_list_sha = hashlib.sha256(json.dumps(object_list, sort_keys=True).encode()).hexdigest()[:16]
     logger.info(f"OBJECTLIST_SHA={object_list_sha} total={len(object_list)} cache_hit_list={1 if step0_cache_hit else 0}")
     
+    # C) Build theme tags from ad_goal
+    theme_tags = build_theme_tags(ad_goal)
+    
+    # Filter object_list to themed_pool
+    themed_pool = [it for it in object_list if it.get("theme_tag") in theme_tags]
+    if len(themed_pool) < 60:
+        logger.warning(f"THEME_POOL: themed_pool too small ({len(themed_pool)}), will use fallback to full object_list")
+        themed_pool = object_list  # Fallback to full list
+    
+    logger.info(f"THEME_POOL: size={len(themed_pool)} (from {len(object_list)} total)")
+    
     # Log request with preview flags
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}, ad_goal={ad_goal[:50]}, "
@@ -3041,7 +3174,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     image_size=PREVIEW_IMAGE_SIZE_DEFAULT,
                     object_list=object_list,
                     used_objects=used_objects,
-                    model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+                    model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro"),
+                    allowed_theme_tags=theme_tags
                 )
                 t_shape_ms = int((time.time() - t_shape_start) * 1000)
                 # Save to cache
@@ -3058,7 +3192,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 image_size=PREVIEW_IMAGE_SIZE_DEFAULT,
                 object_list=object_list,
                 used_objects=used_objects,
-                model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+                model_name=planner_model or os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro"),
+                allowed_theme_tags=theme_tags
             )
             t_shape_ms = int((time.time() - t_shape_start) * 1000)
         
@@ -3306,6 +3441,17 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     object_list_sha = hashlib.sha256(json.dumps(object_list, sort_keys=True).encode()).hexdigest()[:16]
     logger.info(f"OBJECTLIST_SHA={object_list_sha} total={len(object_list)} cache_hit_list={1 if step0_cache_hit else 0}")
     
+    # C) Build theme tags from ad_goal
+    theme_tags = build_theme_tags(ad_goal)
+    
+    # Filter object_list to themed_pool
+    themed_pool = [it for it in object_list if it.get("theme_tag") in theme_tags]
+    if len(themed_pool) < 60:
+        logger.warning(f"THEME_POOL: themed_pool too small ({len(themed_pool)}), will use fallback to full object_list")
+        themed_pool = object_list  # Fallback to full list
+    
+    logger.info(f"THEME_POOL: size={len(themed_pool)} (from {len(object_list)} total)")
+    
     # Log request
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
                 f"productName={product_name[:50]}, language={language}, is_preview={is_preview}, ad_goal={ad_goal[:50]}, "
@@ -3363,7 +3509,8 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 ad_goal=ad_goal,
                 image_size=image_size_str,
                 used_objects=None,  # Anti-repeat handled internally
-                model_name=planner_model
+                model_name=planner_model,
+                allowed_theme_tags=theme_tags
             )
             t_shape_ms = int((time.time() - t_shape_start) * 1000)
             
