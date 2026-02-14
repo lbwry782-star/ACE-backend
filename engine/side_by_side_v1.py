@@ -597,73 +597,72 @@ def uniform_shuffle(items: List, seed: int) -> List:
     return shuffled
 
 
-def validate_object_item(item: Dict, forbidden_words: List[str]) -> Tuple[bool, Optional[str]]:
+def validate_object_item(item: Dict, forbidden_words: Optional[List[str]] = None) -> Tuple[bool, Optional[str]]:
     """
-    Validate a single object item with CRITICAL classic_context quality checks.
+    Validate a single object item with STRUCTURAL checks only (no forbidden words).
     
     Args:
-        item: Dict with keys: id, object, classic_context, theme_link, category, shape_hint, theme_tag
-        forbidden_words: List of forbidden words to check
+        item: Dict with keys: id, object, sub_object, classic_context, theme_link, category, shape_hint, theme_tag
+        forbidden_words: DEPRECATED - ignored (forbidden words are now model responsibility)
     
     Returns:
         Tuple[bool, Optional[str]]: (is_valid, error_message)
     """
-    # Check required fields
+    # STRUCTURAL CHECKS ONLY
+    
+    # 1. Check required fields
     if not item.get("id") or not item.get("object") or not item.get("classic_context"):
         return False, "Missing required fields (id, object, classic_context)"
     
+    # 2. Check sub_object is present and not empty
+    sub_object = item.get("sub_object", "").strip()
+    if not sub_object:
+        return False, "Missing sub_object (required field)"
+    
     classic_context = item.get("classic_context", "").strip()
     
-    # B) CRITICAL CLASSIC_CONTEXT VALIDATION
-    
-    # 1. Check minimum length (3 words minimum)
+    # 3. Check minimum length (3 words minimum)
     words = classic_context.split()
     if len(words) < 3:
         return False, f"classic_context too short ({len(words)} words, need >=3): '{classic_context}'"
     
-    # 2. Check for forbidden abstract/marketing words in classic_context
-    forbidden_context_words = [
-        "eco", "sustainable", "meaningful", "modern", "creative",
-        "concept", "awareness", "symbol", "campaign", "environmental",
-        "green", "ethical", "conscious", "responsible", "impact",
-        "change", "future", "vision", "mission", "purpose"
-    ]
-    context_lower = classic_context.lower()
-    for word in forbidden_context_words:
-        if word in context_lower:
-            return False, f"classic_context contains forbidden abstract/marketing word '{word}': '{classic_context}'"
+    # 4. Check maximum length (12 words maximum)
+    if len(words) > 12:
+        return False, f"classic_context too long ({len(words)} words, max 12): '{classic_context}'"
     
-    # 3. Check for required physical preposition/relationship
+    # 5. Check for required physical preposition/relationship
+    context_lower = classic_context.lower()
     physical_prepositions = [
         "on", "in", "under", "next to", "attached to", "inside", "resting on",
         "landing on", "with", "lying on", "sitting on", "placed on", "hanging from",
         "growing from", "emerging from", "surrounded by", "near", "beside", "against",
-        "within", "among", "between", "alongside", "above", "below", "over", "underneath"
+        "within", "among", "between", "alongside", "above", "below", "over", "underneath",
+        "inserted into", "being opened with", "holding", "touching"
     ]
     has_physical_relationship = any(prep in context_lower for prep in physical_prepositions)
     if not has_physical_relationship:
         return False, f"classic_context missing physical preposition/relationship: '{classic_context}'"
     
-    # 4. Check for forbidden generic phrases
-    forbidden_phrases = [
-        "in nature", "in the wild", "in its habitat", "in natural setting",
-        "in environment", "in context", "in setting", "in scene"
-    ]
-    for phrase in forbidden_phrases:
-        if phrase in context_lower:
-            return False, f"classic_context contains forbidden generic phrase '{phrase}': '{classic_context}'"
+    # 6. Check that classic_context explicitly mentions sub_object
+    sub_object_lower = sub_object.lower()
+    # Check if sub_object or its main word appears in classic_context
+    sub_object_words = sub_object_lower.split()
+    sub_object_main = sub_object_words[0] if sub_object_words else ""
+    if sub_object_main and sub_object_main not in context_lower:
+        # Also check if any significant word from sub_object is in context
+        # (allow some flexibility for variations like "can opener" vs "opener")
+        significant_words = [w for w in sub_object_words if len(w) > 3]  # Words longer than 3 chars
+        if significant_words and not any(w in context_lower for w in significant_words):
+            return False, f"classic_context must explicitly mention sub_object '{sub_object}': '{classic_context}'"
     
-    # 5. Check maximum length (12 words maximum)
-    if len(words) > 12:
-        return False, f"classic_context too long ({len(words)} words, max 12): '{classic_context}'"
-    
-    # Check other fields for forbidden words (object, theme_link, etc.)
-    text = f"{item.get('object', '')} {item.get('theme_link', '')}".lower()
-    
-    # Check for forbidden words in object/theme_link
-    for word in forbidden_words:
-        if word in text:
-            return False, f"Contains forbidden word '{word}' in object/theme_link"
+    # 7. Check that sub_object is not environment-like (structural check, not word-based)
+    # This is a structural check: if sub_object is a single generic word that's typically an environment
+    # But we don't use a blacklist - we check if it's too generic structurally
+    if len(sub_object_words) == 1 and len(sub_object_main) > 0:
+        # Single-word sub_object might be too generic, but we don't reject based on specific words
+        # We only check if it's structurally too vague (e.g., just "nature" without specificity)
+        # This is a minimal structural check, not a word blacklist
+        pass  # Allow model to handle this via prompt instructions
     
     return True, None
 
@@ -693,6 +692,12 @@ def build_object_list_from_ad_goal(
     max_retries: int = 2,
     language: str = "en"
 ) -> List[Dict]:
+    """
+    STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL with Self-Repair Fill-Up
+    
+    Build a list of EXACTLY {OBJECT_LIST_TARGET} object items related to ad_goal.
+    Uses fill-up mechanism: if initial attempt doesn't reach target, requests only missing items.
+    """
     """
     STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL
     
@@ -736,17 +741,27 @@ def build_object_list_from_ad_goal(
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
     
-    # Build prompt for new format ({OBJECT_LIST_TARGET} items with classic_context and theme_link)
+    # Check if model is o* type - these use Responses API
+    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+    using_responses_api = is_o_model
+    
+    # Constants for fill-up mechanism
+    MAX_TOTAL_ATTEMPTS = 5
+    valid_items = []  # Accumulate valid items across attempts
+    seen_ids = set()  # Dedup by id
+    seen_pairs = set()  # Dedup by (object, sub_object)
+    rejection_reasons = {}  # Track structural rejection reasons
+    
     product_context = f"\nProduct name (optional context): {product_name}" if product_name else ""
     
-    forbidden_patterns = "logo, brand, label, text, number, sign, screen, packaging, barcode, sticker, poster, billboard, phone screen, book cover, receipt, newspaper"
-    
-    prompt = f"""Generate EXACTLY {OBJECT_LIST_TARGET} physical classic objects related to this advertising goal.
+    # Base prompt template
+    def build_base_prompt(count: int, feedback: str = "") -> str:
+        return f"""Generate EXACTLY {count} physical classic objects related to this advertising goal.
 
 Advertising goal: {ad_goal}{product_context}
 
 CRITICAL REQUIREMENTS:
-- EXACTLY {OBJECT_LIST_TARGET} ITEMS (no more, no less).
+- EXACTLY {count} ITEMS (no more, no less).
 - PHYSICAL CLASSIC OBJECTS ONLY (concrete, tangible, drawable).
 - Each item MUST include:
   * id: unique identifier (e.g., "bee_flower", "can_opener", "mouse_cheese")
@@ -760,6 +775,12 @@ CRITICAL REQUIREMENTS:
 
 🔴 CRITICAL RULE: Every item must follow the pattern: MAIN_OBJECT interacting with SUB_OBJECT.
 
+FORBIDDEN CONTENT RULES (MODEL RESPONSIBILITY):
+- Do NOT generate any object or sub_object that contains logos, brand names, labels, printed text, numbers, barcodes, signage, packaging graphics, or screens with text.
+- All objects must be generic and unbranded.
+- classic_context must describe ONLY physical interaction (no marketing/abstract language).
+- If an object normally has branding, it must be rendered blank/generic.
+
 SUB_OBJECT RULES (ABSOLUTE - MUST BE FOLLOWED):
 - sub_object MUST be a concrete physical object, NOT an environment
 - sub_object MUST be a specific, tangible item
@@ -767,306 +788,188 @@ SUB_OBJECT RULES (ABSOLUTE - MUST BE FOLLOWED):
   * General environments: "nature", "environment", "world", "background", "scene", "forest", "ocean", "sky", "space", "ecosystem", "habitat", "setting", "context"
   * Abstract concepts: "life", "existence", "reality", "concept"
   * Generic surfaces without specificity: "ground", "floor", "surface" (unless very specific like "wooden floor")
-- CORRECT sub_object examples:
-  * "flower" (for bee)
-  * "manual can opener" (for tin can)
-  * "straw" (for soda can)
-  * "wedge of cheese" (for mouse)
-  * "bed" (for pillow)
-  * "soil" (for tree)
-  * "bookshelf" (for book)
-  * "nail" (for hammer)
-  * "lock" (for key)
-  * "fork" (for plate)
-  * "saucer" (for coffee cup)
-- INCORRECT sub_object examples (DO NOT USE):
-  * "forest" (too general - use "tree trunk" or "soil" instead)
-  * "water" (too general - use "fish tank" or "pond surface" instead)
-  * "nature" (forbidden)
-  * "environment" (forbidden)
-  * "road" (too general - use "parking meter" or "traffic cone" instead)
 
 CLASSIC_CONTEXT RULES (CRITICAL - MUST BE FOLLOWED):
 - classic_context MUST describe the PHYSICAL INTERACTION between object and sub_object
 - MUST include a clear physical preposition/relationship: "on", "in", "under", "next to", "attached to", "inside", "resting on", "landing on", "with", "lying on", "inserted into", "hanging from", "touching", "holding", "opening", "closing"
 - MUST be concrete and specific (3-12 words)
-- MUST mention both object and sub_object (implicitly or explicitly)
+- MUST explicitly mention sub_object
 - MUST be a natural, expected, real-world interaction
 - FORBIDDEN in classic_context:
   * Abstract settings: "in an eco-friendly setting", "in a meaningful environment"
   * Symbolic language: "symbolizing sustainability", "representing change"
   * Marketing language: "in a modern context", "for awareness"
   * Generic phrases: "in nature", "in the wild", "in its habitat" (too vague)
-  * Words: "eco", "sustainable", "meaningful", "modern", "creative", "concept", "awareness", "symbol", "campaign"
-- CORRECT examples:
-  * "landing on a flower" (bee + flower)
-  * "being opened with a manual can opener" (tin can + can opener)
-  * "next to a wedge of cheese" (mouse + cheese)
-  * "resting on a bed" (pillow + bed)
-  * "growing from soil" (tree + soil)
-  * "sitting on a bookshelf" (book + bookshelf)
-  * "driving a nail" (hammer + nail)
-  * "inserted into a lock" (key + lock)
-  * "placed next to a fork" (plate + fork)
-- INCORRECT examples (DO NOT USE):
-  * "in an eco-friendly setting"
-  * "in a meaningful environment"
-  * "symbolizing sustainability"
-  * "in a modern context"
-  * "in nature" (too vague, no sub_object)
-  * "in forest" (forest is environment, not sub_object)
-  * "in water" (water is too general)
+  * No environments as sub_object
 
-NO brand names, NO logos, NO labels, NO printed text, NO numbers, NO signs, NO screens, NO packaging with writing.
-Avoid: "bottle label", "poster", "billboard", "phone screen", "book cover", "receipt", "newspaper".
-Keep objects concrete and timeless (everyday, nature, kitchen, tools, etc.).
+{feedback}
 
-Return ONLY a JSON array with this exact format:
-[
-  {{
-    "id": "bee_flower",
-    "object": "bee",
-    "sub_object": "flower",
-    "classic_context": "landing on a flower",
-    "theme_link": "pollination supports healthy ecosystems",
-    "category": "insect",
-    "shape_hint": "small round",
-    "theme_tag": "nature"
-  }},
-  {{
-    "id": "can_opener",
-    "object": "tin can",
-    "sub_object": "manual can opener",
-    "classic_context": "being opened with a manual can opener",
-    "theme_link": "reusable containers reduce waste",
-    "category": "container",
-    "shape_hint": "cylindrical",
-    "theme_tag": "kitchen"
-  }},
-  ...
-]
-
-EXACTLY {OBJECT_LIST_TARGET} items. JSON array only:"""
-
-    # Check if model is o* type - these use Responses API
-    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-    using_responses_api = is_o_model
+Return ONLY a JSON array with EXACTLY {count} items:"""
     
-    for attempt in range(max_retries):
+    # First attempt: request full target
+    attempt = 0
+    needed = OBJECT_LIST_TARGET
+    
+    logger.info(f"STEP 0 - BUILD_OBJECT_LIST: text_model={model_name}, ad_goal={ad_goal[:50]}, productName={product_name[:50] if product_name else 'N/A'}, using_responses_api={using_responses_api}")
+    
+    while attempt < MAX_TOTAL_ATTEMPTS and len(valid_items) < OBJECT_LIST_TARGET:
         try:
-            if attempt == 0:
-                logger.info(f"STEP 0 - BUILD_OBJECT_LIST: text_model={model_name}, ad_goal={ad_goal[:50]}, productName={product_name[:50] if product_name else 'N/A'}, using_responses_api={using_responses_api}")
+            # Build feedback from previous attempt
+            feedback = ""
+            if attempt > 0 and rejection_reasons:
+                top_reasons = sorted(rejection_reasons.items(), key=lambda x: x[1], reverse=True)[:3]
+                reasons_text = ", ".join([f"{reason}({count})" for reason, count in top_reasons])
+                feedback = f"""FEEDBACK FROM PREVIOUS ATTEMPT:
+- Most common structural rejection reasons: {reasons_text}
+- Reminder: classic_context must include a physical preposition AND explicitly mention sub_object
+- Reminder: no environments as sub_object
+- Reminder: forbidden content rules (logos/text/brands etc.) - model responsibility
+
+You need to generate EXACTLY {needed} additional valid items."""
+
+            prompt = build_base_prompt(needed, feedback)
             
             if using_responses_api:
-                # Use Responses API for o* models
-                response = client.responses.create(
-                    model=model_name,
-                    input=prompt
-                )
+                response = client.responses.create(model=model_name, input=prompt)
                 response_text = response.output_text.strip()
             else:
-                # Use Chat Completions for other models
                 request_params = {
                     "model": model_name,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7
                 }
                 response = client.chat.completions.create(**request_params)
                 response_text = response.choices[0].message.content.strip()
             
             # Parse JSON response
-            # Try to extract JSON from response (might have markdown code blocks)
             response_text = response_text.strip()
             if response_text.startswith("```"):
-                # Remove markdown code blocks
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
             if response_text.startswith("```json"):
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
             
-            # Parse JSON - expect array of objects
             data = json.loads(response_text)
             if isinstance(data, list):
                 object_list = data
             elif isinstance(data, dict) and "objectList" in data:
-                # Fallback for old format - convert to new format
                 old_list = data.get("objectList", [])
                 object_list = [{"id": f"item_{i}", "object": obj, "classic_context": "", "theme_link": ""} for i, obj in enumerate(old_list)]
             else:
                 raise ValueError("Invalid JSON format: expected array or object with 'objectList' key")
             
-            # Validate items with CRITICAL classic_context quality checks
-            forbidden_words = ["logo", "brand", "label", "text", "number", "sign", "screen", "packaging", "barcode", "sticker", "poster", "billboard", "phone", "book cover", "receipt", "newspaper"]
-            valid_items = []
-            rejected_count = 0
-            rejection_reasons = {}
+            # Validate items (structural checks only, no forbidden words)
+            added_this_attempt = 0
+            rejected_this_attempt = 0
             
             for item in object_list:
-                is_valid, error_msg = validate_object_item(item, forbidden_words)
+                # Dedup check: id
+                item_id = item.get("id", "").strip()
+                if item_id in seen_ids:
+                    rejected_this_attempt += 1
+                    rejection_reasons["duplicate_id"] = rejection_reasons.get("duplicate_id", 0) + 1
+                    continue
+                
+                # Dedup check: (object, sub_object) pair
+                obj_key = (item.get("object", "").strip().lower(), item.get("sub_object", "").strip().lower())
+                if obj_key in seen_pairs:
+                    rejected_this_attempt += 1
+                    rejection_reasons["duplicate_pair"] = rejection_reasons.get("duplicate_pair", 0) + 1
+                    continue
+                
+                # Structural validation (no forbidden words check)
+                is_valid, error_msg = validate_object_item(item, forbidden_words=None)
                 if is_valid:
                     valid_items.append(item)
+                    seen_ids.add(item_id)
+                    seen_pairs.add(obj_key)
+                    added_this_attempt += 1
                 else:
-                    rejected_count += 1
-                    # Extract rejection reason category for statistics
+                    rejected_this_attempt += 1
                     reason_key = error_msg.split(":")[0] if ":" in error_msg else error_msg
-                    if len(reason_key) > 50:  # Truncate long reasons
+                    if len(reason_key) > 50:
                         reason_key = reason_key[:50]
                     rejection_reasons[reason_key] = rejection_reasons.get(reason_key, 0) + 1
-                    if attempt == 0:  # Log first attempt rejections
-                        logger.debug(f"STEP 0 - Rejected item: {item.get('id', 'unknown')} - {error_msg}")
             
-            # Must have at least OBJECT_LIST_MIN_OK valid items
-            if len(valid_items) < OBJECT_LIST_MIN_OK:
-                logger.warning(f"STEP 0 - Only {len(valid_items)} valid items (need at least {OBJECT_LIST_MIN_OK}), rejected={rejected_count}, reasons={dict(list(rejection_reasons.items())[:5])}")
-                if attempt < max_retries - 1:
-                    # Retry with stricter prompt focusing on classic_context quality
-                    top_reasons = sorted(rejection_reasons.items(), key=lambda x: x[1], reverse=True)[:3]
-                    reasons_text = ", ".join([f"{reason}({count})" for reason, count in top_reasons])
-                    feedback = f"""You generated {rejected_count} rejected items. Common issues:
-- classic_context must be 3-12 words with a physical preposition (on/in/next to/attached to/etc.)
-- classic_context must NOT contain: eco, sustainable, meaningful, modern, creative, concept, awareness, symbol, campaign
-- classic_context must NOT use generic phrases like "in nature", "in the wild", "in its habitat"
-- classic_context must describe a NATURAL, EXPECTED, REAL-WORLD PHYSICAL SITUATION
-- Examples of CORRECT classic_context: "landing on a flower", "with a metal straw inserted", "next to a wedge of cheese", "attached to a tree branch"
-- Examples of INCORRECT classic_context: "in an eco-friendly setting", "symbolizing sustainability", "in nature" (too vague)
-
-Top rejection reasons: {reasons_text}
-
-Ensure EXACTLY {OBJECT_LIST_TARGET} valid items with proper classic_context."""
-                    prompt = f"""Generate EXACTLY {OBJECT_LIST_TARGET} physical classic objects related to this advertising goal.
-
-Advertising goal: {ad_goal}{product_context}
-
-CRITICAL REQUIREMENTS:
-- EXACTLY {OBJECT_LIST_TARGET} ITEMS (no more, no less).
-- PHYSICAL CLASSIC OBJECTS ONLY (concrete, tangible, drawable).
-- Each item MUST include:
-  * id: unique identifier (e.g., "bee_flower", "can_straw", "mouse_cheese")
-  * object: the physical object name (e.g., "bee", "can", "mouse")
-  * classic_context: 3-12 words describing a NATURAL, EXPECTED, REAL-WORLD PHYSICAL SITUATION (e.g., "landing on a flower", "with a metal straw inserted", "next to a wedge of cheese", "attached to a tree branch", "lying on ocean beach sand", "on a wooden kitchen table", "resting in a toolbox")
-  * theme_link: 5-12 words explaining how it supports the ad_goal theme
-  * category: object category (e.g., "insect", "container", "rodent", "tool", "plant")
-  * shape_hint: very short shape description (e.g., "curved organic", "cylindrical", "small round")
-  * theme_tag: single word theme tag (e.g., "nature", "ocean", "kitchen", "wildlife")
-
-CLASSIC_CONTEXT RULES (CRITICAL - MUST BE FOLLOWED):
-- classic_context MUST describe a PHYSICAL CLASSIC SITUATION
-- MUST include a clear physical preposition: "on", "in", "under", "next to", "attached to", "inside", "resting on", "landing on", "with", "lying on", etc.
-- MUST be concrete and specific (3-12 words)
-- MUST be a natural, expected, real-world scene
-- FORBIDDEN in classic_context:
-  * Abstract settings: "in an eco-friendly setting", "in a meaningful environment"
-  * Symbolic language: "symbolizing sustainability", "representing change"
-  * Marketing language: "in a modern context", "for awareness"
-  * Generic phrases: "in nature", "in the wild", "in its habitat" (too vague)
-  * Words: "eco", "sustainable", "meaningful", "modern", "creative", "concept", "awareness", "symbol", "campaign"
-- CORRECT examples:
-  * "landing on a flower" (bee)
-  * "with a metal straw inserted" (can)
-  * "next to a wedge of cheese" (mouse)
-  * "attached to a tree branch" (leaf)
-  * "lying on ocean beach sand" (shell)
-  * "on a wooden kitchen table" (spoon)
-  * "resting in a toolbox" (hammer)
-
-FEEDBACK: {feedback}
-
-Return ONLY a JSON array with EXACTLY {OBJECT_LIST_TARGET} items:"""
-                    continue
-                else:
-                    raise ValueError(f"Failed to generate at least {OBJECT_LIST_MIN_OK} valid items after {max_retries} attempts. Got {len(valid_items)} valid items. Rejection reasons: {dict(list(rejection_reasons.items())[:5])}")
+            # Log attempt
+            top_struct_rejects = ", ".join([f"{k}({v})" for k, v in sorted(rejection_reasons.items(), key=lambda x: x[1], reverse=True)[:3]])
+            logger.info(f"STEP0_FILL attempt={attempt+1} needed={needed} added={added_this_attempt} total={len(valid_items)} top_struct_rejects={top_struct_rejects}")
             
-            # Take up to OBJECT_LIST_TARGET items (or all if less)
-            object_list = valid_items[:OBJECT_LIST_TARGET]
+            # Check if we reached target
+            if len(valid_items) >= OBJECT_LIST_TARGET:
+                break
             
-            # Log warning if we have less than target
-            if len(object_list) < OBJECT_LIST_TARGET:
-                logger.warning(f"STEP0 proceeding with {len(object_list)} items (target={OBJECT_LIST_TARGET})")
+            # Check if we reached minimum
+            if len(valid_items) >= OBJECT_LIST_MIN_OK:
+                logger.warning(f"STEP0 proceeding with {len(valid_items)} items (target={OBJECT_LIST_TARGET}, min_ok={OBJECT_LIST_MIN_OK})")
+                break
             
-            # Calculate SHA for logging
-            object_list_str = json.dumps(object_list, sort_keys=True)
-            object_list_sha = hashlib.sha256(object_list_str.encode()).hexdigest()[:16]
+            # Prepare for next attempt
+            needed = OBJECT_LIST_TARGET - len(valid_items)
+            attempt += 1
             
-            logger.info(f"OBJECTLIST_SHA={object_list_sha} total={len(object_list)} rejected={rejected_count} retry={attempt}")
-            
-            # Log sample (first 5 items)
-            sample = object_list[:5]
-            logger.info(f"STEP 0 OBJECTLIST: size={len(object_list)}, sample5={json.dumps(sample, indent=2)}")
-            
-            # Save to cache
-            _set_to_step0_cache(step0_cache_key, object_list)
-            
-            return object_list
-            
-        except json.JSONDecodeError as e:
-            logger.error(f"STEP 0 - BUILD_OBJECT_LIST: JSON parse error: {e}")
-            if attempt < max_retries - 1:
-                continue
-            raise ValueError(f"Failed to parse object list JSON: {e}")
         except Exception as e:
-            error_str = str(e)
-            error_lower = error_str.lower()
-            
-            # Check for 400 errors - DO NOT RETRY
-            is_400_error = (
-                "400" in error_str or 
-                "invalid_request" in error_lower or 
-                "unsupported_value" in error_lower or
-                "bad_request" in error_lower
-            )
-            
-            if is_400_error:
-                logger.error(f"STEP 0 - BUILD_OBJECT_LIST: OpenAI 400 error (no retry): {error_str}")
-                raise ValueError(f"invalid_request: {error_str}")
-            
-            # Check for rate limit (429) - RETRY with backoff
-            is_rate_limit = (
-                "429" in error_str or 
-                "rate_limit" in error_lower or 
-                "quota" in error_lower or
-                "rate limit" in error_lower
-            )
-            
-            if is_rate_limit:
-                if attempt < max_retries - 1:
-                    base_delay = 2 ** attempt
-                    jitter = random.uniform(0, 1)
-                    delay = base_delay + jitter
-                    logger.warning(f"STEP 0 - BUILD_OBJECT_LIST: Rate limit hit (attempt {attempt + 1}/{max_retries}), retrying in {delay:.2f}s")
-                    time.sleep(delay)
-                    continue
-                else:
-                    logger.error(f"STEP 0 - BUILD_OBJECT_LIST: Rate limit exceeded after {max_retries} attempts")
-                    raise Exception("rate_limited")
-            
-            # Check for server errors - RETRY
-            is_server_error = (
-                "500" in error_str or 
-                "502" in error_str or 
-                "503" in error_str or
-                "504" in error_str or
-                "timeout" in error_lower or
-                "connection" in error_lower or
-                "network" in error_lower
-            )
-            
-            if is_server_error:
-                if attempt < max_retries - 1:
-                    logger.warning(f"STEP 0 - BUILD_OBJECT_LIST: Server/connection error (attempt {attempt + 1}/{max_retries}): {error_str}, retrying...")
-                    time.sleep(1 + attempt)
-                    continue
-                else:
-                    logger.error(f"STEP 0 - BUILD_OBJECT_LIST: Server/connection error after {max_retries} attempts: {error_str}")
-                    raise
-            
-            # Other errors - don't retry, raise immediately
-            logger.error(f"STEP 0 - BUILD_OBJECT_LIST: OpenAI call failed (non-retryable, attempt {attempt + 1}): {error_str}")
-            raise
+            logger.error(f"STEP 0 - Attempt {attempt+1} failed: {e}")
+            attempt += 1
+            if attempt >= MAX_TOTAL_ATTEMPTS:
+                break
     
-    raise Exception("Failed to build object list from ad_goal")
+    # Final validation
+    if len(valid_items) < OBJECT_LIST_MIN_OK:
+        raise ValueError(f"Failed to generate at least {OBJECT_LIST_MIN_OK} valid items after {MAX_TOTAL_ATTEMPTS} attempts. Got {len(valid_items)} valid items. Rejection reasons: {dict(list(rejection_reasons.items())[:5])}")
+    
+    # Take up to OBJECT_LIST_TARGET items
+    final_list = valid_items[:OBJECT_LIST_TARGET]
+    
+    # Log final result
+    logger.info(f"STEP0_DONE total={len(final_list)} target={OBJECT_LIST_TARGET} min_ok={OBJECT_LIST_MIN_OK} attempts={attempt+1}")
+    
+    # Calculate SHA for logging
+    object_list_str = json.dumps(final_list, sort_keys=True)
+    object_list_sha = hashlib.sha256(object_list_str.encode()).hexdigest()[:16]
+    
+    logger.info(f"OBJECTLIST_SHA={object_list_sha} total={len(final_list)} rejected={sum(rejection_reasons.values())} retry={attempt}")
+    
+    # Log sample (first 5 items)
+    sample = final_list[:5]
+    logger.info(f"STEP 0 OBJECTLIST: size={len(final_list)}, sample5={json.dumps(sample, indent=2)}")
+    
+    # Save to cache
+    _set_to_step0_cache(step0_cache_key, final_list)
+    
+    return final_list
+
+
+def validate_object_list(object_list: Optional[List], ad_goal: Optional[str] = None, product_name: Optional[str] = None, language: str = "en") -> List[Dict]:
+    """
+    Validate and return object list (new format: List[Dict] with id, object, classic_context, theme_link).
+    If None or too small, and ad_goal is provided, use STEP 0 to build list.
+    Otherwise, return default concrete objects list (converted to new format).
+    """
+    # Check if old format (List[str]) and convert
+    if object_list and len(object_list) > 0 and isinstance(object_list[0], str):
+        # Old format - convert to new format
+        logger.info(f"Converting old format objectList (List[str]) to new format (List[Dict])")
+        object_list = [{"id": f"item_{i}", "object": obj, "classic_context": "", "theme_link": ""} for i, obj in enumerate(object_list)]
+    
+    if not object_list or len(object_list) < 2:
+        # If ad_goal is provided, use STEP 0 to build list
+        if ad_goal:
+            logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), building from ad_goal using STEP 0")
+            return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name, language=language)
+        else:
+            logger.info(f"objectList missing or too small (size={len(object_list) if object_list else 0}), using default concrete objects list (size={len(DEFAULT_OBJECT_LIST)})")
+            # Convert DEFAULT_OBJECT_LIST to new format
+            return [{"id": f"default_{i}", "object": obj, "classic_context": "", "theme_link": ""} for i, obj in enumerate(DEFAULT_OBJECT_LIST)]
+    
+    # If object_list is provided but small (<OBJECT_LIST_MIN_OK), and ad_goal is provided, use STEP 0
+    if len(object_list) < OBJECT_LIST_MIN_OK and ad_goal:
+        logger.info(f"objectList too small (size={len(object_list)}), building from ad_goal using STEP 0")
+        return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name, language=language)
+    
+    logger.info(f"objectList provided with {len(object_list)} items")
+    return object_list
 
 
 def validate_object_list(object_list: Optional[List], ad_goal: Optional[str] = None, product_name: Optional[str] = None, language: str = "en") -> List[Dict]:
@@ -1263,10 +1166,13 @@ STRICT OBJECT RULES:
 - No environments like forest, nature, water, sky, background.
 - classic_context must include a physical relation:
   (on, in, next to, attached to, inserted into, resting on, being opened with, holding, touching)
-- No logos.
-- No text.
-- No branding.
-- No abstract metaphors.
+- classic_context must explicitly mention sub_object.
+
+FORBIDDEN CONTENT RULES (MODEL RESPONSIBILITY):
+- Do NOT generate any object or sub_object that contains logos, brand names, labels, printed text, numbers, barcodes, signage, packaging graphics, or screens with text.
+- All objects must be generic and unbranded.
+- classic_context must describe ONLY physical interaction (no marketing/abstract language).
+- If an object normally has branding, it must be rendered blank/generic.
 
 PHYSICAL METAPHOR ENFORCEMENT (CRITICAL):
 - Each object in object_list MUST originate from one of the physical metaphors generated in step 2.5.
