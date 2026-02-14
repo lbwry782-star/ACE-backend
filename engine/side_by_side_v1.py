@@ -16,6 +16,7 @@ import zipfile
 import base64
 import string
 import hashlib
+import re
 from typing import Dict, List, Optional, Tuple
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
@@ -458,6 +459,34 @@ Output ONLY the ad_goal sentence, nothing else:"""
         fallback = f"Support {product_name.lower()}" if product_name else "Make a positive difference"
         logger.warning(f"Using fallback ad_goal: {fallback}")
         return fallback
+
+
+def _norm(s: str) -> str:
+    """
+    Normalize string for matching: remove all non-alphanumeric, convert to lowercase.
+    
+    Args:
+        s: String to normalize
+    
+    Returns:
+        Normalized string (only lowercase alphanumeric)
+    """
+    return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+
+
+def _main_key(it) -> str:
+    """
+    Get normalized main object key from item (dict or string).
+    
+    Args:
+        it: Item (dict with "object" key, or string)
+    
+    Returns:
+        Normalized main object name
+    """
+    if isinstance(it, dict):
+        return _norm(it.get("object", ""))
+    return _norm(str(it))
 
 
 def build_theme_tags(ad_goal: str) -> List[str]:
@@ -1131,18 +1160,35 @@ def select_pair_with_limited_shape_search(
     if model_name is None:
         model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
     
-    # Filter by theme tags if provided
+    # Filter by theme tags if provided (with normalized matching)
+    themed_pool = None
     if allowed_theme_tags and len(allowed_theme_tags) > 0:
-        themed_pool = [it for it in object_list if it.get("theme_tag") in allowed_theme_tags]
+        theme_tags_norm = {_norm(t) for t in allowed_theme_tags}
+        themed_pool_by_tag = []
+        themed_pool_by_link = []
+        for it in object_list:
+            it_tag_norm = _norm(it.get("theme_tag", ""))
+            it_link_norm = _norm(it.get("theme_link", ""))
+            
+            # Primary match: by theme_tag
+            if it_tag_norm in theme_tags_norm:
+                themed_pool_by_tag.append(it)
+            # Secondary match: by theme_link (if primary didn't match)
+            elif any(tn in it_link_norm for tn in theme_tags_norm):
+                themed_pool_by_link.append(it)
+        
+        themed_pool = themed_pool_by_tag + themed_pool_by_link
+        
         # Use themed_pool if it's large enough (>= 60), otherwise fallback to full object_list
         if len(themed_pool) >= 60:
             search_objects = themed_pool
-            logger.info(f"THEME_FILTER: using themed_pool size={len(themed_pool)} (from {len(object_list)} total)")
+            logger.info(f"THEME_FILTER: using themed_pool size={len(themed_pool)} (by_tag={len(themed_pool_by_tag)} by_link={len(themed_pool_by_link)}) (from {len(object_list)} total)")
         else:
             search_objects = object_list
             logger.warning(f"THEME_FILTER: themed_pool too small ({len(themed_pool)}), using full object_list ({len(object_list)})")
     else:
         search_objects = object_list
+        themed_pool = []  # Empty for fallback checks
     
     # Generate seed for uniform shuffle
     seed_str = f"{sid}|{ad_index}|{ad_goal}|{image_size}|side_by_side"
@@ -1195,6 +1241,13 @@ def select_pair_with_limited_shape_search(
             obj_b_id = obj_b_item["id"]
             obj_b_name = obj_b_item["object"]
             
+            # CRITICAL: Reject if same main object (forbidden: same object with different sub_object)
+            obj_a_main_key = _main_key(obj_a_item)
+            obj_b_main_key = _main_key(obj_b_item)
+            if obj_a_main_key == obj_b_main_key:
+                logger.debug(f"PAIR_REJECT_MAIN_DUPLICATE sid={sid} ad={ad_index} A={obj_a_id}(main={obj_a_main_key}) B={obj_b_id}(main={obj_b_main_key}) - same main object")
+                continue
+            
             # Skip if already used in session
             if obj_b_id in used_objects_session and len(used_objects_session) < len(shuffled_objects) * 0.8:
                 continue
@@ -1242,6 +1295,25 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
                 hint = result.get("hint", "")
                 
                 if shape_score >= SHAPE_MIN_SCORE:
+                    # Get theme and sub_object info for logging
+                    obj_a_theme = obj_a_item.get("theme_tag", "")
+                    obj_b_theme = obj_b_item.get("theme_tag", "")
+                    obj_a_sub = obj_a_item.get("sub_object", "")
+                    obj_b_sub = obj_b_item.get("sub_object", "")
+                    
+                    # Check theme relevance if allowed_theme_tags provided
+                    obj_a_link = obj_a_item.get("theme_link", "")
+                    obj_b_link = obj_b_item.get("theme_link", "")
+                    
+                    # Acceptance rule: reject if theme tags don't match (unless fallback mode)
+                    if allowed_theme_tags and len(allowed_theme_tags) > 0 and themed_pool and len(themed_pool) >= 60:
+                        theme_tags_norm = {_norm(t) for t in allowed_theme_tags}
+                        obj_a_theme_norm = _norm(obj_a_theme)
+                        obj_b_theme_norm = _norm(obj_b_theme)
+                        if obj_a_theme_norm not in theme_tags_norm or obj_b_theme_norm not in theme_tags_norm:
+                            logger.debug(f"PAIR_REJECT_THEME sid={sid} ad={ad_index} A={obj_a_id}(theme={obj_a_theme}) B={obj_b_id}(theme={obj_b_theme}) not in allowed_tags")
+                            continue
+                    
                     best_pair = {
                         "object_a": obj_a_name,
                         "object_b": obj_b_name,
@@ -1260,7 +1332,14 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
                             used_objects_session.add(obj_b_id)
                             _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
                     
-                    logger.info(f"PAIR_PICK sid={sid} ad={ad_index} A={obj_a_id} B={obj_b_id} shape={int(shape_score*100)} checked_pairs={checked_pairs} cache_hit_plan=0")
+                    # Log with detailed information including main objects and sub_objects
+                    theme_info = ""
+                    if obj_a_theme or obj_b_theme:
+                        a_link_short = obj_a_link[:30] + "..." if len(obj_a_link) > 30 else obj_a_link
+                        b_link_short = obj_b_link[:30] + "..." if len(obj_b_link) > 30 else obj_b_link
+                        theme_info = f" A_theme={obj_a_theme} B_theme={obj_b_theme} A_link={a_link_short} B_link={b_link_short}"
+                    
+                    logger.info(f"PAIR_PICK sid={sid} ad={ad_index} A={obj_a_id} A_obj={obj_a_name} A_sub={obj_a_sub} B={obj_b_id} B_obj={obj_b_name} B_sub={obj_b_sub} shape={int(shape_score*100)} checked_pairs={checked_pairs} cache_hit_plan=0{theme_info}")
                     return best_pair
                 
                 if shape_score > best_score:
@@ -1289,9 +1368,17 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
         obj_a_link = obj_a_item_fallback.get("theme_link", "") if obj_a_item_fallback else ""
         obj_b_link = obj_b_item_fallback.get("theme_link", "") if obj_b_item_fallback else ""
         
+        obj_a_sub = obj_a_item_fallback.get("sub_object", "") if obj_a_item_fallback else ""
+        obj_b_sub = obj_b_item_fallback.get("sub_object", "") if obj_b_item_fallback else ""
+        obj_a_name_fallback = best_pair["object_a"]
+        obj_b_name_fallback = best_pair["object_b"]
+        
         # Check theme relevance for fallback too
-        if allowed_theme_tags and len(allowed_theme_tags) > 0 and len(themed_pool) >= 60:
-            if obj_a_theme not in allowed_theme_tags or obj_b_theme not in allowed_theme_tags:
+        if allowed_theme_tags and len(allowed_theme_tags) > 0 and themed_pool and len(themed_pool) >= 60:
+            theme_tags_norm = {_norm(t) for t in allowed_theme_tags}
+            obj_a_theme_norm = _norm(obj_a_theme)
+            obj_b_theme_norm = _norm(obj_b_theme)
+            if obj_a_theme_norm not in theme_tags_norm or obj_b_theme_norm not in theme_tags_norm:
                 logger.warning(f"PAIR_REJECT_THEME_FALLBACK sid={sid} ad={ad_index} A={best_pair['object_a_id']}(theme={obj_a_theme}) B={best_pair['object_b_id']}(theme={obj_b_theme}) not in allowed_tags")
                 # Still return it as fallback, but log the issue
         
@@ -1304,14 +1391,14 @@ Return JSON: {{"shape_score": 0-100, "hint": "short description"}}"""
                 used_objects_session.add(best_pair["object_b_id"])
                 _session_used_pairs[sid] = (used_pairs_set, used_objects_session, time.time())
         
-        # Log with theme information
+        # Log with detailed information including main objects and sub_objects
         theme_info = ""
         if obj_a_theme or obj_b_theme:
             a_link_short = obj_a_link[:30] + "..." if len(obj_a_link) > 30 else obj_a_link
             b_link_short = obj_b_link[:30] + "..." if len(obj_b_link) > 30 else obj_b_link
             theme_info = f" A_theme={obj_a_theme} B_theme={obj_b_theme} A_link={a_link_short} B_link={b_link_short}"
         
-        logger.warning(f"PAIR_PICK sid={sid} ad={ad_index} A={best_pair['object_a_id']} B={best_pair['object_b_id']} shape={best_pair['shape_similarity_score']} checked_pairs={checked_pairs} cache_hit_plan=0 (fallback){theme_info}")
+        logger.warning(f"PAIR_PICK sid={sid} ad={ad_index} A={best_pair['object_a_id']} A_obj={obj_a_name_fallback} A_sub={obj_a_sub} B={best_pair['object_b_id']} B_obj={obj_b_name_fallback} B_sub={obj_b_sub} shape={best_pair['shape_similarity_score']} checked_pairs={checked_pairs} cache_hit_plan=0 (fallback){theme_info}")
         return best_pair
     
     raise ValueError(f"No valid pair found after {checked_pairs} checks")
@@ -2723,7 +2810,9 @@ def create_image_prompt(
         context_b_hint = f", shown {object_b_context}"
     
     composition_rules = f"""COMPOSITION RULES (CRITICAL):
-- Two panels: left panel shows FULL {object_a}{context_a_hint}, right panel shows FULL {object_b}{context_b_hint}.
+- CRITICAL: The left and right panels MUST show two DIFFERENT object types. Do NOT repeat the same main object on both sides.
+- Left panel MUST show: {object_a}{context_a_hint} (interacting with its sub_object as described in classic_context).
+- Right panel MUST show: {object_b}{context_b_hint} (interacting with its sub_object as described in classic_context).
 - Both objects are FULL objects, completely visible in their respective panels.
 - Each object must be shown interacting with its sub_object as described in classic_context.
 - The sub_object is part of the composition, not just background.
@@ -3051,13 +3140,31 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     # C) Build theme tags from ad_goal
     theme_tags = build_theme_tags(ad_goal)
     
-    # Filter object_list to themed_pool
-    themed_pool = [it for it in object_list if it.get("theme_tag") in theme_tags]
+    # Normalize theme tags for robust matching
+    theme_tags_norm = {_norm(t) for t in theme_tags}
+    
+    # Filter object_list to themed_pool with normalized matching
+    themed_pool_by_tag = []
+    themed_pool_by_link = []
+    for it in object_list:
+        it_tag_norm = _norm(it.get("theme_tag", ""))
+        it_link_norm = _norm(it.get("theme_link", ""))
+        
+        # Primary match: by theme_tag
+        if it_tag_norm in theme_tags_norm:
+            themed_pool_by_tag.append(it)
+        # Secondary match: by theme_link (if primary didn't match)
+        elif any(tn in it_link_norm for tn in theme_tags_norm):
+            themed_pool_by_link.append(it)
+    
+    # Combine both matches
+    themed_pool = themed_pool_by_tag + themed_pool_by_link
+    
     if len(themed_pool) < 60:
         logger.warning(f"THEME_POOL: themed_pool too small ({len(themed_pool)}), will use fallback to full object_list")
         themed_pool = object_list  # Fallback to full list
     
-    logger.info(f"THEME_POOL: size={len(themed_pool)} (from {len(object_list)} total)")
+    logger.info(f"THEME_POOL_MATCH counts: by_tag={len(themed_pool_by_tag)} by_link={len(themed_pool_by_link)} total={len(themed_pool)} (from {len(object_list)} total)")
     
     # Log request with preview flags
     logger.info(f"[{request_id}] generate_preview_data called: sessionId={session_id}, adIndex={ad_index}, "
@@ -3444,13 +3551,31 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     # C) Build theme tags from ad_goal
     theme_tags = build_theme_tags(ad_goal)
     
-    # Filter object_list to themed_pool
-    themed_pool = [it for it in object_list if it.get("theme_tag") in theme_tags]
+    # Normalize theme tags for robust matching
+    theme_tags_norm = {_norm(t) for t in theme_tags}
+    
+    # Filter object_list to themed_pool with normalized matching
+    themed_pool_by_tag = []
+    themed_pool_by_link = []
+    for it in object_list:
+        it_tag_norm = _norm(it.get("theme_tag", ""))
+        it_link_norm = _norm(it.get("theme_link", ""))
+        
+        # Primary match: by theme_tag
+        if it_tag_norm in theme_tags_norm:
+            themed_pool_by_tag.append(it)
+        # Secondary match: by theme_link (if primary didn't match)
+        elif any(tn in it_link_norm for tn in theme_tags_norm):
+            themed_pool_by_link.append(it)
+    
+    # Combine both matches
+    themed_pool = themed_pool_by_tag + themed_pool_by_link
+    
     if len(themed_pool) < 60:
         logger.warning(f"THEME_POOL: themed_pool too small ({len(themed_pool)}), will use fallback to full object_list")
         themed_pool = object_list  # Fallback to full list
     
-    logger.info(f"THEME_POOL: size={len(themed_pool)} (from {len(object_list)} total)")
+    logger.info(f"THEME_POOL_MATCH counts: by_tag={len(themed_pool_by_tag)} by_link={len(themed_pool_by_link)} total={len(themed_pool)} (from {len(object_list)} total)")
     
     # Log request
     logger.info(f"[{request_id}] generate_zip called: sessionId={session_id}, adIndex={ad_index}, "
