@@ -2736,17 +2736,38 @@ Headline:"""
             words = [w for w in words if w != object_a_upper and w != object_b_upper]
             headline = " ".join(words)
             
+            # CRITICAL: Ensure product name is always in headline
+            product_name_upper = product_name.upper()
+            product_words = product_name_upper.split()
+            headline_words = headline.split()
+            
+            # Check if product name (or any part of it) is in headline
+            product_in_headline = any(word in headline_words for word in product_words)
+            
+            if not product_in_headline:
+                # Add product name at the beginning
+                logger.info(f"STEP 2 - HEADLINE: Product name '{product_name}' not found, adding it to headline")
+                headline = f"{product_name_upper} {headline}".strip()
+                headline_words = headline.split()
+            
             # Validate: max 7 words including productName
-            words = headline.split()
-            product_words = product_name.upper().split()
-            if len(words) > 7:
+            if len(headline_words) > 7:
                 # Try to keep product name + first words
                 if len(product_words) <= 7:
                     remaining = 7 - len(product_words)
-                    other_words = [w for w in words if w not in product_words][:remaining]
+                    other_words = [w for w in headline_words if w not in product_words][:remaining]
                     headline = " ".join(product_words + other_words)
                 else:
-                    headline = " ".join(words[:7])
+                    # If product name itself is > 7 words, truncate to first 7 words
+                    headline = " ".join(headline_words[:7])
+            
+            # Final validation: ensure product name is still in headline after truncation
+            headline_words_final = headline.split()
+            product_in_headline_final = any(word in headline_words_final for word in product_words)
+            if not product_in_headline_final:
+                # Force add product name at the beginning (even if it exceeds 7 words)
+                headline = f"{product_name_upper} {' '.join(headline_words_final)}".strip()
+                logger.warning(f"STEP 2 - HEADLINE: Product name forced into headline (may exceed 7 words): {headline}")
             
             words_count = len(headline.split())
             placement_info = f", placement={headline_placement}" if headline_placement else ""
@@ -3574,7 +3595,8 @@ def create_image_prompt(
     object_a_context: Optional[str] = None,
     object_b_context: Optional[str] = None,
     object_a_item: Optional[Dict] = None,
-    object_b_item: Optional[Dict] = None
+    object_b_item: Optional[Dict] = None,
+    product_name: Optional[str] = None
 ) -> str:
     """
     STEP 3 - IMAGE GENERATION PROMPT
@@ -3621,33 +3643,36 @@ def create_image_prompt(
                     break
         
         replacement_main_object = object_b
+        product_name_str = product_name or "PRODUCT"
         
         replacement_prompt = f"""Create a professional photorealistic advertisement image as a single unified scene.
 
 BASE SCENE (LOCKED TO OBJECT A):
-- The scene is exactly: '{scene_context}'
-- The ONLY sub-object visible and used for interaction must be: '{locked_sub_object}'
-- Keep background, lighting, camera angle, framing, depth of field, and overall composition as if photographing Object A in this exact situation.
+- The scene background and setting must be exactly based on: '{scene_context}'
+- The sub-object from A MUST be clearly visible and present in the scene: '{locked_sub_object}'
+- Keep lighting, camera angle, framing, and overall environment as if photographing Object A in its classic situation.
 
 MAIN OBJECT REPLACEMENT (LOCKED):
 - The ONLY main object visible must be: '{replacement_main_object}'
-- Do NOT show '{object_a}' anywhere in the image.
+- Do NOT show '{object_a}' anywhere.
 - Do NOT include any sub-object that naturally belongs to '{replacement_main_object}'.
-- '{replacement_main_object}' must occupy the exact same position, pose, orientation, and scale where '{object_a}' would be in this scene.
-- '{replacement_main_object}' must be shown interacting with '{locked_sub_object}' in the exact interaction role implied by the scene.
+- '{replacement_main_object}' must occupy the same position, pose logic, orientation, and scale where '{object_a}' would be in this scene.
+- '{replacement_main_object}' must be shown interacting with '{locked_sub_object}' (A.sub_object must be physically present next to/on/in/under/attached-to B as implied by the scene).
 
-STRICT NEGATIVES (MANDATORY):
-- No split panels. No side-by-side layout.
-- No additional props besides '{locked_sub_object}' that explain or replace the interaction.
-- Do not swap the scene to match '{replacement_main_object}'. The scene stays from A.
+TEXT RULES (CRITICAL):
+- The image must contain exactly ONE headline.
+- The headline MUST include the product name exactly: '{product_name_str}'
+- Headline text must be: '{headline}'
+- The headline must be LARGE, BOLD, and visually dominant — equal visual importance to the main object '{replacement_main_object}'.
+- The headline must be fully readable and high-contrast.
+- No other text may appear anywhere in the image.
 
 STYLE:
-Ultra realistic photography. Real materials. Natural lighting.
-No logos. No brand names. No printed text. No labels. No packaging graphics. No numbers.
+Ultra realistic commercial photography. Real materials. Natural lighting.
+No logos. No brand names other than the headline product name. No printed labels. No numbers.
 
-HEADLINE – EXACTLY ONE:
-'{headline}'
-The headline must be fully readable and integrated into the image. No other text."""
+FINAL RULE:
+Single scene only. One main object only: '{replacement_main_object}'. A.sub_object must be visible in the same scene."""
         
         return replacement_prompt
     
@@ -3797,7 +3822,8 @@ def generate_image_with_dalle(
     max_retries: int = 3,
     object_a_context: Optional[str] = None,
     object_b_context: Optional[str] = None,
-    quality: str = "high"
+    quality: str = "high",
+    product_name: Optional[str] = None
 ) -> bytes:
     """
     STEP 3 - IMAGE GENERATION
@@ -3846,7 +3872,8 @@ def generate_image_with_dalle(
             hybrid_plan=hybrid_plan,
             is_strict=is_strict,
             object_a_context=object_a_context,
-            object_b_context=object_b_context
+            object_b_context=object_b_context,
+            product_name=product_name
         )
         
         try:
@@ -3901,7 +3928,8 @@ def _generate_final_image_unified(
     object_a_context: Optional[str] = None,
     object_b_context: Optional[str] = None,
     quality: str = "high",
-    max_retries: int = 3
+    max_retries: int = 3,
+    product_name: Optional[str] = None
 ) -> bytes:
     """
     Unified function to generate final image (used by both preview and zip).
@@ -3922,7 +3950,8 @@ def _generate_final_image_unified(
         max_retries=max_retries,
         object_a_context=object_a_context,
         object_b_context=object_b_context,
-        quality=quality
+        quality=quality,
+        product_name=product_name
     )
 
 
@@ -3939,7 +3968,8 @@ def render_final_ad_bytes(
     width: int,
     height: int,
     quality: str = "high",
-    max_retries: int = 3
+    max_retries: int = 3,
+    product_name: Optional[str] = None
 ) -> Tuple[bytes, str, Dict, str]:
     """
     Unified function to render final ad image (used by both preview and zip).
@@ -3975,7 +4005,8 @@ def render_final_ad_bytes(
         object_a_context=object_a_context,
         object_b_context=object_b_context,
         object_a_item=object_a_item,
-        object_b_item=object_b_item
+        object_b_item=object_b_item,
+        product_name=product_name
     )
     
     # Generate image
@@ -3990,7 +4021,8 @@ def render_final_ad_bytes(
         object_a_context=object_a_context,
         object_b_context=object_b_context,
         quality=quality,
-        max_retries=max_retries
+        max_retries=max_retries,
+        product_name=product_name
     )
     
     # Build selected_pair dict
@@ -4438,7 +4470,8 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 width=width,
                 height=height,
                 quality=final_quality,
-                max_retries=max_img_retries
+                max_retries=max_img_retries,
+                product_name=product_name
             )
             
             # Save to unified image cache
@@ -4759,7 +4792,8 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 width=width,
                 height=height,
                 quality=final_quality,
-                max_retries=max_img_retries
+                max_retries=max_img_retries,
+                product_name=product_name
             )
             
             # Save to unified image cache (for future preview/zip reuse)
