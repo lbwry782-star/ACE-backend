@@ -193,9 +193,13 @@ def _set_to_image_cache(key: str, value_bytes: bytes):
         _image_cache[key] = (value_bytes, time.time())
 
 
-def _get_cache_key_step0(ad_goal: str, product_name: Optional[str], language: str = "en") -> str:
-    """Generate cache key for STEP 0 (objectList building)."""
-    key_str = f"{ad_goal}|{product_name or ''}|{language}|STEP0_V1"
+def _get_cache_key_step0(ad_goal: str, product_name: Optional[str], language: str = "en", session_seed: Optional[str] = None) -> str:
+    """Generate cache key for STEP 0 (objectList building).
+    
+    Shared across ads in same session (session_seed included in key).
+    """
+    session_part = f"|{session_seed}" if session_seed else ""
+    key_str = f"{ad_goal}|{product_name or ''}|{language}{session_part}|STEP0_V1"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -2811,7 +2815,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     step0_cache_hit = False
     if not object_list or len(object_list) < 120:
         # Build from ad_goal
-        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, ad_index=1, session_seed=session_id)  # Shared across ads in same session
+        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, session_seed=session_id)  # Shared across ads in same session
         cached_step0_list = _get_from_step0_cache(step0_cache_key)
         if cached_step0_list:
             step0_cache_hit = True
@@ -3160,7 +3164,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     step0_cache_hit = False
     if not object_list or len(object_list) < 120:
         # Build from ad_goal
-        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, ad_index=1, session_seed=session_id)  # Shared across ads
+        step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, session_seed=session_id)  # Shared across ads in same session
         cached_step0_list = _get_from_step0_cache(step0_cache_key)
         if cached_step0_list:
             step0_cache_hit = True
