@@ -60,6 +60,10 @@ SHAPE_MIN_SCORE = float(os.environ.get("SHAPE_MIN_SCORE", "0.80"))  # Minimum sh
 SHAPE_SEARCH_K = int(os.environ.get("SHAPE_SEARCH_K", "40"))  # Number of candidates to check per object (K=35-50)
 MAX_CHECKED_PAIRS = int(os.environ.get("MAX_CHECKED_PAIRS", "500"))  # Maximum pairs to check before stopping
 
+# Object list size parameters
+OBJECT_LIST_TARGET = 150  # Target size for STEP 0 object list
+OBJECT_LIST_MIN_OK = 130  # Minimum acceptable size to proceed without failure
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -531,7 +535,7 @@ def build_object_list_from_ad_goal(
     """
     STEP 0 - BUILD_OBJECT_LIST_FROM_AD_GOAL
     
-    Build a list of EXACTLY 200 object items related to ad_goal.
+    Build a list of EXACTLY {OBJECT_LIST_TARGET} object items related to ad_goal.
     Each item includes: id, object, sub_object, classic_context, theme_link, category, shape_hint, theme_tag.
     
     Args:
@@ -541,7 +545,7 @@ def build_object_list_from_ad_goal(
         language: Language (default: "en")
     
     Returns:
-        List[Dict]: List of 200 items, each with keys:
+        List[Dict]: List of {OBJECT_LIST_TARGET} items, each with keys:
             - id: unique identifier
             - object: main physical object name
             - sub_object: secondary physical object (REQUIRED - not environment)
@@ -552,7 +556,7 @@ def build_object_list_from_ad_goal(
             - theme_tag: single word theme tag
     
     Rules:
-    - EXACTLY 200 ITEMS
+    - EXACTLY {OBJECT_LIST_TARGET} ITEMS
     - PHYSICAL CLASSIC OBJECTS ONLY
     - Every item must follow: MAIN_OBJECT interacting with SUB_OBJECT
     - sub_object MUST be concrete physical object, NOT environment (forbidden: nature, forest, water, etc.)
@@ -571,17 +575,17 @@ def build_object_list_from_ad_goal(
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
     
-    # Build prompt for new format (200 items with classic_context and theme_link)
+    # Build prompt for new format ({OBJECT_LIST_TARGET} items with classic_context and theme_link)
     product_context = f"\nProduct name (optional context): {product_name}" if product_name else ""
     
     forbidden_patterns = "logo, brand, label, text, number, sign, screen, packaging, barcode, sticker, poster, billboard, phone screen, book cover, receipt, newspaper"
     
-    prompt = f"""Generate EXACTLY 200 physical classic objects related to this advertising goal.
+    prompt = f"""Generate EXACTLY {OBJECT_LIST_TARGET} physical classic objects related to this advertising goal.
 
 Advertising goal: {ad_goal}{product_context}
 
 CRITICAL REQUIREMENTS:
-- EXACTLY 200 ITEMS (no more, no less).
+- EXACTLY {OBJECT_LIST_TARGET} ITEMS (no more, no less).
 - PHYSICAL CLASSIC OBJECTS ONLY (concrete, tangible, drawable).
 - Each item MUST include:
   * id: unique identifier (e.g., "bee_flower", "can_opener", "mouse_cheese")
@@ -681,7 +685,7 @@ Return ONLY a JSON array with this exact format:
   ...
 ]
 
-EXACTLY 200 items. JSON array only:"""
+EXACTLY {OBJECT_LIST_TARGET} items. JSON array only:"""
 
     # Check if model is o* type - these use Responses API
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
@@ -753,9 +757,9 @@ EXACTLY 200 items. JSON array only:"""
                     if attempt == 0:  # Log first attempt rejections
                         logger.debug(f"STEP 0 - Rejected item: {item.get('id', 'unknown')} - {error_msg}")
             
-            # Must have exactly 200 valid items
-            if len(valid_items) < 200:
-                logger.warning(f"STEP 0 - Only {len(valid_items)} valid items (need 200), rejected={rejected_count}, reasons={dict(list(rejection_reasons.items())[:5])}")
+            # Must have at least OBJECT_LIST_MIN_OK valid items
+            if len(valid_items) < OBJECT_LIST_MIN_OK:
+                logger.warning(f"STEP 0 - Only {len(valid_items)} valid items (need at least {OBJECT_LIST_MIN_OK}), rejected={rejected_count}, reasons={dict(list(rejection_reasons.items())[:5])}")
                 if attempt < max_retries - 1:
                     # Retry with stricter prompt focusing on classic_context quality
                     top_reasons = sorted(rejection_reasons.items(), key=lambda x: x[1], reverse=True)[:3]
@@ -770,13 +774,13 @@ EXACTLY 200 items. JSON array only:"""
 
 Top rejection reasons: {reasons_text}
 
-Ensure EXACTLY 200 valid items with proper classic_context."""
-                    prompt = f"""Generate EXACTLY 200 physical classic objects related to this advertising goal.
+Ensure EXACTLY {OBJECT_LIST_TARGET} valid items with proper classic_context."""
+                    prompt = f"""Generate EXACTLY {OBJECT_LIST_TARGET} physical classic objects related to this advertising goal.
 
 Advertising goal: {ad_goal}{product_context}
 
 CRITICAL REQUIREMENTS:
-- EXACTLY 200 ITEMS (no more, no less).
+- EXACTLY {OBJECT_LIST_TARGET} ITEMS (no more, no less).
 - PHYSICAL CLASSIC OBJECTS ONLY (concrete, tangible, drawable).
 - Each item MUST include:
   * id: unique identifier (e.g., "bee_flower", "can_straw", "mouse_cheese")
@@ -809,23 +813,27 @@ CLASSIC_CONTEXT RULES (CRITICAL - MUST BE FOLLOWED):
 
 FEEDBACK: {feedback}
 
-Return ONLY a JSON array with EXACTLY 200 items:"""
+Return ONLY a JSON array with EXACTLY {OBJECT_LIST_TARGET} items:"""
                     continue
                 else:
-                    raise ValueError(f"Failed to generate 200 valid items after {max_retries} attempts. Got {len(valid_items)} valid items. Rejection reasons: {dict(list(rejection_reasons.items())[:5])}")
+                    raise ValueError(f"Failed to generate at least {OBJECT_LIST_MIN_OK} valid items after {max_retries} attempts. Got {len(valid_items)} valid items. Rejection reasons: {dict(list(rejection_reasons.items())[:5])}")
             
-            # Take exactly 200 items
-            object_list = valid_items[:200]
+            # Take up to OBJECT_LIST_TARGET items (or all if less)
+            object_list = valid_items[:OBJECT_LIST_TARGET]
+            
+            # Log warning if we have less than target
+            if len(object_list) < OBJECT_LIST_TARGET:
+                logger.warning(f"STEP0 proceeding with {len(object_list)} items (target={OBJECT_LIST_TARGET})")
             
             # Calculate SHA for logging
             object_list_str = json.dumps(object_list, sort_keys=True)
             object_list_sha = hashlib.sha256(object_list_str.encode()).hexdigest()[:16]
             
-            logger.info(f"OBJECTLIST_SHA={object_list_sha} total=200 rejected={rejected_count} retry={attempt}")
+            logger.info(f"OBJECTLIST_SHA={object_list_sha} total={len(object_list)} rejected={rejected_count} retry={attempt}")
             
             # Log sample (first 5 items)
             sample = object_list[:5]
-            logger.info(f"STEP 0 OBJECTLIST: size=200, sample5={json.dumps(sample, indent=2)}")
+            logger.info(f"STEP 0 OBJECTLIST: size={len(object_list)}, sample5={json.dumps(sample, indent=2)}")
             
             # Save to cache
             _set_to_step0_cache(step0_cache_key, object_list)
@@ -922,8 +930,8 @@ def validate_object_list(object_list: Optional[List], ad_goal: Optional[str] = N
             # Convert DEFAULT_OBJECT_LIST to new format
             return [{"id": f"default_{i}", "object": obj, "classic_context": "", "theme_link": ""} for i, obj in enumerate(DEFAULT_OBJECT_LIST)]
     
-    # If object_list is provided but small (<120), and ad_goal is provided, use STEP 0
-    if len(object_list) < 120 and ad_goal:
+    # If object_list is provided but small (<OBJECT_LIST_MIN_OK), and ad_goal is provided, use STEP 0
+    if len(object_list) < OBJECT_LIST_MIN_OK and ad_goal:
         logger.info(f"objectList too small (size={len(object_list)}), building from ad_goal using STEP 0")
         return build_object_list_from_ad_goal(ad_goal=ad_goal, product_name=product_name, language=language)
     
@@ -2811,9 +2819,9 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
-    # B) Build object_list in new format (200 items with id/object/classic_context/theme_link)
+    # B) Build object_list in new format ({OBJECT_LIST_TARGET} items with id/object/classic_context/theme_link)
     step0_cache_hit = False
-    if not object_list or len(object_list) < 120:
+    if not object_list or len(object_list) < OBJECT_LIST_MIN_OK:
         # Build from ad_goal
         step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, session_seed=session_id)  # Shared across ads in same session
         cached_step0_list = _get_from_step0_cache(step0_cache_key)
@@ -3160,9 +3168,9 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     # Validate and normalize
     width, height = parse_image_size(image_size_str)
     
-    # B) Build object_list in new format (200 items with id/object/classic_context/theme_link)
+    # B) Build object_list in new format ({OBJECT_LIST_TARGET} items with id/object/classic_context/theme_link)
     step0_cache_hit = False
-    if not object_list or len(object_list) < 120:
+    if not object_list or len(object_list) < OBJECT_LIST_MIN_OK:
         # Build from ad_goal
         step0_cache_key = _get_cache_key_step0(ad_goal, product_name, language, session_seed=session_id)  # Shared across ads in same session
         cached_step0_list = _get_from_step0_cache(step0_cache_key)
