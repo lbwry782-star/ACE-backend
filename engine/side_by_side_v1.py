@@ -3596,7 +3596,8 @@ def create_image_prompt(
     object_b_context: Optional[str] = None,
     object_a_item: Optional[Dict] = None,
     object_b_item: Optional[Dict] = None,
-    product_name: Optional[str] = None
+    product_name: Optional[str] = None,
+    force_mode: Optional[str] = None  # "replacement" | "side_by_side" | None (use ACE_IMAGE_MODE)
 ) -> str:
     """
     STEP 3 - IMAGE GENERATION PROMPT
@@ -3616,10 +3617,12 @@ def create_image_prompt(
         object_a_context: Classic context for object_a (optional)
         object_b_context: Classic context for object_b (optional)
     """
-    logger.info(f"ACE_IMAGE_MODE={ACE_IMAGE_MODE} (prompt mode)")
+    # Determine mode: use force_mode if provided, otherwise use ACE_IMAGE_MODE
+    effective_mode = force_mode if force_mode else ACE_IMAGE_MODE
+    logger.info(f"IMAGE_PROMPT_MODE={effective_mode} (force_mode={force_mode}, ACE_IMAGE_MODE={ACE_IMAGE_MODE})")
     
-    # REPLACEMENT mode: B replaces A in A's scene
-    if ACE_IMAGE_MODE == "replacement":
+    # MODE 1 — REPLACEMENT (ONLY IF ≥ 85% silhouette overlap)
+    if effective_mode == "replacement":
         # Get A.sub_object directly from object_a_item (NEVER use B.sub_object)
         scene_context = object_a_context or f"{object_a} in its classic situation"
         locked_sub_object = ""
@@ -3647,150 +3650,97 @@ def create_image_prompt(
         
         replacement_prompt = f"""Create a professional photorealistic advertisement image as a single unified scene.
 
-BASE SCENE (LOCKED TO OBJECT A):
-- The scene background and setting must be exactly based on: '{scene_context}'
-- The sub-object from A MUST be clearly visible and present in the scene: '{locked_sub_object}'
-- Keep lighting, camera angle, framing, and overall environment as if photographing Object A in its classic situation.
+BASE SCENE:
+The scene is based entirely on:
+"{scene_context}"
 
-MAIN OBJECT REPLACEMENT (LOCKED):
-- The ONLY main object visible must be: '{replacement_main_object}'
-- Do NOT show '{object_a}' anywhere.
-- Do NOT include any sub-object that naturally belongs to '{replacement_main_object}'.
-- '{replacement_main_object}' must occupy the same position, pose logic, orientation, and scale where '{object_a}' would be in this scene.
-- '{replacement_main_object}' must be shown interacting with '{locked_sub_object}' (A.sub_object must be physically present next to/on/in/under/attached-to B as implied by the scene).
+The sub-object from Object A must remain visible:
+"{locked_sub_object}"
 
-TEXT RULES (CRITICAL):
-- The image must contain exactly ONE headline.
-- The headline MUST include the product name exactly: '{product_name_str}'
-- Headline text must be: '{headline}'
-- The headline must be LARGE, BOLD, and visually dominant — equal visual importance to the main object '{replacement_main_object}'.
-- The headline must be fully readable and high-contrast.
-- No other text may appear anywhere in the image.
+The environment, lighting, camera angle, framing, and depth of field remain identical to A's original situation.
 
-STYLE:
-Ultra realistic commercial photography. Real materials. Natural lighting.
-No logos. No brand names other than the headline product name. No printed labels. No numbers.
+MAIN OBJECT REPLACEMENT:
 
-FINAL RULE:
-Single scene only. One main object only: '{replacement_main_object}'. A.sub_object must be visible in the same scene."""
+Replace ONLY the main object body of A with "{replacement_main_object}".
+
+Do NOT show A anywhere.
+
+Keep exact same pose, position, orientation, and scale.
+
+Maintain natural physics.
+
+Object B must interact physically with "{locked_sub_object}".
+
+No floating objects.
+
+No added B.sub_object.
+
+HEADLINE RULE:
+
+Include exactly one headline.
+
+Headline must include "{product_name_str}".
+
+Headline must be large and visually dominant.
+
+Headline must have visual weight comparable to the main object.
+
+No additional text allowed.
+
+Ultra realistic photography only.
+No logos.
+No labels.
+No surreal distortions."""
         
         return replacement_prompt
     
-    # SIDE_BY_SIDE mode (legacy)
+    # MODE 2 — SIDE_BY_SIDE (AUTO FALLBACK IF < 85%)
     # Build shape hint instruction if provided
     shape_instruction = ""
     if shape_hint:
         shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
     
-    # Build composition rules section (SIDE BY SIDE only - two full panels)
-    # Include classic_context as photography hints (not text on image)
-    context_a_hint = ""
-    if object_a_context is not None and object_a_context:
-        context_a_hint = f", shown {object_a_context}"
-    context_b_hint = ""
-    if object_b_context is not None and object_b_context:
-        context_b_hint = f", shown {object_b_context}"
+    product_name_str = product_name or "PRODUCT"
     
-    composition_rules = f"""COMPOSITION RULES (CRITICAL):
-- CRITICAL: The left and right panels MUST show two DIFFERENT main object types. Do NOT repeat the same main object on both sides.
-- CRITICAL: Left and right panels must show TWO DIFFERENT main object types. Never repeat the same main object on both sides.
-- Left panel MUST show exactly: {object_a}{context_a_hint} (interacting with its sub_object as described in classic_context).
-- Right panel MUST show exactly: {object_b}{context_b_hint} (interacting with its sub_object as described in classic_context).
-- Both objects are FULL objects, completely visible in their respective panels.
-- Each object must be shown interacting with its sub_object as described in classic_context.
-- The sub_object is part of the composition, not just background.
-- VISUAL DOMINANCE RULE: The main object ({object_a} and {object_b}) must be visually dominant in each panel.
-- The sub_object must support the scene but must not dominate the silhouette.
-- The overall outline similarity should be determined by the main objects, not the secondary objects.
-- Two separate objects side by side, no overlap.
-- Clear separation between left and right panels.
-- Same vertical alignment (same baseline alignment).
-- Center of the composition is between the two objects.
-- Clear comparable outer contours.{shape_instruction}
-- Maintain this exact compositional structure in all attempts (do not change positioning between retries)."""
+    side_by_side_prompt = f"""Create a professional photorealistic advertisement image with SIDE BY SIDE composition.
 
-    # Build visual style constraints section
-    visual_style_constraints = """VISUAL STYLE CONSTRAINTS:
-- Ultra realistic photography.
-- Professional studio or real-world photography.
-- Natural lighting.
-- Real materials.
-- No illustration style.
-- No drawn elements.
-- No graphic design look.
-- No visible logos.
-- No printed brand names.
-- No readable text except the main headline generated for the ad.
-- If any object would normally contain branding, render it completely generic and blank."""
+Composition Rules:
 
-    if is_strict:
-        return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
+Display BOTH main objects: "{object_a}" and "{object_b}".
 
-LAYOUT:
-- Two panels side by side (left and right).
-- Left panel shows FULL {object_a}.
-- Right panel shows FULL {object_b}.
-- Both objects are completely visible, no overlap.
-- Clear separation between panels.
+Do NOT include any sub-objects.
 
-{composition_rules}
+No sub-objects from either object.
 
-{visual_style_constraints}
+Clean isolated presentation.
 
-HEADLINE:
-- Only one headline: "{headline}"
-- Use fewer letters. Use one short headline. Make text extremely large and bold.
-- The headline must be integrated into the design as a strong central visual element.
-- The headline must have the same visual importance as the objects.
+Both objects must partially overlap visually in the center.
 
-TEXT RULES (CRITICAL):
-- ALL CAPS.
-- English only.
-- Perfectly legible.
-- No paragraphs.
-- No small print.
-- No separate CTA.
-- No extra text.
+The overlap must clearly show their similar silhouette logic.
 
-STYLE:
-- Bold, modern, minimal.
-- High contrast.
-- Clear typography.
-- Professional advertising aesthetic."""
+Objects must not be duplicated.
 
-    else:
-        return f"""Create a professional advertisement image with a SIDE BY SIDE layout.
+Main object types must be different.
 
-LAYOUT:
-- Two panels side by side (left and right).
-- Left panel shows FULL {object_a}.
-- Right panel shows FULL {object_b}.
-- Both objects are completely visible, no overlap.
-- Clear separation between panels.
+Background:
+Neutral, clean, professional advertising background.
 
-{composition_rules}
+Headline:
 
-{visual_style_constraints}
+Exactly one headline.
 
-HEADLINE:
-- Only one headline: "{headline}"
-- The headline must be integrated into the design as a strong central visual element.
-- The headline must have the same visual importance as the objects.
+Must include "{product_name_str}".
 
-TEXT RULES (CRITICAL):
-- ALL CAPS.
-- English only.
-- Perfectly legible.
-- No paragraphs.
-- No small print.
-- No separate CTA.
-- No extra text.
+Must be large and dominant.
 
-STYLE:
-- Bold, modern, minimal.
-- High contrast.
-- Clear typography.
-- Professional advertising aesthetic."""
+Positioned above or integrated professionally.
+
+Photorealistic.
+No logos.
+No brand graphics.
+No text except headline.{shape_instruction}"""
+    
+    return side_by_side_prompt
 
 
 def check_text_quality(image_base64: str) -> bool:
@@ -3955,6 +3905,122 @@ def _generate_final_image_unified(
     )
 
 
+def evaluate_silhouette_overlap(
+    object_a: str,
+    object_b: str,
+    model_name: Optional[str] = None
+) -> float:
+    """
+    Evaluate silhouette overlap between Object A and Object B.
+    
+    Critical rule: Overlap must be based on the main object bodies only.
+    Ignore sub-objects completely. Ignore background and composition.
+    Compare only the pure outer contour (dominant silhouette).
+    
+    Args:
+        object_a: Main object A name
+        object_b: Main object B name
+        model_name: Model to use (default: OPENAI_SHAPE_MODEL)
+    
+    Returns:
+        float: Silhouette overlap percentage (0-100)
+    """
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    if model_name is None:
+        model_name = os.environ.get("OPENAI_SHAPE_MODEL", "o3-pro")
+    
+    prompt = f"""Evaluate the silhouette overlap between two objects.
+
+CRITICAL RULES:
+- Overlap must be based on the main object bodies ONLY.
+- Ignore sub-objects completely.
+- Ignore background and composition.
+- Compare ONLY the pure outer contour (dominant silhouette).
+
+Objects:
+- Object A: {object_a}
+- Object B: {object_b}
+
+Task:
+Calculate the silhouette overlap percentage between Object A and Object B.
+
+Consider:
+- The dominant outer contour/shape of each main object
+- How much of Object A's silhouette would overlap with Object B's silhouette if placed in the same position
+- Only the main object body, not any attached or nearby objects
+- Pure geometric shape comparison
+
+Return JSON only:
+{{
+  "silhouette_overlap_percentage": 0-100,
+  "reason": "brief explanation of the overlap calculation"
+}}
+
+The percentage must be a number between 0 and 100."""
+    
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"SILHOUETTE_OVERLAP_EVAL attempt={attempt+1} A={object_a} B={object_b} model={model_name}")
+            
+            # Use Responses API for o* models
+            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+            if is_o_model:
+                response = client.responses.create(model=model_name, input=prompt)
+                response_text = response.output_text.strip()
+            else:
+                # Fallback to Chat Completions
+                response = client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "You are a silhouette similarity analyzer. Output must be in English only. Return JSON only without additional text."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.3,
+                    max_tokens=500
+                )
+                response_text = response.choices[0].message.content.strip()
+            
+            # Parse JSON
+            if response_text.startswith("```"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            if response_text.startswith("```json"):
+                lines = response_text.split('\n')
+                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
+            
+            result = json.loads(response_text)
+            overlap = float(result.get("silhouette_overlap_percentage", 0))
+            
+            # Validate range
+            if overlap < 0:
+                overlap = 0
+            if overlap > 100:
+                overlap = 100
+            
+            reason = result.get("reason", "")
+            logger.info(f"SILHOUETTE_OVERLAP_EVAL SUCCESS: A={object_a} B={object_b} overlap={overlap}% reason={reason}")
+            return overlap
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"SILHOUETTE_OVERLAP_EVAL JSON parse error (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            # Fallback: assume low overlap if parsing fails
+            logger.warning(f"SILHOUETTE_OVERLAP_EVAL: Failed to parse, defaulting to 0% overlap")
+            return 0.0
+        except Exception as e:
+            logger.error(f"SILHOUETTE_OVERLAP_EVAL failed (attempt {attempt+1}/{max_retries}): {e}")
+            if attempt < max_retries - 1:
+                continue
+            # Fallback: assume low overlap if evaluation fails
+            logger.warning(f"SILHOUETTE_OVERLAP_EVAL: Failed, defaulting to 0% overlap")
+            return 0.0
+    
+    # Final fallback
+    return 0.0
+
+
 def render_final_ad_bytes(
     client: OpenAI,
     object_a_name: str,
@@ -3989,11 +4055,25 @@ def render_final_ad_bytes(
     object_a_sub = object_a_item.get("sub_object", "") if object_a_item else ""
     object_b_sub = object_b_item.get("sub_object", "") if object_b_item else ""
     
-    # Log replacement input before image generation
-    if ACE_IMAGE_MODE == "replacement":
-        logger.info(f"REPLACEMENT_INPUT A={object_a_name} A_sub={object_a_sub} A_ctx={object_a_context} | B={object_b_name} B_sub={object_b_sub}")
+    # SILHOUETTE DECISION RULE: Evaluate overlap to determine mode
+    silhouette_overlap = evaluate_silhouette_overlap(
+        object_a=object_a_name,
+        object_b=object_b_name
+    )
     
-    # Create prompt
+    # Determine mode based on silhouette overlap threshold (85%)
+    SILHOUETTE_THRESHOLD = 85.0
+    use_replacement_mode = silhouette_overlap >= SILHOUETTE_THRESHOLD
+    
+    if use_replacement_mode:
+        selected_mode = "replacement"
+        logger.info(f"SILHOUETTE_DECISION: overlap={silhouette_overlap}% >= {SILHOUETTE_THRESHOLD}% → REPLACEMENT mode")
+        logger.info(f"REPLACEMENT_INPUT A={object_a_name} A_sub={object_a_sub} A_ctx={object_a_context} | B={object_b_name} B_sub={object_b_sub}")
+    else:
+        selected_mode = "side_by_side"
+        logger.info(f"SILHOUETTE_DECISION: overlap={silhouette_overlap}% < {SILHOUETTE_THRESHOLD}% → SIDE_BY_SIDE mode (auto fallback)")
+    
+    # Create prompt with determined mode
     prompt_used = create_image_prompt(
         object_a=object_a_name,
         object_b=object_b_name,
@@ -4006,7 +4086,8 @@ def render_final_ad_bytes(
         object_b_context=object_b_context,
         object_a_item=object_a_item,
         object_b_item=object_b_item,
-        product_name=product_name
+        product_name=product_name,
+        force_mode=selected_mode  # Pass determined mode
     )
     
     # Generate image
