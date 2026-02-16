@@ -4123,7 +4123,8 @@ def create_image_prompt(
     effective_mode = force_mode if force_mode else ACE_IMAGE_MODE
     # Log is handled in MODE_APPLIED in render_final_ad_bytes, so we don't duplicate here
     
-    # MODE 1 — REPLACEMENT (ONLY IF ≥ 85% silhouette similarity)
+    # MODE 1 — REPLACEMENT (TEMPORARILY DISABLED - see TEMP_DISABLE_REPLACEMENT in render_final_ad_bytes)
+    # This branch should not execute as replacement mode is disabled
     if effective_mode == "replacement":
         # Get A.sub_object directly from object_a_item (NEVER use B.sub_object)
         scene_context = object_a_context or f"{object_a} in its classic situation"
@@ -4560,37 +4561,35 @@ def render_final_ad_bytes(
     object_a_sub = object_a_item.get("sub_object", "") if object_a_item else ""
     object_b_sub = object_b_item.get("sub_object", "") if object_b_item else ""
     
-    # SILHOUETTE SIMILARITY DECISION: Evaluate similarity to determine mode
+    # SILHOUETTE SIMILARITY DECISION: Evaluate similarity (always computed for measurement)
     silhouette_similarity_pct = evaluate_silhouette_similarity(
         object_a=object_a_name,
         object_b=object_b_name
     )
     
-    # Determine mode based on silhouette similarity threshold (85%)
+    # TEMP_DISABLE_REPLACEMENT: Force side_by_side mode regardless of similarity
+    # Similarity is still computed and logged for measurement purposes
     SILHOUETTE_THRESHOLD = 85.0
-    use_replacement_mode = silhouette_similarity_pct >= SILHOUETTE_THRESHOLD
+    replacement_eligible = silhouette_similarity_pct >= SILHOUETTE_THRESHOLD
     
-    if use_replacement_mode:
-        final_mode = "replacement"
-    else:
-        final_mode = "side_by_side"
+    # Force side_by_side mode (replacement disabled)
+    final_mode = "side_by_side"
     
-    # Log mode decision
-    logger.info(f"MODE_DECISION SILHOUETTE_SIMILARITY_PCT={silhouette_similarity_pct} threshold={SILHOUETTE_THRESHOLD} final_mode={final_mode}")
+    # Log similarity and replacement eligibility
+    logger.info(f"SILHOUETTE_SIMILARITY_PCT={silhouette_similarity_pct}")
+    logger.info(f"REPLACEMENT_DISABLED=true")
+    if replacement_eligible:
+        logger.info(f"REPLACEMENT_ELIGIBLE=true (similarity >= {SILHOUETTE_THRESHOLD}%, but replacement mode is disabled)")
     
-    if final_mode == "replacement":
-        # REPLACEMENT GUARD: A.sub_object must exist
-        if not object_a_sub or object_a_sub.strip() == "":
-            raise ValueError("REPLACEMENT_MISSING_A_SUB_OBJECT: A.sub_object is missing or empty, cannot generate replacement image")
-        
-        logger.info(f"REPLACEMENT_INPUT A={object_a_name} A_sub={object_a_sub} A_ctx={object_a_context} | B={object_b_name} B_sub={object_b_sub}")
-    else:
-        # SIDE_BY_SIDE mode: Visual overlap is handled in the image prompt (geometry/layout)
-        # Note: SIDE_BY_SIDE_OVERLAP is a separate geometry metric for side-by-side layout,
-        # not the silhouette similarity metric used for mode decision.
-        # The prompt will handle visual overlap rules (e.g., "partially overlap visually in the center").
-        # We don't compute a separate overlap percentage here, as it's a visual composition rule, not a metric.
-        pass
+    # Log mode decision (forced to side_by_side)
+    logger.info(f"MODE_DECISION SILHOUETTE_SIMILARITY_PCT={silhouette_similarity_pct} threshold={SILHOUETTE_THRESHOLD} final_mode={final_mode} (forced)")
+    logger.info(f"FINAL_MODE={final_mode}")
+    
+    # SIDE_BY_SIDE mode: Visual overlap is handled in the image prompt (geometry/layout)
+    # Note: SIDE_BY_SIDE_OVERLAP is a separate geometry metric for side-by-side layout,
+    # not the silhouette similarity metric used for measurement.
+    # The prompt will handle visual overlap rules (e.g., "partially overlap visually in the center").
+    # We don't compute a separate overlap percentage here, as it's a visual composition rule, not a metric.
     
     # Log mode application before image generation
     logger.info(f"MODE_APPLIED final_mode={final_mode} ACE_LAYOUT_MODE={ACE_LAYOUT_MODE} STEP3_MODE={final_mode.upper()}")
