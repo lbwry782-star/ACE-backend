@@ -7,7 +7,7 @@ import json
 import base64
 import os
 from typing import Dict, Optional
-# ENGINE REMOVED: Engine imports deleted - engine module removed
+from engine.side_by_side_v1 import generate_preview_data
 
 app = Flask(__name__)
 
@@ -117,33 +117,76 @@ def generate():
 @app.route('/api/preview', methods=['POST'])
 def preview():
     """
-    Generate a single ad and return as JSON for preview.
+    Generate a single ad preview and return as JSON.
     
-    ENGINE DISABLED: Returns 501 stub response (no image generation, no OpenAI calls).
+    By default returns text-only (no image) for low cost.
+    Set "includeImage": true in the request body to generate an image.
     
     Request JSON:
     {
-        "productName": string,
-        "productDescription": string,
-        "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
-        "adIndex": int (optional, default 0),
-        "batchState": {  // optional
-            "material_analogy_used": boolean,
-            "structural_morphology_used": boolean,
-            "structural_exception_used": boolean
-        }
+        "productName": string (required),
+        "productDescription": string (required),
+        "imageSize": "1024x1024" | "1536x1024" | "1024x1536" (optional),
+        "adIndex": int (optional, 1-3),
+        "sessionId": string (optional),
+        "includeImage": boolean (optional, default false = text-only)
     }
     
-    Returns: 501 with engine_disabled error (no credits consumed, no OpenAI calls)
+    Returns: 200 JSON with ad_goal, object_a, object_b, headline, marketing_copy_50_words, etc.
     """
-    # ENGINE DISABLED: Short-circuit immediately before any engine logic
-    # No OpenAI calls, no image generation, no credit consumption
-    logger.info("ENGINE_DISABLED /api/preview called")
-    return jsonify({
-        'ok': False,
-        'error': 'engine_disabled',
-        'message': 'ACE engine is disabled (rebuild mode).'
-    }), 501
+    request_id = str(uuid.uuid4())
+    try:
+        if not request.is_json:
+            logger.warning(f"[{request_id}] Preview request is not JSON")
+            return jsonify({
+                'ok': False,
+                'error': 'invalid_request',
+                'message': 'Request must be JSON'
+            }), 400
+        payload = request.get_json()
+        if not payload.get("productName"):
+            return jsonify({
+                'ok': False,
+                'error': 'missing_field',
+                'message': 'productName is required'
+            }), 400
+        if not payload.get("productDescription"):
+            return jsonify({
+                'ok': False,
+                'error': 'missing_field',
+                'message': 'productDescription is required'
+            }), 400
+        result = generate_preview_data(payload)
+        return jsonify(result), 200
+    except ValueError as e:
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Preview failed (400): {error_msg}", exc_info=True)
+        if "invalid_request" in error_msg.lower():
+            actual_error = error_msg.split("invalid_request:", 1)[-1].strip() if "invalid_request:" in error_msg else error_msg
+            return jsonify({
+                'ok': False,
+                'error': 'invalid_request',
+                'message': f'Invalid request: {actual_error}'
+            }), 400
+        return jsonify({
+            'ok': False,
+            'error': 'validation_error',
+            'message': error_msg
+        }), 400
+    except Exception as e:
+        error_msg = str(e)
+        logger.error(f"[{request_id}] Preview failed: {error_msg}", exc_info=True)
+        if "rate_limited" in error_msg:
+            return jsonify({
+                'ok': False,
+                'error': 'rate_limited',
+                'message': 'Rate limit exceeded. Please try again later.'
+            }), 503
+        return jsonify({
+            'ok': False,
+            'error': 'generation_failed',
+            'message': str(error_msg)
+        }), 500
 
 
 # SESSION SYSTEM REMOVED: All entitlement endpoints deleted

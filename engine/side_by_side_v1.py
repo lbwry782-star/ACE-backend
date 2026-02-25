@@ -5024,14 +5024,40 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
         if ENABLE_PLAN_CACHE and plan_cache_key:
             _set_to_plan_cache(plan_cache_key, plan_data)
     
-    # If plan_only mode, return plan immediately (no image generation)
+    # Text-only preview: return plan + marketing copy, no image (default unless includeImage=true)
+    text_only = not payload_dict.get("includeImage", False)
+    if text_only:
+        marketing_copy = generate_marketing_copy(
+            product_name=product_name,
+            product_description=product_description,
+            ad_goal=ad_goal
+        )
+        text_only_response = {
+            "ad_goal": ad_goal,
+            "ad_index": ad_index,
+            "object_a": object_a_name,
+            "object_b": object_b_name,
+            "chosen_objects": [object_a_name, object_b_name],
+            "mode_decision": "side_by_side",
+            "headline": headline,
+            "marketing_copy_50_words": marketing_copy,
+            "shape_similarity_score": shape_score,
+            "shape_hint": shape_hint,
+        }
+        t_total_ms = int((time.time() - t_start) * 1000)
+        cache_hit = preview_cache_hit or plan_cache_hit
+        logger.info(f"[{request_id}] PREVIEW_MODE=text_only image_called=false")
+        logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms=0 cache_hit={cache_hit}")
+        return text_only_response
+    
+    # If plan_only mode (env), return plan immediately (no image generation)
     if PREVIEW_MODE == "plan_only":
         t_total_ms = int((time.time() - t_start) * 1000)
         cache_hit = preview_cache_hit or plan_cache_hit
         logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms=0 cache_hit={cache_hit}")
         return plan_data if not cache_hit else cached_plan
     
-    # STEP 3 - IMAGE GENERATION (only if PREVIEW_MODE=image)
+    # STEP 3 - IMAGE GENERATION (only if includeImage=true and PREVIEW_MODE=image)
     # Use FINAL image size and quality (same as ZIP) - no preview-only variants
     t_image_start = time.time()
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
