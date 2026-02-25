@@ -36,7 +36,7 @@ ENABLE_IMAGE_CACHE = os.environ.get("ENABLE_IMAGE_CACHE", "0") == "1"
 IMAGE_CACHE_TTL_SECONDS = int(os.environ.get("IMAGE_CACHE_TTL_SECONDS", "900"))
 
 # Preview optimization flags
-PREVIEW_PLANNER_MODEL = os.environ.get("PREVIEW_PLANNER_MODEL", "o4-mini")  # Model for preview planning
+PREVIEW_PLANNER_MODEL = os.environ.get("PREVIEW_PLANNER_MODEL", "o3-pro")  # Model for preview planning
 GENERATE_PLANNER_MODEL = os.environ.get("GENERATE_PLANNER_MODEL", "o3-pro")  # Model for generate planning
 PREVIEW_SKIP_PHYSICAL_CONTEXT = os.environ.get("PREVIEW_SKIP_PHYSICAL_CONTEXT", "1") == "1"  # Skip STEP 1.5 in preview
 PREVIEW_USE_CACHE = os.environ.get("PREVIEW_USE_CACHE", "1") == "1"  # Use cache for preview
@@ -458,7 +458,7 @@ def build_ad_goal(product_name: str, product_description: str) -> str:
         "Protect natural ecosystems and wildlife habitats"
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    model = os.environ.get("OPENAI_TEXT_MODEL", "o3-pro")
     
     prompt = f"""Generate a single advertising goal (ad_goal) from the product information below.
 
@@ -554,7 +554,7 @@ def build_theme_tags(ad_goal: str) -> List[str]:
         List[str]: List of theme tags (e.g., ["marketing", "ads", "campaigns", ...])
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    model = os.environ.get("OPENAI_TEXT_MODEL", "o3-pro")
     
     prompt = f"""Generate 8-12 short theme tags (1-2 words each) that represent the key themes and topics related to this advertising goal.
 
@@ -761,7 +761,7 @@ def build_step0_bundle(
         Dict with ad_goal, difficulty_score, object_list
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o3-pro")
     
     prompt = f"""Generate a complete advertising bundle in one JSON response.
 
@@ -1029,7 +1029,7 @@ def build_object_list_from_ad_goal(
         return cached_object_list
     
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o3-pro")
     
     # Check if model is o* type - these use Responses API
     is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
@@ -3029,7 +3029,7 @@ def generate_marketing_copy(
         str: Marketing copy (45-55 words)
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o3-pro")
     
     prompt = f"""Generate marketing copy for an advertisement.
 
@@ -3162,7 +3162,7 @@ def generate_headline_only(
     """
     STEP 2 - HEADLINE GENERATION
     
-    Generate headline ONLY using OPENAI_TEXT_MODEL (default: o4-mini).
+    Generate headline ONLY using OPENAI_TEXT_MODEL (default: o3-pro).
     
     Input:
     - productName
@@ -3181,7 +3181,7 @@ def generate_headline_only(
     - Do NOT re-select objects
     """
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o4-mini")
+    model_name = os.environ.get("OPENAI_TEXT_MODEL", "o3-pro")
     
     logger.info(f"STEP 2 - HEADLINE GENERATION: text_model={model_name}, productName={product_name[:50]}, message={message[:50]}, object_a={object_a}, object_b={object_b}, hard_mode={hard_mode}")
     
@@ -4691,6 +4691,9 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     """
     request_id = str(uuid.uuid4())
     t_start = time.time()
+    logger.info(
+        f"MODEL_CONFIG text_model={os.environ.get('OPENAI_TEXT_MODEL', 'o3-pro')} preview_planner={PREVIEW_PLANNER_MODEL} generate_planner={GENERATE_PLANNER_MODEL} shape_model={os.environ.get('OPENAI_SHAPE_MODEL', 'o3-pro')} image_model={os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1.5')}"
+    )
     
     # Extract and validate required fields
     product_name = payload_dict.get("productName", "")
@@ -5152,6 +5155,9 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
     """
     request_id = str(uuid.uuid4())
     t_start = time.time()
+    logger.info(
+        f"MODEL_CONFIG text_model={os.environ.get('OPENAI_TEXT_MODEL', 'o3-pro')} preview_planner={PREVIEW_PLANNER_MODEL} generate_planner={GENERATE_PLANNER_MODEL} shape_model={os.environ.get('OPENAI_SHAPE_MODEL', 'o3-pro')} image_model={os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1.5')}"
+    )
     
     # Extract and validate required fields
     product_name = payload_dict.get("productName", "")

@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify, send_file, Response
-from flask_cors import CORS
 import uuid
 import logging
 import io
@@ -8,35 +7,66 @@ import json
 import base64
 import os
 from typing import Dict, Optional
-from engine.side_by_side_v1 import generate_zip, generate_preview_data
+# ENGINE REMOVED: Engine imports deleted - engine module removed
 
 app = Flask(__name__)
 
 # ============================================================================
-# CORS Configuration (Flask-CORS)
+# CORS Configuration (Manual Implementation)
 # ============================================================================
 
-# Allowed origins for production and development
+# Allowed origins (exact match)
 ALLOWED_ORIGINS = [
-    "https://lbwry782-star.github.io",
     "https://ace-advertising.agency",
-    "http://localhost:5173"
+    "https://www.ace-advertising.agency"
 ]
 
-# Configure CORS for /api/* routes only
-CORS(
-    app,
-    resources={
-        r"/api/*": {
-            "origins": ALLOWED_ORIGINS,
-            "methods": ["GET", "POST", "OPTIONS"],
-            "allow_headers": ["Content-Type", "Authorization", "X-ACE-Batch-State"],
-            "expose_headers": ["X-ACE-Batch-State"],
-            "supports_credentials": False,
-            "max_age": 86400
-        }
-    }
-)
+def is_origin_allowed(origin: Optional[str]) -> bool:
+    """Check if origin is in allowed list."""
+    if not origin:
+        return False
+    return origin in ALLOWED_ORIGINS
+
+@app.before_request
+def handle_preflight():
+    """Handle OPTIONS preflight requests for CORS."""
+    if request.method == "OPTIONS" and request.path.startswith("/api/"):
+        origin = request.headers.get("Origin")
+        
+        if is_origin_allowed(origin):
+            response = Response('', status=200)
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+            response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
+            response.headers["Access-Control-Max-Age"] = "86400"
+            return response
+        else:
+            # Return 200 without Allow-Origin if origin not allowed (don't reveal info)
+            return Response('', status=200)
+
+@app.after_request
+def add_cors_headers(response):
+    """
+    Add CORS headers to all /api/* responses.
+    
+    This applies to all responses (200, 404, 500, etc.) for endpoints under /api/.
+    """
+    if request.path.startswith("/api/"):
+        origin = request.headers.get("Origin")
+        
+        if is_origin_allowed(origin):
+            # Add CORS headers for allowed origin
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Vary"] = "Origin"
+            response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
+            
+            # Expose X-ACE-Batch-State header for frontend (if needed)
+            if "X-ACE-Batch-State" in response.headers:
+                response.headers["Access-Control-Expose-Headers"] = "X-ACE-Batch-State"
+    
+    return response
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -56,213 +86,64 @@ def generate():
     """
     Generate a single ad and return as ZIP file.
     
-    SideBySide Engine v1: Generates one ad with SIDE_BY_SIDE layout.
+    ENGINE DISABLED: Returns 501 stub response (no image generation, no OpenAI calls).
     
     Request JSON:
     {
-        "productName": string (required),
-        "productDescription": string (required),
-        "imageSize": string (e.g. "1536x1024", default: "1536x1024"),
-        "language": string ("he" or "en", default: "he"),
-        "adIndex": int (1-3, default: 1, 0 is treated as 1),
-        "sessionId": string uuid (optional),
-        "history": array of previous ads (optional),
-        "objectList": array of strings (optional, uses default if missing)
+        "productName": string,
+        "productDescription": string,
+        "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
+        "adIndex": int (optional, default 0),
+        "batchState": {  // optional
+            "material_analogy_used": boolean,
+            "structural_morphology_used": boolean,
+            "structural_exception_used": boolean
+        }
     }
     
-    Returns: application/zip with image.jpg and text.txt
+    Returns: 501 with engine_disabled error (no credits consumed, no OpenAI calls)
     """
-    request_id = str(uuid.uuid4())
-    
-    try:
-        # Get JSON payload
-        if not request.is_json:
-            logger.warning(f"[{request_id}] Request is not JSON")
-            return jsonify({
-                'ok': False,
-                'error': 'invalid_request',
-                'message': 'Request must be JSON'
-            }), 400
-        
-        payload = request.get_json()
-        
-        # Validate required fields
-        if not payload.get("productName"):
-            logger.warning(f"[{request_id}] Missing productName")
-            return jsonify({
-                'ok': False,
-                'error': 'missing_field',
-                'message': 'productName is required'
-            }), 400
-        
-        if not payload.get("productDescription"):
-            logger.warning(f"[{request_id}] Missing productDescription")
-            return jsonify({
-                'ok': False,
-                'error': 'missing_field',
-                'message': 'productDescription is required'
-            }), 400
-        
-        # Generate ZIP using SideBySide Engine v1
-        logger.info(f"[{request_id}] Starting generation: productName={payload.get('productName')[:50]}, "
-                   f"adIndex={payload.get('adIndex', 0)}, sessionId={payload.get('sessionId')}")
-        
-        zip_bytes = generate_zip(payload_dict=payload, is_preview=False)
-        
-        logger.info(f"[{request_id}] Generation successful, returning ZIP ({len(zip_bytes)} bytes), generate_response_type=zip")
-        
-        # Return ZIP file
-        return send_file(
-            io.BytesIO(zip_bytes),
-            mimetype='application/zip',
-            as_attachment=True,
-            download_name='ad.zip'
-        )
-        
-    except ValueError as e:
-        # Handle 400 errors (invalid_request from OpenAI)
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Generation failed (400): {error_msg}", exc_info=True)
-        
-        if "invalid_request" in error_msg.lower():
-            # Extract the actual error message (after "invalid_request: ")
-            actual_error = error_msg.split("invalid_request:", 1)[-1].strip() if "invalid_request:" in error_msg else error_msg
-            return jsonify({
-                'ok': False,
-                'error': 'invalid_request',
-                'message': f'Invalid request to OpenAI: {actual_error}'
-            }), 400
-        else:
-            # Other ValueError - still 400
-            return jsonify({
-                'ok': False,
-                'error': 'validation_error',
-                'message': error_msg
-            }), 400
-            
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Generation failed: {error_msg}", exc_info=True)
-        
-        # Handle rate limit specifically
-        if "rate_limited" in error_msg:
-            return jsonify({
-                'ok': False,
-                'error': 'rate_limited',
-                'message': 'Rate limit exceeded. Please try again later.'
-            }), 503
-        
-        # Generic error
-        return jsonify({
-            'ok': False,
-            'error': 'generation_failed',
-            'message': f'Failed to generate ad: {error_msg}'
-        }), 500
+    # ENGINE DISABLED: Short-circuit immediately before any engine logic
+    # No OpenAI calls, no image generation, no credit consumption
+    logger.info("ENGINE_DISABLED /api/generate called")
+    return jsonify({
+        'ok': False,
+        'error': 'engine_disabled',
+        'message': 'ACE engine is disabled (rebuild mode).'
+    }), 501
     
 
 
 @app.route('/api/preview', methods=['POST'])
 def preview():
     """
-    Generate a single ad preview and return as JSON.
+    Generate a single ad and return as JSON for preview.
     
-    SideBySide Engine v1: Same logic as /api/generate, returns JSON for preview.
+    ENGINE DISABLED: Returns 501 stub response (no image generation, no OpenAI calls).
     
     Request JSON:
     {
-        "productName": string (required),
-        "productDescription": string (required),
-        "imageSize": string (e.g. "1536x1024", default: "1536x1024"),
-        "language": string ("he" or "en", default: "he"),
-        "adIndex": int (1-3, default: 1, 0 is treated as 1),
-        "sessionId": string uuid (optional),
-        "history": array of previous ads (optional),
-        "objectList": array of strings (optional, uses default if missing)
+        "productName": string,
+        "productDescription": string,
+        "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
+        "adIndex": int (optional, default 0),
+        "batchState": {  // optional
+            "material_analogy_used": boolean,
+            "structural_morphology_used": boolean,
+            "structural_exception_used": boolean
+        }
     }
     
-    Returns: application/json with imageBase64, ad_goal, headline, chosen_objects, layout
+    Returns: 501 with engine_disabled error (no credits consumed, no OpenAI calls)
     """
-    request_id = str(uuid.uuid4())
-    
-    try:
-        # Get JSON payload
-        if not request.is_json:
-            logger.warning(f"[{request_id}] Preview request is not JSON")
-            return jsonify({
-                'ok': False,
-                'error': 'invalid_request',
-                'message': 'Request must be JSON'
-            }), 400
-        
-        payload = request.get_json()
-        
-        # Validate required fields
-        if not payload.get("productName"):
-            logger.warning(f"[{request_id}] Preview missing productName")
-            return jsonify({
-                'ok': False,
-                'error': 'missing_field',
-                'message': 'productName is required'
-            }), 400
-        
-        if not payload.get("productDescription"):
-            logger.warning(f"[{request_id}] Preview missing productDescription")
-            return jsonify({
-                'ok': False,
-                'error': 'missing_field',
-                'message': 'productDescription is required'
-            }), 400
-        
-        # Generate preview data using SideBySide Engine v1
-        logger.info(f"[{request_id}] Starting preview: productName={payload.get('productName')[:50]}, "
-                   f"adIndex={payload.get('adIndex', 0)}, sessionId={payload.get('sessionId')}")
-        
-        preview_data = generate_preview_data(payload_dict=payload)
-        
-        logger.info(f"[{request_id}] Preview generation successful, returning JSON, preview_response_type=json")
-        
-        # Return JSON response
-        return jsonify(preview_data), 200
-        
-    except ValueError as e:
-        # Handle 400 errors (invalid_request from OpenAI)
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Preview generation failed (400): {error_msg}", exc_info=True)
-        
-        if "invalid_request" in error_msg.lower():
-            # Extract the actual error message (after "invalid_request: ")
-            actual_error = error_msg.split("invalid_request:", 1)[-1].strip() if "invalid_request:" in error_msg else error_msg
-            return jsonify({
-                'ok': False,
-                'error': 'invalid_request',
-                'message': f'Invalid request to OpenAI: {actual_error}'
-            }), 400
-        else:
-            # Other ValueError - still 400
-            return jsonify({
-                'ok': False,
-                'error': 'validation_error',
-                'message': error_msg
-            }), 400
-            
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Preview generation failed: {error_msg}", exc_info=True)
-        
-        # Handle rate limit specifically
-        if "rate_limited" in error_msg:
-            return jsonify({
-                'ok': False,
-                'error': 'rate_limited',
-                'message': 'Rate limit exceeded. Please try again later.'
-            }), 503
-        
-        # Generic error
-        return jsonify({
-            'ok': False,
-            'error': 'generation_failed',
-            'message': f'Failed to generate preview: {error_msg}'
-        }), 500
+    # ENGINE DISABLED: Short-circuit immediately before any engine logic
+    # No OpenAI calls, no image generation, no credit consumption
+    logger.info("ENGINE_DISABLED /api/preview called")
+    return jsonify({
+        'ok': False,
+        'error': 'engine_disabled',
+        'message': 'ACE engine is disabled (rebuild mode).'
+    }), 501
 
 
 # SESSION SYSTEM REMOVED: All entitlement endpoints deleted
