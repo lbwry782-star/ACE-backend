@@ -4139,6 +4139,15 @@ def create_image_prompt(
     effective_mode = force_mode if force_mode else ACE_IMAGE_MODE
     # Log is handled in MODE_APPLIED in render_final_ad_bytes, so we don't duplicate here
     
+    # Shared composition: pencil style, pure white background, very wide margins, lots of negative space
+    negative_space_rules = """
+Composition and framing (CRITICAL):
+- Pencil drawing style only; soft pencil sketch aesthetic.
+- Pure white background only; no scene, no texture, no gradient.
+- Very wide white margins on all four sides; lots of negative space.
+- Subject(s) centered and small; together they occupy about 25-35% of the canvas.
+- Subject(s) must not touch or nearly touch the image edges; keep ample empty white space between subjects and frame."""
+    
     # MODE 1 — REPLACEMENT (TEMPORARILY DISABLED - see TEMP_DISABLE_REPLACEMENT in render_final_ad_bytes)
     # This branch should not execute as replacement mode is disabled
     if effective_mode == "replacement":
@@ -4167,7 +4176,7 @@ def create_image_prompt(
         replacement_main_object = object_b
         product_name_str = product_name or "PRODUCT"
         
-        replacement_prompt = f"""Create a professional photorealistic advertisement image as a single unified scene.
+        replacement_prompt = f"""Create a professional advertisement image in pencil drawing style as a single unified scene.
 
 BASE SCENE:
 The scene is based entirely on:
@@ -4206,11 +4215,11 @@ Headline must have visual weight comparable to the main object.
 
 No additional text allowed.
 
-Ultra realistic photography only.
+Pencil drawing style only; soft pencil sketch aesthetic. Pure white background.
 No logos.
 No labels.
 No surreal distortions."""
-        
+        replacement_prompt = replacement_prompt.rstrip() + negative_space_rules
         return replacement_prompt
     
     # MODE 2 — SIDE_BY_SIDE (AUTO FALLBACK IF < 85%)
@@ -4221,7 +4230,7 @@ No surreal distortions."""
     
     product_name_str = product_name or "PRODUCT"
     
-    side_by_side_prompt = f"""Create a professional photorealistic advertisement image with SIDE BY SIDE composition.
+    side_by_side_prompt = f"""Create a professional advertisement image in pencil drawing style with SIDE BY SIDE composition.
 
 Composition Rules:
 
@@ -4242,7 +4251,7 @@ Objects must not be duplicated.
 Main object types must be different.
 
 Background:
-Neutral, clean, professional advertising background.
+Pure white only; no scene, no texture, no gradient.
 
 Headline:
 
@@ -4254,10 +4263,10 @@ Must be large and dominant.
 
 Positioned above or integrated professionally.
 
-Photorealistic.
+Pencil drawing style only; soft pencil sketch aesthetic.
 No logos.
 No brand graphics.
-No text except headline.{shape_instruction}"""
+No text except headline.{shape_instruction}{negative_space_rules}"""
     
     return side_by_side_prompt
 
@@ -4347,6 +4356,7 @@ def generate_image_with_dalle(
         
         try:
             logger.info(f"STEP 3 - IMAGE GENERATION: attempt={attempt + 1}/{max_retries}, image_model={model}, image_size={image_size}")
+            logger.info("NEGATIVE_SPACE=enabled subject_scale=small margins=very_wide background=white")
             
             # Simple call without response_format for gpt-image-1.5 compatibility
             # Include quality parameter for preview (low) vs generate (high)
