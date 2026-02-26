@@ -18,11 +18,23 @@ import string
 import hashlib
 import re
 from typing import Dict, List, Optional, Tuple
+import httpx
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from threading import Lock
 
 logger = logging.getLogger(__name__)
+
+
+# Exceptions for STEP0_BUNDLE timeout/errors (so app can return 504/500)
+class Step0BundleTimeoutError(Exception):
+    """STEP0_BUNDLE OpenAI call timed out."""
+    pass
+
+
+class Step0BundleOpenAIError(Exception):
+    """STEP0_BUNDLE OpenAI call failed (non-timeout)."""
+    pass
 
 # ============================================================================
 # Feature Flags (from ENV, with safe defaults = legacy behavior)
@@ -751,11 +763,17 @@ def parse_image_size(image_size: str) -> Tuple[int, int]:
         return (1536, 1024)
 
 
+# STEP0_BUNDLE OpenAI call timeouts (connect 10s, read 90s max)
+STEP0_OPENAI_CONNECT_TIMEOUT = 10.0
+STEP0_OPENAI_READ_TIMEOUT = 90.0
+
+
 def build_step0_bundle(
     product_name: str,
     product_description: str,
     language: str = "en",
-    max_retries: int = 2
+    max_retries: int = 2,
+    request_id: Optional[str] = None
 ) -> Dict:
     """
     STEP 0 - UNIFIED BUNDLE: ad_goal + difficulty_score + object_list(150)
@@ -772,11 +790,18 @@ def build_step0_bundle(
         product_description: Product description
         language: Language (default: "en")
         max_retries: Maximum retry attempts
+        request_id: Optional request ID for logging
     
     Returns:
         Dict with ad_goal, difficulty_score, object_list
+    
+    Raises:
+        Step0BundleTimeoutError: On OpenAI call timeout (caller should return 504)
+        Step0BundleOpenAIError: On other OpenAI errors (caller should return 500)
     """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    rid = request_id or str(uuid.uuid4())
+    step0_timeout = httpx.Timeout(STEP0_OPENAI_CONNECT_TIMEOUT, STEP0_OPENAI_READ_TIMEOUT)
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), timeout=step0_timeout)
     model_name = _get_text_model()
     
     prompt = f"""Generate a complete advertising bundle in one JSON response.
@@ -831,24 +856,37 @@ Return JSON only:
     for attempt in range(max_attempts):
         try:
             logger.info(f"STEP0_BUNDLE attempt={attempt+1} model={model_name} product={product_name[:50]}")
-            
-            # Use Responses API for o* models
-            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-            if is_o_model:
-                response = client.responses.create(model=model_name, input=prompt)
-                response_text = response.output_text.strip()
-            else:
-                # Fallback to Chat Completions
-                response = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "You are an advertising content generator. Output must be in English only. Return JSON only without additional text."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.7,
-                    max_tokens=8000
-                )
-                response_text = response.choices[0].message.content.strip()
+            logger.info(f"STEP0_BUNDLE_OPENAI_CALL_START request_id={rid} model={model_name} product={product_name[:50]}")
+            t_openai_start = time.time()
+            try:
+                # Use Responses API for o* models
+                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+                if is_o_model:
+                    response = client.responses.create(model=model_name, input=prompt)
+                    response_text = response.output_text.strip()
+                else:
+                    # Fallback to Chat Completions
+                    response = client.chat.completions.create(
+                        model=model_name,
+                        messages=[
+                            {"role": "system", "content": "You are an advertising content generator. Output must be in English only. Return JSON only without additional text."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.7,
+                        max_tokens=8000
+                    )
+                    response_text = response.choices[0].message.content.strip()
+            except httpx.TimeoutException as e:
+                elapsed_ms = int((time.time() - t_openai_start) * 1000)
+                logger.error(f"STEP0_BUNDLE_OPENAI_CALL_TIMEOUT request_id={rid} elapsed_ms={elapsed_ms}")
+                raise Step0BundleTimeoutError(f"Step0 bundle timed out after {elapsed_ms}ms") from e
+            except Exception as openai_err:
+                elapsed_ms = int((time.time() - t_openai_start) * 1000)
+                logger.error(f"STEP0_BUNDLE_OPENAI_CALL_ERROR request_id={rid} elapsed_ms={elapsed_ms} err={openai_err}")
+                raise Step0BundleOpenAIError(f"Step0 bundle OpenAI error: {openai_err}") from openai_err
+            elapsed_ms = int((time.time() - t_openai_start) * 1000)
+            raw_len = len(response_text) if response_text else 0
+            logger.info(f"STEP0_BUNDLE_OPENAI_CALL_END request_id={rid} elapsed_ms={elapsed_ms} raw_len={raw_len}")
             
             # Parse JSON
             if response_text.startswith("```"):
