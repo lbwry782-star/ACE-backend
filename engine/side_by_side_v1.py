@@ -4805,7 +4805,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                     del _step0_cache[step0_cache_key]
         
         if not step0_cache_hit:
-            step0_bundle = build_step0_bundle(product_name, product_description, language=language)
+            step0_bundle = build_step0_bundle(product_name, product_description, language=language, request_id=request_id)
             # Cache the bundle
             with _step0_cache_lock:
                 _step0_cache[step0_cache_key] = (step0_bundle, time.time())
@@ -5295,7 +5295,7 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                     del _step0_cache[step0_cache_key]
         
         if not step0_cache_hit:
-            step0_bundle = build_step0_bundle(product_name, product_description, language=language)
+            step0_bundle = build_step0_bundle(product_name, product_description, language=language, request_id=request_id)
             # Cache the bundle
             with _step0_cache_lock:
                 _step0_cache[step0_cache_key] = (step0_bundle, time.time())

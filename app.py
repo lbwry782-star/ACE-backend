@@ -7,7 +7,7 @@ import json
 import base64
 import os
 from typing import Dict, Optional
-from engine.side_by_side_v1 import generate_preview_data
+from engine.side_by_side_v1 import generate_preview_data, Step0BundleTimeoutError, Step0BundleOpenAIError
 
 app = Flask(__name__)
 
@@ -158,6 +158,22 @@ def preview():
             }), 400
         result = generate_preview_data(payload)
         return jsonify(result), 200
+    except Step0BundleTimeoutError as e:
+        logger.error(f"[{request_id}] Preview step0_bundle timeout: {e}", exc_info=True)
+        return jsonify({
+            'ok': False,
+            'error': 'timeout',
+            'step': 'step0_bundle',
+            'message': 'Step0 bundle timed out'
+        }), 504
+    except Step0BundleOpenAIError as e:
+        logger.error(f"[{request_id}] Preview step0_bundle OpenAI error: {e}", exc_info=True)
+        return jsonify({
+            'ok': False,
+            'error': 'openai_error',
+            'step': 'step0_bundle',
+            'message': str(e)
+        }), 500
     except ValueError as e:
         error_msg = str(e)
         logger.error(f"[{request_id}] Preview failed (400): {error_msg}", exc_info=True)
