@@ -803,6 +803,8 @@ def build_step0_bundle(
     step0_timeout = httpx.Timeout(
         connect=STEP0_OPENAI_CONNECT_TIMEOUT,
         read=STEP0_OPENAI_READ_TIMEOUT,
+        write=STEP0_OPENAI_READ_TIMEOUT,
+        pool=STEP0_OPENAI_CONNECT_TIMEOUT,
     )
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), timeout=step0_timeout)
     model_name = _get_text_model()
