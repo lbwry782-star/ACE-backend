@@ -800,7 +800,10 @@ def build_step0_bundle(
         Step0BundleOpenAIError: On other OpenAI errors (caller should return 500)
     """
     rid = request_id or str(uuid.uuid4())
-    step0_timeout = httpx.Timeout(STEP0_OPENAI_CONNECT_TIMEOUT, STEP0_OPENAI_READ_TIMEOUT)
+    step0_timeout = httpx.Timeout(
+        connect=STEP0_OPENAI_CONNECT_TIMEOUT,
+        read=STEP0_OPENAI_READ_TIMEOUT,
+    )
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), timeout=step0_timeout)
     model_name = _get_text_model()
     
