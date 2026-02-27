@@ -8,6 +8,7 @@ import json
 import base64
 import os
 from threading import Lock
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 from engine.side_by_side_v1 import generate_preview_data, Step0BundleTimeoutError, Step0BundleOpenAIError
 from engine.openai_retry import OpenAIRateLimitError
@@ -91,6 +92,12 @@ _GENERATE_ARTIFACT_TTL_SECONDS = 45 * 60
 _generate_artifacts: Dict[tuple, dict] = {}  # (session_id, ad_index) -> { "image_bytes", "bodyText50", "headline", "timestamp" }
 _generate_artifacts_guard = Lock()
 
+# In-memory async job store for /api/preview (background execution + polling)
+_JOB_TTL_SECONDS = 30 * 60
+_jobs: Dict[str, dict] = {}  # jobId -> { status, created_at, finished_at, session_id, ad_index, result, error, error_message }
+_jobs_lock = Lock()
+_preview_executor = ThreadPoolExecutor(max_workers=1)
+
 
 def _get_artifact(session_id: str, ad_index: int):
     """Get stored artifact for (session_id, ad_index). Returns None if missing or expired."""
@@ -115,6 +122,26 @@ def _set_artifact(session_id: str, ad_index: int, image_bytes: bytes, body_text_
             "headline": headline,
             "timestamp": time.time(),
         }
+
+
+def _cleanup_jobs() -> None:
+    """Remove expired jobs from in-memory store."""
+    now = time.time()
+    with _jobs_lock:
+        expired_ids = [jid for jid, job in _jobs.items() if now - job.get("created_at", now) > _JOB_TTL_SECONDS]
+        for jid in expired_ids:
+            _jobs.pop(jid, None)
+
+
+def _get_job(job_id: str) -> Optional[dict]:
+    _cleanup_jobs()
+    with _jobs_lock:
+        return _jobs.get(job_id)
+
+
+def _set_job(job_id: str, data: dict) -> None:
+    with _jobs_lock:
+        _jobs[job_id] = data
 
 
 def _acquire_session_lock(session_id: str, ad_index: int) -> bool:
@@ -262,70 +289,121 @@ def preview():
                 'message': 'productDescription is required'
             }), 400
         session_id = payload.get("sessionId") or "no_session"
-        ad_index = payload.get("adIndex", 1)
+        ad_index = int(payload.get("adIndex", 1) or 1)
+        ad_index = max(1, min(3, ad_index))
+
+        # Enforce serial execution per session: acquire lock before scheduling job
         if not _acquire_session_lock(session_id, ad_index):
             return jsonify({
                 'ok': False,
                 'error': 'busy',
                 'message': 'Generation already in progress'
             }), 409
+
+        # Create async job
+        job_id = str(uuid.uuid4())
+        created_at = time.time()
+        job_record = {
+            "jobId": job_id,
+            "status": "pending",
+            "created_at": created_at,
+            "finished_at": None,
+            "session_id": session_id,
+            "ad_index": ad_index,
+            "result": None,
+            "error": None,
+            "error_message": None,
+        }
+        _cleanup_jobs()
+        _set_job(job_id, job_record)
+        logger.info(f"JOB_CREATED jobId={job_id} sid={session_id} ad={ad_index}")
+
+        # Schedule background execution
+        def _run_preview_job(jid: str, payload_data: dict, sid: str, ad_idx: int, req_id: str) -> None:
+            start = time.time()
+            try:
+                with _jobs_lock:
+                    job = _jobs.get(jid)
+                    if not job:
+                        return
+                    job["status"] = "running"
+                try:
+                    result = generate_preview_data(payload_data)
+                    elapsed_ms = int((time.time() - start) * 1000)
+                    with _jobs_lock:
+                        job = _jobs.get(jid)
+                        if job is not None:
+                            job["status"] = "done"
+                            job["finished_at"] = time.time()
+                            job["result"] = result
+                            job["error"] = None
+                            job["error_message"] = None
+                    logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={elapsed_ms}")
+                except OpenAIRateLimitError as e:
+                    with _jobs_lock:
+                        job = _jobs.get(jid)
+                        if job is not None:
+                            job["status"] = "error"
+                            job["finished_at"] = time.time()
+                            job["error"] = "rate_limited"
+                            job["error_message"] = e.message
+                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err=rate_limited")
+                except Step0BundleTimeoutError as e:
+                    with _jobs_lock:
+                        job = _jobs.get(jid)
+                        if job is not None:
+                            job["status"] = "error"
+                            job["finished_at"] = time.time()
+                            job["error"] = "timeout"
+                            job["error_message"] = "Step0 bundle timed out"
+                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err=timeout")
+                except Step0BundleOpenAIError as e:
+                    with _jobs_lock:
+                        job = _jobs.get(jid)
+                        if job is not None:
+                            job["status"] = "error"
+                            job["finished_at"] = time.time()
+                            job["error"] = "openai_error"
+                            job["error_message"] = str(e)
+                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err=openai_error")
+                except Exception as e:
+                    with _jobs_lock:
+                        job = _jobs.get(jid)
+                        if job is not None:
+                            job["status"] = "error"
+                            job["finished_at"] = time.time()
+                            job["error"] = "generation_failed"
+                            job["error_message"] = str(e)
+                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err={e}")
+            finally:
+                # Always release session lock so it never gets stuck
+                _release_session_lock(sid, ad_idx)
+
         try:
-            result = generate_preview_data(payload)
-            return jsonify(result), 200
-        finally:
-            # Always release so lock is never stuck (e.g. on Step0 timeout → 504)
+            _preview_executor.submit(_run_preview_job, job_id, payload, session_id, ad_index, request_id)
+        except Exception as e:
+            # Failed to schedule job: release lock and surface error
             _release_session_lock(session_id, ad_index)
-    except OpenAIRateLimitError as e:
-        logger.warning(f"[{request_id}] Preview rate limited: {e.message}")
-        return jsonify({
-            'ok': False,
-            'error': 'rate_limited',
-            'message': e.message
-        }), 503
-    except Step0BundleTimeoutError as e:
-        logger.error(f"[{request_id}] Preview step0_bundle timeout: {e}", exc_info=True)
-        return jsonify({
-            'ok': False,
-            'error': 'timeout',
-            'step': 'step0_bundle',
-            'message': 'Step0 bundle timed out'
-        }), 504
-    except Step0BundleOpenAIError as e:
-        logger.error(f"[{request_id}] Preview step0_bundle OpenAI error: {e}", exc_info=True)
-        return jsonify({
-            'ok': False,
-            'error': 'openai_error',
-            'step': 'step0_bundle',
-            'message': str(e)
-        }), 500
-    except ValueError as e:
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Preview failed (400): {error_msg}", exc_info=True)
-        if "invalid_request" in error_msg.lower():
-            actual_error = error_msg.split("invalid_request:", 1)[-1].strip() if "invalid_request:" in error_msg else error_msg
+            logger.error(f"JOB_ERROR jobId={job_id} sid={session_id} ad={ad_index} err=schedule_failed: {e}")
             return jsonify({
                 'ok': False,
-                'error': 'invalid_request',
-                'message': f'Invalid request: {actual_error}'
-            }), 400
+                'error': 'schedule_failed',
+                'message': 'Failed to schedule preview job'
+            }), 500
+
+        # Return immediately with jobId for polling
         return jsonify({
-            'ok': False,
-            'error': 'validation_error',
-            'message': error_msg
-        }), 400
+            'ok': True,
+            'jobId': job_id,
+            'status': 'pending'
+        }), 202
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"[{request_id}] Preview failed: {error_msg}", exc_info=True)
-        if "rate_limited" in error_msg:
-            return jsonify({
-                'ok': False,
-                'error': 'rate_limited',
-                'message': 'Temporarily rate limited. Please retry.'
-            }), 503
+        logger.error(f"[{request_id}] Preview job creation failed: {error_msg}", exc_info=True)
         return jsonify({
             'ok': False,
-            'error': 'generation_failed',
-            'message': str(error_msg)
+            'error': 'preview_init_failed',
+            'message': error_msg
         }), 500
 
 
@@ -360,6 +438,30 @@ def download_zip():
         as_attachment=True,
         download_name=f'ad-{ad_index}.zip'
     )
+
+
+@app.route('/api/job-status', methods=['GET'])
+def job_status():
+    """Poll job status for /api/preview async jobs."""
+    job_id = request.args.get("jobId", "").strip()
+    if not job_id:
+        return jsonify({'ok': False, 'error': 'missing_param', 'message': 'jobId is required'}), 400
+    job = _get_job(job_id)
+    if not job:
+        return jsonify({'ok': False, 'error': 'not_found', 'status': 'error', 'message': 'Job not found or expired'}), 404
+    status = job.get("status", "pending")
+    logger.info(f"JOB_POLL jobId={job_id} status={status}")
+    if status in ("pending", "running"):
+        return jsonify({'ok': True, 'status': status}), 200
+    if status == "done":
+        return jsonify({'ok': True, 'status': 'done', 'result': job.get("result")}), 200
+    # error
+    return jsonify({
+        'ok': False,
+        'status': 'error',
+        'error': job.get("error"),
+        'message': job.get("error_message"),
+    }), 200
 
 
 # SESSION SYSTEM REMOVED: All entitlement endpoints deleted
