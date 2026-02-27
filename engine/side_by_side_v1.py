@@ -23,6 +23,8 @@ from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 from threading import Lock
 
+from . import openai_retry
+
 logger = logging.getLogger(__name__)
 
 
@@ -509,13 +511,11 @@ Example outputs:
 Output ONLY the ad_goal sentence, nothing else:"""
     
     try:
-        if model.startswith("o"):
-            # Use Responses API for o* models
-            response = client.responses.create(model=model, input=prompt)
-            ad_goal = response.output_text.strip()
-        else:
-            # Use Chat Completions for other models
-            response = client.chat.completions.create(
+        def _call():
+            if model.startswith("o"):
+                r = client.responses.create(model=model, input=prompt)
+                return r.output_text.strip()
+            r = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a marketing strategist. Generate concise advertising goals."},
@@ -524,15 +524,15 @@ Output ONLY the ad_goal sentence, nothing else:"""
                 temperature=0.7,
                 max_tokens=50
             )
-            ad_goal = response.choices[0].message.content.strip()
-        
+            return r.choices[0].message.content.strip()
+        ad_goal = openai_retry.openai_call_with_retry(_call, endpoint="responses")
         # Clean up: remove quotes, extra whitespace
         ad_goal = ad_goal.strip('"\'')
         ad_goal = ' '.join(ad_goal.split())
-        
         logger.info(f"AD_GOAL={ad_goal}")
         return ad_goal
-    
+    except openai_retry.OpenAIRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"Failed to generate ad_goal: {str(e)}")
         # Fallback
@@ -605,13 +605,11 @@ Example for "Protect natural ecosystems":
 Output ONLY a JSON array of strings, nothing else:"""
     
     try:
-        if model.startswith("o"):
-            # Use Responses API for o* models
-            response = client.responses.create(model=model, input=prompt)
-            response_text = response.output_text.strip()
-        else:
-            # Use Chat Completions for other models
-            response = client.chat.completions.create(
+        def _call():
+            if model.startswith("o"):
+                r = client.responses.create(model=model, input=prompt)
+                return r.output_text.strip()
+            r = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are a marketing analyst. Generate concise theme tags."},
@@ -620,8 +618,8 @@ Output ONLY a JSON array of strings, nothing else:"""
                 temperature=0.7,
                 max_tokens=200
             )
-            response_text = response.choices[0].message.content.strip()
-        
+            return r.choices[0].message.content.strip()
+        response_text = openai_retry.openai_call_with_retry(_call, endpoint="responses")
         # Parse JSON array
         if response_text.startswith("```"):
             lines = response_text.split('\n')
@@ -647,7 +645,8 @@ Output ONLY a JSON array of strings, nothing else:"""
         
         logger.info(f"THEME_TAGS={','.join(theme_tags)}")
         return theme_tags
-        
+    except openai_retry.OpenAIRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"Failed to build theme tags: {e}")
         # Fallback to generic tags
@@ -864,14 +863,12 @@ Return JSON only:
             logger.info(f"STEP0_BUNDLE_OPENAI_CALL_START request_id={rid} model={model_name} product={product_name[:50]}")
             t_openai_start = time.time()
             try:
-                # Use Responses API for o* models
-                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-                if is_o_model:
-                    response = client.responses.create(model=model_name, input=prompt)
-                    response_text = response.output_text.strip()
-                else:
-                    # Fallback to Chat Completions
-                    response = client.chat.completions.create(
+                def _step0_api_call():
+                    is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+                    if is_o_model:
+                        r = client.responses.create(model=model_name, input=prompt)
+                        return r.output_text.strip()
+                    r = client.chat.completions.create(
                         model=model_name,
                         messages=[
                             {"role": "system", "content": "You are an advertising content generator. Output must be in English only. Return JSON only without additional text."},
@@ -880,11 +877,14 @@ Return JSON only:
                         temperature=0.7,
                         max_tokens=8000
                     )
-                    response_text = response.choices[0].message.content.strip()
+                    return r.choices[0].message.content.strip()
+                response_text = openai_retry.openai_call_with_retry(_step0_api_call, endpoint="responses")
             except httpx.TimeoutException as e:
                 elapsed_ms = int((time.time() - t_openai_start) * 1000)
                 logger.error(f"STEP0_BUNDLE_OPENAI_CALL_TIMEOUT request_id={rid} elapsed_ms={elapsed_ms}")
                 raise Step0BundleTimeoutError(f"Step0 bundle timed out after {elapsed_ms}ms") from e
+            except openai_retry.OpenAIRateLimitError:
+                raise
             except Exception as openai_err:
                 elapsed_ms = int((time.time() - t_openai_start) * 1000)
                 logger.error(f"STEP0_BUNDLE_OPENAI_CALL_ERROR request_id={rid} elapsed_ms={elapsed_ms} err={openai_err}")
@@ -1178,18 +1178,18 @@ You need to generate EXACTLY {needed} additional valid items."""
 
             prompt = build_base_prompt(needed, feedback)
             
-            if using_responses_api:
-                response = client.responses.create(model=model_name, input=prompt)
-                response_text = response.output_text.strip()
-            else:
+            def _object_list_call():
+                if using_responses_api:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text.strip()
                 request_params = {
                     "model": model_name,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7
                 }
-                response = client.chat.completions.create(**request_params)
-                response_text = response.choices[0].message.content.strip()
-            
+                r = client.chat.completions.create(**request_params)
+                return r.choices[0].message.content.strip()
+            response_text = openai_retry.openai_call_with_retry(_object_list_call, endpoint="responses")
             # Parse JSON response
             response_text = response_text.strip()
             if response_text.startswith("```"):
@@ -1198,7 +1198,6 @@ You need to generate EXACTLY {needed} additional valid items."""
             if response_text.startswith("```json"):
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-            
             data = json.loads(response_text)
             if isinstance(data, list):
                 object_list = data
@@ -1591,10 +1590,10 @@ Do NOT include extra text.
 Return JSON only."""
     
     try:
-        # Use Responses API for o3-pro
-        response = client.responses.create(model=model, input=prompt)
-        response_text = response.output_text.strip()
-        
+        def _plan_call():
+            r = client.responses.create(model=model, input=prompt)
+            return r.output_text.strip()
+        response_text = openai_retry.openai_call_with_retry(_plan_call, endpoint="responses")
         # Parse JSON
         if response_text.startswith("```"):
             lines = response_text.split('\n')
@@ -1730,14 +1729,12 @@ Return ONLY a JSON array with one object per pair:
 Do not write any extra text. Return JSON array only."""
     
     try:
-        # Use Responses API for o* models (o3-pro)
-        is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-        if is_o_model:
-            response = client.responses.create(model=model_name, input=prompt)
-            response_text = response.output_text.strip()
-        else:
-            # Fallback to Chat Completions if not o* model
-            response = client.chat.completions.create(
+        def _batch_score_call():
+            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+            if is_o_model:
+                r = client.responses.create(model=model_name, input=prompt)
+                return r.output_text.strip()
+            r = client.chat.completions.create(
                 model=model_name,
                 messages=[
                     {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
@@ -1746,8 +1743,8 @@ Do not write any extra text. Return JSON array only."""
                 temperature=0.3,
                 max_tokens=2000
             )
-            response_text = response.choices[0].message.content.strip()
-        
+            return r.choices[0].message.content.strip()
+        response_text = openai_retry.openai_call_with_retry(_batch_score_call, endpoint="responses")
         # Parse JSON array
         if response_text.startswith("```"):
             lines = response_text.split('\n')
@@ -1755,12 +1752,10 @@ Do not write any extra text. Return JSON array only."""
         if response_text.startswith("```json"):
             lines = response_text.split('\n')
             response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-        
         results = json.loads(response_text)
         if not isinstance(results, list):
             logger.warning(f"Batch scoring returned non-list: {type(results)}")
             return []
-        
         # Validate and normalize results
         validated_results = []
         for r in results:
@@ -1785,7 +1780,8 @@ Do not write any extra text. Return JSON array only."""
             })
         
         return validated_results
-        
+    except openai_retry.OpenAIRateLimitError:
+        raise
     except Exception as e:
         logger.error(f"Batch scoring failed: {e}")
         return []
@@ -1891,13 +1887,12 @@ Return ONLY a JSON array as specified. No other text."""
             logger.info(f"SELECT_THREE_PAIRS attempt={attempt+1} model={model_name} object_list_size={len(object_list)}")
             
             # Use Responses API for o* models
-            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-            if is_o_model:
-                response = client.responses.create(model=model_name, input=prompt)
-                response_text = response.output_text
-            else:
-                # Fallback to Chat Completions
-                response = client.chat.completions.create(
+            def _select_three_call():
+                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+                if is_o_model:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text or ""
+                r = client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
@@ -1906,8 +1901,8 @@ Return ONLY a JSON array as specified. No other text."""
                     temperature=0.3,
                     max_tokens=2000
                 )
-                response_text = response.choices[0].message.content
-            
+                return (r.choices[0].message.content or "") if r.choices else ""
+            response_text = openai_retry.openai_call_with_retry(_select_three_call, endpoint="responses")
             # Log raw response length
             raw_len = len(response_text) if response_text else 0
             logger.info(f"SELECT_THREE_PAIRS_RAW_LEN={raw_len}")
@@ -2820,15 +2815,10 @@ Requirements:
             if attempt == 0:
                 logger.info(f"Shape selection: using model={model_name}, using_responses_api={using_responses_api}, shape_model={model_name}")
             
-            if using_responses_api:
-                # Use Responses API for o* models
-                response = client.responses.create(
-                    model=model_name,
-                    input=prompt
-                )
-                content = response.output_text
-            else:
-                # Use Chat Completions for other models
+            def _shape_select_call():
+                if using_responses_api:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text or ""
                 request_params = {
                     "model": model_name,
                     "messages": [
@@ -2838,9 +2828,9 @@ Requirements:
                     "response_format": {"type": "json_object"},
                     "temperature": 0.7
                 }
-                response = client.chat.completions.create(**request_params)
-                content = response.choices[0].message.content
-            
+                r = client.chat.completions.create(**request_params)
+                return (r.choices[0].message.content or "") if r.choices else ""
+            content = openai_retry.openai_call_with_retry(_shape_select_call, endpoint="responses")
             result = json.loads(content)
             
             # Validate result structure
@@ -3112,14 +3102,12 @@ Marketing copy:"""
         try:
             logger.info(f"MARKETING_COPY attempt={attempt+1} model={model_name} product={product_name[:50]}")
             
-            # Use Responses API for o* models
-            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-            if is_o_model:
-                response = client.responses.create(model=model_name, input=prompt)
-                copy_text = response.output_text.strip()
-            else:
-                # Fallback to Chat Completions
-                response = client.chat.completions.create(
+            def _copy_call():
+                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+                if is_o_model:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text.strip()
+                r = client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": "You are a marketing copywriter. Output must be in English only. Return only the marketing copy text, no JSON, no quotes."},
@@ -3128,8 +3116,8 @@ Marketing copy:"""
                     temperature=0.7,
                     max_tokens=200
                 )
-                copy_text = response.choices[0].message.content.strip()
-            
+                return r.choices[0].message.content.strip()
+            copy_text = openai_retry.openai_call_with_retry(_copy_call, endpoint="responses")
             # Clean copy
             copy_text = copy_text.strip('"\'')
             
@@ -3196,6 +3184,8 @@ Marketing copy:"""
             logger.info(f"MARKETING_COPY SUCCESS: word_count={final_word_count} copy='{copy_text[:100]}...'")
             return copy_text
             
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             logger.error(f"MARKETING_COPY failed (attempt {attempt+1}/{max_attempts}): {e}")
             if attempt < max_attempts - 1:
@@ -3203,7 +3193,6 @@ Marketing copy:"""
             # Fallback: return minimal copy
             logger.warning(f"MARKETING_COPY: Using fallback copy")
             return f"{product_name} helps you achieve {ad_goal.lower()}. Discover how {product_name} can transform your workflow. Get started today."
-    
     # Final fallback
     return f"{product_name} helps you achieve {ad_goal.lower()}. Discover how {product_name} can transform your workflow. Get started today."
 
@@ -3280,25 +3269,18 @@ Headline:"""
             if attempt == 0:
                 logger.info(f"STEP 2 - HEADLINE GENERATION: using_responses_api={using_responses_api}")
             
-            if using_responses_api:
-                # Use Responses API for o* models
-                response = client.responses.create(
-                    model=model_name,
-                    input=prompt
-                )
-                headline = response.output_text.strip()
-            else:
-                # Use Chat Completions for other models
+            def _headline_call():
+                if using_responses_api:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text.strip()
                 request_params = {
                     "model": model_name,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7
                 }
-                response = client.chat.completions.create(**request_params)
-                headline = response.choices[0].message.content.strip()
-            
+                r = client.chat.completions.create(**request_params)
+                return r.choices[0].message.content.strip() if r.choices else ""
+            headline = openai_retry.openai_call_with_retry(_headline_call, endpoint="responses")
             # Clean headline (remove quotes, ensure ALL CAPS, remove punctuation)
             headline = headline.strip('"\'')
             headline = headline.upper()
@@ -3334,11 +3316,11 @@ Headline:"""
             words_count = len(headline.split())
             logger.info(f"HEADLINE_POLICY hard_mode=True headline_words={words_count} headline='{headline}'")
             return headline
-            
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_str = str(e)
             error_lower = error_str.lower()
-            
             # Check for 400 errors (invalid_request, unsupported_value, etc.) - DO NOT RETRY
             is_400_error = (
                 "400" in error_str or 
@@ -3346,7 +3328,6 @@ Headline:"""
                 "unsupported_value" in error_lower or
                 "bad_request" in error_lower
             )
-            
             if is_400_error:
                 logger.error(f"OpenAI 400 error (no retry): {error_str}")
                 # Wrap in a specific exception type for 400 errors
@@ -3495,25 +3476,18 @@ JSON:"""
     
     for attempt in range(max_retries):
         try:
-            if using_responses_api:
-                # Use Responses API for o* models
-                response = client.responses.create(
-                    model=model_name,
-                    input=prompt
-                )
-                response_text = response.output_text.strip()
-            else:
-                # Use Chat Completions for other models (fallback)
+            def _physical_call():
+                if using_responses_api:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text.strip()
                 request_params = {
                     "model": model_name,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7
                 }
-                response = client.chat.completions.create(**request_params)
-                response_text = response.choices[0].message.content.strip()
-            
+                r = client.chat.completions.create(**request_params)
+                return r.choices[0].message.content.strip() if r.choices else ""
+            response_text = openai_retry.openai_call_with_retry(_physical_call, endpoint="responses")
             # Parse JSON response
             response_text = response_text.strip()
             if response_text.startswith("```"):
@@ -3522,10 +3496,8 @@ JSON:"""
             if response_text.startswith("```json"):
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-            
             # Parse JSON
             data = json.loads(response_text)
-            
             # Validate response structure
             if "object_a" not in data or "object_b" not in data:
                 raise ValueError("Missing object_a or object_b in response")
@@ -3550,10 +3522,11 @@ JSON:"""
             if attempt < max_retries - 1:
                 continue
             raise ValueError(f"Failed to parse physical context JSON: {e}")
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_str = str(e)
             error_lower = error_str.lower()
-            
             # Check for 400 errors - DO NOT RETRY
             is_400_error = (
                 "400" in error_str or 
@@ -3561,7 +3534,6 @@ JSON:"""
                 "unsupported_value" in error_lower or
                 "bad_request" in error_lower
             )
-            
             if is_400_error:
                 logger.error(f"STEP 1.5 - PHYSICAL CONTEXT EXTENSION: OpenAI 400 error (no retry): {error_str}")
                 raise ValueError(f"invalid_request: {error_str}")
@@ -3726,23 +3698,18 @@ JSON:"""
     
     for attempt in range(max_retries):
         try:
-            if using_responses_api:
-                response = client.responses.create(
-                    model=model_name,
-                    input=prompt
-                )
-                response_text = response.output_text.strip()
-            else:
+            def _combined_plan_call():
+                if using_responses_api:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text.strip()
                 request_params = {
                     "model": model_name,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7
                 }
-                response = client.chat.completions.create(**request_params)
-                response_text = response.choices[0].message.content.strip()
-            
+                r = client.chat.completions.create(**request_params)
+                return r.choices[0].message.content.strip() if r.choices else ""
+            response_text = openai_retry.openai_call_with_retry(_combined_plan_call, endpoint="responses")
             # Parse JSON response
             response_text = response_text.strip()
             if response_text.startswith("```"):
@@ -3751,9 +3718,7 @@ JSON:"""
             if response_text.startswith("```json"):
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-            
             data = json.loads(response_text)
-            
             # Validate shape_selection
             if "shape_selection" not in data:
                 raise ValueError("Missing shape_selection in response")
@@ -3787,12 +3752,13 @@ JSON:"""
             if attempt < max_retries - 1:
                 continue
             raise ValueError(f"Failed to parse combined plan JSON: {e}")
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_str = str(e)
             error_lower = error_str.lower()
-            
             is_400_error = (
-                "400" in error_str or 
+                "400" in error_str or
                 "invalid_request" in error_lower or 
                 "unsupported_value" in error_lower or
                 "bad_request" in error_lower
@@ -3959,25 +3925,18 @@ JSON:"""
     
     for attempt in range(max_retries):
         try:
-            if using_responses_api:
-                # Use Responses API for o* models
-                response = client.responses.create(
-                    model=model_name,
-                    input=prompt
-                )
-                response_text = response.output_text.strip()
-            else:
-                # Use Chat Completions for other models (fallback)
+            def _hybrid_plan_call():
+                if using_responses_api:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text.strip()
                 request_params = {
                     "model": model_name,
-                    "messages": [
-                        {"role": "user", "content": prompt}
-                    ],
+                    "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.7
                 }
-                response = client.chat.completions.create(**request_params)
-                response_text = response.choices[0].message.content.strip()
-            
+                r = client.chat.completions.create(**request_params)
+                return r.choices[0].message.content.strip() if r.choices else ""
+            response_text = openai_retry.openai_call_with_retry(_hybrid_plan_call, endpoint="responses")
             # Parse JSON response
             response_text = response_text.strip()
             if response_text.startswith("```"):
@@ -3986,10 +3945,8 @@ JSON:"""
             if response_text.startswith("```json"):
                 lines = response_text.split('\n')
                 response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-            
             # Parse JSON
             data = json.loads(response_text)
-            
             # Validate response structure
             if data.get("hero_object") not in [object_a, object_b]:
                 raise ValueError(f"hero_object must be '{object_a}' or '{object_b}'")
@@ -4017,10 +3974,11 @@ JSON:"""
             if attempt < max_retries - 1:
                 continue
             raise ValueError(f"Failed to parse hybrid classic environment plan JSON: {e}")
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_str = str(e)
             error_lower = error_str.lower()
-            
             # Check for 400 errors - DO NOT RETRY
             is_400_error = (
                 "400" in error_str or 
@@ -4403,11 +4361,15 @@ def generate_image_with_dalle(
             
             # Simple call without response_format for gpt-image-1.5 compatibility
             # Include quality parameter for preview (low) vs generate (high)
-            response = client.images.generate(
-                model=model,
-                prompt=prompt,
-                size=image_size,
-                quality=quality
+            # 429 is handled by openai_retry (exponential backoff + Retry-After)
+            response = openai_retry.openai_call_with_retry(
+                lambda: client.images.generate(
+                    model=model,
+                    prompt=prompt,
+                    size=image_size,
+                    quality=quality
+                ),
+                endpoint="images"
             )
             
             # Extract base64 from response
@@ -4425,12 +4387,14 @@ def generate_image_with_dalle(
             logger.info(f"Image generated successfully (attempt {attempt + 1}), image_model={model}, image_size={image_size}")
             return image_bytes
             
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_str = str(e)
             logger.error(f"DALL-E generation failed (attempt {attempt + 1}/{max_retries}): {error_str}")
             
             if attempt < max_retries - 1:
-                # Retry on errors
+                # Retry on errors (non-429)
                 time.sleep(1 + attempt)
                 continue
             else:
@@ -4536,15 +4500,12 @@ The percentage must be a number between 0 and 100."""
     for attempt in range(max_retries):
         try:
             logger.info(f"SILHOUETTE_SIMILARITY_EVAL attempt={attempt+1} A={object_a} B={object_b} model={model_name}")
-            
-            # Use Responses API for o* models
-            is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-            if is_o_model:
-                response = client.responses.create(model=model_name, input=prompt)
-                response_text = response.output_text.strip()
-            else:
-                # Fallback to Chat Completions
-                response = client.chat.completions.create(
+            def _silhouette_call():
+                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+                if is_o_model:
+                    r = client.responses.create(model=model_name, input=prompt)
+                    return r.output_text.strip()
+                r = client.chat.completions.create(
                     model=model_name,
                     messages=[
                         {"role": "system", "content": "You are a silhouette similarity analyzer. Output must be in English only. Return JSON only without additional text."},
@@ -4553,8 +4514,8 @@ The percentage must be a number between 0 and 100."""
                     temperature=0.3,
                     max_tokens=500
                 )
-                response_text = response.choices[0].message.content.strip()
-            
+                return r.choices[0].message.content.strip() if r.choices else ""
+            response_text = openai_retry.openai_call_with_retry(_silhouette_call, endpoint="responses")
             # Parse JSON
             if response_text.startswith("```"):
                 lines = response_text.split('\n')
@@ -4584,14 +4545,14 @@ The percentage must be a number between 0 and 100."""
             # Fallback: assume low similarity if parsing fails
             logger.warning(f"SILHOUETTE_SIMILARITY_EVAL: Failed to parse, defaulting to 0% similarity")
             return 0.0
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             logger.error(f"SILHOUETTE_SIMILARITY_EVAL failed (attempt {attempt+1}/{max_retries}): {e}")
             if attempt < max_retries - 1:
                 continue
-            # Fallback: assume low similarity if evaluation fails
             logger.warning(f"SILHOUETTE_SIMILARITY_EVAL: Failed, defaulting to 0% similarity")
             return 0.0
-    
     # Final fallback
     return 0.0
 
@@ -5042,15 +5003,15 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                 logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a_name}, {object_b_name}], score={shape_score}, shape_hint={shape_hint}, model={planner_model} (from cache)")
             else:
                 logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a_name}, {object_b_name}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_msg = str(e)
             if "rate_limited" in error_msg:
                 logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
-                raise Exception("rate_limited")
-            else:
-                logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
-                raise
-        
+                raise openai_retry.OpenAIRateLimitError()
+            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
+            raise
         # STEP 2 - HEADLINE GENERATION
         t_headline_start = time.time()
         try:
@@ -5066,15 +5027,15 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
             )
             t_headline_ms = int((time.time() - t_headline_start) * 1000)
             logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_msg = str(e)
             if "rate_limited" in error_msg:
                 logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
-                raise Exception("rate_limited")
-            else:
-                logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
-                raise
-        
+                raise openai_retry.OpenAIRateLimitError()
+            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
+            raise
         # Save to preview cache and plan cache (SIDE BY SIDE mode only)
         plan_data = {
             "mode": "SIDE_BY_SIDE",
@@ -5226,9 +5187,17 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     logger.info(f"[{request_id}] PERF_PREVIEW total_ms={t_total_ms} shape_ms={t_shape_ms} env_ms={t_envswap_ms} headline_ms={t_headline_ms} image_ms={t_image_ms} cache_hit={cache_hit} cache_image_hit={image_cache_hit} cache_step0_hit={step0_cache_hit} cache_step1_hit={step1_cache_hit}")
     logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit={image_cache_hit} mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN_CALLED={image_gen_called}")
     
-    # Return only imageBase64 (all text is in the image) - same bytes as ZIP
+    # 50-word body text for on-screen display and ZIP (copy phase infers from image; we generate for display/store)
+    body_text_50 = generate_marketing_copy(
+        product_name=product_name,
+        product_description=product_description,
+        ad_goal=ad_goal
+    )
+    # Return image + headline + body for display and for artifact store (sketch only in image; headline/body separate)
     return {
-        "imageBase64": image_base64
+        "imageBase64": image_base64,
+        "headline": headline,
+        "bodyText50": body_text_50,
     }
 
 
@@ -5439,15 +5408,15 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 raise ValueError(f"Could not find items for ids: {object_a_id}, {object_b_id}")
             
             logger.info(f"[{request_id}] STEP 1 SUCCESS: selected_pair=[{object_a_name}, {object_b_name}], score={shape_score}, shape_hint={shape_hint}, model={planner_model}")
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_msg = str(e)
             if "rate_limited" in error_msg:
                 logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection rate limited")
-                raise Exception("rate_limited")
-            else:
-                logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
-                raise
-        
+                raise openai_retry.OpenAIRateLimitError()
+            logger.error(f"[{request_id}] STEP 1 FAILED: Shape selection error: {error_msg}")
+            raise
         # STEP 2 - HEADLINE GENERATION
         t_headline_start = time.time()
         try:
@@ -5461,15 +5430,15 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
             )
             t_headline_ms = int((time.time() - t_headline_start) * 1000)
             logger.info(f"[{request_id}] STEP 2 SUCCESS: headline={headline}")
+        except openai_retry.OpenAIRateLimitError:
+            raise
         except Exception as e:
             error_msg = str(e)
             if "rate_limited" in error_msg:
                 logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation rate limited")
-                raise Exception("rate_limited")
-            else:
-                logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
-                raise
-        
+                raise openai_retry.OpenAIRateLimitError()
+            logger.error(f"[{request_id}] STEP 2 FAILED: Headline generation error: {error_msg}")
+            raise
         # Save to plan cache (SIDE BY SIDE mode only)
         plan_data = {
             "mode": "SIDE_BY_SIDE",

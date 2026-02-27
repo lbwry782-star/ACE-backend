@@ -1,13 +1,16 @@
 from flask import Flask, request, jsonify, send_file, Response
 import uuid
 import logging
+import time
 import io
 import zipfile
 import json
 import base64
 import os
+from threading import Lock
 from typing import Dict, Optional
 from engine.side_by_side_v1 import generate_preview_data, Step0BundleTimeoutError, Step0BundleOpenAIError
+from engine.openai_retry import OpenAIRateLimitError
 
 app = Flask(__name__)
 
@@ -78,39 +81,141 @@ logger = logging.getLogger(__name__)
 # Allowed image sizes
 ALLOWED_SIZES = ["1024x1024", "1536x1024", "1024x1536"]
 
+# Per-session lock: only one ad generation at a time per sessionId (serial execution)
+_session_locks: Dict[str, Lock] = {}
+_session_locks_guard = Lock()
+
+# Artifact store for generate: (sessionId, adIndex) -> { image_bytes, bodyText50, headline } for ZIP download without regenerating
+# TTL 45 minutes
+_GENERATE_ARTIFACT_TTL_SECONDS = 45 * 60
+_generate_artifacts: Dict[tuple, dict] = {}  # (session_id, ad_index) -> { "image_bytes", "bodyText50", "headline", "timestamp" }
+_generate_artifacts_guard = Lock()
+
+
+def _get_artifact(session_id: str, ad_index: int):
+    """Get stored artifact for (session_id, ad_index). Returns None if missing or expired."""
+    key = (session_id, ad_index)
+    with _generate_artifacts_guard:
+        if key not in _generate_artifacts:
+            return None
+        entry = _generate_artifacts[key]
+        if time.time() - entry["timestamp"] > _GENERATE_ARTIFACT_TTL_SECONDS:
+            del _generate_artifacts[key]
+            return None
+        return entry
+
+
+def _set_artifact(session_id: str, ad_index: int, image_bytes: bytes, body_text_50: str, headline: str) -> None:
+    """Store artifact for later ZIP download."""
+    key = (session_id, ad_index)
+    with _generate_artifacts_guard:
+        _generate_artifacts[key] = {
+            "image_bytes": image_bytes,
+            "bodyText50": body_text_50,
+            "headline": headline,
+            "timestamp": time.time(),
+        }
+
+
+def _acquire_session_lock(session_id: str, ad_index: int) -> bool:
+    """Try to acquire the lock for this session. Returns True if acquired, False if already held."""
+    with _session_locks_guard:
+        if session_id not in _session_locks:
+            _session_locks[session_id] = Lock()
+        lock = _session_locks[session_id]
+    acquired = lock.acquire(blocking=False)
+    if acquired:
+        logger.info(f"SESSION_LOCK acquired=true sid={session_id} adIndex={ad_index}")
+    return acquired
+
+
+def _release_session_lock(session_id: str, ad_index: int) -> None:
+    """Release the lock for this session."""
+    with _session_locks_guard:
+        lock = _session_locks.get(session_id)
+    if lock is not None:
+        try:
+            lock.release()
+        except RuntimeError:
+            pass
+    logger.info(f"SESSION_LOCK released=true sid={session_id} adIndex={ad_index}")
+
 # SESSION SYSTEM REMOVED: All entitlement/session functions deleted
 
 
 @app.route('/api/generate', methods=['POST'])
 def generate():
     """
-    Generate a single ad and return as ZIP file.
-    
-    ENGINE DISABLED: Returns 501 stub response (no image generation, no OpenAI calls).
+    Generate a single ad: sketch image + headline + 50-word body. Returns JSON for display;
+    stores artifacts for later ZIP download (no OpenAI on download).
     
     Request JSON:
     {
-        "productName": string,
-        "productDescription": string,
-        "imageSize": "1024x1024" | "1536x1024" | "1024x1536",
-        "adIndex": int (optional, default 0),
-        "batchState": {  // optional
-            "material_analogy_used": boolean,
-            "structural_morphology_used": boolean,
-            "structural_exception_used": boolean
-        }
+        "productName": string (required),
+        "productDescription": string (required),
+        "imageSize": "1024x1024" | "1536x1024" | "1024x1536" (optional),
+        "adIndex": int (optional, 1-3),
+        "sessionId": string (optional)
     }
     
-    Returns: 501 with engine_disabled error (no credits consumed, no OpenAI calls)
+    Returns: 200 JSON { ok: true, sessionId, adIndex, imageBase64, headline, bodyText50 }
+    Or 409 if generation already in progress for this session.
     """
-    # ENGINE DISABLED: Short-circuit immediately before any engine logic
-    # No OpenAI calls, no image generation, no credit consumption
-    logger.info("ENGINE_DISABLED /api/generate called")
-    return jsonify({
-        'ok': False,
-        'error': 'engine_disabled',
-        'message': 'ACE engine is disabled (rebuild mode).'
-    }), 501
+    request_id = str(uuid.uuid4())
+    try:
+        if not request.is_json:
+            return jsonify({'ok': False, 'error': 'invalid_request', 'message': 'Request must be JSON'}), 400
+        payload = request.get_json()
+        if not payload.get("productName"):
+            return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productName is required'}), 400
+        if not payload.get("productDescription"):
+            return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productDescription is required'}), 400
+        session_id = payload.get("sessionId") or "no_session"
+        ad_index = int(payload.get("adIndex", 1))
+        ad_index = max(1, min(3, ad_index))
+        if not _acquire_session_lock(session_id, ad_index):
+            return jsonify({'ok': False, 'error': 'busy', 'message': 'Generation already in progress'}), 409
+        logger.info(f"GENERATE_START sid={session_id} ad={ad_index}")
+        try:
+            # Build payload for preview with image (same flow as generate: image + headline + body)
+            gen_payload = {
+                "productName": payload["productName"],
+                "productDescription": payload["productDescription"],
+                "imageSize": payload.get("imageSize", "1536x1024"),
+                "adIndex": ad_index,
+                "sessionId": session_id,
+                "includeImage": True,
+            }
+            result = generate_preview_data(gen_payload)
+            image_base64 = result["imageBase64"]
+            headline = result.get("headline", "")
+            body_text_50 = result.get("bodyText50", "")
+            image_bytes = base64.b64decode(image_base64)
+            _set_artifact(session_id, ad_index, image_bytes, body_text_50, headline)
+            logger.info(f"GENERATE_DONE sid={session_id} ad={ad_index} stored=true")
+            return jsonify({
+                "ok": True,
+                "sessionId": session_id,
+                "adIndex": ad_index,
+                "imageBase64": image_base64,
+                "headline": headline,
+                "bodyText50": body_text_50,
+            }), 200
+        finally:
+            _release_session_lock(session_id, ad_index)
+    except OpenAIRateLimitError as e:
+        return jsonify({'ok': False, 'error': 'rate_limited', 'message': e.message}), 503
+    except Step0BundleTimeoutError:
+        return jsonify({'ok': False, 'error': 'timeout', 'step': 'step0_bundle', 'message': 'Step0 bundle timed out'}), 504
+    except Step0BundleOpenAIError as e:
+        return jsonify({'ok': False, 'error': 'openai_error', 'step': 'step0_bundle', 'message': str(e)}), 500
+    except ValueError as e:
+        return jsonify({'ok': False, 'error': 'validation_error', 'message': str(e)}), 400
+    except Exception as e:
+        logger.error(f"[{request_id}] Generate failed: {e}", exc_info=True)
+        if "rate_limited" in str(e):
+            return jsonify({'ok': False, 'error': 'rate_limited', 'message': 'Temporarily rate limited. Please retry.'}), 503
+        return jsonify({'ok': False, 'error': 'generation_failed', 'message': str(e)}), 500
     
 
 
@@ -156,8 +261,26 @@ def preview():
                 'error': 'missing_field',
                 'message': 'productDescription is required'
             }), 400
-        result = generate_preview_data(payload)
-        return jsonify(result), 200
+        session_id = payload.get("sessionId") or "no_session"
+        ad_index = payload.get("adIndex", 1)
+        if not _acquire_session_lock(session_id, ad_index):
+            return jsonify({
+                'ok': False,
+                'error': 'busy',
+                'message': 'Generation already in progress'
+            }), 409
+        try:
+            result = generate_preview_data(payload)
+            return jsonify(result), 200
+        finally:
+            _release_session_lock(session_id, ad_index)
+    except OpenAIRateLimitError as e:
+        logger.warning(f"[{request_id}] Preview rate limited: {e.message}")
+        return jsonify({
+            'ok': False,
+            'error': 'rate_limited',
+            'message': e.message
+        }), 503
     except Step0BundleTimeoutError as e:
         logger.error(f"[{request_id}] Preview step0_bundle timeout: {e}", exc_info=True)
         return jsonify({
@@ -196,13 +319,46 @@ def preview():
             return jsonify({
                 'ok': False,
                 'error': 'rate_limited',
-                'message': 'Rate limit exceeded. Please try again later.'
+                'message': 'Temporarily rate limited. Please retry.'
             }), 503
         return jsonify({
             'ok': False,
             'error': 'generation_failed',
             'message': str(error_msg)
         }), 500
+
+
+@app.route('/api/download-zip', methods=['GET'])
+def download_zip():
+    """
+    Download ZIP for a previously generated ad (sessionId + adIndex). No OpenAI calls.
+    ZIP contains: image.jpg (sketch), text.txt (50-word body text).
+    """
+    session_id = request.args.get("sessionId", "").strip()
+    ad_index_str = request.args.get("adIndex", "")
+    if not session_id:
+        return jsonify({'ok': False, 'error': 'missing_param', 'message': 'sessionId is required'}), 400
+    try:
+        ad_index = int(ad_index_str)
+    except (TypeError, ValueError):
+        return jsonify({'ok': False, 'error': 'missing_param', 'message': 'adIndex must be 1, 2, or 3'}), 400
+    ad_index = max(1, min(3, ad_index))
+    artifact = _get_artifact(session_id, ad_index)
+    if not artifact:
+        logger.info(f"ZIP_DOWNLOAD sid={session_id} ad={ad_index} hit=false")
+        return jsonify({'ok': False, 'error': 'not_found', 'message': 'No generated ad found for this session and ad index. Generate first or link may have expired.'}), 404
+    logger.info(f"ZIP_DOWNLOAD sid={session_id} ad={ad_index} hit=true")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("image.jpg", artifact["image_bytes"])
+        zf.writestr("text.txt", artifact["bodyText50"].encode("utf-8"))
+    zip_buffer.seek(0)
+    return send_file(
+        zip_buffer,
+        mimetype='application/zip',
+        as_attachment=True,
+        download_name=f'ad-{ad_index}.zip'
+    )
 
 
 # SESSION SYSTEM REMOVED: All entitlement endpoints deleted
