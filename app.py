@@ -76,6 +76,28 @@ def add_cors_headers(response):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ACE_TEST_MODE: "1" or "true" = no OpenAI, return demo result immediately
+ACE_TEST_MODE = (os.environ.get("ACE_TEST_MODE", "") or "").strip().lower() in ("1", "true")
+if ACE_TEST_MODE:
+    logger.info("TEST_MODE_ACTIVE=true")
+
+# Small placeholder PNG (1x1 transparent) as base64 - no OpenAI image call
+_TEST_PLACEHOLDER_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+def _get_test_mode_demo_result():
+    """Demo result when ACE_TEST_MODE is on. No engine/OpenAI calls."""
+    return {
+        "imageBase64": _TEST_PLACEHOLDER_PNG_BASE64,
+        "image_base64": _TEST_PLACEHOLDER_PNG_BASE64,
+        "headline": "ACE TEST MODE DEMO",
+        "bodyText50": "This is a placeholder body text for ACE test mode. No OpenAI calls were made. You can develop and test the app with images and copy visible immediately. About fifty words of sample content to fill the body text area for layout and UI checks.",
+        "body_text": "This is a placeholder body text for ACE test mode. No OpenAI calls were made. You can develop and test the app with images and copy visible immediately. About fifty words of sample content to fill the body text area for layout and UI checks.",
+        "image_url": None,
+        "ad_goal": "Demo ad goal for test mode",
+        "object_a": "object_a",
+        "object_b": "object_b",
+        "marketing_copy_50_words": "This is a placeholder body text for ACE test mode. No OpenAI calls were made. About fifty words of sample content.",
+    }
 
 # ENGINE REMOVED: get_engine_functions() deleted - engine module removed
 
@@ -200,6 +222,22 @@ def generate():
         session_id = payload.get("sessionId") or "no_session"
         ad_index = int(payload.get("adIndex", 1))
         ad_index = max(1, min(3, ad_index))
+
+        # ACE_TEST_MODE: bypass engine; return demo and store artifact for download-zip
+        if ACE_TEST_MODE:
+            logger.info("TEST_MODE_RETURNING_DEMO_RESULT=true")
+            demo = _get_test_mode_demo_result()
+            image_bytes = base64.b64decode(demo["imageBase64"])
+            _set_artifact(session_id, ad_index, image_bytes, demo["bodyText50"], demo["headline"])
+            return jsonify({
+                "ok": True,
+                "sessionId": session_id,
+                "adIndex": ad_index,
+                "imageBase64": demo["imageBase64"],
+                "headline": demo["headline"],
+                "bodyText50": demo["bodyText50"],
+            }), 200
+
         if not _acquire_session_lock(session_id, ad_index):
             return jsonify({'ok': False, 'error': 'busy', 'message': 'Generation already in progress'}), 409
         logger.info(f"GENERATE_START sid={session_id} ad={ad_index}")
@@ -291,6 +329,16 @@ def preview():
         session_id = payload.get("sessionId") or "no_session"
         ad_index = int(payload.get("adIndex", 1) or 1)
         ad_index = max(1, min(3, ad_index))
+
+        # ACE_TEST_MODE: bypass engine and job; return finished demo result immediately
+        if ACE_TEST_MODE:
+            logger.info("TEST_MODE_RETURNING_DEMO_RESULT=true")
+            demo = _get_test_mode_demo_result()
+            return jsonify({
+                "ok": True,
+                "status": "done",
+                "result": demo,
+            }), 200
 
         # Enforce serial execution per session: acquire lock before scheduling job
         if not _acquire_session_lock(session_id, ad_index):

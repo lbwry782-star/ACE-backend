@@ -773,7 +773,7 @@ def build_step0_bundle(
     product_name: str,
     product_description: str,
     language: str = "en",
-    max_retries: int = 2,
+    max_retries: int = 0,
     request_id: Optional[str] = None
 ) -> Dict:
     """
