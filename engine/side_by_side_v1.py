@@ -762,9 +762,11 @@ def parse_image_size(image_size: str) -> Tuple[int, int]:
         return (1536, 1024)
 
 
-# STEP0_BUNDLE OpenAI call timeouts (connect 10s, read 90s max)
+# STEP0_BUNDLE OpenAI call timeouts (longer read for o3-pro; align with ~4min UX)
 STEP0_OPENAI_CONNECT_TIMEOUT = 10.0
-STEP0_OPENAI_READ_TIMEOUT = 90.0
+STEP0_OPENAI_READ_TIMEOUT = 180.0
+STEP0_OPENAI_WRITE_TIMEOUT = 180.0
+STEP0_OPENAI_POOL_TIMEOUT = 10.0
 
 
 def build_step0_bundle(
@@ -777,12 +779,9 @@ def build_step0_bundle(
     """
     STEP 0 - UNIFIED BUNDLE: ad_goal + difficulty_score + object_list(150)
     
-    Single call to OPENAI_TEXT_MODEL that returns:
-    {
-      "ad_goal": "6-12 words English sentence",
-      "difficulty_score": 0-100,
-      "object_list": [150 items with id/object/sub_object/classic_context/theme_link/shape_hint/theme_tag]
-    }
+    Single call to OPENAI_TEXT_MODEL (o3-pro). Compact JSON only. Timeouts: connect 10s, read/write 180s.
+    Returns (compact schema accepted): ad_goal, difficulty_score, object_list
+    (object_list items normalized from primary_object/sub_object to full id/object/sub_object/classic_context/...).
     
     Args:
         product_name: Product name
@@ -802,59 +801,26 @@ def build_step0_bundle(
     step0_timeout = httpx.Timeout(
         connect=STEP0_OPENAI_CONNECT_TIMEOUT,
         read=STEP0_OPENAI_READ_TIMEOUT,
-        write=STEP0_OPENAI_READ_TIMEOUT,
-        pool=STEP0_OPENAI_CONNECT_TIMEOUT,
+        write=STEP0_OPENAI_WRITE_TIMEOUT,
+        pool=STEP0_OPENAI_POOL_TIMEOUT,
     )
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), timeout=step0_timeout)
     model_name = _get_text_model()
     
-    prompt = f"""Generate a complete advertising bundle in one JSON response.
+    prompt = f"""Product: {product_name}. Description: {product_description}. Language: English only.
 
-Product name: {product_name}
-Product description: {product_description}
-Language: English
+Output a single JSON object. No explanations, no bullet points, no extra keys. Minimal whitespace (compact JSON).
 
-TASK:
-1) Generate AD_GOAL:
-   - One sentence, 6-12 words, English
-   - Clear commercial intent
+Schema:
+{{"ad_goal":"6-12 word English sentence, commercial intent","difficulty_score":0-100,"object_list":[{{"primary_object":"1-3 words","sub_object":"1-3 words"}}, ... exactly 150 items]}}
 
-2) Generate DIFFICULTY_SCORE:
-   - Number 0-100
-   - Represents: "How difficult is it to generate 150 items that are all directly related to ad_goal?"
-   - 0 = easy (generic products, everyday items)
-   - 100 = nearly impossible (highly abstract services, very niche)
-   - Abstract services (AI, analytics, SaaS) typically score 70-90
+Rules:
+- ad_goal: one short sentence, English only.
+- difficulty_score: number 0-100 (0=easy, 100=very hard).
+- object_list: exactly 150 items. Each item only "primary_object" and "sub_object". Use 1-3 words per field. Physical classical objects only. sub_object must be a physical object (not environment, nature, background, scene, sky, world). No logos, text, brands, labels. English only.
 
-3) Generate OBJECT_LIST:
-   - EXACTLY 150 items
-   - Each item must contain:
-     {{
-       "id": "unique_snake_case_id",
-       "object": "main physical object",
-       "sub_object": "secondary physical object",
-       "classic_context": "3-12 words describing physical interaction",
-       "theme_link": "short direct link to ad_goal (5-12 words)",
-       "shape_hint": "short silhouette hint (e.g., round, oval, elongated, rectangular, triangular, curved_organic, cylindrical, irregular)",
-       "theme_tag": "1-2 words theme tag"
-     }}
-
-CRITICAL RULES FOR OBJECT_LIST:
-- Each item MUST be MAIN_OBJECT + SUB_OBJECT (physical sub-object, NOT environment)
-- sub_object MUST be a concrete physical object, NOT an environment
-- FORBIDDEN as sub_object: "nature", "environment", "world", "background", "scene", "forest", "ocean", "sky", "space", "ecosystem", "habitat", "setting", "context"
-- classic_context MUST include a physical preposition: "on", "in", "under", "next to", "attached to", "inside", "resting on", "landing on", "with", "lying on", "inserted into", "hanging from", "touching", "holding", "opening", "closing"
-- classic_context MUST explicitly mention sub_object
-- theme_link MUST directly link the object to ad_goal (not generic marketing)
-- No logos, brand names, labels, printed text, numbers, barcodes, signage, packaging graphics
-- All objects must be generic and unbranded
-
-Return JSON only:
-{{
-  "ad_goal": "...",
-  "difficulty_score": 0-100,
-  "object_list": [150 items]
-}}"""
+Return only this JSON, no other text:
+{{"ad_goal":"...","difficulty_score":0,"object_list":[{{"primary_object":"...","sub_object":"..."}}]}}"""
     
     max_attempts = max_retries + 1
     for attempt in range(max_attempts):
@@ -931,63 +897,29 @@ Return JSON only:
             if len(object_list) != OBJECT_LIST_TARGET:
                 logger.warning(f"STEP0_BUNDLE: object_list length={len(object_list)}, expected={OBJECT_LIST_TARGET}")
             
-            # Validate and normalize each item (coerce types, strip strings)
+            # Validate and normalize each item (accept compact primary_object/sub_object or full schema)
             normalized_items = []
             for i, item in enumerate(object_list):
                 if not isinstance(item, dict):
                     raise ValueError(f"Item {i} is not a dict")
-                
-                # Coerce types to string and strip
-                raw_id = item.get("id")
-                raw_object = item.get("object")
+                # Accept compact schema: primary_object + sub_object only; or full object/sub_object/...
+                raw_object = item.get("object") or item.get("primary_object")
                 raw_sub_object = item.get("sub_object")
-                raw_classic_context = item.get("classic_context")
-                raw_theme_link = item.get("theme_link")
-                raw_theme_tag = item.get("theme_tag")
-                
-                # Coerce and log if type changed
-                if raw_id is not None and not isinstance(raw_id, str):
-                    logger.warning(f"STEP0_BUNDLE_COERCE: id_type={type(raw_id).__name__} -> str, id={raw_id}")
-                item["id"] = str(raw_id) if raw_id is not None else ""
-                
-                if raw_object is not None and not isinstance(raw_object, str):
-                    logger.warning(f"STEP0_BUNDLE_COERCE: object_type={type(raw_object).__name__} -> str, object={raw_object}")
-                item["object"] = str(raw_object) if raw_object is not None else ""
-                
-                if raw_sub_object is not None and not isinstance(raw_sub_object, str):
-                    logger.warning(f"STEP0_BUNDLE_COERCE: sub_object_type={type(raw_sub_object).__name__} -> str, sub_object={raw_sub_object}")
-                item["sub_object"] = str(raw_sub_object) if raw_sub_object is not None else ""
-                
-                if raw_classic_context is not None and not isinstance(raw_classic_context, str):
-                    logger.warning(f"STEP0_BUNDLE_COERCE: classic_context_type={type(raw_classic_context).__name__} -> str")
-                item["classic_context"] = str(raw_classic_context) if raw_classic_context is not None else ""
-                
-                # Optional fields (coerce if present)
-                if raw_theme_link is not None:
-                    if not isinstance(raw_theme_link, str):
-                        logger.warning(f"STEP0_BUNDLE_COERCE: theme_link_type={type(raw_theme_link).__name__} -> str")
-                    item["theme_link"] = str(raw_theme_link)
-                
-                if raw_theme_tag is not None:
-                    if not isinstance(raw_theme_tag, str):
-                        logger.warning(f"STEP0_BUNDLE_COERCE: theme_tag_type={type(raw_theme_tag).__name__} -> str")
-                    item["theme_tag"] = str(raw_theme_tag)
-                
-                # Strip all string fields
-                item["id"] = item["id"].strip()
-                item["object"] = item["object"].strip()
-                item["sub_object"] = item["sub_object"].strip()
-                item["classic_context"] = item["classic_context"].strip()
-                if "theme_link" in item:
-                    item["theme_link"] = item["theme_link"].strip()
-                if "theme_tag" in item:
-                    item["theme_tag"] = item["theme_tag"].strip()
-                
-                # Validate required fields are not empty after stripping
-                if not item["id"] or not item["object"] or not item["sub_object"] or not item["classic_context"]:
-                    raise ValueError(f"Item {i} missing required fields after normalization (id/object/sub_object/classic_context)")
-                
-                normalized_items.append(item)
+                raw_object = str(raw_object).strip() if raw_object is not None else ""
+                raw_sub_object = str(raw_sub_object).strip() if raw_sub_object is not None else ""
+                if not raw_object or not raw_sub_object:
+                    raise ValueError(f"Item {i} missing primary_object/object or sub_object")
+                # Build full item for downstream (id, classic_context, theme_link, shape_hint, theme_tag)
+                safe_id = re.sub(r'[^a-z0-9_]', '_', (raw_object + "_" + raw_sub_object).lower())[:48] or f"item_{i}"
+                normalized_items.append({
+                    "id": safe_id if safe_id else f"item_{i}",
+                    "object": raw_object,
+                    "sub_object": raw_sub_object,
+                    "classic_context": "with " + raw_sub_object,
+                    "theme_link": ad_goal[:50] if ad_goal else "",
+                    "shape_hint": "",
+                    "theme_tag": "",
+                })
             
             # Replace object_list with normalized version
             object_list = normalized_items
@@ -1006,12 +938,7 @@ Return JSON only:
         except json.JSONDecodeError as e:
             logger.error(f"STEP0_BUNDLE JSON parse error (attempt {attempt+1}/{max_attempts}): {e}")
             if attempt < max_attempts - 1:
-                prompt = f"""Fix JSON only. Return valid JSON:
-{{
-  "ad_goal": "...",
-  "difficulty_score": 0-100,
-  "object_list": [150 items]
-}}"""
+                prompt = f"""Return valid compact JSON only. No other text. Product: {product_name}. {{"ad_goal":"...","difficulty_score":0-100,"object_list":[{{"primary_object":"...","sub_object":"..."}}, ... 150 items]}}"""
                 continue
             raise ValueError(f"STEP0_BUNDLE_PARSE_ERROR: Failed to parse JSON after {max_attempts} attempts: {e}")
         except ValueError as e:
@@ -1020,10 +947,7 @@ Return JSON only:
                 raise
             logger.warning(f"STEP0_BUNDLE validation error (attempt {attempt+1}/{max_attempts}): {error_msg}")
             if attempt < max_attempts - 1:
-                prompt = f"""Fix JSON only. Return valid JSON with:
-- ad_goal (string)
-- difficulty_score (number 0-100)
-- object_list (array of 150 items, each with id/object/sub_object/classic_context/theme_link/shape_hint/theme_tag)"""
+                prompt = f"""Return valid compact JSON only. {{"ad_goal":"6-12 words","difficulty_score":0-100,"object_list":[{{"primary_object":"1-3 words","sub_object":"1-3 words"}}, ... exactly 150 items]}}. Product: {product_name}."""
                 continue
             raise ValueError(f"STEP0_BUNDLE_VALIDATION_ERROR: {error_msg}")
         except Exception as e:

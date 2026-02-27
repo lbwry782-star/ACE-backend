@@ -273,6 +273,7 @@ def preview():
             result = generate_preview_data(payload)
             return jsonify(result), 200
         finally:
+            # Always release so lock is never stuck (e.g. on Step0 timeout → 504)
             _release_session_lock(session_id, ad_index)
     except OpenAIRateLimitError as e:
         logger.warning(f"[{request_id}] Preview rate limited: {e.message}")
