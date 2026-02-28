@@ -4682,7 +4682,8 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
     timeout_sec = GOAL_PAIRS_O3_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
-        timeout=httpx.Timeout(timeout_sec)
+        timeout=httpx.Timeout(timeout_sec),
+        max_retries=0,
     )
     model = "o3-pro"
     prompt = GOAL_PAIRS_O3_PROMPT_TEMPLATE.format(
