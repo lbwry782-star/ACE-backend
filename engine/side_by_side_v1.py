@@ -108,8 +108,8 @@ ALLOWED_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024"}  # Supported by gp
 # ACE_IMAGE_ONLY=1: real image via gpt-image-1.5 only, no o3-pro, placeholder copy
 ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip() in ("1", "true")
 
-# ACE_PHASE2_GOAL_PAIRS=1: when IMAGE_ONLY, call o3-pro once for goal + 3 pairs, then image from selected pair
-ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip() in ("1", "true")
+# ACE_PHASE2_GOAL_PAIRS=1/true/yes: when IMAGE_ONLY, call o3-pro once for goal + 3 pairs, then image from selected pair
+ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip().lower() in ("1", "true", "yes")
 
 # Fallback placeholder PNG (1x1) when image call fails in IMAGE_ONLY mode
 _IMAGE_ONLY_PLACEHOLDER_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -4851,11 +4851,20 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
 
+    # Pipeline branch (for troubleshooting): IMAGE_ONLY = Phase 1, PHASE2_GOAL_PAIRS+IMAGE_ONLY = Phase 2, else full pipeline
+    if ACE_IMAGE_ONLY and ACE_PHASE2_GOAL_PAIRS:
+        logger.info(f"PIPELINE_BRANCH=PHASE2_GOAL_PAIRS+IMAGE_ONLY request_id={request_id}")
+    elif ACE_IMAGE_ONLY:
+        logger.info(f"PIPELINE_BRANCH=IMAGE_ONLY request_id={request_id}")
+    else:
+        logger.info(f"PIPELINE_BRANCH=FULL request_id={request_id}")
+
     # ACE_IMAGE_ONLY: single gpt-image-1.5 call, placeholder copy, no retries. Phase 2: goal+pairs from o3-pro when enabled.
     if ACE_IMAGE_ONLY:
         size = image_size_str if image_size_str in ALLOWED_IMAGE_SIZES else "1536x1024"
         prompt_to_use = None
         if ACE_PHASE2_GOAL_PAIRS:
+            logger.info(f"GOAL_PAIRS_START request_id={request_id}")
             cache_key = _get_goal_pairs_cache_key(session_id, product_name, product_description, size)
             now = time.time()
             with _goal_pairs_cache_lock:

@@ -80,6 +80,8 @@ logger = logging.getLogger(__name__)
 ACE_TEST_MODE = (os.environ.get("ACE_TEST_MODE", "") or "").strip().lower() in ("1", "true")
 # ACE_IMAGE_ONLY: "1" or "true" = gpt-image-1.5 only, no o3-pro, placeholder copy
 ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip().lower() in ("1", "true")
+# ACE_PHASE2_GOAL_PAIRS: "1" or "true" or "yes" = when IMAGE_ONLY, call o3-pro for goal + 3 pairs
+ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip().lower() in ("1", "true", "yes")
 if ACE_TEST_MODE:
     logger.info("TEST_MODE_ACTIVE=true")
 
@@ -343,7 +345,7 @@ def preview():
                 "result": demo,
             }), 200
 
-        logger.info(f"PREVIEW_FLAGS TEST_MODE=false IMAGE_ONLY={ACE_IMAGE_ONLY} size={payload.get('imageSize', '')} adIndex={ad_index} sessionId={session_id}")
+        logger.info(f"PREVIEW_FLAGS TEST_MODE=false IMAGE_ONLY={ACE_IMAGE_ONLY} PHASE2_GOAL_PAIRS={ACE_PHASE2_GOAL_PAIRS} size={payload.get('imageSize', '')} adIndex={ad_index} sessionId={session_id}")
         # Enforce serial execution per session: acquire lock before scheduling job
         if not _acquire_session_lock(session_id, ad_index):
             return jsonify({
