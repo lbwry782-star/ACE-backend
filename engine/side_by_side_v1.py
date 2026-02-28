@@ -1,4 +1,4 @@
-"""
+ """
 SideBySide Engine v1
 
 Generates ads with SIDE_BY_SIDE layout only.
@@ -4638,7 +4638,8 @@ def _image_only_single_call(image_size: str, request_id: str) -> Tuple[str, bool
     Returns (image_base64_str, success).
     """
     t0 = time.time()
-    logger.info(f"IMAGE_CALL_START size={image_size} request_id={request_id}")
+    quality = "low"
+    logger.info(f"IMAGE_CALL_START size={image_size} quality={quality} request_id={request_id}")
     timeout_sec = IMAGE_ONLY_CALL_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -4650,7 +4651,7 @@ def _image_only_single_call(image_size: str, request_id: str) -> Tuple[str, bool
             model=model,
             prompt=IMAGE_ONLY_HARDCODED_PROMPT,
             size=image_size,
-            quality="standard"
+            quality=quality
         )
         latency_ms = int((time.time() - t0) * 1000)
         b64 = response.data[0].b64_json if response.data else None
