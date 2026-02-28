@@ -4643,24 +4643,16 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "NO text, NO logos, NO letters, NO numbers."
 )
 
-# Phase 2: o3-pro single call for advertising_goal + 3 pairs (strict JSON, no Vision)
+# Phase 2: o3-pro single call for advertising_goal + 3 pairs (minimal prompt, strict JSON only)
 GOAL_PAIRS_O3_PROMPT_TEMPLATE = """Product: {product_name}
-Description: {product_description}
+{product_description}
 
-Output a single JSON object. No explanations, no markdown. Keys: "advertising_goal", "pairs".
+Reply with exactly one JSON object. No other text, no markdown, no explanation.
+Keys: "advertising_goal" (string, max 120 chars), "pairs" (array of exactly 3 objects).
+Each pair: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words; sub = typical companion object), "silhouette_similarity" (0-100 int).
+Rules: physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ.
 
-Rules:
-- advertising_goal: one short English sentence (6-12 words), commercial intent.
-- pairs: array of exactly 3 items. Each item: "a_primary", "a_sub", "b_primary", "b_sub", "silhouette_similarity".
-  - a_primary, a_sub, b_primary, b_sub: physical object names (1-3 words each). Sub = secondary physical object, not environment.
-  - silhouette_similarity: integer 0-100 (how similar the main shapes of A and B are).
-- Physical objects only. No environments, no abstract, no text, no logos, no brands.
-- Pairs must be distinct: A and B not identical; no repeated pair across the 3.
-
-Example shape:
-{{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}
-
-Return only valid JSON:"""
+{{"advertising_goal":"...","pairs":[{{"a_primary":"x","a_sub":"y","b_primary":"z","b_sub":"w","silhouette_similarity":50}},{{...}},{{...}}]}}"""
 
 
 def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_description: str, image_size: str) -> str:
@@ -4692,7 +4684,9 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
     )
     try:
         response = client.responses.create(model=model, input=prompt)
-        raw = (response.output_text or "").strip()
+        raw_from_api = response.output_text or ""
+        output_chars = len(raw_from_api)
+        raw = raw_from_api.strip()
         if not raw:
             raise ValueError("Empty response")
         if raw.startswith("```"):
@@ -4732,7 +4726,7 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
                 "silhouette_similarity": sim,
             })
         latency_ms = int((time.time() - t0) * 1000)
-        logger.info(f"GOAL_PAIRS_OK latency_ms={latency_ms} pairs_count=3 request_id={request_id}")
+        logger.info(f"GOAL_PAIRS_OK latency_ms={latency_ms} output_chars={output_chars} pairs_count=3 request_id={request_id}")
         return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs}
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
