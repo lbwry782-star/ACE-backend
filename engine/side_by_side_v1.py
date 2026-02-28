@@ -108,7 +108,7 @@ ALLOWED_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024"}  # Supported by gp
 # ACE_IMAGE_ONLY=1: real image via gpt-image-1.5 only, no o3-pro, placeholder copy
 ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip() in ("1", "true")
 
-# ACE_PHASE2_GOAL_PAIRS=1/true/yes: when IMAGE_ONLY, call o3-pro once for goal + 3 pairs, then image from selected pair
+# ACE_PHASE2_GOAL_PAIRS=1/true/yes: when IMAGE_ONLY, call o3-pro once for goal + 1 pair, then image from that pair
 ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip().lower() in ("1", "true", "yes")
 
 # Fallback placeholder PNG (1x1) when image call fails in IMAGE_ONLY mode
@@ -4643,16 +4643,16 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "NO text, NO logos, NO letters, NO numbers."
 )
 
-# Phase 2: o3-pro single call for advertising_goal + 3 pairs (minimal prompt, strict JSON only)
-GOAL_PAIRS_O3_PROMPT_TEMPLATE = """Product: {product_name}
+# Phase 2B: o3-pro single call for advertising_goal + 1 pair only (strict JSON, minimal output)
+GOAL_PAIR_O3_PROMPT_TEMPLATE = """Product: {product_name}
 {product_description}
 
 Reply with exactly one JSON object. No other text, no markdown, no explanation.
-Keys: "advertising_goal" (string, max 120 chars), "pairs" (array of exactly 3 objects).
-Each pair: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words; sub = typical companion object), "silhouette_similarity" (0-100 int).
+Keys: "advertising_goal" (string, max 120 chars), "pairs" (array of exactly 1 object).
+That object: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words; sub = typical companion), "silhouette_similarity" (0-100 int).
 Rules: physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ.
 
-{{"advertising_goal":"...","pairs":[{{"a_primary":"x","a_sub":"y","b_primary":"z","b_sub":"w","silhouette_similarity":50}},{{...}},{{...}}]}}"""
+{{"advertising_goal":"...","pairs":[{{"a_primary":"x","a_sub":"y","b_primary":"z","b_sub":"w","silhouette_similarity":50}}]}}"""
 
 
 def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_description: str, image_size: str) -> str:
@@ -4665,12 +4665,12 @@ def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_descri
 
 def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id: str) -> Optional[Dict]:
     """
-    Call o3-pro once for advertising_goal + 3 pairs. 15s timeout, 1 attempt, no retries.
-    On timeout/error: log GOAL_PAIRS_FAIL latency_ms=... FALLBACK_USED=true and return None (proceed to IMAGE_CALL_START).
-    Returns { "advertising_goal": str, "pairs": [ ... ] } or None.
+    Call o3-pro once for advertising_goal + 1 pair. 15s timeout, 1 attempt, no retries.
+    On timeout/error: log GOAL_PAIR_FAIL FALLBACK_USED=true and return None (proceed to IMAGE_CALL_START).
+    Returns { "advertising_goal": str, "pairs": [ single_pair ] } or None.
     """
     t0 = time.time()
-    logger.info(f"GOAL_PAIRS_START request_id={request_id}")
+    logger.info(f"GOAL_PAIR_START request_id={request_id}")
     timeout_sec = GOAL_PAIRS_O3_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -4678,7 +4678,7 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         max_retries=0,
     )
     model = "o3-pro"
-    prompt = GOAL_PAIRS_O3_PROMPT_TEMPLATE.format(
+    prompt = GOAL_PAIR_O3_PROMPT_TEMPLATE.format(
         product_name=product_name or "product",
         product_description=product_description or "description"
     )
@@ -4698,39 +4698,38 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         data = json.loads(raw)
         goal = (data.get("advertising_goal") or "").strip()
         pairs = data.get("pairs")
-        if not isinstance(pairs, list) or len(pairs) != 3:
-            raise ValueError("pairs must be array of 3 items")
-        out_pairs = []
-        for i, p in enumerate(pairs):
-            if not isinstance(p, dict):
-                raise ValueError(f"pair {i} not object")
-            ap = str(p.get("a_primary") or "").strip()
-            asub = str(p.get("a_sub") or "").strip()
-            bp = str(p.get("b_primary") or "").strip()
-            bsub = str(p.get("b_sub") or "").strip()
-            sim = p.get("silhouette_similarity")
-            if sim is not None:
-                try:
-                    sim = max(0, min(100, int(sim)))
-                except (TypeError, ValueError):
-                    sim = 50
-            else:
+        if not isinstance(pairs, list) or len(pairs) != 1:
+            raise ValueError("pairs must be array of exactly 1 item")
+        p = pairs[0]
+        if not isinstance(p, dict):
+            raise ValueError("pair not object")
+        ap = str(p.get("a_primary") or "").strip()
+        asub = str(p.get("a_sub") or "").strip()
+        bp = str(p.get("b_primary") or "").strip()
+        bsub = str(p.get("b_sub") or "").strip()
+        sim = p.get("silhouette_similarity")
+        if sim is not None:
+            try:
+                sim = max(0, min(100, int(sim)))
+            except (TypeError, ValueError):
                 sim = 50
-            if not ap or not bp:
-                raise ValueError(f"pair {i} missing a_primary or b_primary")
-            out_pairs.append({
-                "a_primary": ap,
-                "a_sub": asub,
-                "b_primary": bp,
-                "b_sub": bsub,
-                "silhouette_similarity": sim,
-            })
+        else:
+            sim = 50
+        if not ap or not bp:
+            raise ValueError("pair missing a_primary or b_primary")
+        out_pair = {
+            "a_primary": ap,
+            "a_sub": asub,
+            "b_primary": bp,
+            "b_sub": bsub,
+            "silhouette_similarity": sim,
+        }
         latency_ms = int((time.time() - t0) * 1000)
-        logger.info(f"GOAL_PAIRS_OK latency_ms={latency_ms} output_chars={output_chars} pairs_count=3 request_id={request_id}")
-        return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs}
+        logger.info(f"GOAL_PAIR_OK latency_ms={latency_ms} output_chars={output_chars} similarity={sim} request_id={request_id}")
+        return {"advertising_goal": goal or "Advertising goal", "pairs": [out_pair]}
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
-        logger.error(f"GOAL_PAIRS_FAIL latency_ms={latency_ms} error={e} request_id={request_id} FALLBACK_USED=true")
+        logger.error(f"GOAL_PAIR_FAIL latency_ms={latency_ms} error={e} request_id={request_id} FALLBACK_USED=true")
         return None
 
 
@@ -4879,8 +4878,7 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
                         _goal_pairs_cache[cache_key] = (goal_pairs_data, now)
             if goal_pairs_data and goal_pairs_data.get("pairs"):
                 pairs = goal_pairs_data["pairs"]
-                idx = max(0, min(2, ad_index - 1))
-                pair = pairs[idx]
+                pair = pairs[0]
                 similarity = int(pair.get("silhouette_similarity", 50))
                 mode_decision = "REPLACEMENT" if similarity >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
                 logger.info(
