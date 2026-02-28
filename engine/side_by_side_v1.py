@@ -118,7 +118,7 @@ _IMAGE_ONLY_PLACEHOLDER_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAA
 IMAGE_ONLY_CALL_TIMEOUT_SECONDS = 60
 
 # Phase 2: o3-pro goal+pairs call timeout (1 attempt, no retries); fail fast to fallback
-GOAL_PAIRS_O3_TIMEOUT_SECONDS = 25
+GOAL_PAIRS_O3_TIMEOUT_SECONDS = 15
 GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
 
@@ -4673,12 +4673,12 @@ def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_descri
 
 def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id: str) -> Optional[Dict]:
     """
-    Call o3-pro once for advertising_goal + 3 pairs. 25s timeout, 1 attempt, no retries.
-    On timeout/error: log GOAL_PAIRS_FAIL FALLBACK_USED=true and return None (proceed to IMAGE_CALL_START).
+    Call o3-pro once for advertising_goal + 3 pairs. 15s timeout, 1 attempt, no retries.
+    On timeout/error: log GOAL_PAIRS_FAIL latency_ms=... FALLBACK_USED=true and return None (proceed to IMAGE_CALL_START).
     Returns { "advertising_goal": str, "pairs": [ ... ] } or None.
     """
-    logger.info(f"GOAL_PAIRS_START request_id={request_id}")
     t0 = time.time()
+    logger.info(f"GOAL_PAIRS_START request_id={request_id}")
     timeout_sec = GOAL_PAIRS_O3_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -4735,7 +4735,8 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         logger.info(f"GOAL_PAIRS_OK latency_ms={latency_ms} pairs_count=3 request_id={request_id}")
         return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs}
     except Exception as e:
-        logger.error(f"GOAL_PAIRS_FAIL error={e} request_id={request_id} FALLBACK_USED=true")
+        latency_ms = int((time.time() - t0) * 1000)
+        logger.error(f"GOAL_PAIRS_FAIL latency_ms={latency_ms} error={e} request_id={request_id} FALLBACK_USED=true")
         return None
 
 
@@ -4864,7 +4865,6 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
         size = image_size_str if image_size_str in ALLOWED_IMAGE_SIZES else "1536x1024"
         prompt_to_use = None
         if ACE_PHASE2_GOAL_PAIRS:
-            logger.info(f"GOAL_PAIRS_START request_id={request_id}")
             cache_key = _get_goal_pairs_cache_key(session_id, product_name, product_description, size)
             now = time.time()
             with _goal_pairs_cache_lock:
