@@ -105,6 +105,15 @@ PREVIEW_IMAGE_QUALITY_DEFAULT = "low"  # Fast preview quality
 GENERATE_IMAGE_QUALITY_DEFAULT = "high"  # High quality for final generation
 ALLOWED_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024"}  # Supported by gpt-image-*
 
+# ACE_IMAGE_ONLY=1: real image via gpt-image-1.5 only, no o3-pro, placeholder copy
+ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip() in ("1", "true")
+
+# Fallback placeholder PNG (1x1) when image call fails in IMAGE_ONLY mode
+_IMAGE_ONLY_PLACEHOLDER_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
+# Timeout for single image call in IMAGE_ONLY mode (no retries)
+IMAGE_ONLY_CALL_TIMEOUT_SECONDS = 60
+
 # ============================================================================
 # In-Memory Caches (with TTL)
 # ============================================================================
@@ -4614,6 +4623,48 @@ def create_text_file(
     return "\n".join(lines)
 
 
+# Hardcoded prompt for ACE_IMAGE_ONLY: pencil sketch, two objects SIDE BY SIDE, no text
+IMAGE_ONLY_HARDCODED_PROMPT = (
+    "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
+    "Two simple objects side by side with slight overlap: "
+    "a playing card next to a card deck, and a notebook with spiral binding. "
+    "NO text, NO logos, NO letters, NO numbers."
+)
+
+
+def _image_only_single_call(image_size: str, request_id: str) -> Tuple[str, bool]:
+    """
+    Single gpt-image-1.5 call for ACE_IMAGE_ONLY mode. No retries, 60s timeout.
+    Returns (image_base64_str, success).
+    """
+    t0 = time.time()
+    logger.info(f"IMAGE_CALL_START size={image_size} request_id={request_id}")
+    timeout_sec = IMAGE_ONLY_CALL_TIMEOUT_SECONDS
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(timeout_sec)
+    )
+    model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
+    try:
+        response = client.images.generate(
+            model=model,
+            prompt=IMAGE_ONLY_HARDCODED_PROMPT,
+            size=image_size,
+            quality="standard"
+        )
+        latency_ms = int((time.time() - t0) * 1000)
+        b64 = response.data[0].b64_json if response.data else None
+        if not b64:
+            raise ValueError("No image data in response")
+        logger.info(f"IMAGE_CALL_OK latency_ms={latency_ms} request_id={request_id}")
+        return (b64, True)
+    except Exception as e:
+        latency_ms = int((time.time() - t0) * 1000)
+        logger.error(f"IMAGE_CALL_FAIL latency_ms={latency_ms} error={e}")
+        logger.info("IMAGE_FALLBACK_PLACEHOLDER_USED=true")
+        return (_IMAGE_ONLY_PLACEHOLDER_BASE64, False)
+
+
 def generate_preview_data(payload_dict: Dict) -> Dict:
     """
     Generate preview data and return as dictionary (for JSON response).
@@ -4670,6 +4721,25 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     session_seed = session_id  # Use session_id as session_seed for cache key
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
+
+    # ACE_IMAGE_ONLY: single gpt-image-1.5 call, no o3-pro, placeholder copy, no retries
+    if ACE_IMAGE_ONLY:
+        size = image_size_str if image_size_str in ALLOWED_IMAGE_SIZES else "1536x1024"
+        image_base64, ok = _image_only_single_call(size, request_id)
+        if not ok:
+            image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
+        return {
+            "imageBase64": image_base64,
+            "image_base64": image_base64,
+            "headline": "Preview Headline",
+            "bodyText50": "Preview body text (placeholder)",
+            "body_text": "Preview body text (placeholder)",
+            "image_url": None,
+            "ad_goal": "Preview ad goal",
+            "object_a": "object_a",
+            "object_b": "object_b",
+            "marketing_copy_50_words": "Preview body text (placeholder)",
+        }
     
     # A) STEP 0 - UNIFIED BUNDLE: ad_goal + difficulty_score + object_list(150)
     step0_cache_hit = False
