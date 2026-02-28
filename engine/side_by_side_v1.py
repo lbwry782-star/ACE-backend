@@ -1,4 +1,4 @@
- """
+"""
 SideBySide Engine v1
 
 Generates ads with SIDE_BY_SIDE layout only.
