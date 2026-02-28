@@ -117,8 +117,8 @@ _IMAGE_ONLY_PLACEHOLDER_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAA
 # Timeout for single image call in IMAGE_ONLY mode (no retries)
 IMAGE_ONLY_CALL_TIMEOUT_SECONDS = 60
 
-# Phase 2: o3-pro goal+pairs call timeout (1 attempt, no retries)
-GOAL_PAIRS_O3_TIMEOUT_SECONDS = 60
+# Phase 2: o3-pro goal+pairs call timeout (1 attempt, no retries); fail fast to fallback
+GOAL_PAIRS_O3_TIMEOUT_SECONDS = 25
 GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
 
@@ -4673,8 +4673,9 @@ def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_descri
 
 def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id: str) -> Optional[Dict]:
     """
-    Call o3-pro once for advertising_goal + 3 pairs. 60s timeout, 1 attempt, no retries.
-    Returns { "advertising_goal": str, "pairs": [ {a_primary, a_sub, b_primary, b_sub, silhouette_similarity}, ... ] } or None.
+    Call o3-pro once for advertising_goal + 3 pairs. 25s timeout, 1 attempt, no retries.
+    On timeout/error: log GOAL_PAIRS_FAIL FALLBACK_USED=true and return None (proceed to IMAGE_CALL_START).
+    Returns { "advertising_goal": str, "pairs": [ ... ] } or None.
     """
     logger.info(f"GOAL_PAIRS_START request_id={request_id}")
     t0 = time.time()
@@ -4733,9 +4734,7 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         logger.info(f"GOAL_PAIRS_OK latency_ms={latency_ms} pairs_count=3 request_id={request_id}")
         return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs}
     except Exception as e:
-        latency_ms = int((time.time() - t0) * 1000)
-        logger.error(f"GOAL_PAIRS_FAIL error={e} request_id={request_id}")
-        logger.info("GOAL_PAIRS_FAIL FALLBACK_USED=true")
+        logger.error(f"GOAL_PAIRS_FAIL error={e} request_id={request_id} FALLBACK_USED=true")
         return None
 
 
