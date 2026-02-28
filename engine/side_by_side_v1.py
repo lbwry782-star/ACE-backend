@@ -108,11 +108,19 @@ ALLOWED_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024"}  # Supported by gp
 # ACE_IMAGE_ONLY=1: real image via gpt-image-1.5 only, no o3-pro, placeholder copy
 ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip() in ("1", "true")
 
+# ACE_PHASE2_GOAL_PAIRS=1: when IMAGE_ONLY, call o3-pro once for goal + 3 pairs, then image from selected pair
+ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip() in ("1", "true")
+
 # Fallback placeholder PNG (1x1) when image call fails in IMAGE_ONLY mode
 _IMAGE_ONLY_PLACEHOLDER_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
 # Timeout for single image call in IMAGE_ONLY mode (no retries)
 IMAGE_ONLY_CALL_TIMEOUT_SECONDS = 60
+
+# Phase 2: o3-pro goal+pairs call timeout (1 attempt, no retries)
+GOAL_PAIRS_O3_TIMEOUT_SECONDS = 60
+GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
+SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
 
 # ============================================================================
 # In-Memory Caches (with TTL)
@@ -139,6 +147,10 @@ _step0_cache_lock = Lock()
 # STEP 1 cache: key -> (shape_result_dict, timestamp)
 _step1_cache: Dict[str, Tuple[Dict, float]] = {}
 _step1_cache_lock = Lock()
+
+# Phase 2 goal+pairs cache: key -> ({ advertising_goal, pairs: [ {a_primary, a_sub, b_primary, b_sub, silhouette_similarity}, ... ] }, timestamp)
+_goal_pairs_cache: Dict[str, Tuple[Dict, float]] = {}
+_goal_pairs_cache_lock = Lock()
 
 # Three pairs cache: key -> (list of 3 pairs, timestamp)
 _three_pairs_cache: Dict[str, Tuple[List[Dict], float]] = {}
@@ -4631,14 +4643,130 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "NO text, NO logos, NO letters, NO numbers."
 )
 
+# Phase 2: o3-pro single call for advertising_goal + 3 pairs (strict JSON, no Vision)
+GOAL_PAIRS_O3_PROMPT_TEMPLATE = """Product: {product_name}
+Description: {product_description}
 
-def _image_only_single_call(image_size: str, request_id: str) -> Tuple[str, bool]:
+Output a single JSON object. No explanations, no markdown. Keys: "advertising_goal", "pairs".
+
+Rules:
+- advertising_goal: one short English sentence (6-12 words), commercial intent.
+- pairs: array of exactly 3 items. Each item: "a_primary", "a_sub", "b_primary", "b_sub", "silhouette_similarity".
+  - a_primary, a_sub, b_primary, b_sub: physical object names (1-3 words each). Sub = secondary physical object, not environment.
+  - silhouette_similarity: integer 0-100 (how similar the main shapes of A and B are).
+- Physical objects only. No environments, no abstract, no text, no logos, no brands.
+- Pairs must be distinct: A and B not identical; no repeated pair across the 3.
+
+Example shape:
+{{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}
+
+Return only valid JSON:"""
+
+
+def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_description: str, image_size: str) -> str:
+    """Cache key for Phase 2 goal+pairs. no_session uses product hash."""
+    if session_id and session_id != "no_session":
+        return f"goal_pairs|{session_id}"
+    h = hashlib.sha256(f"{product_name}|{product_description}|{image_size}".encode()).hexdigest()[:16]
+    return f"goal_pairs|no_session_{h}"
+
+
+def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id: str) -> Optional[Dict]:
+    """
+    Call o3-pro once for advertising_goal + 3 pairs. 60s timeout, 1 attempt, no retries.
+    Returns { "advertising_goal": str, "pairs": [ {a_primary, a_sub, b_primary, b_sub, silhouette_similarity}, ... ] } or None.
+    """
+    logger.info(f"GOAL_PAIRS_START request_id={request_id}")
+    t0 = time.time()
+    timeout_sec = GOAL_PAIRS_O3_TIMEOUT_SECONDS
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(timeout_sec)
+    )
+    model = "o3-pro"
+    prompt = GOAL_PAIRS_O3_PROMPT_TEMPLATE.format(
+        product_name=product_name or "product",
+        product_description=product_description or "description"
+    )
+    try:
+        response = client.responses.create(model=model, input=prompt)
+        raw = (response.output_text or "").strip()
+        if not raw:
+            raise ValueError("Empty response")
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+        if raw.startswith("```json"):
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+        data = json.loads(raw)
+        goal = (data.get("advertising_goal") or "").strip()
+        pairs = data.get("pairs")
+        if not isinstance(pairs, list) or len(pairs) != 3:
+            raise ValueError("pairs must be array of 3 items")
+        out_pairs = []
+        for i, p in enumerate(pairs):
+            if not isinstance(p, dict):
+                raise ValueError(f"pair {i} not object")
+            ap = str(p.get("a_primary") or "").strip()
+            asub = str(p.get("a_sub") or "").strip()
+            bp = str(p.get("b_primary") or "").strip()
+            bsub = str(p.get("b_sub") or "").strip()
+            sim = p.get("silhouette_similarity")
+            if sim is not None:
+                try:
+                    sim = max(0, min(100, int(sim)))
+                except (TypeError, ValueError):
+                    sim = 50
+            else:
+                sim = 50
+            if not ap or not bp:
+                raise ValueError(f"pair {i} missing a_primary or b_primary")
+            out_pairs.append({
+                "a_primary": ap,
+                "a_sub": asub,
+                "b_primary": bp,
+                "b_sub": bsub,
+                "silhouette_similarity": sim,
+            })
+        latency_ms = int((time.time() - t0) * 1000)
+        logger.info(f"GOAL_PAIRS_OK latency_ms={latency_ms} pairs_count=3 request_id={request_id}")
+        return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs}
+    except Exception as e:
+        latency_ms = int((time.time() - t0) * 1000)
+        logger.error(f"GOAL_PAIRS_FAIL error={e} request_id={request_id}")
+        logger.info("GOAL_PAIRS_FAIL FALLBACK_USED=true")
+        return None
+
+
+def _build_phase2_image_prompt(pair: Dict, mode_decision: str) -> str:
+    """Build gpt-image-1.5 prompt from selected pair. Pencil sketch, white bg, no text."""
+    ap = pair.get("a_primary", "")
+    asub = pair.get("a_sub", "")
+    bp = pair.get("b_primary", "")
+    bsub = pair.get("b_sub", "")
+    a_str = f"{ap} with {asub}" if asub else ap
+    b_str = f"{bp} with {bsub}" if bsub else bp
+    base = "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
+    if mode_decision == "REPLACEMENT":
+        return (
+            base + f"{bp} replaces the main surface or shape of {ap}, with {ap}'s context and {asub} still visible. "
+            f"Sketch style. NO text, NO logos, NO letters, NO numbers."
+        )
+    return (
+        base + f"Two objects side by side with slight overlap: {a_str} and {b_str}. "
+        "Sub-objects visible. NO text, NO logos, NO letters, NO numbers."
+    )
+
+
+def _image_only_single_call(image_size: str, request_id: str, prompt: Optional[str] = None) -> Tuple[str, bool]:
     """
     Single gpt-image-1.5 call for ACE_IMAGE_ONLY mode. No retries, 60s timeout.
-    Returns (image_base64_str, success).
+    Returns (image_base64_str, success). If prompt is None, uses IMAGE_ONLY_HARDCODED_PROMPT.
     """
     t0 = time.time()
     quality = "low"
+    image_prompt = prompt if prompt else IMAGE_ONLY_HARDCODED_PROMPT
     logger.info(f"IMAGE_CALL_START size={image_size} quality={quality} request_id={request_id}")
     timeout_sec = IMAGE_ONLY_CALL_TIMEOUT_SECONDS
     client = OpenAI(
@@ -4649,7 +4777,7 @@ def _image_only_single_call(image_size: str, request_id: str) -> Tuple[str, bool
     try:
         response = client.images.generate(
             model=model,
-            prompt=IMAGE_ONLY_HARDCODED_PROMPT,
+            prompt=image_prompt,
             size=image_size,
             quality=quality
         )
@@ -4723,10 +4851,41 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     history = payload_dict.get("history", [])
     object_list = payload_dict.get("objectList")
 
-    # ACE_IMAGE_ONLY: single gpt-image-1.5 call, no o3-pro, placeholder copy, no retries
+    # ACE_IMAGE_ONLY: single gpt-image-1.5 call, placeholder copy, no retries. Phase 2: goal+pairs from o3-pro when enabled.
     if ACE_IMAGE_ONLY:
         size = image_size_str if image_size_str in ALLOWED_IMAGE_SIZES else "1536x1024"
-        image_base64, ok = _image_only_single_call(size, request_id)
+        prompt_to_use = None
+        if ACE_PHASE2_GOAL_PAIRS:
+            cache_key = _get_goal_pairs_cache_key(session_id, product_name, product_description, size)
+            now = time.time()
+            with _goal_pairs_cache_lock:
+                entry = _goal_pairs_cache.get(cache_key)
+                if entry:
+                    data, ts = entry
+                    if now - ts <= GOAL_PAIRS_CACHE_TTL_SECONDS:
+                        goal_pairs_data = data
+                    else:
+                        del _goal_pairs_cache[cache_key]
+                        goal_pairs_data = None
+                else:
+                    goal_pairs_data = None
+            if goal_pairs_data is None:
+                goal_pairs_data = _fetch_goal_pairs_o3(product_name, product_description, request_id)
+                if goal_pairs_data:
+                    with _goal_pairs_cache_lock:
+                        _goal_pairs_cache[cache_key] = (goal_pairs_data, now)
+            if goal_pairs_data and goal_pairs_data.get("pairs"):
+                pairs = goal_pairs_data["pairs"]
+                idx = max(0, min(2, ad_index - 1))
+                pair = pairs[idx]
+                similarity = int(pair.get("silhouette_similarity", 50))
+                mode_decision = "REPLACEMENT" if similarity >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
+                logger.info(
+                    f"PAIR_USED adIndex={ad_index} A={pair.get('a_primary','')} A_sub={pair.get('a_sub','')} "
+                    f"B={pair.get('b_primary','')} B_sub={pair.get('b_sub','')} similarity={similarity} mode_decision={mode_decision}"
+                )
+                prompt_to_use = _build_phase2_image_prompt(pair, mode_decision)
+        image_base64, ok = _image_only_single_call(size, request_id, prompt=prompt_to_use)
         if not ok:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
         return {
