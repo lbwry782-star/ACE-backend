@@ -117,8 +117,8 @@ _IMAGE_ONLY_PLACEHOLDER_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAA
 # Timeout for single image call in IMAGE_ONLY mode (no retries)
 IMAGE_ONLY_CALL_TIMEOUT_SECONDS = 60
 
-# Phase 2: o3-pro goal+pairs call timeout (1 attempt, no retries); fail fast to fallback
-GOAL_PAIRS_O3_TIMEOUT_SECONDS = 15
+# Phase 2: o3-pro goal+pair call timeout (1 attempt, no retries); on timeout/error -> fallback to image
+GOAL_PAIRS_O3_TIMEOUT_SECONDS = 30
 GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
 
