@@ -4647,16 +4647,24 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "NO text, NO logos, NO letters, NO numbers."
 )
 
-# Phase 2B: o3-pro single call for advertising_goal + 1 pair only (strict JSON, minimal output)
+# Phase 2B: o3-pro single call for advertising_goal + 1 pair (strict JSON). Creative upgrade: target high silhouette similarity.
+GOAL_PAIR_MIN_SIMILARITY_ACCEPT = 40
+GOAL_PAIR_TARGET_SIMILARITY = 60
+
 GOAL_PAIR_O3_PROMPT_TEMPLATE = """Product: {product_name}
 {product_description}
 
 Reply with exactly one JSON object. No other text, no markdown, no explanation.
-Keys: "advertising_goal" (string, max 120 chars), "pairs" (array of exactly 1 object).
-That object: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words; sub = typical companion), "silhouette_similarity" (0-100 int).
+Keys: "advertising_goal" (string, max 120 chars), "pairs" (array of exactly 1 object), "best_effort" (boolean), "min_target" (number).
+- advertising_goal: short commercial sentence.
+- pairs: exactly 1 object with "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words; sub = typical companion), "silhouette_similarity" (integer 0-100).
+- TARGET: silhouette_similarity >= 60. Choose A and B so their overall silhouette/contour is similar (e.g. both rounded, both rectangular).
+- If you cannot find a pair with similarity >= 60, return the best pair you found and set "best_effort": true and "min_target": 60. Otherwise set "best_effort": false.
 Rules: physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ.
 
-{{"advertising_goal":"...","pairs":[{{"a_primary":"x","a_sub":"y","b_primary":"z","b_sub":"w","silhouette_similarity":50}}]}}"""
+{{"advertising_goal":"...","pairs":[{{"a_primary":"x","a_sub":"y","b_primary":"z","b_sub":"w","silhouette_similarity":65}}],"best_effort":false,"min_target":60}}"""
+
+GOAL_PAIR_RETRY_INSTRUCTION = """Your previous pair was too dissimilar. Pick a new pair with much more similar overall silhouette/contour. Aim for silhouette_similarity >= 60."""
 
 
 def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_description: str, image_size: str) -> str:
@@ -4711,9 +4719,15 @@ def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
         return None
 
 
-def create_goal_pair_background(product_name: str, product_description: str, request_id: str) -> Optional[str]:
+def create_goal_pair_background(
+    product_name: str,
+    product_description: str,
+    request_id: str,
+    retry_instruction: Optional[str] = None,
+) -> Optional[str]:
     """
     Create o3-pro GOAL_PAIR request in OpenAI Background Mode. No retries.
+    If retry_instruction is set, appends it to the prompt (for one extra attempt after low similarity).
     Returns response_id (str) for polling, or None on create failure.
     """
     client = OpenAI(
@@ -4725,6 +4739,8 @@ def create_goal_pair_background(product_name: str, product_description: str, req
         product_name=product_name or "product",
         product_description=product_description or "description"
     )
+    if retry_instruction:
+        prompt = prompt.rstrip() + "\n\n" + retry_instruction.strip()
     try:
         response = client.responses.create(
             model="o3-pro",

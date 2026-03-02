@@ -18,6 +18,8 @@ from engine.side_by_side_v1 import (
     poll_goal_pair_response,
     GOAL_PAIR_BG_MAX_WAIT_SECONDS,
     GOAL_PAIR_BG_POLL_INTERVAL_SECONDS,
+    GOAL_PAIR_MIN_SIMILARITY_ACCEPT,
+    GOAL_PAIR_RETRY_INSTRUCTION,
 )
 from engine.openai_retry import OpenAIRateLimitError
 
@@ -384,6 +386,7 @@ def preview():
             "goal_pair_fallback": False,
             "goal_pair_poll_attempt": 0,
             "goal_pair_next_poll_time_ms": 0,
+            "goal_pair_retry_done": False,
         }
         _cleanup_jobs()
         _set_job(job_id, job_record)
@@ -452,8 +455,31 @@ def preview():
                                     j["goal_pair_poll_attempt"] = new_attempt
                                     j["goal_pair_next_poll_time_ms"] = int(time.time() * 1000) + delay_ms
                                     if status == "completed" and goal_data:
-                                        j["goal_pairs_data"] = goal_data
-                                        break
+                                        sim = goal_data.get("pairs", [{}])[0].get("silhouette_similarity", 0)
+                                        if sim < GOAL_PAIR_MIN_SIMILARITY_ACCEPT and not j.get("goal_pair_retry_done"):
+                                            logger.info(f"GOAL_PAIR_REJECTED similarity={sim} reason=too_low retrying=true request_id={job_request_id}")
+                                            retry_response_id = create_goal_pair_background(
+                                                product_name, product_description, job_request_id,
+                                                retry_instruction=GOAL_PAIR_RETRY_INSTRUCTION,
+                                            )
+                                            if retry_response_id:
+                                                logger.info(f"GOAL_PAIR_RETRY_STARTED attempt=2 request_id={job_request_id}")
+                                                j["openai_response_id"] = retry_response_id
+                                                j["openai_goal_pair_response_id"] = retry_response_id
+                                                j["goal_pair_created_at"] = time.time()
+                                                j["goal_pair_poll_attempt"] = 0
+                                                j["goal_pair_next_poll_time_ms"] = 0
+                                                j["goal_pair_retry_done"] = True
+                                            else:
+                                                j["goal_pairs_data"] = goal_data
+                                                break
+                                        elif sim < GOAL_PAIR_MIN_SIMILARITY_ACCEPT and j.get("goal_pair_retry_done"):
+                                            logger.info(f"GOAL_PAIR_RETRY_RESULT similarity={sim} request_id={job_request_id}")
+                                            j["goal_pairs_data"] = goal_data
+                                            break
+                                        else:
+                                            j["goal_pairs_data"] = goal_data
+                                            break
                                     if status == "failed":
                                         j["goal_pair_fallback"] = True
                                         break
