@@ -4665,12 +4665,12 @@ def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_descri
 
 def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id: str) -> Optional[Dict]:
     """
-    Call o3-pro once for advertising_goal + 1 pair. 15s timeout, 1 attempt, no retries.
+    Call o3-pro once for advertising_goal + 1 pair. 30s timeout, reasoning.effort=low, 1 attempt, no retries.
     On timeout/error: log GOAL_PAIR_FAIL FALLBACK_USED=true and return None (proceed to IMAGE_CALL_START).
     Returns { "advertising_goal": str, "pairs": [ single_pair ] } or None.
     """
     t0 = time.time()
-    logger.info(f"GOAL_PAIR_START request_id={request_id}")
+    logger.info(f"GOAL_PAIR_START request_id={request_id} effort=low")
     timeout_sec = GOAL_PAIRS_O3_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -4683,7 +4683,11 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         product_description=product_description or "description"
     )
     try:
-        response = client.responses.create(model=model, input=prompt)
+        response = client.responses.create(
+            model=model,
+            input=prompt,
+            reasoning={"effort": "low"},
+        )
         raw_from_api = response.output_text or ""
         output_chars = len(raw_from_api)
         raw = raw_from_api.strip()
