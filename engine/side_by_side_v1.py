@@ -4917,6 +4917,7 @@ def generate_preview_data(
     payload_dict: Dict,
     goal_pairs_data_override: Optional[Dict] = None,
     goal_pair_skip_fetch: bool = False,
+    request_id: Optional[str] = None,
 ) -> Dict:
     """
     Generate preview data and return as dictionary (for JSON response).
@@ -4949,7 +4950,7 @@ def generate_preview_data(
             (if PREVIEW_MODE=plan_only)
         }
     """
-    request_id = str(uuid.uuid4())
+    request_id = request_id or str(uuid.uuid4())
     t_start = time.time()
     logger.info(
         f"MODEL_CONFIG text_model={_get_text_model()} preview_planner={PREVIEW_PLANNER_MODEL} generate_planner={GENERATE_PLANNER_MODEL} shape_model={_get_shape_model()} image_model={os.environ.get('OPENAI_IMAGE_MODEL', 'gpt-image-1.5')}"
@@ -5021,7 +5022,8 @@ def generate_preview_data(
                 mode_decision = "REPLACEMENT" if similarity >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
                 logger.info(
                     f"PAIR_USED adIndex={ad_index} A={pair.get('a_primary','')} A_sub={pair.get('a_sub','')} "
-                    f"B={pair.get('b_primary','')} B_sub={pair.get('b_sub','')} similarity={similarity} mode_decision={mode_decision}"
+                    f"B={pair.get('b_primary','')} B_sub={pair.get('b_sub','')} similarity={similarity} "
+                    f"mode_decision={mode_decision} request_id={request_id}"
                 )
                 prompt_to_use = _build_phase2_image_prompt(pair, mode_decision)
         image_base64, ok = _image_only_single_call(size, request_id, prompt=prompt_to_use)

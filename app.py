@@ -375,10 +375,14 @@ def preview():
             "result": None,
             "error": None,
             "error_message": None,
+            # Phase 2D: background GOAL_PAIR state
+            "request_id": request_id,
             "openai_goal_pair_response_id": None,
             "goal_pair_created_at": None,
             "goal_pairs_data": None,
             "goal_pair_fallback": False,
+            "goal_pair_poll_attempt": 0,
+            "goal_pair_next_poll_ts": 0.0,
         }
         _cleanup_jobs()
         _set_job(job_id, job_record)
@@ -393,11 +397,12 @@ def preview():
                     if not job:
                         return
                     job["status"] = "running"
+                    job_request_id = job.get("request_id") or req_id
                 try:
                     if ACE_PHASE2_GOAL_PAIRS and ACE_IMAGE_ONLY:
                         product_name = payload_data.get("productName", "") or "product"
                         product_description = payload_data.get("productDescription", "") or "description"
-                        response_id = create_goal_pair_background(product_name, product_description, req_id)
+                        response_id = create_goal_pair_background(product_name, product_description, job_request_id)
                         if not response_id:
                             with _jobs_lock:
                                 j = _jobs.get(jid)
@@ -409,6 +414,8 @@ def preview():
                                 if j is not None:
                                     j["openai_goal_pair_response_id"] = response_id
                                     j["goal_pair_created_at"] = time.time()
+                                    j["goal_pair_poll_attempt"] = 0
+                                    j["goal_pair_next_poll_ts"] = 0.0
                             while True:
                                 with _jobs_lock:
                                     j = _jobs.get(jid)
@@ -416,36 +423,52 @@ def preview():
                                         break
                                     rid = j.get("openai_goal_pair_response_id")
                                     created_at_ts = j.get("goal_pair_created_at") or 0
+                                    poll_attempt = j.get("goal_pair_poll_attempt", 0)
+                                    next_poll_ts = j.get("goal_pair_next_poll_ts", 0.0)
+                                    job_request_id = j.get("request_id") or job_request_id
                                 if not rid:
                                     break
-                                if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
-                                    with _jobs_lock:
-                                        j = _jobs.get(jid)
-                                        if j is not None:
-                                            j["goal_pair_fallback"] = True
-                                    break
-                                goal_data, status = poll_goal_pair_response(rid, req_id, created_at_ts)
+                                now_ts = time.time()
+                                # Throttle polling based on next_poll_ts (backoff: 1s, 2s, 3s)
+                                if next_poll_ts and now_ts < next_poll_ts:
+                                    next_ms = int((next_poll_ts - now_ts) * 1000)
+                                    logger.info(f"GOAL_PAIR_BG_POLL_SKIPPED next_poll_in_ms={next_ms} request_id={job_request_id}")
+                                    time.sleep(min(max(next_poll_ts - now_ts, 0.0), 1.0))
+                                    continue
+                                logger.info(f"GOAL_PAIR_BG_POLL_CALL attempt={poll_attempt + 1} request_id={job_request_id}")
+                                goal_data, status = poll_goal_pair_response(rid, job_request_id, created_at_ts)
                                 with _jobs_lock:
                                     j = _jobs.get(jid)
                                     if j is None:
                                         break
+                                    # Update poll attempt and next poll time (1s, 2s, 3s cap)
+                                    new_attempt = poll_attempt + 1
+                                    if new_attempt == 1:
+                                        delay = 1.0
+                                    elif new_attempt == 2:
+                                        delay = 2.0
+                                    else:
+                                        delay = 3.0
+                                    j["goal_pair_poll_attempt"] = new_attempt
+                                    j["goal_pair_next_poll_ts"] = time.time() + delay
                                     if status == "completed" and goal_data:
                                         j["goal_pairs_data"] = goal_data
                                         break
                                     if status == "failed":
                                         j["goal_pair_fallback"] = True
                                         break
-                                time.sleep(GOAL_PAIR_BG_POLL_INTERVAL_SECONDS)
+                                # Small sleep to avoid tight loop when continuing
+                                time.sleep(0.05)
                     with _jobs_lock:
                         j = _jobs.get(jid)
                         goal_data = j.get("goal_pairs_data") if j else None
                         use_fallback = j.get("goal_pair_fallback", False) if j else False
                     if goal_data:
-                        result = generate_preview_data(payload_data, goal_pairs_data_override=goal_data)
+                        result = generate_preview_data(payload_data, goal_pairs_data_override=goal_data, request_id=job_request_id)
                     elif use_fallback:
-                        result = generate_preview_data(payload_data, goal_pair_skip_fetch=True)
+                        result = generate_preview_data(payload_data, goal_pair_skip_fetch=True, request_id=job_request_id)
                     else:
-                        result = generate_preview_data(payload_data)
+                        result = generate_preview_data(payload_data, request_id=job_request_id)
                     elapsed_ms = int((time.time() - start) * 1000)
                     with _jobs_lock:
                         job = _jobs.get(jid)
