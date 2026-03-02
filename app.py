@@ -10,7 +10,15 @@ import os
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
-from engine.side_by_side_v1 import generate_preview_data, Step0BundleTimeoutError, Step0BundleOpenAIError
+from engine.side_by_side_v1 import (
+    generate_preview_data,
+    Step0BundleTimeoutError,
+    Step0BundleOpenAIError,
+    create_goal_pair_background,
+    poll_goal_pair_response,
+    GOAL_PAIR_BG_MAX_WAIT_SECONDS,
+    GOAL_PAIR_BG_POLL_INTERVAL_SECONDS,
+)
 from engine.openai_retry import OpenAIRateLimitError
 
 app = Flask(__name__)
@@ -367,6 +375,10 @@ def preview():
             "result": None,
             "error": None,
             "error_message": None,
+            "openai_goal_pair_response_id": None,
+            "goal_pair_created_at": None,
+            "goal_pairs_data": None,
+            "goal_pair_fallback": False,
         }
         _cleanup_jobs()
         _set_job(job_id, job_record)
@@ -382,7 +394,58 @@ def preview():
                         return
                     job["status"] = "running"
                 try:
-                    result = generate_preview_data(payload_data)
+                    if ACE_PHASE2_GOAL_PAIRS and ACE_IMAGE_ONLY:
+                        product_name = payload_data.get("productName", "") or "product"
+                        product_description = payload_data.get("productDescription", "") or "description"
+                        response_id = create_goal_pair_background(product_name, product_description, req_id)
+                        if not response_id:
+                            with _jobs_lock:
+                                j = _jobs.get(jid)
+                                if j is not None:
+                                    j["goal_pair_fallback"] = True
+                        elif response_id:
+                            with _jobs_lock:
+                                j = _jobs.get(jid)
+                                if j is not None:
+                                    j["openai_goal_pair_response_id"] = response_id
+                                    j["goal_pair_created_at"] = time.time()
+                            while True:
+                                with _jobs_lock:
+                                    j = _jobs.get(jid)
+                                    if j is None:
+                                        break
+                                    rid = j.get("openai_goal_pair_response_id")
+                                    created_at_ts = j.get("goal_pair_created_at") or 0
+                                if not rid:
+                                    break
+                                if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
+                                    with _jobs_lock:
+                                        j = _jobs.get(jid)
+                                        if j is not None:
+                                            j["goal_pair_fallback"] = True
+                                    break
+                                goal_data, status = poll_goal_pair_response(rid, req_id, created_at_ts)
+                                with _jobs_lock:
+                                    j = _jobs.get(jid)
+                                    if j is None:
+                                        break
+                                    if status == "completed" and goal_data:
+                                        j["goal_pairs_data"] = goal_data
+                                        break
+                                    if status == "failed":
+                                        j["goal_pair_fallback"] = True
+                                        break
+                                time.sleep(GOAL_PAIR_BG_POLL_INTERVAL_SECONDS)
+                    with _jobs_lock:
+                        j = _jobs.get(jid)
+                        goal_data = j.get("goal_pairs_data") if j else None
+                        use_fallback = j.get("goal_pair_fallback", False) if j else False
+                    if goal_data:
+                        result = generate_preview_data(payload_data, goal_pairs_data_override=goal_data)
+                    elif use_fallback:
+                        result = generate_preview_data(payload_data, goal_pair_skip_fetch=True)
+                    else:
+                        result = generate_preview_data(payload_data)
                     elapsed_ms = int((time.time() - start) * 1000)
                     with _jobs_lock:
                         job = _jobs.get(jid)

@@ -121,6 +121,10 @@ IMAGE_ONLY_CALL_TIMEOUT_SECONDS = 60
 GOAL_PAIRS_O3_TIMEOUT_SECONDS = 30
 GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
+# Phase 2D: background mode max wait for GOAL_PAIR polling (then fallback)
+GOAL_PAIR_BG_MAX_WAIT_SECONDS = 120
+GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS = 15  # create with background=True returns quickly
+GOAL_PAIR_BG_POLL_INTERVAL_SECONDS = 2
 
 # ============================================================================
 # In-Memory Caches (with TTL)
@@ -4663,6 +4667,123 @@ def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_descri
     return f"goal_pairs|no_session_{h}"
 
 
+def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
+    """Parse raw o3 output to goal + 1 pair dict. Returns None on parse/validation failure."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+    if raw.startswith("```json"):
+        lines = raw.split("\n")
+        raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+    try:
+        data = json.loads(raw)
+        goal = (data.get("advertising_goal") or "").strip()
+        pairs = data.get("pairs")
+        if not isinstance(pairs, list) or len(pairs) != 1:
+            return None
+        p = pairs[0]
+        if not isinstance(p, dict):
+            return None
+        ap = str(p.get("a_primary") or "").strip()
+        bp = str(p.get("b_primary") or "").strip()
+        if not ap or not bp:
+            return None
+        sim = p.get("silhouette_similarity")
+        if sim is not None:
+            try:
+                sim = max(0, min(100, int(sim)))
+            except (TypeError, ValueError):
+                sim = 50
+        else:
+            sim = 50
+        out_pair = {
+            "a_primary": ap,
+            "a_sub": str(p.get("a_sub") or "").strip(),
+            "b_primary": bp,
+            "b_sub": str(p.get("b_sub") or "").strip(),
+            "silhouette_similarity": sim,
+        }
+        return {"advertising_goal": goal or "Advertising goal", "pairs": [out_pair]}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
+def create_goal_pair_background(product_name: str, product_description: str, request_id: str) -> Optional[str]:
+    """
+    Create o3-pro GOAL_PAIR request in OpenAI Background Mode. No retries.
+    Returns response_id (str) for polling, or None on create failure.
+    """
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS),
+        max_retries=0,
+    )
+    prompt = GOAL_PAIR_O3_PROMPT_TEMPLATE.format(
+        product_name=product_name or "product",
+        product_description=product_description or "description"
+    )
+    try:
+        response = client.responses.create(
+            model="o3-pro",
+            input=prompt,
+            reasoning={"effort": "low"},
+            background=True,
+        )
+        response_id = getattr(response, "id", None)
+        if not response_id:
+            logger.error("GOAL_PAIR_BG_CREATE_FAIL no response id returned")
+            return None
+        logger.info(f"GOAL_PAIR_BG_CREATE_OK response_id={response_id} request_id={request_id}")
+        return response_id
+    except Exception as e:
+        logger.error(f"GOAL_PAIR_BG_CREATE_FAIL error={e} request_id={request_id}")
+        return None
+
+
+def poll_goal_pair_response(
+    response_id: str, request_id: str, created_at_ts: float
+) -> Tuple[Optional[Dict], str]:
+    """
+    Poll OpenAI GET /v1/responses/{id}. Returns (goal_pairs_data or None, status).
+    status in ("pending", "completed", "failed").
+    Enforces GOAL_PAIR_BG_MAX_WAIT_SECONDS; after that returns (None, "failed").
+    """
+    if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
+        logger.info(f"GOAL_PAIR_BG_FAIL status=timeout FALLBACK_USED=true request_id={request_id}")
+        return (None, "failed")
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(15),
+        max_retries=0,
+    )
+    try:
+        resp = client.responses.retrieve(response_id)
+    except Exception as e:
+        logger.error(f"GOAL_PAIR_BG_STATUS status=retrieve_error error={e} request_id={request_id}")
+        logger.info("GOAL_PAIR_BG_FAIL FALLBACK_USED=true")
+        return (None, "failed")
+    status = (getattr(resp, "status", None) or "").lower()
+    logger.info(f"GOAL_PAIR_BG_STATUS status={status} request_id={request_id}")
+    if status in ("queued", "in_progress"):
+        return (None, "pending")
+    if status == "completed":
+        raw = getattr(resp, "output_text", None) or ""
+        data = _parse_goal_pair_output(raw)
+        if data:
+            latency_ms = int((time.time() - created_at_ts) * 1000)
+            sim = data["pairs"][0].get("silhouette_similarity", 50)
+            logger.info(f"GOAL_PAIR_BG_COMPLETED latency_ms={latency_ms} output_chars={len(raw)} similarity={sim} request_id={request_id}")
+            return (data, "completed")
+        logger.error(f"GOAL_PAIR_BG_FAIL status=parse_error FALLBACK_USED=true request_id={request_id}")
+        return (None, "failed")
+    # failed, cancelled, incomplete, etc.
+    logger.info(f"GOAL_PAIR_BG_FAIL status={status} FALLBACK_USED=true request_id={request_id}")
+    return (None, "failed")
+
+
 def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id: str) -> Optional[Dict]:
     """
     Call o3-pro once for advertising_goal + 1 pair. 30s timeout, reasoning.effort=low, 1 attempt, no retries.
@@ -4792,20 +4913,27 @@ def _image_only_single_call(image_size: str, request_id: str, prompt: Optional[s
         return (_IMAGE_ONLY_PLACEHOLDER_BASE64, False)
 
 
-def generate_preview_data(payload_dict: Dict) -> Dict:
+def generate_preview_data(
+    payload_dict: Dict,
+    goal_pairs_data_override: Optional[Dict] = None,
+    goal_pair_skip_fetch: bool = False,
+) -> Dict:
     """
     Generate preview data and return as dictionary (for JSON response).
-    
+
     Supports:
     - PREVIEW_MODE=plan_only: Returns plan JSON without image (fast)
     - PREVIEW_MODE=image: Returns imageBase64 (legacy behavior)
     - ENGINE_MODE=optimized: Uses combined LLM calls
     - ENGINE_MODE=legacy: Uses separate calls (legacy behavior)
     - Caching: Plan cache and image cache (if enabled)
-    
+    - Phase 2D: goal_pairs_data_override = use this goal+pair (no fetch); goal_pair_skip_fetch = use fallback prompt (no fetch).
+
     Args:
         payload_dict: Request payload with productName, productDescription, etc.
-    
+        goal_pairs_data_override: If set (and Phase2), use this instead of fetch/cache.
+        goal_pair_skip_fetch: If True (and Phase2), skip GOAL_PAIR fetch and use hardcoded prompt.
+
     Returns:
         dict: {
             "imageBase64": str (if PREVIEW_MODE=image),
@@ -4857,29 +4985,35 @@ def generate_preview_data(payload_dict: Dict) -> Dict:
     else:
         logger.info(f"PIPELINE_BRANCH=FULL request_id={request_id}")
 
-    # ACE_IMAGE_ONLY: single gpt-image-1.5 call, placeholder copy, no retries. Phase 2: goal+pairs from o3-pro when enabled.
+    # ACE_IMAGE_ONLY: single gpt-image-1.5 call, placeholder copy, no retries. Phase 2: goal+pairs from o3-pro when enabled (or override/skip from background flow).
     if ACE_IMAGE_ONLY:
         size = image_size_str if image_size_str in ALLOWED_IMAGE_SIZES else "1536x1024"
         prompt_to_use = None
+        goal_pairs_data = None
         if ACE_PHASE2_GOAL_PAIRS:
-            cache_key = _get_goal_pairs_cache_key(session_id, product_name, product_description, size)
-            now = time.time()
-            with _goal_pairs_cache_lock:
-                entry = _goal_pairs_cache.get(cache_key)
-                if entry:
-                    data, ts = entry
-                    if now - ts <= GOAL_PAIRS_CACHE_TTL_SECONDS:
-                        goal_pairs_data = data
+            if goal_pair_skip_fetch:
+                pass
+            elif goal_pairs_data_override and goal_pairs_data_override.get("pairs"):
+                goal_pairs_data = goal_pairs_data_override
+            else:
+                cache_key = _get_goal_pairs_cache_key(session_id, product_name, product_description, size)
+                now = time.time()
+                with _goal_pairs_cache_lock:
+                    entry = _goal_pairs_cache.get(cache_key)
+                    if entry:
+                        data, ts = entry
+                        if now - ts <= GOAL_PAIRS_CACHE_TTL_SECONDS:
+                            goal_pairs_data = data
+                        else:
+                            del _goal_pairs_cache[cache_key]
+                            goal_pairs_data = None
                     else:
-                        del _goal_pairs_cache[cache_key]
                         goal_pairs_data = None
-                else:
-                    goal_pairs_data = None
-            if goal_pairs_data is None:
-                goal_pairs_data = _fetch_goal_pairs_o3(product_name, product_description, request_id)
-                if goal_pairs_data:
-                    with _goal_pairs_cache_lock:
-                        _goal_pairs_cache[cache_key] = (goal_pairs_data, now)
+                if goal_pairs_data is None:
+                    goal_pairs_data = _fetch_goal_pairs_o3(product_name, product_description, request_id)
+                    if goal_pairs_data:
+                        with _goal_pairs_cache_lock:
+                            _goal_pairs_cache[cache_key] = (goal_pairs_data, now)
             if goal_pairs_data and goal_pairs_data.get("pairs"):
                 pairs = goal_pairs_data["pairs"]
                 pair = pairs[0]
