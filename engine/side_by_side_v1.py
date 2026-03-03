@@ -4676,11 +4676,12 @@ GOAL_PAIR_O3_PROMPT_TEMPLATE = """Product: {product_name}
 
 You must do the following in order:
 1) First derive one specific, concrete Advertising Goal from the product name and description (one short commercial sentence, max 120 chars). It must describe a visual, real-world scenario or objective that could be shown in an ad.
-2) Then choose A and B ONLY as DIRECT subjects of that Advertising Goal — not generic similarity pairs. A and B must be concrete physical things that are inherently part of, or obviously required by, that goal.
+2) Then choose A and B ONLY as DIRECT subjects of that Advertising Goal — not generic similarity pairs. A and B must be concrete physical things that are inherently part of, or obviously required by, that goal. A and B are presented as two separate objects placed side by side with slight overlap, not acting on each other.
 3) Any domain (sports, food, technology, fashion, etc.) is allowed ONLY if it is explicitly implied or stated by the derived Advertising Goal. If the goal does not mention or clearly imply that domain, you must NOT use it, even if silhouette similarity would be high.
 4) Relevance is mandatory. Optimise silhouette similarity ONLY AFTER you have selected objects that are clearly and directly relevant to the Advertising Goal.
 5) If you cannot find directly relevant physical subjects, refine the Advertising Goal to make it more concrete and visualizable (e.g. from “improve marketing” to “show an AI tool rearranging ad layouts on a screen”), then choose A and B from that refined goal space.
 6) Reject generic pairs chosen only for silhouette similarity. Every pair must clearly support or depict the Advertising Goal.
+7) The relationship between A and B must be limited to: (a) visual silhouette similarity, and (b) both being direct subjects of the Advertising Goal. Do NOT imply any action, causality, control, activation, usage, or interaction between A and B (e.g. “A controls B”, “A powers B”, “A updates B”, “A operates B”, “A is used to change B”).
 
 Output exactly one JSON object. No other text, no markdown. No extra keys.
 Keys: "advertising_goal" (string), "pairs" (array of exactly 3 objects).
