@@ -4922,27 +4922,35 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         return None
 
 
-def _build_phase2_image_prompt(pair: Dict, mode_decision: str) -> str:
-    """Build gpt-image-1.5 prompt from selected pair. Pencil sketch, white bg, no text."""
+def _build_phase2_image_prompt(pair: Dict, mode_decision: str, product_name: str = "") -> str:
+    """Build gpt-image-1.5 prompt from selected pair. Pencil sketch, white bg. Headline inside image = productName."""
     ap = pair.get("a_primary", "")
     asub = pair.get("a_sub", "")
     bp = pair.get("b_primary", "")
     bsub = pair.get("b_sub", "")
     a_str = f"{ap} with {asub}" if asub else ap
     b_str = f"{bp} with {bsub}" if bsub else bp
+    headline_text = (product_name or "Ad").strip()
+    headline_rule = (
+        f" Include a required headline INSIDE the image: the text must be exactly \"{headline_text}\". "
+        "Headline style: bold printed typography (not handwritten), integrated into the composition (not outside margins). "
+        "No other text in the image; no logos or brands on objects or packaging. "
+    )
     base = "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
     if mode_decision == "REPLACEMENT":
         return (
             base + f"{bp} fully occupies the structural role of {ap}: the replacing object takes over the other's form. "
             f"The original {ap} must not be visible in any form — no traces, no outlines, no blending, no ghosting. "
-            f"The composition must read as a single object that has taken over the other's form. Sketch style. NO text, NO logos, NO letters, NO numbers."
+            f"The composition must read as a single object that has taken over the other's form. Sketch style."
+            + headline_rule
         )
     # SIDE_BY_SIDE: enforce physical overlap (25–40%), smaller object in front, no spacing
     return (
         base + f"Two objects that physically overlap: {a_str} and {b_str}. "
         "Clear physical overlap (approx. 25–40% area intersection); no spacing between objects. "
         "The smaller object must be in the foreground (on top), visibly occluding part of the larger object. "
-        "Composition must feel like a single fused visual unit. Sub-objects visible. NO text, NO logos, NO letters, NO numbers."
+        "Composition must feel like a single fused visual unit. Sub-objects visible."
+        + headline_rule
     )
 
 
@@ -5220,7 +5228,13 @@ def generate_preview_data(
                     f"B={pair.get('b_primary','')} B_sub={pair.get('b_sub','')} similarity={similarity} "
                     f"mode_decision={mode_decision} request_id={request_id}"
                 )
-                prompt_to_use = _build_phase2_image_prompt(pair, mode_decision)
+                ad_goal_summary = (goal_pairs_data.get("advertising_goal") or "").strip()
+                logger.info(
+                    f'CREATIVE_SUMMARY adIndex={ad_index} mode={mode_decision} similarity={similarity} '
+                    f'A="{pair.get("a_primary", "")}" A_sub="{pair.get("a_sub", "")}" '
+                    f'B="{pair.get("b_primary", "")}" B_sub="{pair.get("b_sub", "")}" goal="{ad_goal_summary}"'
+                )
+                prompt_to_use = _build_phase2_image_prompt(pair, mode_decision, product_name)
         image_base64, ok = _image_only_single_call(size, request_id, prompt=prompt_to_use)
         if not ok:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
