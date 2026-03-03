@@ -4690,6 +4690,7 @@ Rules:
 - physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ in each pair.
 - First ensure strong relevance to the Advertising Goal, then maximise silhouette_similarity as much as possible.
 - Prefer pairs where silhouette similarity is visually obvious: choose objects with a similar overall scale/category (handheld↔handheld, tabletop↔tabletop, large sign↔large sign) and avoid tiny↔giant pairings.
+- When maximising silhouette_similarity, prefer objects with matching aspect ratio and orientation (vertical↔vertical, horizontal↔horizontal, square↔square). Avoid strong scale or orientation mismatches unless no better direct-subject alternative exists.
 - Prefer simple, iconic silhouettes with a clear outer contour.
 - Sub-objects must reinforce the main object's physical form or function (e.g. tablet+stylus, billboard+frame), and must not add unrelated complexity. Avoid using "hand" as a sub-object unless the Advertising Goal is explicitly about human gesture or interaction.
 - When choosing A and B, apply this internal validity test (do not output it): if the relationship between A and B can naturally be expressed as “A does X to B”, the pair is invalid and must be replaced. The only allowed relationship is “two related symbols that can be visually overlapped or replaced without implying interaction”.
@@ -4929,12 +4930,16 @@ def _build_phase2_image_prompt(pair: Dict, mode_decision: str) -> str:
     base = "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
     if mode_decision == "REPLACEMENT":
         return (
-            base + f"{bp} replaces the main surface or shape of {ap}, with {ap}'s context and {asub} still visible. "
-            f"Sketch style. NO text, NO logos, NO letters, NO numbers."
+            base + f"{bp} fully occupies the structural role of {ap}: the replacing object takes over the other's form. "
+            f"The original {ap} must not be visible in any form — no traces, no outlines, no blending, no ghosting. "
+            f"The composition must read as a single object that has taken over the other's form. Sketch style. NO text, NO logos, NO letters, NO numbers."
         )
+    # SIDE_BY_SIDE: enforce physical overlap (25–40%), smaller object in front, no spacing
     return (
-        base + f"Two objects side by side with slight overlap: {a_str} and {b_str}. "
-        "Sub-objects visible. NO text, NO logos, NO letters, NO numbers."
+        base + f"Two objects that physically overlap: {a_str} and {b_str}. "
+        "Clear physical overlap (approx. 25–40% area intersection); no spacing between objects. "
+        "The smaller object must be in the foreground (on top), visibly occluding part of the larger object. "
+        "Composition must feel like a single fused visual unit. Sub-objects visible. NO text, NO logos, NO letters, NO numbers."
     )
 
 
@@ -4946,9 +4951,10 @@ Objects in image: A primary={a_primary}, A sub={a_sub}; B primary={b_primary}, B
 
 Look at the ad image and write ONLY the body text (no headline). Return valid JSON with a single key: "body".
 
+The image is a marketing metaphor. Do NOT describe the image literally (objects, layout, style). Instead, interpret it: write persuasive, brand-oriented marketing copy that uses the visual as symbolic support for the Advertising Goal. Focus on meaning, positioning, impact, and brand strength. Do not invent interaction or narrative action between the objects (A and B); treat them as symbols that coexist. Aim for about 50 words.
+
 Rules:
-- body: about 50 words. Describe only what is visually present in the image (objects, layout, style). Do not invent facts.
-- No headline. Output format: {{ "body": "..." }}"""
+- body: about 50 words. Persuasive marketing copy that interprets the visual metaphor and supports the Advertising Goal. No literal description of what is in the image. No headline. Output format: {{ "body": "..." }}"""
 
 
 def _word_count(text: str) -> int:
