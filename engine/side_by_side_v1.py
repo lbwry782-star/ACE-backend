@@ -128,9 +128,17 @@ GOAL_PAIR_BG_MAX_WAIT_SECONDS = 120
 GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS = 15  # create with background=True returns quickly
 GOAL_PAIR_BG_POLL_INTERVAL_SECONDS = 2
 
-# Stage 3: vision-based copy after image (synchronous, one vision call + optional one fix)
+# Stage 3: vision-based body-only copy after image (background=true, one attempt, no fix)
 COPY_VISION_TIMEOUT_SECONDS = 45
 COPY_BODY_TARGET_WORDS = 50
+COPY_BG_CREATE_TIMEOUT_SECONDS = 15
+COPY_BG_MAX_WAIT_SECONDS = 90
+# Fallback 50-word body when copy fails or times out (no retries)
+COPY_FALLBACK_BODY_50 = (
+    "This ad highlights the product with a clear visual. The image shows key elements in a simple layout. "
+    "We focus on what you see: shapes, composition, and style. No extra claims beyond the visual. "
+    "Here is placeholder text when generation fails. This is the fallback body text."
+)
 # Deterministic 50-word body for ACE_TEST_MODE (exactly 50 words)
 COPY_TEST_MODE_BODY_50 = (
     "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore "
@@ -4906,20 +4914,17 @@ def _build_phase2_image_prompt(pair: Dict, mode_decision: str) -> str:
     )
 
 
-# Stage 3: vision copy prompt (strict JSON headline + body; productName must appear in headline)
-COPY_VISION_PROMPT_TEMPLATE = """Look at this ad image and write advertising copy. Product name: "{product_name}".
+# Stage 3: body-only copy from image (background=true). Input: productName, productDescription, advertising_goal, A, A_sub, B, B_sub, mode_decision + image.
+COPY_BODY_PROMPT_TEMPLATE = """Product: {product_name}
+Description: {product_description}
+Advertising goal: {advertising_goal}
+Objects in image: A primary={a_primary}, A sub={a_sub}; B primary={b_primary}, B sub={b_sub}. Mode: {mode_decision}.
 
-Return ONLY valid JSON with no other text:
-{{ "headline": "...", "body": "..." }}
+Look at the ad image and write ONLY the body text (no headline). Return valid JSON with a single key: "body".
 
 Rules:
-- headline: 3 to 7 words. Must include the product name "{product_name}" exactly as given.
-- body: EXACTLY 50 words. Describe only what is visually present in the image (objects, layout, style). Do not invent interactions or facts not shown."""
-
-COPY_FIX_BODY_PROMPT_TEMPLATE = """Rewrite the following ad body to contain EXACTLY 50 words. Keep the same meaning and only what is visually described. Do not add new content. Return ONLY the rewritten body text, nothing else.
-
-Current body:
-{body}"""
+- body: about 50 words. Describe only what is visually present in the image (objects, layout, style). Do not invent facts.
+- No headline. Output format: {{ "body": "..." }}"""
 
 
 def _word_count(text: str) -> int:
@@ -4927,25 +4932,42 @@ def _word_count(text: str) -> int:
     return len((text or "").split())
 
 
-def _generate_copy_from_image_vision(
-    image_base64: str, product_name: str, request_id: str
-) -> Tuple[str, str]:
+def create_copy_background(
+    image_base64: str,
+    product_name: str,
+    product_description: str,
+    advertising_goal: str,
+    a_primary: str,
+    a_sub: str,
+    b_primary: str,
+    b_sub: str,
+    mode_decision: str,
+    request_id: str,
+) -> Optional[str]:
     """
-    Call o3-pro with image (vision) to get headline + body. Synchronous, reasoning.effort=low.
-    Returns (headline, body). On failure returns placeholder strings.
+    Create o3-pro body-only copy request in background. Single attempt, no retries.
+    Returns response_id for polling, or None on create failure.
     """
     logger.info(f"COPY_START request_id={request_id}")
-    t0 = time.time()
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
-        timeout=httpx.Timeout(COPY_VISION_TIMEOUT_SECONDS),
+        timeout=httpx.Timeout(COPY_BG_CREATE_TIMEOUT_SECONDS),
         max_retries=0,
     )
-    prompt = COPY_VISION_PROMPT_TEMPLATE.format(product_name=product_name or "Product")
+    prompt = COPY_BODY_PROMPT_TEMPLATE.format(
+        product_name=product_name or "Product",
+        product_description=product_description or "",
+        advertising_goal=advertising_goal or "",
+        a_primary=a_primary or "",
+        a_sub=a_sub or "",
+        b_primary=b_primary or "",
+        b_sub=b_sub or "",
+        mode_decision=mode_decision or "",
+    )
     image_url = f"data:image/png;base64,{image_base64}" if image_base64 else ""
     if not image_url:
-        logger.error(f"COPY_FAIL request_id={request_id} error=no_image")
-        return ("Preview Headline", "Preview body text (placeholder).")
+        logger.error(f"COPY_FAIL request_id={request_id} reason=no_image FALLBACK_USED=true")
+        return None
     input_content = [
         {"type": "input_text", "text": prompt},
         {"type": "input_image", "image_url": image_url},
@@ -4955,59 +4977,66 @@ def _generate_copy_from_image_vision(
             model="o3-pro",
             input=[{"role": "user", "content": input_content}],
             reasoning={"effort": "low"},
-            background=False,
+            background=True,
         )
-        raw = (getattr(response, "output_text", None) or "").strip()
-        if not raw:
-            raise ValueError("Empty copy response")
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
-        if raw.startswith("```json"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
-        data = json.loads(raw)
-        headline = (data.get("headline") or "Preview Headline").strip()
-        body = (data.get("body") or "").strip()
-        if not headline:
-            headline = "Preview Headline"
-        if not body:
-            body = "Preview body text (placeholder)."
-        latency_ms = int((time.time() - t0) * 1000)
-        body_words = _word_count(body)
-        logger.info(f"COPY_OK request_id={request_id} latency_ms={latency_ms}")
-        logger.info(f"HEADLINE=\"{headline}\" request_id={request_id}")
-        logger.info(f"BODY_WORDS=50 actual={body_words} request_id={request_id}")
-        return (headline, body)
+        response_id = getattr(response, "id", None)
+        if not response_id:
+            logger.error(f"COPY_FAIL request_id={request_id} reason=no_response_id FALLBACK_USED=true")
+            return None
+        return response_id
     except Exception as e:
-        logger.error(f"COPY_FAIL request_id={request_id} error={e}")
-        return ("Preview Headline", "Preview body text (placeholder).")
+        logger.error(f"COPY_FAIL request_id={request_id} reason={e} FALLBACK_USED=true")
+        return None
 
 
-def _fix_body_to_50_words(body: str, request_id: str) -> str:
-    """One text-only o3-pro call to rewrite body to exactly 50 words. Returns fixed body or original if fail."""
+def poll_copy_response(
+    response_id: str, request_id: str, created_at_ts: float
+) -> Tuple[Optional[str], str]:
+    """
+    Poll OpenAI GET /v1/responses/{id} for copy. Returns (body or None, status).
+    status in ("pending", "completed", "failed"). Max wait COPY_BG_MAX_WAIT_SECONDS.
+    """
+    if time.time() - created_at_ts > COPY_BG_MAX_WAIT_SECONDS:
+        logger.info(f"COPY_FAIL request_id={request_id} reason=timeout FALLBACK_USED=true")
+        return (None, "failed")
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
-        timeout=httpx.Timeout(COPY_VISION_TIMEOUT_SECONDS),
+        timeout=httpx.Timeout(15),
         max_retries=0,
     )
-    prompt = COPY_FIX_BODY_PROMPT_TEMPLATE.format(body=body[:2000])
     try:
-        response = client.responses.create(
-            model="o3-pro",
-            input=prompt,
-            reasoning={"effort": "low"},
-            background=False,
-        )
-        raw = (getattr(response, "output_text", None) or "").strip()
-        if raw:
-            fixed = raw.strip().strip('"')
-            if _word_count(fixed) == COPY_BODY_TARGET_WORDS:
-                logger.info(f"COPY_FIX_APPLIED field=body request_id={request_id}")
-                return fixed
+        resp = client.responses.retrieve(response_id)
     except Exception as e:
-        logger.error(f"COPY_FIX_FAIL request_id={request_id} error={e}")
-    return body
+        logger.error(f"COPY_FAIL request_id={request_id} reason=retrieve_error FALLBACK_USED=true")
+        return (None, "failed")
+    status = (getattr(resp, "status", None) or "").lower()
+    logger.info(f"COPY_BG_STATUS status={status} request_id={request_id}")
+    if status in ("queued", "in_progress"):
+        return (None, "pending")
+    if status == "completed":
+        raw = (getattr(resp, "output_text", None) or "").strip()
+        body = None
+        if raw:
+            if raw.startswith("```"):
+                lines = raw.split("\n")
+                raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+            if raw.startswith("```json"):
+                lines = raw.split("\n")
+                raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+            try:
+                data = json.loads(raw)
+                body = (data.get("body") or "").strip()
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if body:
+            latency_ms = int((time.time() - created_at_ts) * 1000)
+            wc = _word_count(body)
+            logger.info(f"COPY_OK request_id={request_id} latency_ms={latency_ms} word_count={wc}")
+            return (body, "completed")
+        logger.info(f"COPY_FAIL request_id={request_id} reason=parse_error FALLBACK_USED=true")
+        return (None, "failed")
+    logger.info(f"COPY_FAIL request_id={request_id} reason=status_{status} FALLBACK_USED=true")
+    return (None, "failed")
 
 
 def _image_only_single_call(image_size: str, request_id: str, prompt: Optional[str] = None) -> Tuple[str, bool]:
@@ -5161,15 +5190,36 @@ def generate_preview_data(
         image_base64, ok = _image_only_single_call(size, request_id, prompt=prompt_to_use)
         if not ok:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
+        headline = "Ad Headline"
         if ACE_TEST_MODE:
-            pn = (product_name or "Product").strip()
-            first_word = pn.split()[0] if pn.split() else "Product"
-            headline = f"The Best {first_word} Today"
             body = COPY_TEST_MODE_BODY_50
         else:
-            headline, body = _generate_copy_from_image_vision(image_base64, product_name, request_id)
-            if _word_count(body) != COPY_BODY_TARGET_WORDS:
-                body = _fix_body_to_50_words(body, request_id)
+            ad_goal = ""
+            a_pri, a_sub, b_pri, b_sub, mode_dec = "", "", "", "", ""
+            if goal_pairs_data and goal_pairs_data.get("pairs"):
+                ad_goal = (goal_pairs_data.get("advertising_goal") or "")
+                pair = goal_pairs_data["pairs"][0]
+                a_pri = pair.get("a_primary", "")
+                a_sub = pair.get("a_sub", "")
+                b_pri = pair.get("b_primary", "")
+                b_sub = pair.get("b_sub", "")
+                sim = int(pair.get("silhouette_similarity", 50))
+                mode_dec = "REPLACEMENT" if sim >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
+            copy_rid = create_copy_background(
+                image_base64, product_name, product_description, ad_goal,
+                a_pri, a_sub, b_pri, b_sub, mode_dec, request_id,
+            )
+            body = COPY_FALLBACK_BODY_50
+            if copy_rid:
+                created_at = time.time()
+                while time.time() - created_at <= COPY_BG_MAX_WAIT_SECONDS:
+                    body_result, copy_status = poll_copy_response(copy_rid, request_id, created_at)
+                    if copy_status == "completed" and body_result:
+                        body = body_result
+                        break
+                    if copy_status == "failed":
+                        break
+                    time.sleep(2)
         return {
             "imageBase64": image_base64,
             "image_base64": image_base64,
