@@ -105,8 +105,10 @@ PREVIEW_IMAGE_QUALITY_DEFAULT = "low"  # Fast preview quality
 GENERATE_IMAGE_QUALITY_DEFAULT = "high"  # High quality for final generation
 ALLOWED_IMAGE_SIZES = {"1024x1024", "1024x1536", "1536x1024"}  # Supported by gpt-image-*
 
-# ACE_IMAGE_ONLY=1: real image via gpt-image-1.5 only, no o3-pro, placeholder copy
+# ACE_IMAGE_ONLY=1: real image via gpt-image-1.5 only, no o3-pro; Stage 3 adds vision copy after image
 ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip() in ("1", "true")
+# ACE_TEST_MODE=1: skip OpenAI; return dummy headline (5 words incl. productName) and fixed 50-word body
+ACE_TEST_MODE = (os.environ.get("ACE_TEST_MODE", "") or "").strip().lower() in ("1", "true")
 
 # ACE_PHASE2_GOAL_PAIRS=1/true/yes: when IMAGE_ONLY, call o3-pro once for goal + 1 pair, then image from that pair
 ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip().lower() in ("1", "true", "yes")
@@ -125,6 +127,16 @@ SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
 GOAL_PAIR_BG_MAX_WAIT_SECONDS = 120
 GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS = 15  # create with background=True returns quickly
 GOAL_PAIR_BG_POLL_INTERVAL_SECONDS = 2
+
+# Stage 3: vision-based copy after image (synchronous, one vision call + optional one fix)
+COPY_VISION_TIMEOUT_SECONDS = 45
+COPY_BODY_TARGET_WORDS = 50
+# Deterministic 50-word body for ACE_TEST_MODE (exactly 50 words)
+COPY_TEST_MODE_BODY_50 = (
+    "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore "
+    "et dolore magna aliqua Ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut "
+    "aliquip ex ea commodo consequat Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat."
+)
 
 # ============================================================================
 # In-Memory Caches (with TTL)
@@ -4894,6 +4906,110 @@ def _build_phase2_image_prompt(pair: Dict, mode_decision: str) -> str:
     )
 
 
+# Stage 3: vision copy prompt (strict JSON headline + body; productName must appear in headline)
+COPY_VISION_PROMPT_TEMPLATE = """Look at this ad image and write advertising copy. Product name: "{product_name}".
+
+Return ONLY valid JSON with no other text:
+{{ "headline": "...", "body": "..." }}
+
+Rules:
+- headline: 3 to 7 words. Must include the product name "{product_name}" exactly as given.
+- body: EXACTLY 50 words. Describe only what is visually present in the image (objects, layout, style). Do not invent interactions or facts not shown."""
+
+COPY_FIX_BODY_PROMPT_TEMPLATE = """Rewrite the following ad body to contain EXACTLY 50 words. Keep the same meaning and only what is visually described. Do not add new content. Return ONLY the rewritten body text, nothing else.
+
+Current body:
+{body}"""
+
+
+def _word_count(text: str) -> int:
+    """Count words in a string (split on whitespace)."""
+    return len((text or "").split())
+
+
+def _generate_copy_from_image_vision(
+    image_base64: str, product_name: str, request_id: str
+) -> Tuple[str, str]:
+    """
+    Call o3-pro with image (vision) to get headline + body. Synchronous, reasoning.effort=low.
+    Returns (headline, body). On failure returns placeholder strings.
+    """
+    logger.info(f"COPY_START request_id={request_id}")
+    t0 = time.time()
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(COPY_VISION_TIMEOUT_SECONDS),
+        max_retries=0,
+    )
+    prompt = COPY_VISION_PROMPT_TEMPLATE.format(product_name=product_name or "Product")
+    image_url = f"data:image/png;base64,{image_base64}" if image_base64 else ""
+    if not image_url:
+        logger.error(f"COPY_FAIL request_id={request_id} error=no_image")
+        return ("Preview Headline", "Preview body text (placeholder).")
+    input_content = [
+        {"type": "input_text", "text": prompt},
+        {"type": "input_image", "image_url": image_url},
+    ]
+    try:
+        response = client.responses.create(
+            model="o3-pro",
+            input=[{"role": "user", "content": input_content}],
+            reasoning={"effort": "low"},
+            background=False,
+        )
+        raw = (getattr(response, "output_text", None) or "").strip()
+        if not raw:
+            raise ValueError("Empty copy response")
+        if raw.startswith("```"):
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+        if raw.startswith("```json"):
+            lines = raw.split("\n")
+            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+        data = json.loads(raw)
+        headline = (data.get("headline") or "Preview Headline").strip()
+        body = (data.get("body") or "").strip()
+        if not headline:
+            headline = "Preview Headline"
+        if not body:
+            body = "Preview body text (placeholder)."
+        latency_ms = int((time.time() - t0) * 1000)
+        body_words = _word_count(body)
+        logger.info(f"COPY_OK request_id={request_id} latency_ms={latency_ms}")
+        logger.info(f"HEADLINE=\"{headline}\" request_id={request_id}")
+        logger.info(f"BODY_WORDS=50 actual={body_words} request_id={request_id}")
+        return (headline, body)
+    except Exception as e:
+        logger.error(f"COPY_FAIL request_id={request_id} error={e}")
+        return ("Preview Headline", "Preview body text (placeholder).")
+
+
+def _fix_body_to_50_words(body: str, request_id: str) -> str:
+    """One text-only o3-pro call to rewrite body to exactly 50 words. Returns fixed body or original if fail."""
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(COPY_VISION_TIMEOUT_SECONDS),
+        max_retries=0,
+    )
+    prompt = COPY_FIX_BODY_PROMPT_TEMPLATE.format(body=body[:2000])
+    try:
+        response = client.responses.create(
+            model="o3-pro",
+            input=prompt,
+            reasoning={"effort": "low"},
+            background=False,
+        )
+        raw = (getattr(response, "output_text", None) or "").strip()
+        if raw:
+            fixed = raw.strip().strip('"')
+            if _word_count(fixed) == COPY_BODY_TARGET_WORDS:
+                logger.info(f"COPY_FIX_APPLIED field=body request_id={request_id}")
+                return fixed
+    except Exception as e:
+        logger.error(f"COPY_FIX_FAIL request_id={request_id} error={e}")
+    return body
+
+
 def _image_only_single_call(image_size: str, request_id: str, prompt: Optional[str] = None) -> Tuple[str, bool]:
     """
     Single gpt-image-1.5 call for ACE_IMAGE_ONLY mode. No retries, 60s timeout.
@@ -5045,17 +5161,26 @@ def generate_preview_data(
         image_base64, ok = _image_only_single_call(size, request_id, prompt=prompt_to_use)
         if not ok:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
+        if ACE_TEST_MODE:
+            pn = (product_name or "Product").strip()
+            first_word = pn.split()[0] if pn.split() else "Product"
+            headline = f"The Best {first_word} Today"
+            body = COPY_TEST_MODE_BODY_50
+        else:
+            headline, body = _generate_copy_from_image_vision(image_base64, product_name, request_id)
+            if _word_count(body) != COPY_BODY_TARGET_WORDS:
+                body = _fix_body_to_50_words(body, request_id)
         return {
             "imageBase64": image_base64,
             "image_base64": image_base64,
-            "headline": "Preview Headline",
-            "bodyText50": "Preview body text (placeholder)",
-            "body_text": "Preview body text (placeholder)",
+            "headline": headline,
+            "bodyText50": body,
+            "body_text": body,
             "image_url": None,
             "ad_goal": "Preview ad goal",
             "object_a": "object_a",
             "object_b": "object_b",
-            "marketing_copy_50_words": "Preview body text (placeholder)",
+            "marketing_copy_50_words": body,
         }
     
     # A) STEP 0 - UNIFIED BUNDLE: ad_goal + difficulty_score + object_list(150)
