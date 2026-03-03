@@ -4667,24 +4667,29 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "NO text, NO logos, NO letters, NO numbers."
 )
 
-# Phase 2B: o3-pro single call for advertising_goal + 1 pair (strict JSON). Creative upgrade: target high silhouette similarity.
+# Phase 2B: o3-pro single call for advertising_goal + 3 pairs (strict JSON). Global rule: relevance to goal comes before similarity.
 GOAL_PAIR_MIN_SIMILARITY_ACCEPT = 40
 GOAL_PAIR_TARGET_SIMILARITY = 60
 
 GOAL_PAIR_O3_PROMPT_TEMPLATE = """Product: {product_name}
 {product_description}
 
-Reply with exactly one JSON object. No other text, no markdown, no explanation.
-Keys: "advertising_goal" (string, max 120 chars), "pairs" (array of exactly 1 object), "best_effort" (boolean), "min_target" (number).
-- advertising_goal: short commercial sentence.
-- pairs: exactly 1 object with "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words; sub = typical companion), "silhouette_similarity" (integer 0-100).
-- TARGET: silhouette_similarity >= 60. Choose A and B so their overall silhouette/contour is similar (e.g. both rounded, both rectangular).
-- If you cannot find a pair with similarity >= 60, return the best pair you found and set "best_effort": true and "min_target": 60. Otherwise set "best_effort": false.
-Rules: physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ.
+You must do the following in order:
+1) First derive one specific, concrete Advertising Goal from the product name and description (one short commercial sentence, max 120 chars). It must describe a visual, real-world scenario or objective that could be shown in an ad.
+2) Then choose A and B ONLY as DIRECT subjects of that Advertising Goal — not generic similarity pairs. A and B must be concrete physical things that are inherently part of, or obviously required by, that goal.
+3) Any domain (sports, food, technology, fashion, etc.) is allowed ONLY if it is explicitly implied or stated by the derived Advertising Goal. If the goal does not mention or clearly imply that domain, you must NOT use it, even if silhouette similarity would be high.
+4) Relevance is mandatory. Optimise silhouette similarity ONLY AFTER you have selected objects that are clearly and directly relevant to the Advertising Goal.
+5) If you cannot find directly relevant physical subjects, refine the Advertising Goal to make it more concrete and visualizable (e.g. from “improve marketing” to “show an AI tool rearranging ad layouts on a screen”), then choose A and B from that refined goal space.
+6) Reject generic pairs chosen only for silhouette similarity. Every pair must clearly support or depict the Advertising Goal.
 
-{{"advertising_goal":"...","pairs":[{{"a_primary":"x","a_sub":"y","b_primary":"z","b_sub":"w","silhouette_similarity":65}}],"best_effort":false,"min_target":60}}"""
+Output exactly one JSON object. No other text, no markdown. No extra keys.
+Keys: "advertising_goal" (string), "pairs" (array of exactly 3 objects).
+Each object: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words each; sub = typical companion object), "silhouette_similarity" (integer 0-100).
+Rules: physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ in each pair. First ensure strong relevance to the Advertising Goal, then maximise silhouette_similarity as much as possible.
 
-GOAL_PAIR_RETRY_INSTRUCTION = """Your previous pair was too dissimilar. Pick a new pair with much more similar overall silhouette/contour. Aim for silhouette_similarity >= 60."""
+{{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
+
+GOAL_PAIR_RETRY_INSTRUCTION = """Your previous pair was too dissimilar or not relevant. Pick a new pair that is directly related to the Advertising Goal and has a much higher silhouette_similarity (maximise similarity after relevance is satisfied)."""
 
 
 def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_description: str, image_size: str) -> str:
@@ -4696,7 +4701,7 @@ def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_descri
 
 
 def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
-    """Parse raw o3 output to goal + 1 pair dict. Returns None on parse/validation failure."""
+    """Parse raw o3 output to goal + 3 pairs dict. Returns None on parse/validation failure."""
     raw = (raw or "").strip()
     if not raw:
         return None
@@ -4710,31 +4715,32 @@ def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
         data = json.loads(raw)
         goal = (data.get("advertising_goal") or "").strip()
         pairs = data.get("pairs")
-        if not isinstance(pairs, list) or len(pairs) != 1:
+        if not isinstance(pairs, list) or len(pairs) != 3:
             return None
-        p = pairs[0]
-        if not isinstance(p, dict):
-            return None
-        ap = str(p.get("a_primary") or "").strip()
-        bp = str(p.get("b_primary") or "").strip()
-        if not ap or not bp:
-            return None
-        sim = p.get("silhouette_similarity")
-        if sim is not None:
-            try:
-                sim = max(0, min(100, int(sim)))
-            except (TypeError, ValueError):
+        out_pairs = []
+        for p in pairs:
+            if not isinstance(p, dict):
+                return None
+            ap = str(p.get("a_primary") or "").strip()
+            bp = str(p.get("b_primary") or "").strip()
+            if not ap or not bp:
+                return None
+            sim = p.get("silhouette_similarity")
+            if sim is not None:
+                try:
+                    sim = max(0, min(100, int(sim)))
+                except (TypeError, ValueError):
+                    sim = 50
+            else:
                 sim = 50
-        else:
-            sim = 50
-        out_pair = {
-            "a_primary": ap,
-            "a_sub": str(p.get("a_sub") or "").strip(),
-            "b_primary": bp,
-            "b_sub": str(p.get("b_sub") or "").strip(),
-            "silhouette_similarity": sim,
-        }
-        return {"advertising_goal": goal or "Advertising goal", "pairs": [out_pair]}
+            out_pairs.append({
+                "a_primary": ap,
+                "a_sub": str(p.get("a_sub") or "").strip(),
+                "b_primary": bp,
+                "b_sub": str(p.get("b_sub") or "").strip(),
+                "silhouette_similarity": sim,
+            })
+        return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs}
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
 
@@ -4788,6 +4794,7 @@ def poll_goal_pair_response(
     Enforces GOAL_PAIR_BG_MAX_WAIT_SECONDS; after that returns (None, "failed").
     """
     if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
+        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
         logger.info(f"GOAL_PAIR_BG_FAIL status=timeout FALLBACK_USED=true request_id={request_id}")
         return (None, "failed")
     client = OpenAI(
@@ -4799,6 +4806,7 @@ def poll_goal_pair_response(
         resp = client.responses.retrieve(response_id)
     except Exception as e:
         logger.error(f"GOAL_PAIR_BG_STATUS status=retrieve_error error={e} request_id={request_id}")
+        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
         logger.info("GOAL_PAIR_BG_FAIL FALLBACK_USED=true")
         return (None, "failed")
     status = (getattr(resp, "status", None) or "").lower()
@@ -4811,12 +4819,16 @@ def poll_goal_pair_response(
         if data:
             latency_ms = int((time.time() - created_at_ts) * 1000)
             sim = data["pairs"][0].get("silhouette_similarity", 50)
+            goal = (data.get("advertising_goal") or "Advertising goal")
+            logger.info(f'GOAL_DERIVED advertising_goal="{goal}"')
             logger.info(f"GOAL_PAIR_BG_COMPLETED latency_ms={latency_ms} output_chars={len(raw)} similarity={sim} request_id={request_id}")
             return (data, "completed")
         logger.error(f"GOAL_PAIR_BG_FAIL status=parse_error FALLBACK_USED=true request_id={request_id}")
+        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
         return (None, "failed")
     # failed, cancelled, incomplete, etc.
     logger.info(f"GOAL_PAIR_BG_FAIL status={status} FALLBACK_USED=true request_id={request_id}")
+    logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
     return (None, "failed")
 
 
@@ -4859,37 +4871,42 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         data = json.loads(raw)
         goal = (data.get("advertising_goal") or "").strip()
         pairs = data.get("pairs")
-        if not isinstance(pairs, list) or len(pairs) != 1:
-            raise ValueError("pairs must be array of exactly 1 item")
-        p = pairs[0]
-        if not isinstance(p, dict):
-            raise ValueError("pair not object")
-        ap = str(p.get("a_primary") or "").strip()
-        asub = str(p.get("a_sub") or "").strip()
-        bp = str(p.get("b_primary") or "").strip()
-        bsub = str(p.get("b_sub") or "").strip()
-        sim = p.get("silhouette_similarity")
-        if sim is not None:
-            try:
-                sim = max(0, min(100, int(sim)))
-            except (TypeError, ValueError):
+        if not isinstance(pairs, list) or len(pairs) != 3:
+            raise ValueError("pairs must be array of exactly 3 items")
+        out_pairs = []
+        for idx, p in enumerate(pairs):
+            if not isinstance(p, dict):
+                raise ValueError(f"pair[{idx}] not object")
+            ap = str(p.get("a_primary") or "").strip()
+            asub = str(p.get("a_sub") or "").strip()
+            bp = str(p.get("b_primary") or "").strip()
+            bsub = str(p.get("b_sub") or "").strip()
+            sim = p.get("silhouette_similarity")
+            if sim is not None:
+                try:
+                    sim = max(0, min(100, int(sim)))
+                except (TypeError, ValueError):
+                    sim = 50
+            else:
                 sim = 50
-        else:
-            sim = 50
-        if not ap or not bp:
-            raise ValueError("pair missing a_primary or b_primary")
-        out_pair = {
-            "a_primary": ap,
-            "a_sub": asub,
-            "b_primary": bp,
-            "b_sub": bsub,
-            "silhouette_similarity": sim,
-        }
+            if not ap or not bp:
+                raise ValueError(f"pair[{idx}] missing a_primary or b_primary")
+            out_pairs.append({
+                "a_primary": ap,
+                "a_sub": asub,
+                "b_primary": bp,
+                "b_sub": bsub,
+                "silhouette_similarity": sim,
+            })
+        sim0 = out_pairs[0]["silhouette_similarity"]
         latency_ms = int((time.time() - t0) * 1000)
-        logger.info(f"GOAL_PAIR_OK latency_ms={latency_ms} output_chars={output_chars} similarity={sim} request_id={request_id}")
-        return {"advertising_goal": goal or "Advertising goal", "pairs": [out_pair]}
+        safe_goal = goal or "Advertising goal"
+        logger.info(f'GOAL_DERIVED advertising_goal="{safe_goal}"')
+        logger.info(f"GOAL_PAIR_OK latency_ms={latency_ms} output_chars={output_chars} pairs_count=3 similarity_p0={sim0} request_id={request_id}")
+        return {"advertising_goal": safe_goal, "pairs": out_pairs}
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
+        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
         logger.error(f"GOAL_PAIR_FAIL latency_ms={latency_ms} error={e} request_id={request_id} FALLBACK_USED=true")
         return None
 
@@ -5178,7 +5195,8 @@ def generate_preview_data(
                             _goal_pairs_cache[cache_key] = (goal_pairs_data, now)
             if goal_pairs_data and goal_pairs_data.get("pairs"):
                 pairs = goal_pairs_data["pairs"]
-                pair = pairs[0]
+                pair_idx = max(0, min(len(pairs) - 1, (ad_index or 1) - 1))
+                pair = pairs[pair_idx]
                 similarity = int(pair.get("silhouette_similarity", 50))
                 mode_decision = "REPLACEMENT" if similarity >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
                 logger.info(
@@ -5198,7 +5216,8 @@ def generate_preview_data(
             a_pri, a_sub, b_pri, b_sub, mode_dec = "", "", "", "", ""
             if goal_pairs_data and goal_pairs_data.get("pairs"):
                 ad_goal = (goal_pairs_data.get("advertising_goal") or "")
-                pair = goal_pairs_data["pairs"][0]
+                pair_idx = max(0, min(len(goal_pairs_data["pairs"]) - 1, (ad_index or 1) - 1))
+                pair = goal_pairs_data["pairs"][pair_idx]
                 a_pri = pair.get("a_primary", "")
                 a_sub = pair.get("a_sub", "")
                 b_pri = pair.get("b_primary", "")
