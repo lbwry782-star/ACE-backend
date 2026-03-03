@@ -124,7 +124,7 @@ GOAL_PAIRS_O3_TIMEOUT_SECONDS = 30
 GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
 # Phase 2D: background mode max wait for GOAL_PAIR polling (then fallback)
-GOAL_PAIR_BG_MAX_WAIT_SECONDS = 120
+GOAL_PAIR_BG_MAX_WAIT_SECONDS = 75  # Cap total wait; if exceeded, cancel and fallback
 GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS = 15  # create with background=True returns quickly
 GOAL_PAIR_BG_POLL_INTERVAL_SECONDS = 2
 
@@ -4667,6 +4667,26 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "NO text, NO logos, NO letters, NO numbers."
 )
 
+# Fallback pair when Stage 2 fails (no model call): used for PAIR_USED/CREATIVE_SUMMARY and image prompt
+FALLBACK_PAIR = {
+    "a_primary": "playing card",
+    "a_sub": "card deck",
+    "b_primary": "notebook",
+    "b_sub": "spiral binding",
+    "silhouette_similarity": 50,
+}
+
+
+def _fallback_goal_from_product(product_name: str, product_description: str) -> str:
+    """Derive a simple fallback advertising_goal from product name and description (no model call)."""
+    name = (product_name or "").strip()
+    desc = (product_description or "").strip()
+    if name and desc:
+        return f"Promote {name}. {(desc[:80] + ('...' if len(desc) > 80 else ''))}".strip()
+    if name:
+        return f"Promote {name}."
+    return "Advertising goal"
+
 # Phase 2B: o3-pro single call for advertising_goal + 3 pairs (strict JSON). Global rule: relevance to goal comes before similarity.
 GOAL_PAIR_MIN_SIMILARITY_ACCEPT = 40
 GOAL_PAIR_TARGET_SIMILARITY = 60
@@ -4808,7 +4828,6 @@ def poll_goal_pair_response(
     Enforces GOAL_PAIR_BG_MAX_WAIT_SECONDS; after that returns (None, "failed").
     """
     if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
-        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
         logger.info(f"GOAL_PAIR_BG_FAIL status=timeout FALLBACK_USED=true request_id={request_id}")
         return (None, "failed")
     client = OpenAI(
@@ -4820,8 +4839,7 @@ def poll_goal_pair_response(
         resp = client.responses.retrieve(response_id)
     except Exception as e:
         logger.error(f"GOAL_PAIR_BG_STATUS status=retrieve_error error={e} request_id={request_id}")
-        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
-        logger.info("GOAL_PAIR_BG_FAIL FALLBACK_USED=true")
+        logger.info(f"GOAL_PAIR_BG_FAIL status=retrieve_error FALLBACK_USED=true request_id={request_id}")
         return (None, "failed")
     status = (getattr(resp, "status", None) or "").lower()
     logger.info(f"GOAL_PAIR_BG_STATUS status={status} request_id={request_id}")
@@ -4838,12 +4856,26 @@ def poll_goal_pair_response(
             logger.info(f"GOAL_PAIR_BG_COMPLETED latency_ms={latency_ms} output_chars={len(raw)} similarity={sim} request_id={request_id}")
             return (data, "completed")
         logger.error(f"GOAL_PAIR_BG_FAIL status=parse_error FALLBACK_USED=true request_id={request_id}")
-        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
         return (None, "failed")
     # failed, cancelled, incomplete, etc.
     logger.info(f"GOAL_PAIR_BG_FAIL status={status} FALLBACK_USED=true request_id={request_id}")
-    logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
     return (None, "failed")
+
+
+def cancel_goal_pair_response(response_id: str, request_id: str) -> None:
+    """Cancel an in-progress background GOAL_PAIR response. No-op if cancel fails."""
+    if not response_id:
+        return
+    try:
+        client = OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            timeout=httpx.Timeout(10),
+            max_retries=0,
+        )
+        client.responses.cancel(response_id)
+        logger.info(f"GOAL_PAIR_BG_CANCELLED response_id={response_id} request_id={request_id}")
+    except Exception as e:
+        logger.warning(f"GOAL_PAIR_BG_CANCEL_FAIL response_id={response_id} error={e} request_id={request_id}")
 
 
 def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id: str) -> Optional[Dict]:
@@ -4920,7 +4952,6 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         return {"advertising_goal": safe_goal, "pairs": out_pairs}
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
-        logger.info('GOAL_DERIVED advertising_goal="FALLBACK_USED"')
         logger.error(f"GOAL_PAIR_FAIL latency_ms={latency_ms} error={e} request_id={request_id} FALLBACK_USED=true")
         return None
 
@@ -5220,6 +5251,13 @@ def generate_preview_data(
                     if goal_pairs_data:
                         with _goal_pairs_cache_lock:
                             _goal_pairs_cache[cache_key] = (goal_pairs_data, now)
+            if ACE_IMAGE_ONLY and goal_pairs_data is None:
+                fallback_goal = _fallback_goal_from_product(product_name, product_description)
+                goal_pairs_data = {
+                    "advertising_goal": fallback_goal,
+                    "pairs": [FALLBACK_PAIR, FALLBACK_PAIR, FALLBACK_PAIR],
+                }
+                logger.info(f'GOAL_DERIVED advertising_goal="{fallback_goal}"')
             if goal_pairs_data and goal_pairs_data.get("pairs"):
                 pairs = goal_pairs_data["pairs"]
                 pair_idx = max(0, min(len(pairs) - 1, (ad_index or 1) - 1))

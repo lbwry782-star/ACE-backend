@@ -16,6 +16,7 @@ from engine.side_by_side_v1 import (
     Step0BundleOpenAIError,
     create_goal_pair_background,
     poll_goal_pair_response,
+    cancel_goal_pair_response,
     GOAL_PAIR_BG_MAX_WAIT_SECONDS,
     GOAL_PAIR_BG_POLL_INTERVAL_SECONDS,
     GOAL_PAIR_MIN_SIMILARITY_ACCEPT,
@@ -432,6 +433,11 @@ def preview():
                                     next_poll_time_ms = j.get("goal_pair_next_poll_time_ms", 0)
                                     job_request_id = j.get("request_id") or job_request_id
                                 if not rid:
+                                    break
+                                if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
+                                    logger.info(f"GOAL_PAIR_BG_FAIL status=timeout FALLBACK_USED=true request_id={job_request_id}")
+                                    cancel_goal_pair_response(rid, job_request_id)
+                                    j["goal_pair_fallback"] = True
                                     break
                                 now_ms = int(time.time() * 1000)
                                 if next_poll_time_ms and now_ms < next_poll_time_ms:
