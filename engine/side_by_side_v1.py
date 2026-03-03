@@ -4683,9 +4683,12 @@ You must do the following in order:
 6) The relationship between A and B must be limited to: (a) visual silhouette similarity, and (b) both being direct subjects of the Advertising Goal. Do NOT imply any action, causality, control, activation, usage, or interaction between A and B (e.g. “A controls B”, “A powers B”, “A updates B”, “A operates B”, “A is used to change B”).
 7) A direct subject may also come from the brand or product NAME as a symbolic motif (for example, a word like “Ace” in the name can justify choosing an ace playing card), even if it is not functionally related to what the product does. Do not force functional narratives; symbolic brand-name motifs are allowed if they fit the Advertising Goal.
 
+Objective: REPLACEMENT is the preferred creative outcome (stronger). When generating the 3 pairs, prioritize finding pairs that can naturally achieve silhouette_similarity ≥ 85 (replacement-grade), while still: (1) keeping A and B as direct subjects of the derived advertising_goal, (2) avoiding any action or causal narrative between A and B, (3) preferring matching aspect ratio and orientation when possible.
+
 Output exactly one JSON object. No other text, no markdown. No extra keys.
 Keys: "advertising_goal" (string), "pairs" (array of exactly 3 objects).
 Each object: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words each; sub = typical companion object), "silhouette_similarity" (integer 0-100).
+Definition of silhouette_similarity: overall visual similarity in the final pencil drawing, including outer contour, aspect ratio/orientation, dominant shape archetype, lighting/glow effects, and contrast/mass distribution. The score (0-100) should reflect how easily one object could visually replace the other without leaving traces.
 Rules:
 - physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ in each pair.
 - First ensure strong relevance to the Advertising Goal, then maximise silhouette_similarity as much as possible.
