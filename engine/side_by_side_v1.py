@@ -4685,7 +4685,12 @@ You must do the following in order:
 Output exactly one JSON object. No other text, no markdown. No extra keys.
 Keys: "advertising_goal" (string), "pairs" (array of exactly 3 objects).
 Each object: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words each; sub = typical companion object), "silhouette_similarity" (integer 0-100).
-Rules: physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ in each pair. First ensure strong relevance to the Advertising Goal, then maximise silhouette_similarity as much as possible.
+Rules:
+- physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ in each pair.
+- First ensure strong relevance to the Advertising Goal, then maximise silhouette_similarity as much as possible.
+- Prefer pairs where silhouette similarity is visually obvious: choose objects with a similar overall scale/category (handheld↔handheld, tabletop↔tabletop, large sign↔large sign) and avoid tiny↔giant pairings.
+- Prefer simple, iconic silhouettes with a clear outer contour.
+- Sub-objects must reinforce the main object's physical form or function (e.g. tablet+stylus, billboard+frame), and must not add unrelated complexity. Avoid using "hand" as a sub-object unless the Advertising Goal is explicitly about human gesture or interaction.
 
 {{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
 
