@@ -124,9 +124,9 @@ GOAL_PAIRS_O3_TIMEOUT_SECONDS = 30
 GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
 SIMILARITY_THRESHOLD_REPLACEMENT = 85  # >= 85 => REPLACEMENT, else SIDE_BY_SIDE
 # Phase 2D: background mode max wait for GOAL_PAIR polling (then fallback)
-GOAL_PAIR_BG_MAX_WAIT_SECONDS = 75  # Cap total wait; if exceeded, cancel and fallback
+GOAL_PAIR_BG_MAX_WAIT_SECONDS = 180  # 180s total; only trigger timeout fallback if status stays queued/in_progress beyond this
 GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS = 15  # create with background=True returns quickly
-GOAL_PAIR_BG_POLL_INTERVAL_SECONDS = 2
+GOAL_PAIR_BG_POLL_INTERVAL_SECONDS = 2  # initial backoff (progressive: 2→3→5→8→10s cap)
 
 # Stage 3: vision-based body-only copy after image (background=true, one attempt, no fix)
 COPY_VISION_TIMEOUT_SECONDS = 45
@@ -4667,14 +4667,116 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "NO text, NO logos, NO letters, NO numbers."
 )
 
-# Fallback pair when Stage 2 fails (no model call): used for PAIR_USED/CREATIVE_SUMMARY and image prompt
-FALLBACK_PAIR = {
-    "a_primary": "playing card",
-    "a_sub": "card deck",
-    "b_primary": "notebook",
-    "b_sub": "spiral binding",
-    "silhouette_similarity": 50,
+# Fallback similarity: always < 85 so mode_decision is SIDE_BY_SIDE (no REPLACEMENT in fallback)
+FALLBACK_SIMILARITY = 50
+
+# Default fallback pair when no category matches (generic retail: box/package, not playing card/notebook)
+FALLBACK_PAIR_DEFAULT = {
+    "a_primary": "box",
+    "a_sub": "lid",
+    "b_primary": "carton",
+    "b_sub": "tape",
+    "silhouette_similarity": FALLBACK_SIMILARITY,
 }
+
+
+def _fallback_pair_from_product(product_name: str, product_description: str) -> Dict:
+    """
+    Build a fallback object pair from product name/description keywords only (no model call).
+    Domain-safe: choose A/B from category-specific pool. Always similarity < 85 so SIDE_BY_SIDE.
+    """
+    text = f"{(product_name or '').strip()} {(product_description or '').strip()}".lower()
+    words = set(re.findall(r"[a-z0-9]+", text))
+
+    # Shoes / footwear
+    if words & {"shoe", "shoes", "footwear", "sneaker", "sneakers", "boot", "boots", "heel", "heels", "loafer", "sandals"}:
+        return {
+            "a_primary": "shoe",
+            "a_sub": "shoelace",
+            "b_primary": "shoebox",
+            "b_sub": "lid",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    # Drink / bottle
+    if words & {"bottle", "drink", "beverage", "water", "juice", "wine", "beer", "coffee", "tea", "soda", "can"}:
+        return {
+            "a_primary": "bottle",
+            "a_sub": "cap",
+            "b_primary": "glass",
+            "b_sub": "coaster",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    # Tech / phone / device
+    if words & {"phone", "smartphone", "tech", "device", "tablet", "laptop", "computer", "gadget", "electronic"}:
+        return {
+            "a_primary": "phone",
+            "a_sub": "case",
+            "b_primary": "tablet",
+            "b_sub": "stylus",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    # Book / reading
+    if words & {"book", "books", "reading", "publish", "novel", "author", "library"}:
+        return {
+            "a_primary": "book",
+            "a_sub": "bookmark",
+            "b_primary": "glasses",
+            "b_sub": "case",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    # Advertising / agency / marketing / creative (pen, notepad, etc. — not playing card unless "ace" in name)
+    if words & {"advertising", "agency", "marketing", "creative", "campaign", "brand", "ad", "ads"}:
+        if "ace" in text:
+            return {
+                "a_primary": "playing card",
+                "a_sub": "card deck",
+                "b_primary": "notebook",
+                "b_sub": "spiral binding",
+                "silhouette_similarity": FALLBACK_SIMILARITY,
+            }
+        return {
+            "a_primary": "pen",
+            "a_sub": "notepad",
+            "b_primary": "light bulb",
+            "b_sub": "magnifying glass",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    # Fashion / apparel
+    if words & {"fashion", "clothing", "shirt", "dress", "apparel", "wear", "jacket", "bag", "handbag"}:
+        return {
+            "a_primary": "handbag",
+            "a_sub": "strap",
+            "b_primary": "hat",
+            "b_sub": "brim",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    # Beauty / skincare / cosmetic
+    if words & {"beauty", "cosmetic", "skincare", "makeup", "cream", "lotion", "perfume"}:
+        return {
+            "a_primary": "bottle",
+            "a_sub": "pump",
+            "b_primary": "jar",
+            "b_sub": "lid",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    # Food / restaurant
+    if words & {"food", "restaurant", "cafe", "kitchen", "recipe", "meal", "snack"}:
+        return {
+            "a_primary": "plate",
+            "a_sub": "cutlery",
+            "b_primary": "bowl",
+            "b_sub": "spoon",
+            "silhouette_similarity": FALLBACK_SIMILARITY,
+        }
+
+    return dict(FALLBACK_PAIR_DEFAULT)
 
 
 def _fallback_goal_from_product(product_name: str, product_description: str) -> str:
@@ -4710,6 +4812,7 @@ Keys: "advertising_goal" (string), "pairs" (array of exactly 3 objects).
 Each object: "a_primary","a_sub","b_primary","b_sub" (physical nouns, 1-3 words each; sub = typical companion object), "silhouette_similarity" (integer 0-100).
 Definition of silhouette_similarity: overall visual similarity in the final pencil drawing, including outer contour, aspect ratio/orientation, dominant shape archetype, lighting/glow effects, and contrast/mass distribution. The score (0-100) should reflect how easily one object could visually replace the other without leaving traces.
 Rules:
+- You must output exactly 3 pairs. Across these 3 pairs, ALL primary objects (a_primary and b_primary) must be unique. No primary may appear more than once anywhere (e.g. if "billboard" is a_primary in pair 1, it must not appear as a_primary or b_primary in pairs 2 or 3). Sub-objects may repeat only if necessary; prefer variety when possible.
 - physical nouns only; no environments/abstract/text/logos/brands; a_primary and b_primary must differ in each pair.
 - MAIN OBJECT RULE: Main objects (a_primary and b_primary) must ALWAYS be direct physical subjects derived from the Advertising Goal. No exceptions.
 - SUB-OBJECT RULE: Sub-objects are either (1) structural sub-objects (normal physical accessories or supports such as stand, base, frame, deck, pole, car body, etc.), which do NOT need to be direct subjects of the Advertising Goal, or (2) symbolic sub-objects (icon-like objects that carry conceptual meaning, e.g. light bulb for ideas, medal, heart, target, shield, etc.), which MUST be direct subjects of the Advertising Goal because they function as primary concepts.
@@ -4828,7 +4931,8 @@ def poll_goal_pair_response(
     Enforces GOAL_PAIR_BG_MAX_WAIT_SECONDS; after that returns (None, "failed").
     """
     if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
-        logger.info(f"GOAL_PAIR_BG_FAIL status=timeout FALLBACK_USED=true request_id={request_id}")
+        total_wait_s = int(time.time() - created_at_ts)
+        logger.info(f"GOAL_PAIR_BG_FAIL status=timeout total_wait_s={total_wait_s} max_wait_s={GOAL_PAIR_BG_MAX_WAIT_SECONDS} FALLBACK_USED=true request_id={request_id}")
         return (None, "failed")
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -5327,9 +5431,10 @@ def generate_preview_data(
                             _goal_pairs_cache[cache_key] = (goal_pairs_data, now)
             if ACE_IMAGE_ONLY and goal_pairs_data is None:
                 fallback_goal = _fallback_goal_from_product(product_name, product_description)
+                fallback_pair = _fallback_pair_from_product(product_name, product_description)
                 goal_pairs_data = {
                     "advertising_goal": fallback_goal,
-                    "pairs": [FALLBACK_PAIR, FALLBACK_PAIR, FALLBACK_PAIR],
+                    "pairs": [fallback_pair, fallback_pair, fallback_pair],
                 }
                 logger.info(f'GOAL_DERIVED advertising_goal="{fallback_goal}"')
             if goal_pairs_data and goal_pairs_data.get("pairs"):
@@ -5372,42 +5477,55 @@ def generate_preview_data(
                 b_sub = pair.get("b_sub", "")
                 sim = int(pair.get("silhouette_similarity", 50))
                 mode_dec = "REPLACEMENT" if sim >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
-            copy_rid = create_copy_background(
-                image_base64, product_name, product_description, ad_goal,
-                a_pri, a_sub, b_pri, b_sub, mode_dec, request_id,
-                vision_headline_body=True,
-            )
-            if copy_rid:
-                created_at = time.time()
-                while time.time() - created_at <= COPY_BG_MAX_WAIT_SECONDS:
-                    (headline_res, body_res), copy_status = poll_copy_response(
-                        copy_rid, request_id, created_at, vision_headline_body=True
-                    )
-                    if copy_status == "completed":
-                        if headline_res:
-                            headline = headline_res
-                        if body_res:
-                            body = body_res
-                        break
-                    if copy_status == "failed":
-                        break
-                    time.sleep(2)
+            try:
+                copy_rid = create_copy_background(
+                    image_base64, product_name, product_description, ad_goal,
+                    a_pri, a_sub, b_pri, b_sub, mode_dec, request_id,
+                    vision_headline_body=True,
+                )
+                vision_copy_ok = False
+                if copy_rid:
+                    created_at = time.time()
+                    while time.time() - created_at <= COPY_BG_MAX_WAIT_SECONDS:
+                        (headline_res, body_res), copy_status = poll_copy_response(
+                            copy_rid, request_id, created_at, vision_headline_body=True
+                        )
+                        if copy_status == "completed":
+                            if headline_res:
+                                headline = headline_res
+                            if body_res:
+                                body = body_res
+                            vision_copy_ok = True
+                            break
+                        if copy_status == "failed":
+                            break
+                        time.sleep(2)
+                    if not vision_copy_ok:
+                        logger.info(f"VISION_COPY_FAIL request_id={request_id} reason=timeout_or_failed FALLBACK_USED=true")
+                else:
+                    logger.info(f"VISION_COPY_FAIL request_id={request_id} reason=create_failed FALLBACK_USED=true")
+            except Exception as e:
+                logger.info(f"VISION_COPY_FAIL request_id={request_id} reason=error error={e} FALLBACK_USED=true")
         headline_for_final = (headline or product_name or "Ad Headline").strip()
-        if goal_pairs_data and goal_pairs_data.get("pairs"):
-            pair_idx = max(0, min(len(goal_pairs_data["pairs"]) - 1, (ad_index or 1) - 1))
-            pair = goal_pairs_data["pairs"][pair_idx]
-            mode_decision = "REPLACEMENT" if int(pair.get("silhouette_similarity", 50)) >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
-            prompt_final = _build_phase2_image_prompt_final(pair, mode_decision, headline_for_final)
-        else:
-            base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace(" NO text, NO logos, NO letters, NO numbers.", "").strip()
-            prompt_final = (
-                base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_for_final}\". "
-                + HEADLINE_TYPOGRAPHY_FINAL
+        try:
+            if goal_pairs_data and goal_pairs_data.get("pairs"):
+                pair_idx = max(0, min(len(goal_pairs_data["pairs"]) - 1, (ad_index or 1) - 1))
+                pair = goal_pairs_data["pairs"][pair_idx]
+                mode_decision = "REPLACEMENT" if int(pair.get("silhouette_similarity", 50)) >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
+                prompt_final = _build_phase2_image_prompt_final(pair, mode_decision, headline_for_final)
+            else:
+                base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace("NO text, NO logos, NO letters, NO numbers.", "").strip()
+                prompt_final = (
+                    base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_for_final}\". "
+                    + HEADLINE_TYPOGRAPHY_FINAL
+                )
+            image_final, ok_final = _image_only_single_call(
+                size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
             )
-        image_final, ok_final = _image_only_single_call(
-            size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
-        )
-        if not ok_final:
+            if not ok_final:
+                image_final = _IMAGE_ONLY_PLACEHOLDER_BASE64
+        except Exception as e:
+            logger.error(f"IMAGE_FINAL_FAIL request_id={request_id} error={e} FALLBACK_PLACEHOLDER_USED=true")
             image_final = _IMAGE_ONLY_PLACEHOLDER_BASE64
         return {
             "imageBase64": image_final,

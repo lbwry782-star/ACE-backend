@@ -93,6 +93,8 @@ ACE_TEST_MODE = (os.environ.get("ACE_TEST_MODE", "") or "").strip().lower() in (
 ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip().lower() in ("1", "true")
 # ACE_PHASE2_GOAL_PAIRS: "1" or "true" or "yes" = when IMAGE_ONLY, call o3-pro for goal + 3 pairs
 ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip().lower() in ("1", "true", "yes")
+# ACE_FALLBACK_RETURN_ERROR: when Stage 2 fails (FALLBACK_USED), return error instead of generating 1 fallback ad (cost control)
+ACE_FALLBACK_RETURN_ERROR = (os.environ.get("ACE_FALLBACK_RETURN_ERROR", "") or "").strip().lower() in ("1", "true", "yes")
 if ACE_TEST_MODE:
     logger.info("TEST_MODE_ACTIVE=true")
 
@@ -356,7 +358,7 @@ def preview():
                 "result": demo,
             }), 200
 
-        logger.info(f"PREVIEW_FLAGS TEST_MODE=false IMAGE_ONLY={ACE_IMAGE_ONLY} PHASE2_GOAL_PAIRS={ACE_PHASE2_GOAL_PAIRS} size={payload.get('imageSize', '')} adIndex={ad_index} sessionId={session_id}")
+        logger.info(f"PREVIEW_FLAGS TEST_MODE=false IMAGE_ONLY={ACE_IMAGE_ONLY} PHASE2_GOAL_PAIRS={ACE_PHASE2_GOAL_PAIRS} FALLBACK_RETURN_ERROR={ACE_FALLBACK_RETURN_ERROR} size={payload.get('imageSize', '')} adIndex={ad_index} sessionId={session_id}")
         # Enforce serial execution per session: acquire lock before scheduling job
         if not _acquire_session_lock(session_id, ad_index):
             return jsonify({
@@ -403,6 +405,12 @@ def preview():
                         return
                     job["status"] = "running"
                     job_request_id = job.get("request_id") or req_id
+                flags = f"ACE_PHASE2_GOAL_PAIRS={1 if ACE_PHASE2_GOAL_PAIRS else 0}, ACE_IMAGE_ONLY={1 if ACE_IMAGE_ONLY else 0}, ACE_FALLBACK_RETURN_ERROR={1 if ACE_FALLBACK_RETURN_ERROR else 0}"
+                logger.info(
+                    f'INPUT_SNAPSHOT productName="{payload_data.get("productName", "") or ""}" '
+                    f'productDescription="{str(payload_data.get("productDescription", "") or "")[:200]}" '
+                    f'imageSize="{payload_data.get("imageSize", "") or ""}" flags="{flags}" request_id={job_request_id}'
+                )
                 try:
                     if ACE_PHASE2_GOAL_PAIRS and ACE_IMAGE_ONLY:
                         product_name = payload_data.get("productName", "") or "product"
@@ -435,7 +443,8 @@ def preview():
                                 if not rid:
                                     break
                                 if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
-                                    logger.info(f"GOAL_PAIR_BG_FAIL status=timeout FALLBACK_USED=true request_id={job_request_id}")
+                                    total_wait_s = int(time.time() - created_at_ts)
+                                    logger.info(f"GOAL_PAIR_BG_FAIL status=timeout total_wait_s={total_wait_s} max_wait_s={GOAL_PAIR_BG_MAX_WAIT_SECONDS} FALLBACK_USED=true request_id={job_request_id}")
                                     cancel_goal_pair_response(rid, job_request_id)
                                     j["goal_pair_fallback"] = True
                                     break
@@ -452,12 +461,17 @@ def preview():
                                     if j is None:
                                         break
                                     new_attempt = poll_attempt + 1
+                                    # Progressive backoff 2s → 3s → 5s → 8s → 10s (cap 10s)
                                     if new_attempt == 1:
-                                        delay_ms = 1000
-                                    elif new_attempt == 2:
                                         delay_ms = 2000
-                                    else:
+                                    elif new_attempt == 2:
                                         delay_ms = 3000
+                                    elif new_attempt == 3:
+                                        delay_ms = 5000
+                                    elif new_attempt == 4:
+                                        delay_ms = 8000
+                                    else:
+                                        delay_ms = 10000
                                     j["goal_pair_poll_attempt"] = new_attempt
                                     j["goal_pair_next_poll_time_ms"] = int(time.time() * 1000) + delay_ms
                                     if status == "completed" and goal_data:
@@ -496,19 +510,41 @@ def preview():
                     if goal_data:
                         result = generate_preview_data(payload_data, goal_pairs_data_override=goal_data, request_id=job_request_id)
                     elif use_fallback:
-                        result = generate_preview_data(payload_data, goal_pair_skip_fetch=True, request_id=job_request_id)
+                        logger.info(f"FALLBACK_ABORTED remaining_ads_skipped=true request_id={job_request_id} jobId={jid} adIndex={ad_idx}")
+                        if ACE_FALLBACK_RETURN_ERROR:
+                            with _jobs_lock:
+                                job = _jobs.get(jid)
+                                if job is not None:
+                                    job["status"] = "error"
+                                    job["finished_at"] = time.time()
+                                    job["result"] = None
+                                    job["error"] = "stage2_fallback"
+                                    job["error_message"] = "Stage 2 failed. Please retry."
+                            logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} error=stage2_fallback (no fallback ad generated)")
+                        else:
+                            result = generate_preview_data(payload_data, goal_pair_skip_fetch=True, request_id=job_request_id)
+                            with _jobs_lock:
+                                job = _jobs.get(jid)
+                                if job is not None:
+                                    job["status"] = "done"
+                                    job["finished_at"] = time.time()
+                                    job["result"] = result
+                                    job["error"] = None
+                                    job["error_message"] = None
+                            logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={int((time.time() - start) * 1000)}")
                     else:
                         result = generate_preview_data(payload_data, request_id=job_request_id)
-                    elapsed_ms = int((time.time() - start) * 1000)
-                    with _jobs_lock:
-                        job = _jobs.get(jid)
-                        if job is not None:
-                            job["status"] = "done"
-                            job["finished_at"] = time.time()
-                            job["result"] = result
-                            job["error"] = None
-                            job["error_message"] = None
-                    logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={elapsed_ms}")
+                    if not (use_fallback and ACE_FALLBACK_RETURN_ERROR):
+                        elapsed_ms = int((time.time() - start) * 1000)
+                        with _jobs_lock:
+                            job = _jobs.get(jid)
+                            if job is not None:
+                                job["status"] = "done"
+                                job["finished_at"] = time.time()
+                                job["result"] = result
+                                job["error"] = None
+                                job["error_message"] = None
+                        logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={elapsed_ms}")
                 except OpenAIRateLimitError as e:
                     with _jobs_lock:
                         job = _jobs.get(jid)
