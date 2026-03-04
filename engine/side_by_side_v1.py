@@ -4796,33 +4796,45 @@ GOAL_PAIR_TARGET_SIMILARITY = 60
 GOAL_PAIR_O3_PROMPT_TEMPLATE = """Product: {product_name}
 {product_description}
 
-You must return exactly: advertising_goal, and exactly 3 object pairs. Each pair: a_primary, a_sub, b_primary, b_sub, silhouette_similarity (0-100). No extra fields. No explanations. No analysis text. Schema must remain exactly as defined.
+Return ONLY this schema (no extra fields, no explanations, no analysis):
+- advertising_goal (the advertising MESSAGE / proposition derived from the chosen visual metaphor)
+- exactly 3 pairs, each with: a_primary, a_sub, b_primary, b_sub, silhouette_similarity (0-100)
 
-PRIORITY ORDER (STRICT)
-1) RELEVANCE – MANDATORY. A and B must be direct physical subjects derived from the advertising_goal. If an object is not a direct subject of the goal, it is invalid.
-2) FUNCTIONAL DIFFERENCE – MAXIMIZE. After relevance is satisfied, maximize functional difference between A and B. The greater the difference between their primary real-world functions, the stronger the ad. Pairs with similar or overlapping function are invalid. Functional similarity is forbidden regardless of silhouette similarity. If two objects share the same primary function, product role, or usage category, the pair must be rejected and replaced.
-3) SILHOUETTE SIMILARITY – SECONDARY. Only after relevance and functional difference are satisfied, maximize visually obvious silhouette similarity. Similarity must be based on outer contour and visible structure.
+METHOD (MUST FOLLOW IN ORDER)
 
-MODE DECISION
-If silhouette_similarity >= 85: mode = REPLACEMENT. B must visually disappear into A (or vice versa) with structural dominance. The smaller object becomes the visually dominant foreground element. Replacement must be physically convincing.
-If silhouette_similarity < 85: mode = SIDE_BY_SIDE. Must include clear physical overlap between A and B. No narrative interaction. No causal relationship. Overlap only, nothing more.
+STEP 1 — ANCHOR SHAPE (product-first)
+From productName + productDescription, infer ONE primary anchor object that best represents the product domain (physical object). Then abstract its dominant outer silhouette (simple iconic contour) and its key visual features (orientation/aspect ratio, major curve/angles, negative space). This anchor is used only to guide shape search (it does not need to appear in outputs unless it becomes the best pair member).
 
-NO FUNCTIONAL DUPLICATION RULE
-Across the 3 pairs: All primary objects must be unique. A primary object may not appear more than once across the entire set. No swapping sides to bypass uniqueness.
+STEP 2 — SHAPE SEARCH (hard requirement)
+Generate candidate objects that are visually similar in silhouette to the anchor shape. Prefer objects with obvious silhouette similarity, similar orientation/aspect ratio, and similar scale archetype.
 
-SUB-OBJECT RULE
-Primary objects must be direct subjects of the advertising_goal. Sub-objects: structural sub-objects are allowed; symbolic sub-objects must function as direct conceptual subjects of the advertising_goal.
+STEP 3 — CROSS-DOMAIN (HARD RULE)
+For every output pair: A and B MUST be from clearly different functional domains. Maximize functional difference; the more different their real-world primary functions, the better. If A and B have overlapping or similar primary function, the pair is INVALID and must not be output.
 
-OPTIMIZATION PRINCIPLE
-The ideal pair: highly relevant, maximally functionally different, visually similar in silhouette. If a tradeoff is required: Relevance > Functional difference > Silhouette similarity.
+STEP 4 — SECOND LINK (HARD RULE)
+For every output pair: After you find a cross-domain object with strong silhouette similarity, find ONE additional non-shape link that creates a recognizable advertising insight (common trope, idiom, cultural association, outcome, or universally known situation). Do NOT invent new causal mechanics between the objects. The second link is conceptual only (association), not action.
 
-OUTPUT CONSTRAINT
-Return exactly: advertising_goal, 3 pairs. No extra commentary. No additional calls.
+STEP 5 — MESSAGE (advertising_goal) DERIVED FROM THE PAIR
+Derive a short advertising MESSAGE from the best pair's "shape similarity + second link". The message must function like a headline proposition (not a generic business goal). Constraints: concise, persuasive, conceptual; grounded in the pair's second link; not a literal description of a drawing; no brand promises like "innovative solutions"; no long sentences.
 
-Output format (JSON only, no other text):
+STEP 6 — PAIRS OUTPUT (exactly 3)
+Output exactly 3 pairs that follow the method. Uniqueness: across the 3 pairs, ALL primary objects must be unique (no repeats, even swapping sides). Sub-objects: structural only (supports/parts); avoid symbolic unless essential to the second link. Sub-objects reinforce shape clarity or identity (parts/attachments/frames/bases/handles/soles/peels). Do NOT use "hand" as sub-object unless the second link explicitly requires a human gesture.
+
+SIMILARITY SCORING
+silhouette_similarity (0-100) must reflect how visually interchangeable the objects are in outline + orientation/aspect ratio + dominant mass distribution. Lighting/glow may contribute only if it is a defining visible part of the silhouette impression.
+
+MODE NOTE (for downstream; do not output mode)
+Downstream uses: >= 85 => REPLACEMENT; < 85 => SIDE_BY_SIDE with clear physical overlap only. You only output silhouette_similarity.
+
+ABSOLUTE BANS
+- No functionally similar pairs (even if silhouette_similarity is high).
+- No narrative/action/causal relationship between A and B (no "controls", "activates", "kicks", "powers", etc.).
+- No repeating primary objects across the 3 pairs.
+
+Return ONLY the schema. JSON only, no other text:
 {{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
 
-GOAL_PAIR_RETRY_INSTRUCTION = """Your previous pair was too dissimilar or not relevant. Maximize functional difference and silhouette_similarity; keep A and B as direct subjects of the advertising_goal. Return the same JSON schema."""
+GOAL_PAIR_RETRY_INSTRUCTION = """Follow the method again: anchor shape from product, shape search for silhouette similarity, cross-domain (A and B from different functional domains), second link (conceptual association only). Derive advertising_goal from the pair. Return the same JSON schema."""
 
 _REMOVED_LEGACY_BLOCK = """
 1) First derive one specific, concrete Advertising Goal from the product name and description (one short commercial sentence, max 120 chars). This goal must be derived ONLY from the product name and description, not from later visual or composition constraints.
