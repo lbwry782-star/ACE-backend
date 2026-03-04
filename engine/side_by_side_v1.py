@@ -4983,8 +4983,10 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
 
 
 PENCIL_FINAL_STYLE = (
-    " Detailed pencil drawing: clean graphite linework, visible cross-hatching, sharp edge definition, "
-    "consistent shading direction, no digital painting look. White paper background only."
+    " Ultra-detailed graphite pencil drawing: fine cross-hatching with directional consistency, sharp edge definition, "
+    "deep tonal range (strong blacks and clean whites), visible paper texture, high contrast line weight variation. "
+    "No soft sketch look, no blurry shading, no digital painting feel, no watercolor or charcoal style. "
+    "Clean white background only. The drawing must look like a professionally scanned high-resolution pencil illustration."
 )
 
 # IMAGE_FINAL headline typography: Times-style editorial serif (not handwritten, sketch, sans-serif, or script).
