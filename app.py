@@ -236,7 +236,9 @@ def generate():
             return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productName is required'}), 400
         if not payload.get("productDescription"):
             return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productDescription is required'}), 400
-        session_id = payload.get("sessionId") or "no_session"
+        session_id = (payload.get("sessionId") or "").strip() or str(uuid.uuid4())
+        session_id_source = "request" if (payload.get("sessionId") or "").strip() else "generated"
+        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={session_id_source} request_id={request_id}")
         ad_index = int(payload.get("adIndex", 1))
         ad_index = max(1, min(3, ad_index))
 
@@ -246,6 +248,7 @@ def generate():
             demo = _get_test_mode_demo_result()
             image_bytes = base64.b64decode(demo["imageBase64"])
             _set_artifact(session_id, ad_index, image_bytes, demo["bodyText50"], demo["headline"])
+            logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
             return jsonify({
                 "ok": True,
                 "sessionId": session_id,
@@ -275,6 +278,7 @@ def generate():
             body_text_50 = result.get("bodyText50", "")
             image_bytes = base64.b64decode(image_base64)
             _set_artifact(session_id, ad_index, image_bytes, body_text_50, headline)
+            logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
             logger.info(f"GENERATE_DONE sid={session_id} ad={ad_index} stored=true")
             return jsonify({
                 "ok": True,
@@ -344,7 +348,9 @@ def preview():
                 'error': 'missing_field',
                 'message': 'productDescription is required'
             }), 400
-        session_id = payload.get("sessionId") or "no_session"
+        session_id = (payload.get("sessionId") or "").strip() or str(uuid.uuid4())
+        session_id_source = "request" if (payload.get("sessionId") or "").strip() else "generated"
+        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={session_id_source} request_id={request_id}")
         ad_index = int(payload.get("adIndex", 1) or 1)
         ad_index = max(1, min(3, ad_index))
 
@@ -544,6 +550,16 @@ def preview():
                                 job["result"] = result
                                 job["error"] = None
                                 job["error_message"] = None
+                        try:
+                            img_b64 = (result or {}).get("imageBase64") or (result or {}).get("image_base64")
+                            if img_b64:
+                                img_bytes = base64.b64decode(img_b64)
+                                body_50 = (result or {}).get("bodyText50") or (result or {}).get("body_text") or ""
+                                headline = (result or {}).get("headline") or ""
+                                _set_artifact(sid, ad_idx, img_bytes, body_50, headline)
+                                logger.info(f"RESULT_STORED sessionId={sid} adIndex={ad_idx} bytes={len(img_bytes)} request_id={job_request_id}")
+                        except Exception:
+                            pass
                         logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={elapsed_ms}")
                 except OpenAIRateLimitError as e:
                     with _jobs_lock:
@@ -597,10 +613,12 @@ def preview():
                 'message': 'Failed to schedule preview job'
             }), 500
 
-        # Return immediately with jobId for polling
+        # Return immediately with jobId for polling (sessionId so frontend can call download-zip)
         return jsonify({
             'ok': True,
             'jobId': job_id,
+            'sessionId': session_id,
+            'adIndex': ad_index,
             'status': 'pending'
         }), 202
     except Exception as e:
@@ -619,10 +637,13 @@ def download_zip():
     Download ZIP for a previously generated ad (sessionId + adIndex). No OpenAI calls.
     ZIP contains: image.jpg (sketch), text.txt (50-word body text).
     """
+    request_id = str(uuid.uuid4())
     session_id = request.args.get("sessionId", "").strip()
     ad_index_str = request.args.get("adIndex", "")
     if not session_id:
         return jsonify({'ok': False, 'error': 'missing_param', 'message': 'sessionId is required'}), 400
+    if not ad_index_str:
+        return jsonify({'ok': False, 'error': 'missing_param', 'message': 'adIndex is required'}), 400
     try:
         ad_index = int(ad_index_str)
     except (TypeError, ValueError):
@@ -630,9 +651,14 @@ def download_zip():
     ad_index = max(1, min(3, ad_index))
     artifact = _get_artifact(session_id, ad_index)
     if not artifact:
-        logger.info(f"ZIP_DOWNLOAD sid={session_id} ad={ad_index} hit=false")
-        return jsonify({'ok': False, 'error': 'not_found', 'message': 'No generated ad found for this session and ad index. Generate first or link may have expired.'}), 404
-    logger.info(f"ZIP_DOWNLOAD sid={session_id} ad={ad_index} hit=true")
+        logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={session_id} adIndex={ad_index} found=false request_id={request_id}")
+        return jsonify({
+            'error': 'not_found',
+            'reason': 'missing_session_or_ad',
+            'sessionId': session_id,
+            'adIndex': ad_index,
+        }), 404
+    logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={session_id} adIndex={ad_index} found=true request_id={request_id}")
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("image.jpg", artifact["image_bytes"])
