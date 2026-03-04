@@ -4979,11 +4979,13 @@ def create_goal_pair_background(
         )
         response_id = getattr(response, "id", None)
         if not response_id:
+            logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=no_response_id")
             logger.error("GOAL_PAIR_BG_CREATE_FAIL no response id returned")
             return None
         logger.info(f"GOAL_PAIR_BG_CREATE_OK response_id={response_id} request_id={request_id}")
         return response_id
     except Exception as e:
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=create_error")
         logger.error(f"GOAL_PAIR_BG_CREATE_FAIL error={e} request_id={request_id}")
         return None
 
@@ -4997,6 +4999,7 @@ def poll_goal_pair_response(
     Enforces GOAL_PAIR_BG_MAX_WAIT_SECONDS; after that returns (None, "failed").
     """
     if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=timeout")
         total_wait_s = int(time.time() - created_at_ts)
         logger.info(f"GOAL_PAIR_BG_FAIL status=timeout total_wait_s={total_wait_s} max_wait_s={GOAL_PAIR_BG_MAX_WAIT_SECONDS} FALLBACK_USED=true request_id={request_id}")
         return (None, "failed")
@@ -5008,6 +5011,7 @@ def poll_goal_pair_response(
     try:
         resp = client.responses.retrieve(response_id)
     except Exception as e:
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=retrieve_error")
         logger.error(f"GOAL_PAIR_BG_STATUS status=retrieve_error error={e} request_id={request_id}")
         logger.info(f"GOAL_PAIR_BG_FAIL status=retrieve_error FALLBACK_USED=true request_id={request_id}")
         return (None, "failed")
@@ -5020,14 +5024,25 @@ def poll_goal_pair_response(
         data = _parse_goal_pair_output(raw)
         if data:
             latency_ms = int((time.time() - created_at_ts) * 1000)
-            sim = data["pairs"][0].get("silhouette_similarity", 50)
             goal = (data.get("advertising_goal") or "Advertising goal")
+            logger.info(f"STAGE2_RESULT_OK request_id={request_id} latency_ms={latency_ms} output_chars={len(raw)}")
+            logger.info(f'STAGE2_MESSAGE advertising_goal="{goal}"')
+            for idx, p in enumerate(data.get("pairs") or [], 1):
+                a = p.get("a_primary") or ""
+                a_sub = p.get("a_sub") or ""
+                b = p.get("b_primary") or ""
+                b_sub = p.get("b_sub") or ""
+                sim = p.get("silhouette_similarity", 0)
+                logger.info(f'STAGE2_PAIR idx={idx} A="{a}" A_sub="{a_sub}" B="{b}" B_sub="{b_sub}" similarity={sim}')
             logger.info(f'GOAL_DERIVED advertising_goal="{goal}"')
-            logger.info(f"GOAL_PAIR_BG_COMPLETED latency_ms={latency_ms} output_chars={len(raw)} similarity={sim} request_id={request_id}")
+            sim0 = data["pairs"][0].get("silhouette_similarity", 50) if data.get("pairs") else 50
+            logger.info(f"GOAL_PAIR_BG_COMPLETED latency_ms={latency_ms} output_chars={len(raw)} similarity={sim0} request_id={request_id}")
             return (data, "completed")
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=parse_error")
         logger.error(f"GOAL_PAIR_BG_FAIL status=parse_error FALLBACK_USED=true request_id={request_id}")
         return (None, "failed")
     # failed, cancelled, incomplete, etc.
+    logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=status_{status}")
     logger.info(f"GOAL_PAIR_BG_FAIL status={status} FALLBACK_USED=true request_id={request_id}")
     return (None, "failed")
 
@@ -5124,11 +5139,21 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         sim0 = out_pairs[0]["silhouette_similarity"]
         latency_ms = int((time.time() - t0) * 1000)
         safe_goal = goal or "Advertising goal"
+        logger.info(f"STAGE2_RESULT_OK request_id={request_id} latency_ms={latency_ms} output_chars={output_chars}")
+        logger.info(f'STAGE2_MESSAGE advertising_goal="{safe_goal}"')
+        for idx, p in enumerate(out_pairs, 1):
+            a = p.get("a_primary") or ""
+            a_sub = p.get("a_sub") or ""
+            b = p.get("b_primary") or ""
+            b_sub = p.get("b_sub") or ""
+            sim = p.get("silhouette_similarity", 0)
+            logger.info(f'STAGE2_PAIR idx={idx} A="{a}" A_sub="{a_sub}" B="{b}" B_sub="{b_sub}" similarity={sim}')
         logger.info(f'GOAL_DERIVED advertising_goal="{safe_goal}"')
         logger.info(f"GOAL_PAIR_OK latency_ms={latency_ms} output_chars={output_chars} pairs_count=3 similarity_p0={sim0} request_id={request_id}")
         return {"advertising_goal": safe_goal, "pairs": out_pairs}
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason={e}")
         logger.error(f"GOAL_PAIR_FAIL latency_ms={latency_ms} error={e} request_id={request_id} FALLBACK_USED=true")
         return None
 
