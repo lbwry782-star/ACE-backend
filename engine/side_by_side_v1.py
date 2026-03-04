@@ -4796,7 +4796,35 @@ GOAL_PAIR_TARGET_SIMILARITY = 60
 GOAL_PAIR_O3_PROMPT_TEMPLATE = """Product: {product_name}
 {product_description}
 
-You must do the following in order:
+You must return exactly: advertising_goal, and exactly 3 object pairs. Each pair: a_primary, a_sub, b_primary, b_sub, silhouette_similarity (0-100). No extra fields. No explanations. No analysis text. Schema must remain exactly as defined.
+
+PRIORITY ORDER (STRICT)
+1) RELEVANCE – MANDATORY. A and B must be direct physical subjects derived from the advertising_goal. If an object is not a direct subject of the goal, it is invalid.
+2) FUNCTIONAL DIFFERENCE – MAXIMIZE. After relevance is satisfied, maximize functional difference between A and B. The greater the difference between their primary real-world functions, the stronger the ad. Pairs with similar or overlapping function are invalid. Functional similarity is forbidden regardless of silhouette similarity. If two objects share the same primary function, product role, or usage category, the pair must be rejected and replaced.
+3) SILHOUETTE SIMILARITY – SECONDARY. Only after relevance and functional difference are satisfied, maximize visually obvious silhouette similarity. Similarity must be based on outer contour and visible structure.
+
+MODE DECISION
+If silhouette_similarity >= 85: mode = REPLACEMENT. B must visually disappear into A (or vice versa) with structural dominance. The smaller object becomes the visually dominant foreground element. Replacement must be physically convincing.
+If silhouette_similarity < 85: mode = SIDE_BY_SIDE. Must include clear physical overlap between A and B. No narrative interaction. No causal relationship. Overlap only, nothing more.
+
+NO FUNCTIONAL DUPLICATION RULE
+Across the 3 pairs: All primary objects must be unique. A primary object may not appear more than once across the entire set. No swapping sides to bypass uniqueness.
+
+SUB-OBJECT RULE
+Primary objects must be direct subjects of the advertising_goal. Sub-objects: structural sub-objects are allowed; symbolic sub-objects must function as direct conceptual subjects of the advertising_goal.
+
+OPTIMIZATION PRINCIPLE
+The ideal pair: highly relevant, maximally functionally different, visually similar in silhouette. If a tradeoff is required: Relevance > Functional difference > Silhouette similarity.
+
+OUTPUT CONSTRAINT
+Return exactly: advertising_goal, 3 pairs. No extra commentary. No additional calls.
+
+Output format (JSON only, no other text):
+{{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
+
+GOAL_PAIR_RETRY_INSTRUCTION = """Your previous pair was too dissimilar or not relevant. Maximize functional difference and silhouette_similarity; keep A and B as direct subjects of the advertising_goal. Return the same JSON schema."""
+
+_REMOVED_LEGACY_BLOCK = """
 1) First derive one specific, concrete Advertising Goal from the product name and description (one short commercial sentence, max 120 chars). This goal must be derived ONLY from the product name and description, not from later visual or composition constraints.
 2) Then, without changing or refining that Advertising Goal, choose A and B ONLY as DIRECT subjects of that goal — not generic similarity pairs. A and B must be concrete physical things that are inherently part of, or obviously required by, that goal. A and B are presented as two separate objects placed side by side with slight overlap, forming a static symbolic pairing rather than a narrative.
 3) Any domain (sports, food, technology, fashion, etc.) is allowed ONLY if it is explicitly implied or stated by the derived Advertising Goal. If the goal does not mention or clearly imply that domain, you must NOT use it, even if silhouette similarity would be high.
@@ -4825,8 +4853,6 @@ Rules:
 - NO NARRATIVE RULE: When choosing A and B, apply this internal validity test (do not output it): if the relationship between A and B can naturally be expressed as “A does X to B”, the pair is invalid and must be replaced. The only allowed relationship is “two related symbols that can be visually overlapped or replaced without implying interaction”.
 
 {{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
-
-GOAL_PAIR_RETRY_INSTRUCTION = """Your previous pair was too dissimilar or not relevant. Pick a new pair that is directly related to the Advertising Goal and has a much higher silhouette_similarity (maximise similarity after relevance is satisfied)."""
 
 
 def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_description: str, image_size: str) -> str:
@@ -4904,6 +4930,13 @@ def create_goal_pair_background(
     )
     if retry_instruction:
         prompt = prompt.rstrip() + "\n\n" + retry_instruction.strip()
+    # Temporary debug: Stage 2 prompt length/preview for analysis (do not log full prompt in production).
+    _chars = len(prompt)
+    _tokens_est = _chars // 4
+    _preview = prompt[:500].replace("\n", " ")
+    logger.info(f"STAGE2_PROMPT_LENGTH chars={_chars} request_id={request_id}")
+    logger.info(f"STAGE2_PROMPT_TOKENS_EST={_tokens_est} request_id={request_id}")
+    logger.info(f"STAGE2_PROMPT_PREVIEW {_preview!r} request_id={request_id}")
     try:
         response = client.responses.create(
             model="o3-pro",
@@ -5001,6 +5034,13 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         product_name=product_name or "product",
         product_description=product_description or "description"
     )
+    # Temporary debug: Stage 2 prompt length/preview for analysis (do not log full prompt in production).
+    _chars = len(prompt)
+    _tokens_est = _chars // 4
+    _preview = prompt[:500].replace("\n", " ")
+    logger.info(f"STAGE2_PROMPT_LENGTH chars={_chars} request_id={request_id}")
+    logger.info(f"STAGE2_PROMPT_TOKENS_EST={_tokens_est} request_id={request_id}")
+    logger.info(f"STAGE2_PROMPT_PREVIEW {_preview!r} request_id={request_id}")
     try:
         response = client.responses.create(
             model=model,
@@ -5206,7 +5246,8 @@ def create_copy_background(
         )
     image_url = f"data:image/png;base64,{image_base64}" if image_base64 else ""
     if not image_url:
-        logger.error(f"COPY_FAIL request_id={request_id} reason=no_image FALLBACK_USED=true")
+        log_prefix = "VISION_COPY" if vision_headline_body else "COPY"
+        logger.error(f"{log_prefix}_FAIL request_id={request_id} reason=no_image FALLBACK_USED=true")
         return None
     input_content = [
         {"type": "input_text", "text": prompt},
@@ -5221,11 +5262,13 @@ def create_copy_background(
         )
         response_id = getattr(response, "id", None)
         if not response_id:
-            logger.error(f"COPY_FAIL request_id={request_id} reason=no_response_id FALLBACK_USED=true")
+            log_prefix = "VISION_COPY" if vision_headline_body else "COPY"
+            logger.error(f"{log_prefix}_FAIL request_id={request_id} reason=no_response_id FALLBACK_USED=true")
             return None
         return response_id
     except Exception as e:
-        logger.error(f"COPY_FAIL request_id={request_id} reason={e} FALLBACK_USED=true")
+        log_prefix = "VISION_COPY" if vision_headline_body else "COPY"
+        logger.error(f"{log_prefix}_FAIL request_id={request_id} reason={e} FALLBACK_USED=true")
         return None
 
 
@@ -5237,8 +5280,9 @@ def poll_copy_response(
     headline may be None if vision_headline_body=False or parse had no headline. body may be None on failure.
     status in ("pending", "completed", "failed"). Max wait COPY_BG_MAX_WAIT_SECONDS.
     """
+    log_prefix = "VISION_COPY" if vision_headline_body else "COPY"
     if time.time() - created_at_ts > COPY_BG_MAX_WAIT_SECONDS:
-        logger.info(f"COPY_FAIL request_id={request_id} reason=timeout FALLBACK_USED=true")
+        logger.info(f"{log_prefix}_FAIL request_id={request_id} reason=timeout FALLBACK_USED=true")
         return ((None, None), "failed")
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -5248,11 +5292,10 @@ def poll_copy_response(
     try:
         resp = client.responses.retrieve(response_id)
     except Exception as e:
-        logger.error(f"COPY_FAIL request_id={request_id} reason=retrieve_error FALLBACK_USED=true")
+        logger.error(f"{log_prefix}_FAIL request_id={request_id} reason=retrieve_error error={e} FALLBACK_USED=true")
         return ((None, None), "failed")
     status = (getattr(resp, "status", None) or "").lower()
-    log_prefix = "VISION_COPY" if vision_headline_body else "COPY"
-    logger.info(f"{log_prefix}_BG_STATUS status={status} request_id={request_id}")
+    logger.info(f"{log_prefix}_BG_STATUS status={status} response_id={response_id} request_id={request_id}")
     if status in ("queued", "in_progress"):
         return ((None, None), "pending")
     if status == "completed":
@@ -5279,9 +5322,9 @@ def poll_copy_response(
             else:
                 logger.info(f"COPY_OK request_id={request_id} latency_ms={latency_ms} word_count={wc}")
             return ((headline, body), "completed")
-        logger.info(f"COPY_FAIL request_id={request_id} reason=parse_error FALLBACK_USED=true")
+        logger.info(f"{log_prefix}_FAIL request_id={request_id} reason=parse_error FALLBACK_USED=true")
         return ((None, None), "failed")
-    logger.info(f"COPY_FAIL request_id={request_id} reason=status_{status} FALLBACK_USED=true")
+    logger.info(f"{log_prefix}_FAIL request_id={request_id} reason=status_{status} FALLBACK_USED=true")
     return ((None, None), "failed")
 
 
@@ -5486,7 +5529,17 @@ def generate_preview_data(
                 vision_copy_ok = False
                 if copy_rid:
                     created_at = time.time()
+                    copy_poll_attempt = 0
+                    copy_next_poll_time_ms = 0
                     while time.time() - created_at <= COPY_BG_MAX_WAIT_SECONDS:
+                        now_ms = int(time.time() * 1000)
+                        if copy_next_poll_time_ms and now_ms < copy_next_poll_time_ms:
+                            wait_s = (copy_next_poll_time_ms - now_ms) / 1000.0
+                            remaining = COPY_BG_MAX_WAIT_SECONDS - (time.time() - created_at)
+                            if wait_s > 0 and remaining > 0:
+                                time.sleep(min(wait_s, remaining))
+                            continue
+                        copy_poll_attempt += 1
                         (headline_res, body_res), copy_status = poll_copy_response(
                             copy_rid, request_id, created_at, vision_headline_body=True
                         )
@@ -5499,7 +5552,8 @@ def generate_preview_data(
                             break
                         if copy_status == "failed":
                             break
-                        time.sleep(2)
+                        delay_ms = [2000, 3000, 5000, 8000, 10000][min(copy_poll_attempt - 1, 4)]
+                        copy_next_poll_time_ms = int(time.time() * 1000) + delay_ms
                     if not vision_copy_ok:
                         logger.info(f"VISION_COPY_FAIL request_id={request_id} reason=timeout_or_failed FALLBACK_USED=true")
                 else:
@@ -5507,6 +5561,7 @@ def generate_preview_data(
             except Exception as e:
                 logger.info(f"VISION_COPY_FAIL request_id={request_id} reason=error error={e} FALLBACK_USED=true")
         headline_for_final = (headline or product_name or "Ad Headline").strip()
+        # Always run IMAGE_FINAL (quality=high) after VISION_COPY; never return IMAGE_BASE.
         try:
             if goal_pairs_data and goal_pairs_data.get("pairs"):
                 pair_idx = max(0, min(len(goal_pairs_data["pairs"]) - 1, (ad_index or 1) - 1))
@@ -5527,6 +5582,7 @@ def generate_preview_data(
         except Exception as e:
             logger.error(f"IMAGE_FINAL_FAIL request_id={request_id} error={e} FALLBACK_PLACEHOLDER_USED=true")
             image_final = _IMAGE_ONLY_PLACEHOLDER_BASE64
+        # Return IMAGE_FINAL only (never IMAGE_BASE).
         return {
             "imageBase64": image_final,
             "image_base64": image_final,
