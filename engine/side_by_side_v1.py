@@ -4956,39 +4956,67 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         return None
 
 
-def _build_phase2_image_prompt(pair: Dict, mode_decision: str, product_name: str = "") -> str:
-    """Build gpt-image-1.5 prompt from selected pair. Pencil sketch, white bg. Headline inside image = productName."""
+def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
+    """Build gpt-image-1.5 prompt for IMAGE_BASE: same composition, NO headline or text in image."""
     ap = pair.get("a_primary", "")
     asub = pair.get("a_sub", "")
     bp = pair.get("b_primary", "")
     bsub = pair.get("b_sub", "")
     a_str = f"{ap} with {asub}" if asub else ap
     b_str = f"{bp} with {bsub}" if bsub else bp
-    headline_text = (product_name or "Ad").strip()
-    headline_rule = (
-        f" Include a required headline INSIDE the image: the text must be exactly \"{headline_text}\". "
-        "Headline style: bold printed typography (not handwritten), integrated into the composition (not outside margins). "
-        "No other text in the image; no logos or brands on objects or packaging. "
-    )
+    no_text_rule = " NO text, NO headlines, NO logos, NO letters, NO numbers in the image."
     base = "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
     if mode_decision == "REPLACEMENT":
         return (
             base + f"{bp} fully occupies the structural role of {ap}: the replacing object takes over the other's form. "
             f"The original {ap} must not be visible in any form — no traces, no outlines, no blending, no ghosting. "
             f"The composition must read as a single object that has taken over the other's form. Sketch style."
-            + headline_rule
+            + no_text_rule
         )
-    # SIDE_BY_SIDE: enforce physical overlap (25–40%), smaller object in front, no spacing
     return (
         base + f"Two objects that physically overlap: {a_str} and {b_str}. "
         "Clear physical overlap (approx. 25–40% area intersection); no spacing between objects. "
         "The smaller object must be in the foreground (on top), visibly occluding part of the larger object. "
         "Composition must feel like a single fused visual unit. Sub-objects visible."
-        + headline_rule
+        + no_text_rule
     )
 
 
-# Stage 3: body-only copy from image (background=true). Input: productName, productDescription, advertising_goal, A, A_sub, B, B_sub, mode_decision + image.
+PENCIL_FINAL_STYLE = (
+    " Detailed pencil drawing: clean graphite linework, visible cross-hatching, sharp edge definition, "
+    "consistent shading direction, no digital painting look. White paper background only."
+)
+
+# IMAGE_FINAL headline typography: Times-style editorial serif (not handwritten, sketch, sans-serif, or script).
+HEADLINE_TYPOGRAPHY_FINAL = (
+    "Headline must be rendered in a classic serif typeface resembling Times / Times New Roman: "
+    "high-contrast serif strokes, traditional editorial newspaper typography, crisp black ink. "
+    "Not handwritten, not sketch-style lettering, not sans-serif, not decorative or script. "
+    "Professionally typeset and integrated into the composition. "
+    "Headline casing: Sentence case only — capitalize only the first letter of the sentence; product name may keep its natural capitalization. Do not use ALL CAPS or title case. "
+    "No other text in the image; no logos or brands on objects or packaging."
+)
+
+
+def _build_phase2_image_prompt_final(pair: Dict, mode_decision: str, headline_text: str) -> str:
+    """Build gpt-image-1.5 prompt for IMAGE_FINAL: same composition as base + headline + Times-style typography + pencil style."""
+    prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
+    # Remove the "NO text..." rule and add headline rule + pencil style
+    prompt_base = prompt_base.replace(" NO text, NO headlines, NO logos, NO letters, NO numbers in the image.", "")
+    headline_rule = (
+        f" Include a required headline INSIDE the image: the text must be exactly \"{headline_text}\". "
+        + HEADLINE_TYPOGRAPHY_FINAL
+    )
+    return prompt_base.strip() + ". " + headline_rule + " " + PENCIL_FINAL_STYLE
+
+
+def _build_phase2_image_prompt(pair: Dict, mode_decision: str, product_name: str = "") -> str:
+    """Build gpt-image-1.5 prompt from selected pair (single-pass legacy: headline = productName)."""
+    headline_text = (product_name or "Ad").strip()
+    return _build_phase2_image_prompt_final(pair, mode_decision, headline_text)
+
+
+# Stage 3: body-only copy from image (legacy). Kept for reference.
 COPY_BODY_PROMPT_TEMPLATE = """Product: {product_name}
 Description: {product_description}
 Advertising goal: {advertising_goal}
@@ -5000,6 +5028,20 @@ The image is a marketing metaphor. Do NOT describe the image literally (objects,
 
 Rules:
 - body: about 50 words. Persuasive marketing copy that interprets the visual metaphor and supports the Advertising Goal. No literal description of what is in the image. No headline. Output format: {{ "body": "..." }}"""
+
+# VISION_COPY: headline + body from image (two-pass flow). Output: headline (3–6 words, include productName naturally) + body (~50 words).
+VISION_COPY_HEADLINE_BODY_TEMPLATE = """Product: {product_name}
+Description: {product_description}
+Advertising goal: {advertising_goal}
+Objects in image: A primary={a_primary}, A sub={a_sub}; B primary={b_primary}, B sub={b_sub}. Mode: {mode_decision}.
+
+Look at the ad image. Return valid JSON with exactly two keys: "headline" and "body".
+
+Rules:
+- headline: 3–6 words. Must include the product name ({product_name}) naturally; must NOT be only the product name. Persuasive marketing headline (not descriptive).
+- body: about 50 words. Marketing copy grounded in what is visible; interpretive (not a literal caption). Do not invent action or causality between the objects A and B. Focus on meaning, positioning, impact.
+
+Output format only: {{ "headline": "...", "body": "..." }}"""
 
 
 def _word_count(text: str) -> int:
@@ -5018,27 +5060,44 @@ def create_copy_background(
     b_sub: str,
     mode_decision: str,
     request_id: str,
+    vision_headline_body: bool = False,
 ) -> Optional[str]:
     """
-    Create o3-pro body-only copy request in background. Single attempt, no retries.
+    Create o3-pro copy request in background. Single attempt, no retries.
+    If vision_headline_body=True, uses VISION_COPY prompt (headline + body) and logs VISION_COPY_START.
     Returns response_id for polling, or None on create failure.
     """
-    logger.info(f"COPY_START request_id={request_id}")
+    if vision_headline_body:
+        logger.info(f"VISION_COPY_START request_id={request_id}")
+    else:
+        logger.info(f"COPY_START request_id={request_id}")
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
         timeout=httpx.Timeout(COPY_BG_CREATE_TIMEOUT_SECONDS),
         max_retries=0,
     )
-    prompt = COPY_BODY_PROMPT_TEMPLATE.format(
-        product_name=product_name or "Product",
-        product_description=product_description or "",
-        advertising_goal=advertising_goal or "",
-        a_primary=a_primary or "",
-        a_sub=a_sub or "",
-        b_primary=b_primary or "",
-        b_sub=b_sub or "",
-        mode_decision=mode_decision or "",
-    )
+    if vision_headline_body:
+        prompt = VISION_COPY_HEADLINE_BODY_TEMPLATE.format(
+            product_name=product_name or "Product",
+            product_description=product_description or "",
+            advertising_goal=advertising_goal or "",
+            a_primary=a_primary or "",
+            a_sub=a_sub or "",
+            b_primary=b_primary or "",
+            b_sub=b_sub or "",
+            mode_decision=mode_decision or "",
+        )
+    else:
+        prompt = COPY_BODY_PROMPT_TEMPLATE.format(
+            product_name=product_name or "Product",
+            product_description=product_description or "",
+            advertising_goal=advertising_goal or "",
+            a_primary=a_primary or "",
+            a_sub=a_sub or "",
+            b_primary=b_primary or "",
+            b_sub=b_sub or "",
+            mode_decision=mode_decision or "",
+        )
     image_url = f"data:image/png;base64,{image_base64}" if image_base64 else ""
     if not image_url:
         logger.error(f"COPY_FAIL request_id={request_id} reason=no_image FALLBACK_USED=true")
@@ -5065,15 +5124,16 @@ def create_copy_background(
 
 
 def poll_copy_response(
-    response_id: str, request_id: str, created_at_ts: float
-) -> Tuple[Optional[str], str]:
+    response_id: str, request_id: str, created_at_ts: float, vision_headline_body: bool = False
+) -> Tuple[Tuple[Optional[str], Optional[str]], str]:
     """
-    Poll OpenAI GET /v1/responses/{id} for copy. Returns (body or None, status).
+    Poll OpenAI GET /v1/responses/{id} for copy. Returns ((headline, body), status).
+    headline may be None if vision_headline_body=False or parse had no headline. body may be None on failure.
     status in ("pending", "completed", "failed"). Max wait COPY_BG_MAX_WAIT_SECONDS.
     """
     if time.time() - created_at_ts > COPY_BG_MAX_WAIT_SECONDS:
         logger.info(f"COPY_FAIL request_id={request_id} reason=timeout FALLBACK_USED=true")
-        return (None, "failed")
+        return ((None, None), "failed")
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
         timeout=httpx.Timeout(15),
@@ -5083,14 +5143,15 @@ def poll_copy_response(
         resp = client.responses.retrieve(response_id)
     except Exception as e:
         logger.error(f"COPY_FAIL request_id={request_id} reason=retrieve_error FALLBACK_USED=true")
-        return (None, "failed")
+        return ((None, None), "failed")
     status = (getattr(resp, "status", None) or "").lower()
-    logger.info(f"COPY_BG_STATUS status={status} request_id={request_id}")
+    log_prefix = "VISION_COPY" if vision_headline_body else "COPY"
+    logger.info(f"{log_prefix}_BG_STATUS status={status} request_id={request_id}")
     if status in ("queued", "in_progress"):
-        return (None, "pending")
+        return ((None, None), "pending")
     if status == "completed":
         raw = (getattr(resp, "output_text", None) or "").strip()
-        body = None
+        headline, body = None, None
         if raw:
             if raw.startswith("```"):
                 lines = raw.split("\n")
@@ -5101,28 +5162,39 @@ def poll_copy_response(
             try:
                 data = json.loads(raw)
                 body = (data.get("body") or "").strip()
+                headline = (data.get("headline") or "").strip() or None
             except (json.JSONDecodeError, TypeError):
                 pass
         if body:
             latency_ms = int((time.time() - created_at_ts) * 1000)
             wc = _word_count(body)
-            logger.info(f"COPY_OK request_id={request_id} latency_ms={latency_ms} word_count={wc}")
-            return (body, "completed")
+            if vision_headline_body:
+                logger.info(f"VISION_COPY_OK latency_ms={latency_ms} word_count={wc} headline=\"{headline or ''}\" request_id={request_id}")
+            else:
+                logger.info(f"COPY_OK request_id={request_id} latency_ms={latency_ms} word_count={wc}")
+            return ((headline, body), "completed")
         logger.info(f"COPY_FAIL request_id={request_id} reason=parse_error FALLBACK_USED=true")
-        return (None, "failed")
+        return ((None, None), "failed")
     logger.info(f"COPY_FAIL request_id={request_id} reason=status_{status} FALLBACK_USED=true")
-    return (None, "failed")
+    return ((None, None), "failed")
 
 
-def _image_only_single_call(image_size: str, request_id: str, prompt: Optional[str] = None) -> Tuple[str, bool]:
+def _image_only_single_call(
+    image_size: str,
+    request_id: str,
+    prompt: Optional[str] = None,
+    log_prefix: str = "IMAGE_CALL",
+    quality: str = "low",
+) -> Tuple[str, bool]:
     """
     Single gpt-image-1.5 call for ACE_IMAGE_ONLY mode. No retries, 60s timeout.
     Returns (image_base64_str, success). If prompt is None, uses IMAGE_ONLY_HARDCODED_PROMPT.
+    log_prefix: for logging (e.g. IMAGE_BASE, IMAGE_FINAL, IMAGE_CALL).
+    quality: "low" (layout/composition) or "high" (final pencil rendering).
     """
     t0 = time.time()
-    quality = "low"
     image_prompt = prompt if prompt else IMAGE_ONLY_HARDCODED_PROMPT
-    logger.info(f"IMAGE_CALL_START size={image_size} quality={quality} request_id={request_id}")
+    logger.info(f"{log_prefix}_START size={image_size} quality={quality} request_id={request_id}")
     timeout_sec = IMAGE_ONLY_CALL_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -5140,11 +5212,11 @@ def _image_only_single_call(image_size: str, request_id: str, prompt: Optional[s
         b64 = response.data[0].b64_json if response.data else None
         if not b64:
             raise ValueError("No image data in response")
-        logger.info(f"IMAGE_CALL_OK latency_ms={latency_ms} request_id={request_id}")
+        logger.info(f"{log_prefix}_OK latency_ms={latency_ms} request_id={request_id}")
         return (b64, True)
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
-        logger.error(f"IMAGE_CALL_FAIL latency_ms={latency_ms} error={e}")
+        logger.error(f"{log_prefix}_FAIL latency_ms={latency_ms} error={e}")
         logger.info("IMAGE_FALLBACK_PLACEHOLDER_USED=true")
         return (_IMAGE_ONLY_PLACEHOLDER_BASE64, False)
 
@@ -5275,11 +5347,14 @@ def generate_preview_data(
                     f'A="{pair.get("a_primary", "")}" A_sub="{pair.get("a_sub", "")}" '
                     f'B="{pair.get("b_primary", "")}" B_sub="{pair.get("b_sub", "")}" goal="{ad_goal_summary}"'
                 )
-                prompt_to_use = _build_phase2_image_prompt(pair, mode_decision, product_name)
-        image_base64, ok = _image_only_single_call(size, request_id, prompt=prompt_to_use)
-        if not ok:
+                prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
+        else:
+            prompt_base = IMAGE_ONLY_HARDCODED_PROMPT
+        image_base64, ok_base = _image_only_single_call(size, request_id, prompt=prompt_base, log_prefix="IMAGE_BASE")
+        if not ok_base:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
-        headline = "Ad Headline"
+        headline = (product_name or "Ad Headline").strip()
+        body = COPY_FALLBACK_BODY_50
         if ACE_TEST_MODE:
             body = COPY_TEST_MODE_BODY_50
         else:
@@ -5298,21 +5373,43 @@ def generate_preview_data(
             copy_rid = create_copy_background(
                 image_base64, product_name, product_description, ad_goal,
                 a_pri, a_sub, b_pri, b_sub, mode_dec, request_id,
+                vision_headline_body=True,
             )
-            body = COPY_FALLBACK_BODY_50
             if copy_rid:
                 created_at = time.time()
                 while time.time() - created_at <= COPY_BG_MAX_WAIT_SECONDS:
-                    body_result, copy_status = poll_copy_response(copy_rid, request_id, created_at)
-                    if copy_status == "completed" and body_result:
-                        body = body_result
+                    (headline_res, body_res), copy_status = poll_copy_response(
+                        copy_rid, request_id, created_at, vision_headline_body=True
+                    )
+                    if copy_status == "completed":
+                        if headline_res:
+                            headline = headline_res
+                        if body_res:
+                            body = body_res
                         break
                     if copy_status == "failed":
                         break
                     time.sleep(2)
+        headline_for_final = (headline or product_name or "Ad Headline").strip()
+        if goal_pairs_data and goal_pairs_data.get("pairs"):
+            pair_idx = max(0, min(len(goal_pairs_data["pairs"]) - 1, (ad_index or 1) - 1))
+            pair = goal_pairs_data["pairs"][pair_idx]
+            mode_decision = "REPLACEMENT" if int(pair.get("silhouette_similarity", 50)) >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
+            prompt_final = _build_phase2_image_prompt_final(pair, mode_decision, headline_for_final)
+        else:
+            base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace(" NO text, NO logos, NO letters, NO numbers.", "").strip()
+            prompt_final = (
+                base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_for_final}\". "
+                + HEADLINE_TYPOGRAPHY_FINAL
+            )
+        image_final, ok_final = _image_only_single_call(
+            size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
+        )
+        if not ok_final:
+            image_final = _IMAGE_ONLY_PLACEHOLDER_BASE64
         return {
-            "imageBase64": image_base64,
-            "image_base64": image_base64,
+            "imageBase64": image_final,
+            "image_base64": image_final,
             "headline": headline,
             "bodyText50": body,
             "body_text": body,
