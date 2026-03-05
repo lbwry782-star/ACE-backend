@@ -131,6 +131,26 @@ _GENERATE_ARTIFACT_TTL_SECONDS = 45 * 60
 _generate_artifacts: Dict[tuple, dict] = {}  # (session_id, ad_index) -> { "image_bytes", "bodyText50", "headline", "timestamp" }
 _generate_artifacts_guard = Lock()
 
+# SessionId alias: request-provided sessionId -> internal sessionId used for storage (so download works when frontend sends a different id)
+_sid_alias_map: Dict[str, str] = {}
+_sid_alias_lock = Lock()
+
+
+def _set_sid_alias(requested_sid: str, resolved_sid: str) -> None:
+    """Map request-provided sessionId to the internal sessionId used when storing artifacts (for download fallback lookup)."""
+    if not (requested_sid and str(requested_sid).strip()):
+        return
+    with _sid_alias_lock:
+        _sid_alias_map[str(requested_sid).strip()] = resolved_sid
+
+
+def _get_sid_alias(requested_sid: str) -> Optional[str]:
+    """Resolve request-provided sessionId to internal sessionId if we have a mapping."""
+    if not (requested_sid and str(requested_sid).strip()):
+        return None
+    with _sid_alias_lock:
+        return _sid_alias_map.get(str(requested_sid).strip())
+
 # In-memory async job store for /api/preview (background execution + polling)
 _JOB_TTL_SECONDS = 30 * 60
 _jobs: Dict[str, dict] = {}  # jobId -> { status, created_at, finished_at, session_id, ad_index, result, error, error_message }
@@ -236,8 +256,9 @@ def generate():
             return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productName is required'}), 400
         if not payload.get("productDescription"):
             return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productDescription is required'}), 400
-        session_id = (payload.get("sessionId") or "").strip() or str(uuid.uuid4())
-        session_id_source = "request" if (payload.get("sessionId") or "").strip() else "generated"
+        requested_sid = (payload.get("sessionId") or "").strip()
+        session_id = requested_sid or str(uuid.uuid4())
+        session_id_source = "request" if requested_sid else "generated"
         logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={session_id_source} request_id={request_id}")
         ad_index = int(payload.get("adIndex", 1))
         ad_index = max(1, min(3, ad_index))
@@ -248,6 +269,8 @@ def generate():
             demo = _get_test_mode_demo_result()
             image_bytes = base64.b64decode(demo["imageBase64"])
             _set_artifact(session_id, ad_index, image_bytes, demo["bodyText50"], demo["headline"])
+            if requested_sid:
+                _set_sid_alias(requested_sid, session_id)
             logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
             return jsonify({
                 "ok": True,
@@ -278,6 +301,8 @@ def generate():
             body_text_50 = result.get("bodyText50", "")
             image_bytes = base64.b64decode(image_base64)
             _set_artifact(session_id, ad_index, image_bytes, body_text_50, headline)
+            if requested_sid:
+                _set_sid_alias(requested_sid, session_id)
             logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
             logger.info(f"GENERATE_DONE sid={session_id} ad={ad_index} stored=true")
             return jsonify({
@@ -348,8 +373,9 @@ def preview():
                 'error': 'missing_field',
                 'message': 'productDescription is required'
             }), 400
-        session_id = (payload.get("sessionId") or "").strip() or str(uuid.uuid4())
-        session_id_source = "request" if (payload.get("sessionId") or "").strip() else "generated"
+        requested_sid = (payload.get("sessionId") or "").strip()
+        session_id = requested_sid or str(uuid.uuid4())
+        session_id_source = "request" if requested_sid else "generated"
         logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={session_id_source} request_id={request_id}")
         ad_index = int(payload.get("adIndex", 1) or 1)
         ad_index = max(1, min(3, ad_index))
@@ -382,6 +408,7 @@ def preview():
             "created_at": created_at,
             "finished_at": None,
             "session_id": session_id,
+            "requested_session_id": requested_sid,
             "ad_index": ad_index,
             "result": None,
             "error": None,
@@ -402,7 +429,7 @@ def preview():
         logger.info(f"JOB_CREATED jobId={job_id} sid={session_id} ad={ad_index} request_id={request_id}")
 
         # Schedule background execution
-        def _run_preview_job(jid: str, payload_data: dict, sid: str, ad_idx: int, req_id: str) -> None:
+        def _run_preview_job(jid: str, payload_data: dict, sid: str, ad_idx: int, req_id: str, req_sid: str = "") -> None:
             start = time.time()
             try:
                 with _jobs_lock:
@@ -557,6 +584,9 @@ def preview():
                                 body_50 = (result or {}).get("bodyText50") or (result or {}).get("body_text") or ""
                                 headline = (result or {}).get("headline") or ""
                                 _set_artifact(sid, ad_idx, img_bytes, body_50, headline)
+                                req_sid = (job.get("requested_session_id") or "").strip() if job else ""
+                                if req_sid:
+                                    _set_sid_alias(req_sid, sid)
                                 logger.info(f"RESULT_STORED sessionId={sid} adIndex={ad_idx} bytes={len(img_bytes)} request_id={job_request_id}")
                         except Exception:
                             pass
@@ -633,15 +663,13 @@ def preview():
 
 def _download_zip_impl():
     """
-    Shared impl for ZIP download (sessionId + adIndex). In-memory artifact store; no filesystem path.
-    Returns (Flask response, status_code) or (response, 200).
+    Shared impl for ZIP download (sessionId + adIndex). In-memory artifact store.
+    Tries requested sessionId first; if not found, resolves via sid alias map (request-provided -> storage id).
     """
     request_id = str(uuid.uuid4())
-    # Debug: request path and query params
-    logger.info(f"ZIP_DOWNLOAD_REQUEST path={request.path} args={dict(request.args)} request_id={request_id}")
-    session_id = request.args.get("sessionId", "").strip()
+    requested_sid = request.args.get("sessionId", "").strip()
     ad_index_str = request.args.get("adIndex", "")
-    if not session_id:
+    if not requested_sid:
         return jsonify({'ok': False, 'error': 'missing_param', 'message': 'sessionId is required'}), 400
     if not ad_index_str:
         return jsonify({'ok': False, 'error': 'missing_param', 'message': 'adIndex is required'}), 400
@@ -650,28 +678,38 @@ def _download_zip_impl():
     except (TypeError, ValueError):
         return jsonify({'ok': False, 'error': 'missing_param', 'message': 'adIndex must be 1, 2, or 3'}), 400
     ad_index = max(1, min(3, ad_index))
-    # Resolved ZIP id = (sessionId, adIndex); lookup key is in-memory (no filesystem path)
-    lookup_key = (session_id, ad_index)
-    logger.info(f"ZIP_DOWNLOAD_RESOLVED sessionId={session_id} adIndex={ad_index} lookup_key=in_memory request_id={request_id}")
-    artifact = _get_artifact(session_id, ad_index)
+
+    logger.info(f"ZIP_DOWNLOAD_REQUEST requested_sid={requested_sid} adIndex={ad_index} request_id={request_id}")
+
+    artifact = _get_artifact(requested_sid, ad_index)
+    resolved_sid = None
     if not artifact:
-        logger.info(f"ZIP_DOWNLOAD_EXISTS found=false sessionId={session_id} adIndex={ad_index} request_id={request_id}")
-        logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={session_id} adIndex={ad_index} found=false request_id={request_id}")
+        resolved_sid = _get_sid_alias(requested_sid)
+        if resolved_sid:
+            artifact = _get_artifact(resolved_sid, ad_index)
+    logger.info(f"ZIP_DOWNLOAD_RESOLVED requested_sid={requested_sid} resolved_sid={resolved_sid or 'none'} request_id={request_id}")
+
+    final_sid = resolved_sid if (resolved_sid and artifact) else requested_sid
+    if not artifact:
+        logger.info(f"ZIP_DOWNLOAD_EXISTS found=false requested_sid={requested_sid} final_lookup_key=({final_sid},{ad_index}) request_id={request_id}")
+        logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={requested_sid} adIndex={ad_index} found=false request_id={request_id}")
         return jsonify({
             'error': 'not_found',
             'reason': 'missing_session_or_ad',
-            'sessionId': session_id,
+            'sessionId': requested_sid,
             'adIndex': ad_index,
         }), 404
+
     img_size = len(artifact.get("image_bytes") or b"")
-    logger.info(f"ZIP_DOWNLOAD_EXISTS found=true sessionId={session_id} adIndex={ad_index} size_bytes={img_size} request_id={request_id}")
-    logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={session_id} adIndex={ad_index} found=true request_id={request_id}")
+    logger.info(f"ZIP_DOWNLOAD_EXISTS found=true final_lookup_key=({final_sid},{ad_index}) size_bytes={img_size} request_id={request_id}")
+    logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={final_sid} adIndex={ad_index} found=true request_id={request_id}")
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("image.jpg", artifact["image_bytes"])
         zf.writestr("text.txt", artifact["bodyText50"].encode("utf-8"))
     zip_buffer.seek(0)
     zip_filename = f"ACE_ad-{ad_index}.zip"
+    logger.info(f"ZIP_SENT 200 sessionId={final_sid} adIndex={ad_index} request_id={request_id}")
     return send_file(
         zip_buffer,
         mimetype='application/zip',
