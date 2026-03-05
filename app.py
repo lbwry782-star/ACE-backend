@@ -631,13 +631,14 @@ def preview():
         }), 500
 
 
-@app.route('/api/download-zip', methods=['GET'])
-def download_zip():
+def _download_zip_impl():
     """
-    Download ZIP for a previously generated ad (sessionId + adIndex). No OpenAI calls.
-    ZIP contains: image.jpg (sketch), text.txt (50-word body text).
+    Shared impl for ZIP download (sessionId + adIndex). In-memory artifact store; no filesystem path.
+    Returns (Flask response, status_code) or (response, 200).
     """
     request_id = str(uuid.uuid4())
+    # Debug: request path and query params
+    logger.info(f"ZIP_DOWNLOAD_REQUEST path={request.path} args={dict(request.args)} request_id={request_id}")
     session_id = request.args.get("sessionId", "").strip()
     ad_index_str = request.args.get("adIndex", "")
     if not session_id:
@@ -649,8 +650,12 @@ def download_zip():
     except (TypeError, ValueError):
         return jsonify({'ok': False, 'error': 'missing_param', 'message': 'adIndex must be 1, 2, or 3'}), 400
     ad_index = max(1, min(3, ad_index))
+    # Resolved ZIP id = (sessionId, adIndex); lookup key is in-memory (no filesystem path)
+    lookup_key = (session_id, ad_index)
+    logger.info(f"ZIP_DOWNLOAD_RESOLVED sessionId={session_id} adIndex={ad_index} lookup_key=in_memory request_id={request_id}")
     artifact = _get_artifact(session_id, ad_index)
     if not artifact:
+        logger.info(f"ZIP_DOWNLOAD_EXISTS found=false sessionId={session_id} adIndex={ad_index} request_id={request_id}")
         logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={session_id} adIndex={ad_index} found=false request_id={request_id}")
         return jsonify({
             'error': 'not_found',
@@ -658,18 +663,33 @@ def download_zip():
             'sessionId': session_id,
             'adIndex': ad_index,
         }), 404
+    img_size = len(artifact.get("image_bytes") or b"")
+    logger.info(f"ZIP_DOWNLOAD_EXISTS found=true sessionId={session_id} adIndex={ad_index} size_bytes={img_size} request_id={request_id}")
     logger.info(f"DOWNLOAD_ZIP_LOOKUP sessionId={session_id} adIndex={ad_index} found=true request_id={request_id}")
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("image.jpg", artifact["image_bytes"])
         zf.writestr("text.txt", artifact["bodyText50"].encode("utf-8"))
     zip_buffer.seek(0)
+    zip_filename = f"ACE_ad-{ad_index}.zip"
     return send_file(
         zip_buffer,
         mimetype='application/zip',
         as_attachment=True,
-        download_name=f'ad-{ad_index}.zip'
+        download_name=zip_filename,
     )
+
+
+@app.route('/api/download-zip', methods=['GET'])
+def download_zip():
+    """Download ZIP for a previously generated ad (sessionId + adIndex). No OpenAI calls."""
+    return _download_zip_impl()
+
+
+@app.route('/api/download', methods=['GET'])
+def download():
+    """Alias for /api/download-zip so both paths work for backward compatibility."""
+    return _download_zip_impl()
 
 
 @app.route('/api/job-status', methods=['GET'])

@@ -4108,15 +4108,26 @@ def create_image_prompt(
     # Determine mode: use force_mode if provided, otherwise use ACE_IMAGE_MODE
     effective_mode = force_mode if force_mode else ACE_IMAGE_MODE
     # Log is handled in MODE_APPLIED in render_final_ad_bytes, so we don't duplicate here
-    
-    # Shared composition: pencil style, pure white background, very wide margins, lots of negative space
+
+    # Headline MUST be ALL CAPS before inserting into the image prompt; render exactly as provided
+    headline = (headline or "").strip().upper()
+
+    # Style: high-end professional graphite pencil (museum-quality). Headline: inside composition, Times, ALL CAPS.
     negative_space_rules = """
 Composition and framing (CRITICAL):
-- Pencil drawing style only; soft pencil sketch aesthetic.
+- High-end professional graphite pencil drawing: museum-quality, clean confident lines, precise shading, subtle paper texture, sharp focus, high detail. NOT rough sketch, NOT childish, NOT low-res, NOT blurry.
 - Pure white background only; no scene, no texture, no gradient.
 - Very wide white margins on all four sides; lots of negative space.
 - Subject(s) centered and small; together they occupy about 25-35% of the canvas.
 - Subject(s) must not touch or nearly touch the image edges; keep ample empty white space between subjects and frame."""
+
+    # Headline inside composition: ALL CAPS, TIMES font, exact text, in negative space (print-ad layout)
+    headline_typography_block = """
+Headline (INSIDE the image composition, not below):
+- Render the headline EXACTLY as provided: no paraphrasing, no spelling changes.
+- Headline must be in ALL CAPS. Use TIMES / TIMES NEW ROMAN / TIMES ROMAN font only; printed type, not handwritten.
+- Place headline as part of the composition (like a print ad layout), in negative space; do not cover key objects.
+- Only this single headline text may appear in the image. No logos, no watermarks, no extra random text."""
     
     # MODE 1 — REPLACEMENT (TEMPORARILY DISABLED - see TEMP_DISABLE_REPLACEMENT in render_final_ad_bytes)
     # This branch should not execute as replacement mode is disabled
@@ -4174,18 +4185,10 @@ No floating objects.
 No added B.sub_object.
 
 HEADLINE RULE:
-
-Include exactly one headline.
-
+Include exactly one headline. The headline text must be rendered EXACTLY as: "{headline}"
 Headline must include "{product_name_str}".
-
-Headline must be large and visually dominant.
-
-Headline must have visual weight comparable to the main object.
-
-No additional text allowed.
-
-Pencil drawing style only; soft pencil sketch aesthetic. Pure white background.
+{headline_typography_block}
+Pencil drawing style only; high-end professional graphite, museum-quality. Pure white background.
 No logos.
 No labels.
 No surreal distortions."""
@@ -4224,20 +4227,14 @@ Background:
 Pure white only; no scene, no texture, no gradient.
 
 Headline:
-
-Exactly one headline.
-
-Must include "{product_name_str}".
-
-Must be large and dominant.
-
-Positioned above or integrated professionally.
-
-Pencil drawing style only; soft pencil sketch aesthetic.
+Exactly one headline. The headline text must be rendered EXACTLY as: "{headline}"
+Must include "{product_name_str}". Must be large and dominant, part of the composition (in negative space), not covering key objects.
+{headline_typography_block}
+Pencil drawing style only; high-end professional graphite, museum-quality.
 No logos.
 No brand graphics.
-No text except headline.{shape_instruction}{negative_space_rules}"""
-    
+No text except this single headline.{shape_instruction}{negative_space_rules}"""
+
     return side_by_side_prompt
 
 
@@ -5184,31 +5181,33 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
     )
 
 
+# High-end professional graphite pencil (museum-quality); NOT rough sketch, NOT childish, NOT low-res, NOT blurry.
 PENCIL_FINAL_STYLE = (
-    " Ultra-detailed graphite pencil drawing: fine cross-hatching with directional consistency, sharp edge definition, "
-    "deep tonal range (strong blacks and clean whites), visible paper texture, high contrast line weight variation. "
-    "No soft sketch look, no blurry shading, no digital painting feel, no watercolor or charcoal style. "
+    " High-end professional graphite pencil drawing: museum-quality, clean confident lines, precise shading, "
+    "subtle paper texture, sharp focus, high detail. Fine cross-hatching with directional consistency, sharp edge definition, "
+    "deep tonal range (strong blacks and clean whites), high contrast line weight variation. "
+    "NOT rough sketch, NOT childish, NOT low-res, NOT blurry. No soft sketch look, no digital painting feel, no watercolor or charcoal. "
     "Clean white background only. The drawing must look like a professionally scanned high-resolution pencil illustration."
 )
 
-# IMAGE_FINAL headline typography: Times-style editorial serif (not handwritten, sketch, sans-serif, or script).
+# IMAGE_FINAL headline: INSIDE composition, ALL CAPS, TIMES font, exact text; printed type (not handwritten).
 HEADLINE_TYPOGRAPHY_FINAL = (
-    "Headline must be rendered in a classic serif typeface resembling Times / Times New Roman: "
-    "high-contrast serif strokes, traditional editorial newspaper typography, crisp black ink. "
-    "Not handwritten, not sketch-style lettering, not sans-serif, not decorative or script. "
-    "Professionally typeset and integrated into the composition. "
-    "Headline casing: Sentence case only — capitalize only the first letter of the sentence; product name may keep its natural capitalization. Do not use ALL CAPS or title case. "
+    "Headline must be rendered INSIDE the image composition (like a print ad layout), in negative space, not covering key objects. "
+    "Use TIMES / TIMES NEW ROMAN / TIMES ROMAN font only: high-contrast serif strokes, traditional editorial typography, crisp black ink. "
+    "Headline must be in ALL CAPS. Printed type only — not handwritten, not sketch-style lettering, not sans-serif, not script. "
+    "Render the headline EXACTLY as provided; no paraphrasing, no spelling changes. "
     "No other text in the image; no logos or brands on objects or packaging."
 )
 
 
 def _build_phase2_image_prompt_final(pair: Dict, mode_decision: str, headline_text: str) -> str:
-    """Build gpt-image-1.5 prompt for IMAGE_FINAL: same composition as base + headline + Times-style typography + pencil style."""
+    """Build gpt-image-1.5 prompt for IMAGE_FINAL: same composition as base + headline (ALL CAPS, Times) + pencil style."""
+    headline_upper = (headline_text or "").strip().upper()
     prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
     # Remove the "NO text..." rule and add headline rule + pencil style
     prompt_base = prompt_base.replace(" NO text, NO headlines, NO logos, NO letters, NO numbers in the image.", "")
     headline_rule = (
-        f" Include a required headline INSIDE the image: the text must be exactly \"{headline_text}\". "
+        f" Include a required headline INSIDE the image: the text must be exactly \"{headline_upper}\". "
         + HEADLINE_TYPOGRAPHY_FINAL
     )
     return prompt_base.strip() + ". " + headline_rule + " " + PENCIL_FINAL_STYLE
@@ -5627,10 +5626,11 @@ def generate_preview_data(
                 mode_decision = "REPLACEMENT" if int(pair.get("silhouette_similarity", 50)) >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
                 prompt_final = _build_phase2_image_prompt_final(pair, mode_decision, headline_for_final)
             else:
+                headline_final_upper = (headline_for_final or "").strip().upper()
                 base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace("NO text, NO logos, NO letters, NO numbers.", "").strip()
                 prompt_final = (
-                    base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_for_final}\". "
-                    + HEADLINE_TYPOGRAPHY_FINAL
+                    base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_final_upper}\". "
+                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PENCIL_FINAL_STYLE
                 )
             image_final, ok_final = _image_only_single_call(
                 size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
