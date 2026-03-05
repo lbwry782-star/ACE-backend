@@ -5557,7 +5557,7 @@ def generate_preview_data(
                 prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
         else:
             prompt_base = IMAGE_ONLY_HARDCODED_PROMPT
-        image_base64, ok_base = _image_only_single_call(size, request_id, prompt=prompt_base, log_prefix="IMAGE_BASE")
+        image_base64, ok_base = _image_only_single_call(size, request_id, prompt=prompt_base, log_prefix="IMAGE_BASE", quality="high")
         if not ok_base:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
         headline = (product_name or "Ad Headline").strip()
