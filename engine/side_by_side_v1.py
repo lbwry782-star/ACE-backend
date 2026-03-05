@@ -5171,14 +5171,14 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
             f"The original {ap} must not be visible in any form — no traces, no outlines, no blending, no ghosting. "
             f"The composition must read as a single object that has taken over the other's form. Sketch style."
             + no_text_rule
-        )
+        ) + "\n\n" + GRAPHITE_STYLE_BLOCK
     return (
         base + f"Two objects that physically overlap: {a_str} and {b_str}. "
         "Clear physical overlap (approx. 25–40% area intersection); no spacing between objects. "
         "The smaller object must be in the foreground (on top), visibly occluding part of the larger object. "
         "Composition must feel like a single fused visual unit. Sub-objects visible."
         + no_text_rule
-    )
+    ) + "\n\n" + GRAPHITE_STYLE_BLOCK
 
 
 # High-end professional graphite pencil (museum-quality); NOT rough sketch, NOT childish, NOT low-res, NOT blurry.
@@ -5189,6 +5189,24 @@ PENCIL_FINAL_STYLE = (
     "NOT rough sketch, NOT childish, NOT low-res, NOT blurry. No soft sketch look, no digital painting feel, no watercolor or charcoal. "
     "Clean white background only. The drawing must look like a professionally scanned high-resolution pencil illustration."
 )
+
+GRAPHITE_STYLE_BLOCK = """
+STYLE:
+museum-quality graphite pencil drawing
+extremely detailed illustration
+clean confident linework
+precise tonal shading
+fine cross-hatching shading
+dense graphite texture
+sharp focus
+high contrast pencil rendering
+professional illustration quality
+white background
+no color
+no paint
+no digital painting look
+pure graphite pencil drawing
+"""
 
 # IMAGE_FINAL headline: INSIDE composition, ALL CAPS, TIMES font, exact text; printed type (not handwritten).
 HEADLINE_TYPOGRAPHY_FINAL = (
@@ -5210,7 +5228,7 @@ def _build_phase2_image_prompt_final(pair: Dict, mode_decision: str, headline_te
         f" Include a required headline INSIDE the image: the text must be exactly \"{headline_upper}\". "
         + HEADLINE_TYPOGRAPHY_FINAL
     )
-    return prompt_base.strip() + ". " + headline_rule + " " + PENCIL_FINAL_STYLE
+    return prompt_base.strip() + ". " + headline_rule + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK
 
 
 def _build_phase2_image_prompt(pair: Dict, mode_decision: str, product_name: str = "") -> str:
@@ -5630,7 +5648,7 @@ def generate_preview_data(
                 base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace("NO text, NO logos, NO letters, NO numbers.", "").strip()
                 prompt_final = (
                     base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_final_upper}\". "
-                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PENCIL_FINAL_STYLE
+                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK
                 )
             image_final, ok_final = _image_only_single_call(
                 size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
