@@ -758,7 +758,16 @@ def job_status():
     if status in ("pending", "running"):
         return jsonify({'ok': True, 'status': status}), 200
     if status == "done":
-        return jsonify({'ok': True, 'status': 'done', 'result': job.get("result")}), 200
+        sid = job.get("session_id", "")
+        ad_idx = job.get("ad_index", 1)
+        logger.info(f"JOB_STATUS_RESPONSE status=done sessionId={sid} adIndex={ad_idx}")
+        return jsonify({
+            'ok': True,
+            'status': 'done',
+            'sessionId': sid,
+            'adIndex': ad_idx,
+            'result': job.get("result"),
+        }), 200
     # error
     return jsonify({
         'ok': False,
