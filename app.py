@@ -256,10 +256,17 @@ def generate():
             return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productName is required'}), 400
         if not payload.get("productDescription"):
             return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productDescription is required'}), 400
-        requested_sid = (payload.get("sessionId") or "").strip()
-        session_id = requested_sid or str(uuid.uuid4())
-        session_id_source = "request" if requested_sid else "generated"
-        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={session_id_source} request_id={request_id}")
+        # Use client sessionId as canonical everywhere; only generate new UUID when request truly has no sessionId
+        client_sid = (payload.get("sessionId") or "").strip()
+        if client_sid:
+            session_id = client_sid
+            sid_source = "client"
+        else:
+            session_id = str(uuid.uuid4())
+            sid_source = "generated"
+        logger.info(f"GEN_REQUEST_SID_SOURCE source={sid_source} request_id={request_id}")
+        logger.info(f"GEN_REQUEST_SID_VALUE sessionId={session_id} request_id={request_id}")
+        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={sid_source} request_id={request_id}")
         ad_index = int(payload.get("adIndex", 1))
         ad_index = max(1, min(3, ad_index))
 
@@ -269,8 +276,8 @@ def generate():
             demo = _get_test_mode_demo_result()
             image_bytes = base64.b64decode(demo["imageBase64"])
             _set_artifact(session_id, ad_index, image_bytes, demo["bodyText50"], demo["headline"])
-            if requested_sid:
-                _set_sid_alias(requested_sid, session_id)
+            if client_sid:
+                _set_sid_alias(client_sid, session_id)
             logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
             return jsonify({
                 "ok": True,
@@ -301,8 +308,8 @@ def generate():
             body_text_50 = result.get("bodyText50", "")
             image_bytes = base64.b64decode(image_base64)
             _set_artifact(session_id, ad_index, image_bytes, body_text_50, headline)
-            if requested_sid:
-                _set_sid_alias(requested_sid, session_id)
+            if client_sid:
+                _set_sid_alias(client_sid, session_id)
             logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
             logger.info(f"GENERATE_DONE sid={session_id} ad={ad_index} stored=true")
             return jsonify({
@@ -373,10 +380,17 @@ def preview():
                 'error': 'missing_field',
                 'message': 'productDescription is required'
             }), 400
-        requested_sid = (payload.get("sessionId") or "").strip()
-        session_id = requested_sid or str(uuid.uuid4())
-        session_id_source = "request" if requested_sid else "generated"
-        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={session_id_source} request_id={request_id}")
+        # Use client sessionId as canonical everywhere; only generate new UUID when request truly has no sessionId
+        client_sid = (payload.get("sessionId") or "").strip()
+        if client_sid:
+            session_id = client_sid
+            sid_source = "client"
+        else:
+            session_id = str(uuid.uuid4())
+            sid_source = "generated"
+        logger.info(f"GEN_REQUEST_SID_SOURCE source={sid_source} request_id={request_id}")
+        logger.info(f"GEN_REQUEST_SID_VALUE sessionId={session_id} request_id={request_id}")
+        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={sid_source} request_id={request_id}")
         ad_index = int(payload.get("adIndex", 1) or 1)
         ad_index = max(1, min(3, ad_index))
 
@@ -408,7 +422,7 @@ def preview():
             "created_at": created_at,
             "finished_at": None,
             "session_id": session_id,
-            "requested_session_id": requested_sid,
+            "requested_session_id": client_sid or session_id,
             "ad_index": ad_index,
             "result": None,
             "error": None,
@@ -585,7 +599,7 @@ def preview():
                                 headline = (result or {}).get("headline") or ""
                                 _set_artifact(sid, ad_idx, img_bytes, body_50, headline)
                                 req_sid = (job.get("requested_session_id") or "").strip() if job else ""
-                                if req_sid:
+                                if req_sid and req_sid != sid:
                                     _set_sid_alias(req_sid, sid)
                                 logger.info(f"RESULT_STORED sessionId={sid} adIndex={ad_idx} bytes={len(img_bytes)} request_id={job_request_id}")
                         except Exception:
