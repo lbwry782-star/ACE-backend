@@ -4986,7 +4986,7 @@ It may be bold or slightly wild. That is acceptable.
 
 STEP 7 — OUTPUT EXACTLY 3 PAIRS
 Rules: Exactly 3 pairs. No repeated primary objects across pairs. No swapping duplicates.
-Sub-objects must be structural (parts, frames, bases, handles, soles, peels, etc.). Avoid symbolic sub-objects unless required by the second link. No "hand" unless concept absolutely requires gesture.
+Secondary objects (a_sub, b_sub): Must be an external, separate, classic contextual object associated with the primary — never a physical part, surface feature, opening, handle, frame, base, sole, peel, cap, face, edge, horn, or other built-in component of the primary. Prefer: visually separate, naturally adjacent, classically associated (e.g. can→straw, dog→bone, bee→flower). Reject as invalid: sole, pip faces, horn opening, glassy edge, or any component/structural part of the primary. No "hand" unless concept absolutely requires gesture.
 
 SIMILARITY SCORING
 silhouette_similarity (0-100) must reflect: interchangeability of outer contour, orientation match, aspect ratio match, mass distribution similarity.
@@ -5012,7 +5012,7 @@ Description:
 Return ONLY valid JSON. You MUST include "product_name" with your invented name. Schema:
 {{ "advertising_goal": "<string>", "product_name": "<string>", "pairs": [ {{ "a_primary": "<string>", "a_sub": "<string>", "b_primary": "<string>", "b_sub": "<string>", "silhouette_similarity": <number 0-100> }} ] }}
 
-(The field "advertising_goal" is the MESSAGE. Follow the same method: anchor shape from description, shape search, cross-domain, second link, message derivation, exactly 3 pairs. Output the same JSON structure with "product_name" added.)
+(The field "advertising_goal" is the MESSAGE. Follow the same method: anchor shape from description, shape search, cross-domain, second link, message derivation, exactly 3 pairs. a_sub and b_sub must be external contextual objects, never physical parts of the primary. Output the same JSON structure with "product_name" added.)
 """
 
 
@@ -5026,7 +5026,7 @@ def _build_goal_pair_prompt(product_name: str, product_description: str) -> str:
     return GOAL_PAIR_O3_PROMPT_WHEN_NO_PRODUCT.format(product_description=desc)
 
 
-GOAL_PAIR_RETRY_INSTRUCTION = """Follow the method again: anchor shape from product, shape search for silhouette similarity, cross-domain (A and B from different functional domains), second link (conceptual association only). Derive advertising_goal from the pair. Return the same JSON schema."""
+GOAL_PAIR_RETRY_INSTRUCTION = """Follow the method again: anchor shape from product, shape search for silhouette similarity, cross-domain (A and B from different functional domains), second link (conceptual association only). a_sub and b_sub must be external, separate contextual objects (e.g. straw, bone, flower), never parts of the primary (no sole, horn opening, pip faces, cap, handle, etc.). Derive advertising_goal from the pair. Return the same JSON schema."""
 
 _REMOVED_LEGACY_BLOCK = """
 1) First derive one specific, concrete Advertising Goal from the product name and description (one short commercial sentence, max 120 chars). This goal must be derived ONLY from the product name and description, not from later visual or composition constraints.
@@ -5059,6 +5059,44 @@ Rules:
 {{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
 
 
+# Words that indicate a secondary object is an integral part/component of the primary (invalid for a_sub/b_sub).
+_SECONDARY_OBJECT_INTEGRAL_PART_WORDS = frozenset({
+    "sole", "soles", "pip", "pips", "face", "faces", "horn", "horns", "opening", "openings",
+    "edge", "edges", "cap", "caps", "handle", "handles", "base", "bases", "frame", "frames",
+    "peel", "peels", "rim", "rims", "mouth", "neck", "lid", "lids", "dial", "dials", "needle", "needles",
+    "stem", "stems", "blade", "blades", "tip", "tips", "point", "points", "hole", "holes", "slot", "slots",
+    "texture", "surface", "component", "components", "part", "parts", "glassy", "builtin", "built-in",
+})
+
+# Safe fallback when a_sub/b_sub is rejected (external contextual placeholder).
+_SECONDARY_OBJECT_SAFE_FALLBACK = "context object"
+
+
+def _validate_secondary_object(primary: str, sub: str, request_id: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Return (is_valid, reason). Secondary must be external, contextual; not a physical part of the primary.
+    """
+    primary = (primary or "").strip().lower()
+    sub = (sub or "").strip().lower()
+    if not sub:
+        return (False, "empty")
+    sub_words = set(re.sub(r"[^\w\s]", "", sub).split())
+    if not sub_words:
+        return (False, "empty")
+    for w in sub_words:
+        if w in _SECONDARY_OBJECT_INTEGRAL_PART_WORDS:
+            logger.info(
+                f"SECONDARY_OBJECT_VALIDATION primary=\"{primary or ''}\" sub=\"{sub}\" valid=false "
+                f"reason=integral_part request_id={request_id or ''}"
+            )
+            return (False, "integral_part")
+    logger.info(
+        f"SECONDARY_OBJECT_VALIDATION primary=\"{primary or ''}\" sub=\"{sub}\" valid=true "
+        f"reason=external_context request_id={request_id or ''}"
+    )
+    return (True, "external_context")
+
+
 def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_description: str, image_size: str) -> str:
     """Cache key for Phase 2 goal+pairs. no_session uses product hash."""
     if session_id and session_id != "no_session":
@@ -5067,8 +5105,8 @@ def _get_goal_pairs_cache_key(session_id: str, product_name: str, product_descri
     return f"goal_pairs|no_session_{h}"
 
 
-def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
-    """Parse raw o3 output to goal + 3 pairs dict. Returns None on parse/validation failure."""
+def _parse_goal_pair_output(raw: str, request_id: Optional[str] = None) -> Optional[Dict]:
+    """Parse raw o3 output to goal + 3 pairs dict. Validates secondary objects; replaces invalid a_sub/b_sub with safe fallback. Returns None on parse failure."""
     raw = (raw or "").strip()
     if not raw:
         return None
@@ -5092,6 +5130,18 @@ def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
             bp = str(p.get("b_primary") or "").strip()
             if not ap or not bp:
                 return None
+            a_sub_raw = str(p.get("a_sub") or "").strip()
+            b_sub_raw = str(p.get("b_sub") or "").strip()
+            a_sub = a_sub_raw
+            b_sub = b_sub_raw
+            valid_a, _ = _validate_secondary_object(ap, a_sub_raw, request_id)
+            if not valid_a and a_sub_raw:
+                a_sub = _SECONDARY_OBJECT_SAFE_FALLBACK
+            valid_b, _ = _validate_secondary_object(bp, b_sub_raw, request_id)
+            if not valid_b and b_sub_raw:
+                b_sub = _SECONDARY_OBJECT_SAFE_FALLBACK
+            logger.info(f"SECONDARY_OBJECT_FINAL primary=\"{ap}\" sub=\"{a_sub}\" request_id={request_id or ''}")
+            logger.info(f"SECONDARY_OBJECT_FINAL primary=\"{bp}\" sub=\"{b_sub}\" request_id={request_id or ''}")
             sim = p.get("silhouette_similarity")
             if sim is not None:
                 try:
@@ -5102,9 +5152,9 @@ def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
                 sim = 50
             out_pairs.append({
                 "a_primary": ap,
-                "a_sub": str(p.get("a_sub") or "").strip(),
+                "a_sub": a_sub,
                 "b_primary": bp,
-                "b_sub": str(p.get("b_sub") or "").strip(),
+                "b_sub": b_sub,
                 "silhouette_similarity": sim,
             })
         invented_name = (data.get("product_name") or "").strip() or None
@@ -5190,7 +5240,7 @@ def poll_goal_pair_response(
         return (None, "pending")
     if status == "completed":
         raw = getattr(resp, "output_text", None) or ""
-        data = _parse_goal_pair_output(raw)
+        data = _parse_goal_pair_output(raw, request_id=request_id)
         if data:
             latency_ms = int((time.time() - created_at_ts) * 1000)
             goal = (data.get("advertising_goal") or "Advertising goal")
@@ -5272,39 +5322,13 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         if raw.startswith("```json"):
             lines = raw.split("\n")
             raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
-        data = json.loads(raw)
-        goal = (data.get("advertising_goal") or "").strip()
-        pairs = data.get("pairs")
-        if not isinstance(pairs, list) or len(pairs) != 3:
-            raise ValueError("pairs must be array of exactly 3 items")
-        out_pairs = []
-        for idx, p in enumerate(pairs):
-            if not isinstance(p, dict):
-                raise ValueError(f"pair[{idx}] not object")
-            ap = str(p.get("a_primary") or "").strip()
-            asub = str(p.get("a_sub") or "").strip()
-            bp = str(p.get("b_primary") or "").strip()
-            bsub = str(p.get("b_sub") or "").strip()
-            sim = p.get("silhouette_similarity")
-            if sim is not None:
-                try:
-                    sim = max(0, min(100, int(sim)))
-                except (TypeError, ValueError):
-                    sim = 50
-            else:
-                sim = 50
-            if not ap or not bp:
-                raise ValueError(f"pair[{idx}] missing a_primary or b_primary")
-            out_pairs.append({
-                "a_primary": ap,
-                "a_sub": asub,
-                "b_primary": bp,
-                "b_sub": bsub,
-                "silhouette_similarity": sim,
-            })
-        sim0 = out_pairs[0]["silhouette_similarity"]
+        data = _parse_goal_pair_output(raw, request_id=request_id)
+        if not data:
+            raise ValueError("parse or validation failed")
+        out_pairs = data.get("pairs") or []
+        sim0 = out_pairs[0]["silhouette_similarity"] if out_pairs else 50
         latency_ms = int((time.time() - t0) * 1000)
-        safe_goal = goal or "Advertising goal"
+        safe_goal = (data.get("advertising_goal") or "Advertising goal").strip() or "Advertising goal"
         logger.info(f"STAGE2_RESULT_OK request_id={request_id} latency_ms={latency_ms} output_chars={output_chars}")
         logger.info(f'STAGE2_MESSAGE advertising_goal="{safe_goal}"')
         for idx, p in enumerate(out_pairs, 1):
@@ -5316,7 +5340,7 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
             logger.info(f'STAGE2_PAIR idx={idx} A="{a}" A_sub="{a_sub}" B="{b}" B_sub="{b_sub}" similarity={sim}')
         logger.info(f'GOAL_DERIVED advertising_goal="{safe_goal}"')
         logger.info(f"GOAL_PAIR_OK latency_ms={latency_ms} output_chars={output_chars} pairs_count=3 similarity_p0={sim0} request_id={request_id}")
-        invented_name = (data.get("product_name") or "").strip() or None
+        invented_name = data.get("product_name")
         return {"advertising_goal": safe_goal, "pairs": out_pairs, "product_name": invented_name}
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
