@@ -237,7 +237,7 @@ def generate():
     
     Request JSON:
     {
-        "productName": string (required),
+        "productName": string (optional; if empty/missing, backend invents one in the reasoning flow),
         "productDescription": string (required),
         "imageSize": "1024x1024" | "1536x1024" | "1024x1536" (optional),
         "adIndex": int (optional, 1-3),
@@ -252,8 +252,6 @@ def generate():
         if not request.is_json:
             return jsonify({'ok': False, 'error': 'invalid_request', 'message': 'Request must be JSON'}), 400
         payload = request.get_json()
-        if not payload.get("productName"):
-            return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productName is required'}), 400
         if not payload.get("productDescription"):
             return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productDescription is required'}), 400
         # Use client sessionId as canonical everywhere; only generate new UUID when request truly has no sessionId
@@ -295,7 +293,7 @@ def generate():
         try:
             # Build payload for preview with image (same flow as generate: image + headline + body)
             gen_payload = {
-                "productName": payload["productName"],
+                "productName": payload.get("productName") or "",
                 "productDescription": payload["productDescription"],
                 "imageSize": payload.get("imageSize", "1536x1024"),
                 "adIndex": ad_index,
@@ -348,7 +346,7 @@ def preview():
     
     Request JSON:
     {
-        "productName": string (required),
+        "productName": string (optional; if empty/missing, backend invents one in the reasoning flow),
         "productDescription": string (required),
         "imageSize": "1024x1024" | "1536x1024" | "1024x1536" (optional),
         "adIndex": int (optional, 1-3),
@@ -368,12 +366,6 @@ def preview():
                 'message': 'Request must be JSON'
             }), 400
         payload = request.get_json()
-        if not payload.get("productName"):
-            return jsonify({
-                'ok': False,
-                'error': 'missing_field',
-                'message': 'productName is required'
-            }), 400
         if not payload.get("productDescription"):
             return jsonify({
                 'ok': False,
