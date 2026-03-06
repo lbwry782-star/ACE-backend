@@ -5349,6 +5349,15 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         return None
 
 
+# Composition rule: secondary object must be visible and framed; primary must not fill frame if it would hide the secondary.
+_PHASE2_SECONDARY_VISIBILITY_RULE = (
+    " The secondary/contextual object must always appear clearly in the drawing and must not be omitted, hidden, cropped out, or visually lost against the background. "
+    "Place it in a natural contextual position relative to the primary (e.g. a wall switch on a wall surface, a straw next to or inside a can, a bone near a dog, a flower near a bee). "
+    "The primary object must not fill the entire frame if that would hide or exclude the secondary; leave enough frame space so the secondary is clearly within the image. "
+    "The secondary object should remain smaller than the primary but clearly readable. "
+    "Exception: only if the composition intentionally uses an extreme close crop on the replacing object alone may the secondary fall outside the frame; otherwise the secondary must remain visible."
+)
+
 def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
     """Build gpt-image-1.5 prompt for IMAGE_BASE: same composition, NO headline or text in image."""
     ap = pair.get("a_primary", "")
@@ -5359,20 +5368,30 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
     b_str = f"{bp} with {bsub}" if bsub else bp
     no_text_rule = " NO text, NO headlines, NO logos, NO letters, NO numbers in the image."
     base = "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
+    has_secondary = bool(asub or bsub)
+    visibility_block = _PHASE2_SECONDARY_VISIBILITY_RULE if has_secondary else ""
     if mode_decision == "REPLACEMENT":
-        return (
+        repl = (
             base + f"{bp} fully occupies the structural role of {ap}: the replacing object takes over the other's form. "
             f"The original {ap} must not be visible in any form — no traces, no outlines, no blending, no ghosting. "
             f"The composition must read as a single object that has taken over the other's form. Sketch style."
-            + no_text_rule
-        ) + "\n\n" + GRAPHITE_STYLE_BLOCK
-    return (
+        )
+        if asub:
+            repl += (
+                f" The contextual object \"{asub}\" (from the original scene) must remain clearly visible in the image, "
+                "in a natural position relative to the replacing object (e.g. mounted on a wall, beside it, or in its typical context). "
+                "Do not let the replacing object fill the whole frame; leave space so the viewer can clearly see and identify the secondary object."
+            )
+        repl += visibility_block + no_text_rule
+        return repl + "\n\n" + GRAPHITE_STYLE_BLOCK
+    side = (
         base + f"Two objects that physically overlap: {a_str} and {b_str}. "
         "Clear physical overlap (approx. 25–40% area intersection); no spacing between objects. "
         "The smaller object must be in the foreground (on top), visibly occluding part of the larger object. "
         "Composition must feel like a single fused visual unit. Sub-objects visible."
-        + no_text_rule
-    ) + "\n\n" + GRAPHITE_STYLE_BLOCK
+    )
+    side += visibility_block + no_text_rule
+    return side + "\n\n" + GRAPHITE_STYLE_BLOCK
 
 
 # High-end professional graphite pencil (museum-quality); NOT rough sketch, NOT childish, NOT low-res, NOT blurry.
@@ -5800,6 +5819,21 @@ def generate_preview_data(
                     f'B="{pair.get("b_primary", "")}" B_sub="{pair.get("b_sub", "")}" goal="{ad_goal_summary}"'
                 )
                 prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
+                a_sub_p = (pair.get("a_sub") or "").strip()
+                b_sub_p = (pair.get("b_sub") or "").strip()
+                if a_sub_p or b_sub_p:
+                    logger.info("IMAGE_PROMPT_SECONDARY_OBJECT_REQUIRED=true")
+                    logger.info("IMAGE_PROMPT_FRAME_BALANCE_ENFORCED=true")
+                if a_sub_p:
+                    logger.info(
+                        f"SECONDARY_OBJECT_VISIBILITY_ENFORCED primary=\"{pair.get('a_primary', '')}\" "
+                        f"sub=\"{a_sub_p}\" mode=\"{mode_decision}\" request_id={request_id}"
+                    )
+                if b_sub_p:
+                    logger.info(
+                        f"SECONDARY_OBJECT_VISIBILITY_ENFORCED primary=\"{pair.get('b_primary', '')}\" "
+                        f"sub=\"{b_sub_p}\" mode=\"{mode_decision}\" request_id={request_id}"
+                    )
         else:
             prompt_base = IMAGE_ONLY_HARDCODED_PROMPT
         # Resolve product name: use user's if provided, else keep invented-at-start or Stage 2/fallback
