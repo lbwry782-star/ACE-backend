@@ -4886,6 +4886,8 @@ Return ONLY valid JSON. You MUST include "product_name" with your invented name.
 {{ "advertising_goal": "<string>", "product_name": "<string>", "pairs": [ {{ "a_primary": "<string>", "a_sub": "<string>", "b_primary": "<string>", "b_sub": "<string>", "silhouette_similarity": <number 0-100> }} ] }}
 
 (The field "advertising_goal" is the MESSAGE. Follow the same method: anchor shape from description, shape search, cross-domain, second link, message derivation, exactly 3 pairs. Output the same JSON structure with "product_name" added.)
+
+If the user did not provide a product name, invent a short (1–2 words), original, memorable brand-style product name suitable for advertising, easy to pronounce, naturally usable inside a marketing headline, and distinctive enough to feel like a real new market brand; avoid existing well-known brand names.
 """
 
 
