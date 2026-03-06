@@ -4787,6 +4787,131 @@ def _fallback_goal_from_product(product_name: str, product_description: str) -> 
     return "Advertising goal"
 
 
+def _normalize_for_validation(text: str) -> List[str]:
+    """Normalize for comparison: lowercase, trim, remove punctuation, split into words."""
+    if not text:
+        return []
+    s = (text or "").strip().lower()
+    s = re.sub(r"[^\w\s]", "", s)
+    return [w for w in s.split() if w]
+
+
+# Generic category phrases that must be rejected as invented product names.
+_GENERIC_CATEGORY_PHRASES = frozenset({
+    "shoe store", "coffee shop", "clothing brand", "skincare product", "water bottle",
+    "our product", "product", "brand", "store", "shop", "brand name", "product name",
+    "clothing store", "shoe shop", "coffee product", "beauty product", "food product",
+    "tech product", "software product", "app", "service", "company", "business",
+})
+
+
+def _validate_invented_name(name: str, product_description: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate an invented product name. Returns (is_valid, reject_reason).
+    Reject if: exact match to description; all words from name in description; generic category phrase.
+    """
+    name = (name or "").strip()
+    if not name:
+        return (False, "empty")
+    norm_name = _normalize_for_validation(name)
+    norm_desc = _normalize_for_validation(product_description or "")
+    if not norm_name:
+        return (False, "empty")
+    # 1) Must NOT be identical to productDescription after normalization
+    norm_name_str = " ".join(norm_name)
+    norm_desc_str = " ".join(norm_desc)
+    if norm_name_str == norm_desc_str:
+        return (False, "exact_match")
+    # 2) Must NOT be composed only of words already present in productDescription
+    desc_words = set(norm_desc)
+    if desc_words and all(w in desc_words for w in norm_name):
+        return (False, "all_words_from_description")
+    # 3) Must NOT be a generic category phrase
+    if norm_name_str in _GENERIC_CATEGORY_PHRASES:
+        return (False, "generic_category_phrase")
+    # 2-word phrase check
+    if len(norm_name) == 2 and " ".join(norm_name) in _GENERIC_CATEGORY_PHRASES:
+        return (False, "generic_category_phrase")
+    return (True, None)
+
+
+INVENT_NAME_PROMPT_BASE = """Invent a short, original, memorable brand-style product name suitable for advertising. Do not copy or lightly rephrase words from the product description. Avoid well-known brand names.
+
+Product description: {description}
+
+Return ONLY the product name, 1-2 words."""
+
+INVENT_NAME_PROMPT_STRICT = """Invent a short, original, memorable brand-style product name suitable for advertising. Do not copy, reuse, or lightly rephrase any words from the product description. Do not output a generic category phrase. Create a distinctive new market brand name, preferably one word, maximum two words.
+
+Product description: {description}
+
+Return ONLY the product name."""
+
+_SYNTHETIC_BRAND_NAMES = ("Novo", "Apex", "Verve", "Zest", "Luma", "Nova", "Vivid", "Prism", "Flux", "Ember")
+
+
+def _invent_product_name_call(product_description: str, request_id: str, strict: bool = False) -> str:
+    """One small model call to invent a product name. Returns stripped name or empty string on failure."""
+    desc = (product_description or "").strip() or "product"
+    prompt = (INVENT_NAME_PROMPT_STRICT if strict else INVENT_NAME_PROMPT_BASE).format(description=desc)
+    try:
+        client = OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            timeout=httpx.Timeout(20),
+            max_retries=0,
+        )
+        response = client.responses.create(
+            model="o3-pro",
+            input=prompt,
+            reasoning={"effort": "low"},
+        )
+        raw = (response.output_text or "").strip()
+        # Take first line or first 2 words
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        if lines:
+            raw = lines[0]
+        words = raw.split()[:2]
+        return " ".join(words).strip() if words else ""
+    except Exception as e:
+        logger.warning(f"INVENT_NAME_CALL_FAIL request_id={request_id} error={e}")
+        return ""
+
+
+def _synthetic_fallback_brand_name() -> str:
+    """Safe final fallback: coined brand name (no description copy)."""
+    return random.choice(_SYNTHETIC_BRAND_NAMES)
+
+
+def resolve_invented_product_name_before_stage2(product_description: str, request_id: str) -> str:
+    """
+    Resolve a creative brand-style product name when user left productName empty.
+    Runs BEFORE Stage 2. Validates and retries up to 2 times with stricter instruction; then synthetic fallback.
+    Does NOT modify Stage 2 prompt. Returns name to pass into Stage 2 as productName.
+    """
+    desc = (product_description or "").strip() or "product"
+    logger.info(f"PRODUCT_NAME_SOURCE=invented request_id={request_id}")
+    for retry_index in range(3):
+        strict = retry_index > 0
+        candidate = _invent_product_name_call(desc, request_id, strict=strict)
+        logger.info(f"PRODUCT_NAME_CANDIDATE=\"{candidate}\" request_id={request_id}")
+        logger.info(f"PRODUCT_NAME_RETRY_INDEX={retry_index} request_id={request_id}")
+        if not candidate:
+            logger.info(f"PRODUCT_NAME_REJECT_REASON=empty_candidate request_id={request_id}")
+            continue
+        is_valid, reject_reason = _validate_invented_name(candidate, desc)
+        if is_valid:
+            logger.info(f"PRODUCT_NAME_RESOLVED=\"{candidate}\" request_id={request_id}")
+            logger.info(f"PRODUCT_NAME_SIMILARITY_RETRY=false request_id={request_id}")
+            return candidate
+        logger.info(f"PRODUCT_NAME_REJECT_REASON={reject_reason} request_id={request_id}")
+        if retry_index < 2:
+            logger.info(f"PRODUCT_NAME_SIMILARITY_RETRY=true request_id={request_id}")
+    final = _synthetic_fallback_brand_name()
+    logger.info(f"PRODUCT_NAME_RESOLVED=\"{final}\" request_id={request_id}")
+    logger.info(f"PRODUCT_NAME_SIMILARITY_RETRY=false request_id={request_id}")
+    return final
+
+
 def _derive_fallback_product_name(product_description: str) -> str:
     """Invent a short product name from description when no name provided (no model call). Best-effort only."""
     desc = (product_description or "").strip()
@@ -5562,6 +5687,7 @@ def generate_preview_data(
     # Extract and validate required fields
     product_name = payload_dict.get("productName", "")
     product_description = payload_dict.get("productDescription", "")
+    product_name_from_payload = (product_name or "").strip()  # keep for resolve block (user vs invented)
     image_size_str = payload_dict.get("imageSize", "1536x1024")
     # Force English-only: default to "en", override "he" to "en"
     language = payload_dict.get("language", "en")
@@ -5594,6 +5720,11 @@ def generate_preview_data(
         size = image_size_str if image_size_str in ALLOWED_IMAGE_SIZES else "1536x1024"
         prompt_to_use = None
         goal_pairs_data = None
+        # When productName is empty, resolve a creative brand-style name BEFORE Stage 2 (validation + retries); then Stage 2 always receives a non-empty product name.
+        product_name_invented_at_start = False
+        if not (product_name or "").strip() and ACE_PHASE2_GOAL_PAIRS:
+            product_name = resolve_invented_product_name_before_stage2(product_description or "", request_id)
+            product_name_invented_at_start = True
         if ACE_PHASE2_GOAL_PAIRS:
             if goal_pair_skip_fetch:
                 pass
@@ -5647,16 +5778,20 @@ def generate_preview_data(
                 prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
         else:
             prompt_base = IMAGE_ONLY_HARDCODED_PROMPT
-        # Resolve product name: use user's if provided, else invented from Stage 2 or fallback (no extra call)
-        product_name_raw = (product_name or "").strip()
-        if product_name_raw:
-            product_name = product_name_raw
+        # Resolve product name: use user's if provided, else keep invented-at-start or Stage 2/fallback
+        if product_name_from_payload:
+            product_name = product_name_from_payload
             logger.info(f"PRODUCT_NAME_SOURCE=user request_id={request_id}")
+            logger.info(f"PRODUCT_NAME_RESOLVED=\"{product_name}\" request_id={request_id}")
+        elif product_name_invented_at_start:
+            # Already set by resolve_invented_product_name_before_stage2; do not overwrite
+            logger.info(f"PRODUCT_NAME_SOURCE=invented request_id={request_id}")
+            logger.info(f"PRODUCT_NAME_RESOLVED=\"{product_name}\" request_id={request_id}")
         else:
             invented = (goal_pairs_data or {}).get("product_name") if goal_pairs_data else None
             product_name = (invented or "").strip() or _derive_fallback_product_name(product_description)
             logger.info(f"PRODUCT_NAME_SOURCE=invented request_id={request_id}")
-        logger.info(f"PRODUCT_NAME_RESOLVED=\"{product_name}\" request_id={request_id}")
+            logger.info(f"PRODUCT_NAME_RESOLVED=\"{product_name}\" request_id={request_id}")
         image_base64, ok_base = _image_only_single_call(size, request_id, prompt=prompt_base, log_prefix="IMAGE_BASE", quality="high")
         if not ok_base:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
