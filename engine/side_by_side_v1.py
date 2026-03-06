@@ -5208,6 +5208,29 @@ no digital painting look
 pure graphite pencil drawing
 """
 
+# ACE_PENCIL_QUALITY: low | medium | high (default medium). Append-only block for FINAL image prompt.
+_PENCIL_QUALITY_TEXTS = {
+    "low": "simple clean pencil sketch, lighter shading, minimal cross-hatching, fewer fine details",
+    "medium": "high-quality graphite pencil drawing, clear linework, balanced shading, moderate cross-hatching, good detail",
+    "high": "museum-quality graphite pencil illustration, extremely detailed, dense cross-hatching, precise tonal rendering, sharp crisp linework",
+}
+
+
+def get_pencil_quality_level() -> tuple:
+    """Return (level: str, defaulted: bool). Level is one of low, medium, high. Default medium if missing/invalid."""
+    raw = (os.environ.get("ACE_PENCIL_QUALITY") or "medium").strip().lower()
+    if raw not in ("low", "medium", "high"):
+        return "medium", True
+    return raw, False
+
+
+def get_pencil_quality_block() -> str:
+    """Return the additive PENCIL_QUALITY block string for the current ACE_PENCIL_QUALITY env."""
+    level, _ = get_pencil_quality_level()
+    text = _PENCIL_QUALITY_TEXTS[level]
+    return "\n\nPENCIL_QUALITY:\n" + text
+
+
 # IMAGE_FINAL headline: INSIDE composition, ALL CAPS, TIMES font, exact text; printed type (not handwritten).
 HEADLINE_TYPOGRAPHY_FINAL = (
     "Headline must be rendered INSIDE the image composition (like a print ad layout), in negative space, not covering key objects. "
@@ -5228,7 +5251,7 @@ def _build_phase2_image_prompt_final(pair: Dict, mode_decision: str, headline_te
         f" Include a required headline INSIDE the image: the text must be exactly \"{headline_upper}\". "
         + HEADLINE_TYPOGRAPHY_FINAL
     )
-    return prompt_base.strip() + ". " + headline_rule + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK
+    return prompt_base.strip() + ". " + headline_rule + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK + get_pencil_quality_block()
 
 
 def _build_phase2_image_prompt(pair: Dict, mode_decision: str, product_name: str = "") -> str:
@@ -5419,6 +5442,9 @@ def _image_only_single_call(
     t0 = time.time()
     image_prompt = prompt if prompt else IMAGE_ONLY_HARDCODED_PROMPT
     logger.info(f"{log_prefix}_START size={image_size} quality={quality} request_id={request_id}")
+    if log_prefix == "IMAGE_BASE":
+        pencil_level, pencil_defaulted = get_pencil_quality_level()
+        logger.info(f"PENCIL_QUALITY_LEVEL level={pencil_level} defaulted={pencil_defaulted} request_id={request_id}")
     timeout_sec = IMAGE_ONLY_CALL_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -5648,7 +5674,7 @@ def generate_preview_data(
                 base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace("NO text, NO logos, NO letters, NO numbers.", "").strip()
                 prompt_final = (
                     base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_final_upper}\". "
-                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK
+                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK + get_pencil_quality_block()
                 )
             image_final, ok_final = _image_only_single_call(
                 size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
