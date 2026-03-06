@@ -4786,6 +4786,19 @@ def _fallback_goal_from_product(product_name: str, product_description: str) -> 
         return f"Promote {name}."
     return "Advertising goal"
 
+
+def _derive_fallback_product_name(product_description: str) -> str:
+    """Invent a short product name from description when no name provided (no model call). Best-effort only."""
+    desc = (product_description or "").strip()
+    if not desc:
+        return "Our Product"
+    words = desc.split()
+    words = [w for w in words if len(w) > 1][:3]
+    if not words:
+        return "Our Product"
+    return " ".join(w[:1].upper() + w[1:].lower() for w in words if w).strip() or "Our Product"
+
+
 # Phase 2B: o3-pro single call for advertising_goal + 3 pairs (strict JSON). Global rule: relevance to goal comes before similarity.
 GOAL_PAIR_MIN_SIMILARITY_ACCEPT = 40
 GOAL_PAIR_TARGET_SIMILARITY = 60
@@ -4851,6 +4864,28 @@ No functional similarity pairs. No narrative interaction. No object controlling 
 
 END. Return JSON only.
 {{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
+
+# When product name is empty: ask model to invent one and return it in JSON as "product_name". Same method, extended schema.
+GOAL_PAIR_O3_PROMPT_WHEN_NO_PRODUCT = """No product name provided. From the description below, invent one concise English product name. Requirements: original-sounding, plausible as a market product name, not a known major brand, concise, suitable for headline. Best-effort originality only (not a legal trademark guarantee).
+
+Description:
+{product_description}
+
+Return ONLY valid JSON. You MUST include "product_name" with your invented name. Schema:
+{{ "advertising_goal": "<string>", "product_name": "<string>", "pairs": [ {{ "a_primary": "<string>", "a_sub": "<string>", "b_primary": "<string>", "b_sub": "<string>", "silhouette_similarity": <number 0-100> }} ] }}
+
+(The field "advertising_goal" is the MESSAGE. Follow the same method: anchor shape from description, shape search, cross-domain, second link, message derivation, exactly 3 pairs. Output the same JSON structure with "product_name" added.)
+"""
+
+
+def _build_goal_pair_prompt(product_name: str, product_description: str) -> str:
+    """Build GOAL_PAIR prompt. When product_name is empty, use variant that asks for invented product_name in JSON."""
+    pn = (product_name or "").strip()
+    desc = product_description or "description"
+    if pn:
+        return GOAL_PAIR_O3_PROMPT_TEMPLATE.format(product_name=pn, product_description=desc)
+    return GOAL_PAIR_O3_PROMPT_WHEN_NO_PRODUCT.format(product_description=desc)
+
 
 GOAL_PAIR_RETRY_INSTRUCTION = """Follow the method again: anchor shape from product, shape search for silhouette similarity, cross-domain (A and B from different functional domains), second link (conceptual association only). Derive advertising_goal from the pair. Return the same JSON schema."""
 
@@ -4933,7 +4968,8 @@ def _parse_goal_pair_output(raw: str) -> Optional[Dict]:
                 "b_sub": str(p.get("b_sub") or "").strip(),
                 "silhouette_similarity": sim,
             })
-        return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs}
+        invented_name = (data.get("product_name") or "").strip() or None
+        return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs, "product_name": invented_name}
     except (json.JSONDecodeError, TypeError, ValueError):
         return None
 
@@ -4954,10 +4990,7 @@ def create_goal_pair_background(
         timeout=httpx.Timeout(GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS),
         max_retries=0,
     )
-    prompt = GOAL_PAIR_O3_PROMPT_TEMPLATE.format(
-        product_name=product_name or "product",
-        product_description=product_description or "description"
-    )
+    prompt = _build_goal_pair_prompt(product_name or "", product_description or "description")
     if retry_instruction:
         prompt = prompt.rstrip() + "\n\n" + retry_instruction.strip()
     # Temporary debug: Stage 2 prompt length/preview for analysis (do not log full prompt in production).
@@ -5075,10 +5108,7 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
         max_retries=0,
     )
     model = "o3-pro"
-    prompt = GOAL_PAIR_O3_PROMPT_TEMPLATE.format(
-        product_name=product_name or "product",
-        product_description=product_description or "description"
-    )
+    prompt = _build_goal_pair_prompt(product_name or "", product_description or "description")
     # Temporary debug: Stage 2 prompt length/preview for analysis (do not log full prompt in production).
     _chars = len(prompt)
     _tokens_est = _chars // 4
@@ -5147,7 +5177,8 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
             logger.info(f'STAGE2_PAIR idx={idx} A="{a}" A_sub="{a_sub}" B="{b}" B_sub="{b_sub}" similarity={sim}')
         logger.info(f'GOAL_DERIVED advertising_goal="{safe_goal}"')
         logger.info(f"GOAL_PAIR_OK latency_ms={latency_ms} output_chars={output_chars} pairs_count=3 similarity_p0={sim0} request_id={request_id}")
-        return {"advertising_goal": safe_goal, "pairs": out_pairs}
+        invented_name = (data.get("product_name") or "").strip() or None
+        return {"advertising_goal": safe_goal, "pairs": out_pairs, "product_name": invented_name}
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
         logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason={e}")
@@ -5579,6 +5610,7 @@ def generate_preview_data(
                 goal_pairs_data = {
                     "advertising_goal": fallback_goal,
                     "pairs": [fallback_pair, fallback_pair, fallback_pair],
+                    "product_name": _derive_fallback_product_name(product_description) if not (product_name or "").strip() else None,
                 }
                 logger.info(f'GOAL_DERIVED advertising_goal="{fallback_goal}"')
             if goal_pairs_data and goal_pairs_data.get("pairs"):
@@ -5601,6 +5633,16 @@ def generate_preview_data(
                 prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
         else:
             prompt_base = IMAGE_ONLY_HARDCODED_PROMPT
+        # Resolve product name: use user's if provided, else invented from Stage 2 or fallback (no extra call)
+        product_name_raw = (product_name or "").strip()
+        if product_name_raw:
+            product_name = product_name_raw
+            logger.info(f"PRODUCT_NAME_SOURCE=user request_id={request_id}")
+        else:
+            invented = (goal_pairs_data or {}).get("product_name") if goal_pairs_data else None
+            product_name = (invented or "").strip() or _derive_fallback_product_name(product_description)
+            logger.info(f"PRODUCT_NAME_SOURCE=invented request_id={request_id}")
+        logger.info(f"PRODUCT_NAME_RESOLVED=\"{product_name}\" request_id={request_id}")
         image_base64, ok_base = _image_only_single_call(size, request_id, prompt=prompt_base, log_prefix="IMAGE_BASE", quality="high")
         if not ok_base:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
