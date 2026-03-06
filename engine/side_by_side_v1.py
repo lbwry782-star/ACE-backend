@@ -5876,6 +5876,7 @@ def generate_preview_data(
             logger.error(f"IMAGE_FINAL_FAIL request_id={request_id} error={e} FALLBACK_PLACEHOLDER_USED=true")
             image_final = _IMAGE_ONLY_PLACEHOLDER_BASE64
         # Return IMAGE_FINAL only (never IMAGE_BASE).
+        logger.info(f"PRODUCT_NAME_INTERNAL_FINAL=\"{product_name or ''}\" request_id={request_id}")
         return {
             "imageBase64": image_final,
             "image_base64": image_final,

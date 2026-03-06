@@ -311,6 +311,8 @@ def generate():
                 _set_sid_alias(client_sid, session_id)
             logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
             logger.info(f"GENERATE_DONE sid={session_id} ad={ad_index} stored=true")
+            resolved_pn_gen = result.get("resolvedProductName", "")
+            logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=generate resolvedProductName=\"{resolved_pn_gen}\"")
             return jsonify({
                 "ok": True,
                 "sessionId": session_id,
@@ -318,7 +320,7 @@ def generate():
                 "imageBase64": image_base64,
                 "headline": headline,
                 "bodyText50": body_text_50,
-                "resolvedProductName": result.get("resolvedProductName", ""),
+                "resolvedProductName": resolved_pn_gen,
             }), 200
         finally:
             _release_session_lock(session_id, ad_index)
@@ -763,11 +765,13 @@ def job_status():
     resolved_pn = job.get("resolved_product_name", "")
     logger.info(f"JOB_POLL jobId={job_id} status={status}")
     if status in ("pending", "running"):
+        logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=running resolvedProductName=\"{resolved_pn}\"")
         return jsonify({'ok': True, 'status': status, 'resolvedProductName': resolved_pn}), 200
     if status == "done":
         sid = job.get("session_id", "")
         ad_idx = job.get("ad_index", 1)
         logger.info(f"JOB_STATUS_RESPONSE status=done sessionId={sid} adIndex={ad_idx}")
+        logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=done resolvedProductName=\"{resolved_pn}\"")
         return jsonify({
             'ok': True,
             'status': 'done',
