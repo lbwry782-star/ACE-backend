@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 from engine.side_by_side_v1 import (
     generate_preview_data,
-    get_resolved_product_name,
     Step0BundleTimeoutError,
     Step0BundleOpenAIError,
     create_goal_pair_background,
@@ -313,6 +312,7 @@ def generate():
             logger.info(f"GENERATE_DONE sid={session_id} ad={ad_index} stored=true")
             resolved_pn_gen = result.get("resolvedProductName", "")
             logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=generate resolvedProductName=\"{resolved_pn_gen}\"")
+            logger.info("PRODUCT_NAME_RESPONSE_SOURCE=canonical_final_name")
             return jsonify({
                 "ok": True,
                 "sessionId": session_id,
@@ -551,17 +551,7 @@ def preview():
                         j = _jobs.get(jid)
                         goal_data = j.get("goal_pairs_data") if j else None
                         use_fallback = j.get("goal_pair_fallback", False) if j else False
-                    # Set resolved product name as early as possible so job-status can return it
-                    resolved_pn = get_resolved_product_name(
-                        payload_data.get("productName") or "",
-                        payload_data.get("productDescription") or "",
-                        goal_data,
-                    )
-                    with _jobs_lock:
-                        j = _jobs.get(jid)
-                        if j is not None:
-                            j["resolved_product_name"] = resolved_pn
-                    logger.info(f"PRODUCT_NAME_EARLY_RETURNED=\"{resolved_pn}\" request_id={job_request_id}")
+                    # Resolved product name: only from engine result (canonical). Never set from goal_data or description-derived fallback.
                     if goal_data:
                         result = generate_preview_data(payload_data, goal_pairs_data_override=goal_data, request_id=job_request_id)
                     elif use_fallback:
@@ -584,6 +574,7 @@ def preview():
                                     job["status"] = "done"
                                     job["finished_at"] = time.time()
                                     job["result"] = result
+                                    job["resolved_product_name"] = (result or {}).get("resolvedProductName", "") or ""
                                     job["error"] = None
                                     job["error_message"] = None
                             logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={int((time.time() - start) * 1000)}")
@@ -597,6 +588,7 @@ def preview():
                                 job["status"] = "done"
                                 job["finished_at"] = time.time()
                                 job["result"] = result
+                                job["resolved_product_name"] = (result or {}).get("resolvedProductName", "") or ""
                                 job["error"] = None
                                 job["error_message"] = None
                         try:
@@ -766,12 +758,14 @@ def job_status():
     logger.info(f"JOB_POLL jobId={job_id} status={status}")
     if status in ("pending", "running"):
         logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=running resolvedProductName=\"{resolved_pn}\"")
+        logger.info("PRODUCT_NAME_RESPONSE_SOURCE=canonical_final_name")
         return jsonify({'ok': True, 'status': status, 'resolvedProductName': resolved_pn}), 200
     if status == "done":
         sid = job.get("session_id", "")
         ad_idx = job.get("ad_index", 1)
         logger.info(f"JOB_STATUS_RESPONSE status=done sessionId={sid} adIndex={ad_idx}")
         logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=done resolvedProductName=\"{resolved_pn}\"")
+        logger.info("PRODUCT_NAME_RESPONSE_SOURCE=canonical_final_name")
         return jsonify({
             'ok': True,
             'status': 'done',
