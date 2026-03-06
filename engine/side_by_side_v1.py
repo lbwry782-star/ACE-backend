@@ -4799,6 +4799,17 @@ def _derive_fallback_product_name(product_description: str) -> str:
     return " ".join(w[:1].upper() + w[1:].lower() for w in words if w).strip() or "Our Product"
 
 
+def get_resolved_product_name(
+    product_name_raw: str, product_description: str, goal_pairs_data: Optional[Dict]
+) -> str:
+    """Return the final product name: user-provided if non-empty, else invented from goal_pairs_data or fallback. No extra model call."""
+    pn = (product_name_raw or "").strip()
+    if pn:
+        return pn
+    invented = (goal_pairs_data or {}).get("product_name") if goal_pairs_data else None
+    return (invented or "").strip() or _derive_fallback_product_name(product_description or "")
+
+
 # Phase 2B: o3-pro single call for advertising_goal + 3 pairs (strict JSON). Global rule: relevance to goal comes before similarity.
 GOAL_PAIR_MIN_SIMILARITY_ACCEPT = 40
 GOAL_PAIR_TARGET_SIMILARITY = 60
@@ -5733,6 +5744,7 @@ def generate_preview_data(
             "headline": headline,
             "bodyText50": body,
             "body_text": body,
+            "resolvedProductName": product_name or "",
             "image_url": None,
             "ad_goal": "Preview ad goal",
             "object_a": "object_a",

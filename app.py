@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
 from engine.side_by_side_v1 import (
     generate_preview_data,
+    get_resolved_product_name,
     Step0BundleTimeoutError,
     Step0BundleOpenAIError,
     create_goal_pair_background,
@@ -317,6 +318,7 @@ def generate():
                 "imageBase64": image_base64,
                 "headline": headline,
                 "bodyText50": body_text_50,
+                "resolvedProductName": result.get("resolvedProductName", ""),
             }), 200
         finally:
             _release_session_lock(session_id, ad_index)
@@ -429,6 +431,7 @@ def preview():
             "goal_pair_poll_attempt": 0,
             "goal_pair_next_poll_time_ms": 0,
             "goal_pair_retry_done": False,
+            "resolved_product_name": (payload.get("productName") or "").strip(),
         }
         _cleanup_jobs()
         _set_job(job_id, job_record)
@@ -546,6 +549,17 @@ def preview():
                         j = _jobs.get(jid)
                         goal_data = j.get("goal_pairs_data") if j else None
                         use_fallback = j.get("goal_pair_fallback", False) if j else False
+                    # Set resolved product name as early as possible so job-status can return it
+                    resolved_pn = get_resolved_product_name(
+                        payload_data.get("productName") or "",
+                        payload_data.get("productDescription") or "",
+                        goal_data,
+                    )
+                    with _jobs_lock:
+                        j = _jobs.get(jid)
+                        if j is not None:
+                            j["resolved_product_name"] = resolved_pn
+                    logger.info(f"PRODUCT_NAME_EARLY_RETURNED=\"{resolved_pn}\" request_id={job_request_id}")
                     if goal_data:
                         result = generate_preview_data(payload_data, goal_pairs_data_override=goal_data, request_id=job_request_id)
                     elif use_fallback:
@@ -746,9 +760,10 @@ def job_status():
     if not job:
         return jsonify({'ok': False, 'error': 'not_found', 'status': 'error', 'message': 'Job not found or expired'}), 404
     status = job.get("status", "pending")
+    resolved_pn = job.get("resolved_product_name", "")
     logger.info(f"JOB_POLL jobId={job_id} status={status}")
     if status in ("pending", "running"):
-        return jsonify({'ok': True, 'status': status}), 200
+        return jsonify({'ok': True, 'status': status, 'resolvedProductName': resolved_pn}), 200
     if status == "done":
         sid = job.get("session_id", "")
         ad_idx = job.get("ad_index", 1)
@@ -758,6 +773,7 @@ def job_status():
             'status': 'done',
             'sessionId': sid,
             'adIndex': ad_idx,
+            'resolvedProductName': resolved_pn,
             'result': job.get("result"),
         }), 200
     # error
