@@ -4876,8 +4876,10 @@ No functional similarity pairs. No narrative interaction. No object controlling 
 END. Return JSON only.
 {{"advertising_goal":"...","pairs":[{{"a_primary":"...","a_sub":"...","b_primary":"...","b_sub":"...","silhouette_similarity":0}},{{...}},{{...}}]}}"""
 
-# When product name is empty: ask model to invent one and return it in JSON as "product_name". Same method, extended schema.
-GOAL_PAIR_O3_PROMPT_WHEN_NO_PRODUCT = """No product name provided. From the description below, invent one concise English product name. Requirements: original-sounding, plausible as a market product name, not a known major brand, concise, suitable for headline. Best-effort originality only (not a legal trademark guarantee).
+# When product name is empty: ask model to invent a creative brand-style name (not copied from description). Same method, extended schema.
+GOAL_PAIR_O3_PROMPT_WHEN_NO_PRODUCT = """No product name provided.
+
+If the user did not provide a product name, invent a short (1–2 words), original, memorable, advertising-style brand name that does not simply repeat or lightly rephrase words from the product description, unless unavoidable. It should feel like a distinctive new market brand, be easy to pronounce, and work naturally inside a headline. Avoid existing well-known brand names.
 
 Description:
 {product_description}
@@ -4886,8 +4888,6 @@ Return ONLY valid JSON. You MUST include "product_name" with your invented name.
 {{ "advertising_goal": "<string>", "product_name": "<string>", "pairs": [ {{ "a_primary": "<string>", "a_sub": "<string>", "b_primary": "<string>", "b_sub": "<string>", "silhouette_similarity": <number 0-100> }} ] }}
 
 (The field "advertising_goal" is the MESSAGE. Follow the same method: anchor shape from description, shape search, cross-domain, second link, message derivation, exactly 3 pairs. Output the same JSON structure with "product_name" added.)
-
-If the user did not provide a product name, invent a short (1–2 words), original, memorable brand-style product name suitable for advertising, easy to pronounce, naturally usable inside a marketing headline, and distinctive enough to feel like a real new market brand; avoid existing well-known brand names.
 """
 
 
@@ -4897,6 +4897,7 @@ def _build_goal_pair_prompt(product_name: str, product_description: str) -> str:
     desc = product_description or "description"
     if pn:
         return GOAL_PAIR_O3_PROMPT_TEMPLATE.format(product_name=pn, product_description=desc)
+    logger.info("PRODUCT_NAME_FALLBACK_MODE=creative_brand_name")
     return GOAL_PAIR_O3_PROMPT_WHEN_NO_PRODUCT.format(product_description=desc)
 
 
