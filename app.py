@@ -23,6 +23,7 @@ from engine.side_by_side_v1 import (
     GOAL_PAIR_RETRY_INSTRUCTION,
 )
 from engine.openai_retry import OpenAIRateLimitError
+import db_session
 
 app = Flask(__name__)
 
@@ -89,11 +90,11 @@ ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").stri
 # ACE_FALLBACK_RETURN_ERROR: when Stage 2 fails (FALLBACK_USED), return error instead of generating 1 fallback ad (cost control)
 ACE_FALLBACK_RETURN_ERROR = (os.environ.get("ACE_FALLBACK_RETURN_ERROR", "") or "").strip().lower() in ("1", "true", "yes")
 
-# ACE_SECURITY_ENABLED: "false" = bypass all security checks. Default True.
-# Wrap: payment validation, entitlement checks, token/session validation, generation limits (e.g. 3-gen limit).
-# Example: if is_security_enabled() and not is_payment_paid(session): return 403
+# ACE_SECURITY_ENABLED: "true" = run security (redirect to Preview after payment, Builder/session validation).
+# "false" = bypass: allow direct Builder access, refresh without redirect, no tab/session validation.
+# IPN endpoint is never bypassed — payment confirmation always runs.
 def is_security_enabled() -> bool:
-    """Read ACE_SECURITY_ENABLED from env. If 'false', security checks are bypassed. Default True if missing."""
+    """Read ACE_SECURITY_ENABLED from env. If 'false', security checks (redirect, Builder/session) are bypassed. Default True."""
     raw = (os.environ.get("ACE_SECURITY_ENABLED", "") or "").strip().lower()
     if raw == "false":
         return False
@@ -789,11 +790,41 @@ def job_status():
     }), 200
 
 
-# SESSION SYSTEM REMOVED: All entitlement endpoints deleted
-# - /api/entitlement/create
-# - /api/entitlement/<sid>
-# - /api/entitlement/latest-paid
-# - /api/ipn/<token>
+# Security status: frontend uses this to decide whether to enforce redirect/Builder checks
+@app.route('/api/security-status', methods=['GET'])
+def security_status():
+    """Return whether security is enabled. When false, frontend may allow direct Builder access and skip redirect to Preview."""
+    return jsonify({"securityEnabled": is_security_enabled()}), 200
+
+
+# IPN: payment confirmation — never bypassed by ACE_SECURITY_ENABLED (always runs)
+IPN_TOKEN = "ace_icount_7f3a9"
+
+@app.route(f'/api/ipn/{IPN_TOKEN}', methods=['POST'])
+def ipn_ace_icount():
+    """
+    iCount IPN endpoint: receive payment confirmation and mark session paid.
+    Logic is NOT wrapped by is_security_enabled(); payment confirmation always runs.
+    """
+    try:
+        db_session.init_db()
+    except Exception as e:
+        logger.error(f"IPN init_db error: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": "db_error"}), 500
+    data = request.get_json(silent=True) or request.form or {}
+    payment_session = (data.get("payment_session") or data.get("payment_session_id") or request.args.get("payment_session") or "").strip()
+    if not payment_session:
+        logger.warning("IPN missing payment_session")
+        return jsonify({"ok": False, "error": "missing_payment_session"}), 400
+    docnum = (data.get("docnum") or data.get("docnum_id") or "").strip()
+    doctype = (data.get("doctype") or "").strip()
+    try:
+        db_session.mark_payment_paid(payment_session, docnum=docnum, doctype=doctype)
+        logger.info(f"IPN_OK payment_session={payment_session}")
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        logger.error(f"IPN mark_payment_paid error: {e}", exc_info=True)
+        return jsonify({"ok": False, "error": "payment_update_failed"}), 500
 
 
 @app.route('/health', methods=['GET'])
