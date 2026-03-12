@@ -804,15 +804,31 @@ IPN_TOKEN = "ace_icount_7f3a9"
 def ipn_ace_icount():
     """
     iCount IPN endpoint: receive payment confirmation and mark session paid.
-    Logic is NOT wrapped by is_security_enabled(); payment confirmation always runs.
+    iCount sends JSON array with one document; document has doctype, docnum, comment, etc. (no payment_session).
+    We accept payment_session from: our field names, or iCount fields (comment, invoice_po_number, based_on_order, client.custom_client_id).
     """
     try:
         db_session.init_db()
     except Exception as e:
         logger.error(f"IPN init_db error: {e}", exc_info=True)
         return jsonify({"ok": False, "error": "db_error"}), 500
-    data = request.get_json(silent=True) or request.form or {}
-    payment_session = (data.get("payment_session") or data.get("payment_session_id") or request.args.get("payment_session") or "").strip()
+    raw = request.get_json(silent=True) or request.form or {}
+    # iCount webhook sends a JSON array of one document: [{ "doctype": "...", "docnum": "...", "comment": "...", ... }]
+    if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], dict):
+        data = raw[0]
+    elif isinstance(raw, dict):
+        data = raw
+    else:
+        data = {}
+    # payment_session: iCount does not send this; checkout may put it in comment, invoice_po_number, or based_on_order
+    client_obj = data.get("client") if isinstance(data.get("client"), dict) else {}
+    payment_session = (
+        (data.get("payment_session") or data.get("payment_session_id") or request.args.get("payment_session") or "").strip()
+        or (data.get("comment") or "").strip()
+        or (data.get("invoice_po_number") or "").strip()
+        or (data.get("based_on_order") or "").strip()
+        or (client_obj.get("custom_client_id") or "").strip()
+    )
     if not payment_session:
         logger.warning("IPN missing payment_session")
         return jsonify({"ok": False, "error": "missing_payment_session"}), 400
