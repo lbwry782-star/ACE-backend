@@ -800,6 +800,20 @@ def security_status():
 # IPN: payment confirmation — never bypassed by ACE_SECURITY_ENABLED (always runs)
 IPN_TOKEN = "ace_icount_7f3a9"
 
+def _ipn_get(data: dict, *keys: str) -> str:
+    """Get first non-empty string from data for any of the keys (case-insensitive)."""
+    if not isinstance(data, dict):
+        return ""
+    key_lower = {str(k).lower(): k for k in data.keys()}
+    for key in keys:
+        k = key_lower.get(str(key).lower()) or (key if key in data else None)
+        if k is not None:
+            v = data.get(k)
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    return ""
+
+
 @app.route(f'/api/ipn/{IPN_TOKEN}', methods=['POST'])
 def ipn_ace_icount():
     """
@@ -812,25 +826,30 @@ def ipn_ace_icount():
     except Exception as e:
         logger.error(f"IPN init_db error: {e}", exc_info=True)
         return jsonify({"ok": False, "error": "db_error"}), 500
-    raw = request.get_json(silent=True) or request.form or {}
-    # iCount webhook sends a JSON array of one document: [{ "doctype": "...", "docnum": "...", "comment": "...", ... }]
+    raw = request.get_json(silent=True)
+    if raw is None and request.get_data():
+        try:
+            raw = json.loads(request.get_data(as_text=True))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    if raw is None or raw == {}:
+        raw = request.form or {}
     if isinstance(raw, list) and len(raw) > 0 and isinstance(raw[0], dict):
         data = raw[0]
     elif isinstance(raw, dict):
         data = raw
     else:
         data = {}
-    # payment_session: iCount does not send this; checkout may put it in comment, invoice_po_number, or based_on_order
     client_obj = data.get("client") if isinstance(data.get("client"), dict) else {}
     payment_session = (
-        (data.get("payment_session") or data.get("payment_session_id") or request.args.get("payment_session") or "").strip()
-        or (data.get("comment") or "").strip()
-        or (data.get("invoice_po_number") or "").strip()
-        or (data.get("based_on_order") or "").strip()
-        or (client_obj.get("custom_client_id") or "").strip()
+        _ipn_get(data, "payment_session", "payment_session_id", "session_id", "session")
+        or (request.args.get("payment_session") or "").strip()
+        or _ipn_get(data, "comment", "Comment", "invoice_po_number", "invoice_po", "based_on_order", "order_id", "ref", "reference")
+        or _ipn_get(client_obj, "custom_client_id", "Custom_Client_Id")
     )
     if not payment_session:
-        logger.warning("IPN missing payment_session")
+        keys_seen = list(data.keys())[:30] if isinstance(data, dict) else []
+        logger.warning("IPN missing payment_session keys_seen=%s", keys_seen)
         return jsonify({"ok": False, "error": "missing_payment_session"}), 400
     docnum = (data.get("docnum") or data.get("docnum_id") or "").strip()
     doctype = (data.get("doctype") or "").strip()
