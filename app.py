@@ -818,8 +818,8 @@ def _ipn_get(data: dict, *keys: str) -> str:
 def ipn_ace_icount():
     """
     iCount IPN endpoint: receive payment confirmation and mark session paid.
-    iCount sends JSON array with one document; document has doctype, docnum, comment, etc. (no payment_session).
-    We accept payment_session from: our field names, or iCount fields (comment, invoice_po_number, based_on_order, client.custom_client_id).
+    iCount may send JSON array or form with flat keys: cp, doctype, docnum, etc. (no payment_session).
+    Session id is accepted from cp (and fallbacks) so mark_payment_paid uses the same id the checkout stored.
     """
     try:
         db_session.init_db()
@@ -838,12 +838,18 @@ def ipn_ace_icount():
         data = raw[0]
     elif isinstance(raw, dict):
         data = raw
+    elif raw is not None and hasattr(raw, "get"):
+        # Form MultiDict / flat key-value (e.g. cp, doctype, docnum) — normalize to dict
+        data = dict(raw) if hasattr(raw, "keys") else {}
     else:
         data = {}
     client_obj = data.get("client") if isinstance(data.get("client"), dict) else {}
+    # iCount IPN sends flat form keys: cp (payment/session reference), doctype, docnum, customer_id, confirmation_code, etc.
+    # No payment_session key — use cp as the session id our checkout passes through the payment link.
     payment_session = (
         _ipn_get(data, "payment_session", "payment_session_id", "session_id", "session")
         or (request.args.get("payment_session") or "").strip()
+        or _ipn_get(data, "cp", "confirmation_code", "customer_id")
         or _ipn_get(data, "comment", "Comment", "invoice_po_number", "invoice_po", "based_on_order", "order_id", "ref", "reference")
         or _ipn_get(client_obj, "custom_client_id", "Custom_Client_Id")
     )
