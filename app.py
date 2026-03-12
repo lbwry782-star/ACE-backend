@@ -47,8 +47,8 @@ def handle_preflight():
     """Handle OPTIONS preflight requests for CORS."""
     if request.method == "OPTIONS" and request.path.startswith("/api/"):
         origin = request.headers.get("Origin")
-        
-        if is_origin_allowed(origin):
+        allow_origin = is_origin_allowed(origin) if is_security_enabled() else bool(origin)
+        if allow_origin and origin:
             response = Response('', status=200)
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
@@ -56,31 +56,24 @@ def handle_preflight():
             response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
             response.headers["Access-Control-Max-Age"] = "86400"
             return response
-        else:
-            # Return 200 without Allow-Origin if origin not allowed (don't reveal info)
-            return Response('', status=200)
+        return Response('', status=200)
 
 @app.after_request
 def add_cors_headers(response):
     """
     Add CORS headers to all /api/* responses.
-    
-    This applies to all responses (200, 404, 500, etc.) for endpoints under /api/.
+    When ACE_SECURITY_ENABLED=false, any provided Origin is allowed (bypass origin check).
     """
     if request.path.startswith("/api/"):
         origin = request.headers.get("Origin")
-        
-        if is_origin_allowed(origin):
-            # Add CORS headers for allowed origin
+        allow_origin = is_origin_allowed(origin) if is_security_enabled() else bool(origin)
+        if allow_origin and origin:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
-            
-            # Expose X-ACE-Batch-State header for frontend (if needed)
             if "X-ACE-Batch-State" in response.headers:
                 response.headers["Access-Control-Expose-Headers"] = "X-ACE-Batch-State"
-    
     return response
 
 # Configure logging
@@ -95,8 +88,21 @@ ACE_IMAGE_ONLY = (os.environ.get("ACE_IMAGE_ONLY", "") or "").strip().lower() in
 ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").strip().lower() in ("1", "true", "yes")
 # ACE_FALLBACK_RETURN_ERROR: when Stage 2 fails (FALLBACK_USED), return error instead of generating 1 fallback ad (cost control)
 ACE_FALLBACK_RETURN_ERROR = (os.environ.get("ACE_FALLBACK_RETURN_ERROR", "") or "").strip().lower() in ("1", "true", "yes")
+
+# ACE_SECURITY_ENABLED: "false" = bypass all security checks. Default True.
+# Wrap: payment validation, entitlement checks, token/session validation, generation limits (e.g. 3-gen limit).
+# Example: if is_security_enabled() and not is_payment_paid(session): return 403
+def is_security_enabled() -> bool:
+    """Read ACE_SECURITY_ENABLED from env. If 'false', security checks are bypassed. Default True if missing."""
+    raw = (os.environ.get("ACE_SECURITY_ENABLED", "") or "").strip().lower()
+    if raw == "false":
+        return False
+    return True
+
 if ACE_TEST_MODE:
     logger.info("TEST_MODE_ACTIVE=true")
+if not is_security_enabled():
+    logger.info("ACE_SECURITY_ENABLED=false security_checks_bypassed=true")
 
 # Small placeholder PNG (1x1 transparent) as base64 - no OpenAI image call
 _TEST_PLACEHOLDER_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
