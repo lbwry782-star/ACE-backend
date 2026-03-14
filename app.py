@@ -90,11 +90,12 @@ ACE_PHASE2_GOAL_PAIRS = (os.environ.get("ACE_PHASE2_GOAL_PAIRS", "") or "").stri
 # ACE_FALLBACK_RETURN_ERROR: when Stage 2 fails (FALLBACK_USED), return error instead of generating 1 fallback ad (cost control)
 ACE_FALLBACK_RETURN_ERROR = (os.environ.get("ACE_FALLBACK_RETURN_ERROR", "") or "").strip().lower() in ("1", "true", "yes")
 
-# ACE_SECURITY_ENABLED: "true" = run security (redirect to Preview after payment, Builder/session validation).
-# "false" = bypass: allow direct Builder access, refresh without redirect, no tab/session validation.
-# IPN endpoint is never bypassed — payment confirmation always runs.
+# ACE_SECURITY_ENABLED (Render ENV): controls Builder security. Payment/IPN unchanged.
+#   "true" or missing: security on — direct Builder, refresh, extra tab, incognito redirect to Preview; only post-payment may enter Builder.
+#   "false": security off — allow Builder access without enforcing those redirects.
+# Wrapped: CORS origin check, GET /api/security-status, GET /api/entitlement/latest-paid. IPN is never bypassed.
 def is_security_enabled() -> bool:
-    """Read ACE_SECURITY_ENABLED from env. If 'false', security checks (redirect, Builder/session) are bypassed. Default True."""
+    """Read ACE_SECURITY_ENABLED from env. Only 'false' disables; missing or 'true' = enabled. Default True."""
     raw = (os.environ.get("ACE_SECURITY_ENABLED", "") or "").strip().lower()
     if raw == "false":
         return False
