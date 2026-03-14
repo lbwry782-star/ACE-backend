@@ -797,6 +797,40 @@ def security_status():
     return jsonify({"securityEnabled": is_security_enabled()}), 200
 
 
+@app.route('/api/entitlement/latest-paid', methods=['GET'])
+def entitlement_latest_paid():
+    """
+    Return whether the current request has a paid entitlement (for Builder access).
+    Resolves session from query payment_session/session, cookie payment_session/ace_payment_session, or header X-Payment-Session / X-Fingerprint.
+    When ACE_SECURITY_ENABLED=false, returns paid: true so Builder is allowed without payment check.
+    Response: { "paid": true } or { "paid": false }.
+    """
+    if not is_security_enabled():
+        return jsonify({"paid": True}), 200
+    try:
+        db_session.init_db()
+    except Exception as e:
+        logger.error(f"entitlement_latest_paid init_db error: {e}", exc_info=True)
+        return jsonify({"paid": False, "error": "db_error"}), 500
+    payment_session = (
+        (request.args.get("payment_session") or request.args.get("session") or "").strip()
+        or (request.cookies.get("payment_session") or request.cookies.get("ace_payment_session") or "").strip()
+        or (request.headers.get("X-Payment-Session") or request.headers.get("X-ACE-Payment-Session") or "").strip()
+    )
+    if not payment_session:
+        fingerprint = (request.headers.get("X-Fingerprint") or "").strip()
+        if fingerprint:
+            payment_session = db_session.get_payment_session_from_fingerprint(fingerprint) or ""
+        if not payment_session:
+            cookie_id = (request.cookies.get("ace_cookie_id") or request.cookies.get("cookie_id") or "").strip()
+            if cookie_id:
+                payment_session = db_session.get_payment_session_from_cookie(cookie_id) or ""
+    if not payment_session:
+        return jsonify({"paid": False}), 200
+    paid = db_session.is_payment_paid(payment_session)
+    return jsonify({"paid": paid}), 200
+
+
 # IPN: payment confirmation — never bypassed by ACE_SECURITY_ENABLED (always runs)
 IPN_TOKEN = "ace_icount_7f3a9"
 
