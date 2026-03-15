@@ -798,6 +798,13 @@ def security_status():
     return jsonify({"securityEnabled": is_security_enabled()}), 200
 
 
+@app.route('/api/security/config', methods=['GET'])
+def security_config():
+    """Backend-controlled security flag for frontend (e.g. GitHub Pages). Reads ACE_SECURITY_ENABLED; default true if missing."""
+    enabled = is_security_enabled()
+    return jsonify({"securityEnabled": enabled}), 200
+
+
 @app.route('/api/entitlement/latest-paid', methods=['GET'])
 def entitlement_latest_paid():
     """
