@@ -805,6 +805,36 @@ def security_config():
     return jsonify({"securityEnabled": enabled}), 200
 
 
+def _under_construction_password_expected() -> str:
+    """UNDER_CONSTRUCTION_PASSWORD from env; empty if missing or blank (fail closed in caller)."""
+    return (os.environ.get("UNDER_CONSTRUCTION_PASSWORD", "") or "").strip()
+
+
+@app.route('/api/check-under-construction-password', methods=['POST'])
+def check_under_construction_password():
+    """
+    Owner gate for Under Construction / Preview 2: compare body password to UNDER_CONSTRUCTION_PASSWORD.
+    No sessions, cookies, or JWT. If env is unset/empty, always returns ok: false.
+    """
+    logger.info("UNDER_CONSTRUCTION_PASSWORD_CHECK attempt")
+    expected = _under_construction_password_expected()
+    if not expected:
+        return jsonify({"ok": False}), 200
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False}), 200
+    raw = payload.get("password")
+    if raw is None:
+        submitted = ""
+    elif isinstance(raw, str):
+        submitted = raw
+    else:
+        submitted = str(raw)
+    if submitted == expected:
+        return jsonify({"ok": True}), 200
+    return jsonify({"ok": False}), 200
+
+
 @app.route('/api/entitlement/latest-paid', methods=['GET'])
 def entitlement_latest_paid():
     """
