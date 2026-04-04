@@ -1,7 +1,7 @@
 """
 ACE Runway video — first MVP path (isolated from the image engine).
 
-Currently: one video output only, simple prompting, gen4_turbo via official REST; scene from promptText only (no fixed landmark promptImage).
+Currently: one video output only, simple prompting, Runway POST /v1/image_to_video; gen4_turbo needs a minimal promptImage (neutral data URI), gen4.5 can omit for text-only.
 Future ACE video engine may produce two outputs and richer concept prompting; keep this module minimal until then.
 """
 
@@ -28,6 +28,12 @@ _POLL_INTERVAL_SECONDS = 5.0
 # Overall wall-clock limit for create + poll (video generation can be slow)
 _MAX_WAIT_SECONDS = 600
 _HTTP_TIMEOUT_SECONDS = 60
+
+# gen4_turbo image_to_video requires promptImage (API returns 400 if omitted). Use a 1x1 transparent PNG
+# data URI — no landmark, product, or scene; motion/scene come from promptText only.
+_NEUTRAL_PROMPT_IMAGE_DATA_URI = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
 
 
 class RunwayVideoMVPError(Exception):
@@ -91,14 +97,18 @@ def _create_text_to_video_task(
     prompt_text: str,
 ) -> str:
     url = f"{base_url}/v1/image_to_video"
-    # Omit promptImage: drive the shot entirely from promptText (ACE plan / fallback), no fixed stock landmark frame.
     body: Dict[str, Any] = {
         "model": model,
         "promptText": prompt_text,
         "ratio": "1280:720",
         "duration": 5,
     }
-    logger.info("RUNWAY_MVP task_create model=%s promptImage=omitted", model)
+    # gen4.5: text-to-video — omit promptImage per Runway docs. gen4_turbo (default): promptImage required.
+    if model == "gen4.5":
+        logger.info("RUNWAY_MVP task_create model=%s mode=text_only promptImage=omitted", model)
+    else:
+        body["promptImage"] = _NEUTRAL_PROMPT_IMAGE_DATA_URI
+        logger.info("RUNWAY_MVP task_create model=%s promptImage=neutral", model)
     resp = session.post(url, json=body, headers=_headers(), timeout=_HTTP_TIMEOUT_SECONDS)
     if resp.status_code >= 400:
         logger.error(
