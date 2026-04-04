@@ -29,10 +29,11 @@ _POLL_INTERVAL_SECONDS = 5.0
 _MAX_WAIT_SECONDS = 600
 _HTTP_TIMEOUT_SECONDS = 60
 
-# gen4_turbo image_to_video requires promptImage (API returns 400 if omitted). Use a 1x1 transparent PNG
-# data URI — no landmark, product, or scene; motion/scene come from promptText only.
+# gen4_turbo image_to_video requires promptImage (API returns 400 if omitted). Opaque light neutral frame
+# (soft gray-beige, no transparency) so Runway does not substitute a default color (e.g. red) for alpha.
+# 8x8 PNG, no subject/text; motion/scene still come from promptText.
 _NEUTRAL_PROMPT_IMAGE_DATA_URI = (
-    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFUlEQVR4nGN8/folAzbAhFV00EoAACbiAs8zJy7JAAAAAElFTkSuQmCC"
 )
 
 
