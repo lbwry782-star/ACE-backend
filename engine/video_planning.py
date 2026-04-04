@@ -10,12 +10,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+
+# Safe preview length for logs (no secrets; truncated model output)
+_LOG_PREVIEW_CHARS = 240
 
 # Match codebase: o4-mini maps to o3-pro
 def _text_model() -> str:
@@ -27,7 +31,12 @@ _VIDEO_PLAN_TIMEOUT = float((os.environ.get("VIDEO_PLANNER_TIMEOUT_SECONDS") or 
 
 
 _JSON_KEYS = """
-You MUST respond with a single JSON object only (no markdown, no commentary), with exactly these keys and types:
+OUTPUT FORMAT (strict)
+- Return ONE JSON object only.
+- Use the exact camelCase keys below. Do not omit required keys; use "" only where allowed.
+- Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
+
+Required keys (all strings except where noted):
 {
   "productNameResolved": string,
   "advertisingPromise": string,
@@ -83,31 +92,95 @@ QUALITY
 """
 
 
+def _log_output_preview(raw: str, prefix: str = "VIDEO_PLAN output_preview") -> None:
+    if not raw:
+        return
+    preview = raw.strip().replace("\n", " ")[:_LOG_PREVIEW_CHARS]
+    logger.info("%s len=%s preview=%r", prefix, len(raw), preview)
+
+
+def _repair_loose_json(s: str) -> str:
+    """Remove trailing commas and stray BOM that often break json.loads."""
+    t = s.strip()
+    if t.startswith("\ufeff"):
+        t = t.lstrip("\ufeff")
+    # Trailing commas before } or ]
+    t = re.sub(r",\s*([}\]])", r"\1", t)
+    return t
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """Remove ``` or ```json fences; tolerate missing closing fence."""
+    t = text.strip()
+    if t.startswith("\ufeff"):
+        t = t.lstrip("\ufeff")
+    lower_start = t[:12].lower()
+    if lower_start.startswith("```json"):
+        t = t[7:].lstrip()
+    elif t.startswith("```"):
+        t = t[3:].lstrip()
+        if t.lower().startswith("json"):
+            t = t[4:].lstrip()
+    if t.endswith("```"):
+        t = t[: -3].rstrip()
+    return t.strip()
+
+
 def _parse_json_from_response(raw: str) -> Optional[Dict[str, Any]]:
     if not raw or not raw.strip():
         return None
-    text = raw.strip()
-    if text.startswith("```"):
-        lines = text.split("\n")
-        if len(lines) >= 2:
-            text = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-    if text.startswith("```json"):
-        lines = text.split("\n")
-        text = "\n".join(lines[1:-1] if len(lines) > 2 and lines[-1].strip() == "```" else lines[1:])
-    try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else None
-    except json.JSONDecodeError:
-        # try to find outermost { ... }
-        start = text.find("{")
-        end = text.rfind("}")
-        if start >= 0 and end > start:
-            try:
-                data = json.loads(text[start : end + 1])
-                return data if isinstance(data, dict) else None
-            except json.JSONDecodeError:
-                return None
-        return None
+    text = _strip_markdown_fences(raw)
+    # Drop leading prose before first {
+    brace = text.find("{")
+    if brace > 0:
+        text = text[brace:]
+    text = _repair_loose_json(text)
+
+    def _try_load(s: str) -> Optional[Dict[str, Any]]:
+        try:
+            data = json.loads(s)
+            return data if isinstance(data, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    got = _try_load(text)
+    if got is not None:
+        return got
+
+    # Brace-balanced slice from first { to last }
+    end = text.rfind("}")
+    start = text.find("{")
+    if start >= 0 and end > start:
+        slice_ = _repair_loose_json(text[start : end + 1])
+        got = _try_load(slice_)
+        if got is not None:
+            return got
+
+    return None
+
+
+def _extract_responses_output_text(response: Any) -> str:
+    """
+    Prefer output_text; if empty, concatenate output_text parts from response.output (reasoning models).
+    """
+    direct = getattr(response, "output_text", None)
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    chunks: List[str] = []
+    for block in getattr(response, "output", None) or []:
+        contents = getattr(block, "content", None)
+        if contents is None and isinstance(block, dict):
+            contents = block.get("content")
+        if not contents:
+            continue
+        for c in contents:
+            ct = getattr(c, "type", None) if not isinstance(c, dict) else c.get("type")
+            if ct == "output_text":
+                txt = getattr(c, "text", None) if not isinstance(c, dict) else c.get("text")
+                if txt:
+                    chunks.append(str(txt))
+    return "".join(chunks).strip()
 
 
 def _word_limit(s: str, max_words: int) -> str:
@@ -122,21 +195,108 @@ def _norm_enum(value: Any, allowed: List[str], default: str) -> str:
     return v if v in allowed else default
 
 
-def validate_and_normalize_plan(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Return a normalized plan dict or None if unusable."""
+def _norm_ab_side(value: Any, default: str) -> str:
+    v = (str(value) if value is not None else "").strip().upper()
+    return v if v in ("A", "B") else default
+
+
+def _fuzzy_replacement_direction(raw: Any) -> str:
+    """Map common model variants to B_replaces_A | A_replaces_B | ''."""
+    s = str(raw or "").strip()
+    if not s:
+        return ""
+    if s in ("B_replaces_A", "A_replaces_B"):
+        return s
+    if re.search(r"\bB\s+REPLAC(?:ES|ING)\s+A\b", s, re.I):
+        return "B_replaces_A"
+    if re.search(r"\bA\s+REPLAC(?:ES|ING)\s+B\b", s, re.I):
+        return "A_replaces_B"
+    u = re.sub(r"\s+", "_", s.upper()).replace("-", "_")
+    if u == "B_REPLACES_A":
+        return "B_replaces_A"
+    if u == "A_REPLACES_B":
+        return "A_replaces_B"
+    return ""
+
+
+def _fuzzy_headline_decision_raw(raw: Any) -> str:
+    """Normalize common variants before strict enum check."""
+    s = str(raw or "").strip().lower()
+    s = s.replace("-", "_").replace(" ", "_")
+    if s in ("no_headline", "noheadline", "none", "without_headline", "no_headline_text", "headline_none"):
+        return "no_headline"
+    if s in ("include_product_name", "include_product", "with_product_name"):
+        return "include_product_name"
+    if s in ("product_name_only", "product_only", "name_only"):
+        return "product_name_only"
+    return str(raw or "").strip()
+
+
+# snake_case / alternate keys from some models → camelCase
+_PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
+    ("product_name_resolved", "productNameResolved"),
+    ("advertising_promise", "advertisingPromise"),
+    ("object_a", "objectA"),
+    ("object_a_secondary", "objectA_secondary"),
+    ("object_b", "objectB"),
+    ("object_b_secondary", "objectB_secondary"),
+    ("morphological_reason", "morphologicalReason"),
+    ("promise_reason", "promiseReason"),
+    ("replacement_direction", "replacementDirection"),
+    ("preserved_background_from", "preservedBackgroundFrom"),
+    ("preserved_secondary_from", "preservedSecondaryFrom"),
+    ("short_replacement_script", "shortReplacementScript"),
+    ("headline_decision", "headlineDecision"),
+    ("headline_text", "headlineText"),
+    ("video_prompt_core", "videoPromptCore"),
+)
+
+
+def _coerce_plan_keys(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill camelCase keys from snake_case duplicates when the canonical key is missing or empty."""
+    out = dict(data)
+    for alt, canon in _PLAN_KEY_ALIASES:
+        cur = out.get(canon)
+        empty = cur is None or (isinstance(cur, str) and not cur.strip())
+        alt_val = out.get(alt)
+        if empty and alt_val is not None and str(alt_val).strip():
+            out[canon] = alt_val
+    return out
+
+
+def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    Return (plan, None) or (None, reason_code) for logging.
+    reason_code: missing_videoPromptCore | missing_advertisingPromise | missing_objectA_or_B
+    """
     if not data:
-        return None
+        return None, "missing_videoPromptCore"
+
+    data = _coerce_plan_keys(data)
+
     core = (data.get("videoPromptCore") or "").strip()
     if not core:
-        return None
+        return None, "missing_videoPromptCore"
+
+    # advertisingPromise from model; if omitted, allow promiseReason (same model output) as fallback
     apromise = (data.get("advertisingPromise") or "").strip()
+    if not apromise:
+        apromise = (data.get("promiseReason") or "").strip()
+    if not apromise:
+        return None, "missing_advertisingPromise"
+
     oa = (data.get("objectA") or "").strip()
     ob = (data.get("objectB") or "").strip()
-    if not apromise or not oa or not ob:
-        return None
+    if not oa or not ob:
+        return None, "missing_objectA_or_B"
+
     pn = (data.get("productNameResolved") or "").strip() or "Product"
+
+    hd_cand = _fuzzy_headline_decision_raw(data.get("headlineDecision"))
+    if hd_cand not in ("include_product_name", "product_name_only", "no_headline"):
+        hd_cand = str(data.get("headlineDecision") or "").strip()
     headline_decision = _norm_enum(
-        data.get("headlineDecision"),
+        hd_cand,
         ["include_product_name", "product_name_only", "no_headline"],
         "no_headline",
     )
@@ -145,9 +305,16 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Optional[Dict[str, Any]
         headline_text = ""
     else:
         headline_text = _word_limit(raw_headline, 7)
-    repl = _norm_enum(data.get("replacementDirection"), ["B_replaces_A", "A_replaces_B"], "B_replaces_A")
-    bg = _norm_enum(data.get("preservedBackgroundFrom"), ["A", "B"], "A")
-    sec = _norm_enum(data.get("preservedSecondaryFrom"), ["A", "B"], "A")
+
+    repl_raw = data.get("replacementDirection")
+    repl_fuzz = _fuzzy_replacement_direction(repl_raw)
+    repl = repl_fuzz if repl_fuzz in ("B_replaces_A", "A_replaces_B") else _norm_enum(
+        repl_raw, ["B_replaces_A", "A_replaces_B"], "B_replaces_A"
+    )
+
+    bg = _norm_ab_side(data.get("preservedBackgroundFrom"), "A")
+    sec = _norm_ab_side(data.get("preservedSecondaryFrom"), "A")
+
     return {
         "productNameResolved": pn,
         "advertisingPromise": apromise,
@@ -164,7 +331,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Optional[Dict[str, Any]
         "headlineDecision": headline_decision,
         "headlineText": headline_text,
         "videoPromptCore": core,
-    }
+    }, None
 
 
 def log_plan_summary(plan: Dict[str, Any]) -> None:
@@ -191,14 +358,20 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
     )
 
 
+def _reasoning_effort() -> str:
+    raw = (os.environ.get("VIDEO_PLANNER_REASONING_EFFORT") or "low").strip().lower()
+    return raw if raw in ("low", "medium") else "low"
+
+
 def fetch_video_plan_o3(product_name: str, product_description: str) -> Optional[Dict[str, Any]]:
     """
     Single o3-pro call returning a validated plan dict, or None on any failure (caller uses fallback).
     """
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        logger.warning("VIDEO_PLAN skip: OPENAI_API_KEY missing")
+        logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
         return None
+
     model = _text_model()
     user_block = f"""Product name (may be empty): {product_name or "(empty)"}
 Product description:
@@ -217,24 +390,45 @@ Product description:
         response = client.responses.create(
             model=model,
             input=full_input,
-            reasoning={"effort": "low"},
+            reasoning={"effort": _reasoning_effort()},
         )
-        raw = (response.output_text or "").strip()
+    except Exception as e:
+        err_type = type(e).__name__
+        logger.warning(
+            "VIDEO_PLAN_FAIL_MODEL_CALL model=%s err_type=%s err=%s",
+            model,
+            err_type,
+            e,
+        )
+        return None
+
+    try:
+        raw = _extract_responses_output_text(response)
         if not raw:
-            logger.error("VIDEO_PLAN empty model output")
+            logger.error("VIDEO_PLAN_FAIL_EMPTY_OUTPUT model=%s", model)
             return None
+
+        _log_output_preview(raw)
+
         parsed = _parse_json_from_response(raw)
         if not parsed:
-            logger.error("VIDEO_PLAN json_parse_failed")
+            logger.error("VIDEO_PLAN_FAIL_JSON_PARSE model=%s", model)
             return None
-        plan = validate_and_normalize_plan(parsed)
+
+        plan, v_err = validate_and_normalize_plan(parsed)
         if not plan:
-            logger.error("VIDEO_PLAN validation_failed")
+            logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
             return None
+
         log_plan_summary(plan)
+        logger.info("VIDEO_PLAN_OK model=%s", model)
         return plan
     except Exception as e:
-        logger.warning("VIDEO_PLAN o3_failed fallback will be used: %s", e)
+        logger.warning(
+            "VIDEO_PLAN_FAIL_EXCEPTION phase=post_create err_type=%s err=%s",
+            type(e).__name__,
+            e,
+        )
         return None
 
 

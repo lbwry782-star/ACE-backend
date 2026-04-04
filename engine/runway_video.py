@@ -191,7 +191,10 @@ def generate_one_video_mvp(
     else:
         prompt = build_simple_prompt(product_name, product_description)
         marketing = ""
-        logger.info("RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true")
+        logger.info(
+            "RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true "
+            "(planning failed; see VIDEO_PLAN_FAIL_* log lines above for this request)"
+        )
 
     session = requests.Session()
     task_id = _create_text_to_video_task(session, base, model, prompt)
