@@ -452,46 +452,67 @@ Product description:
 _RUNWAY_PROMPT_MAX_CHARS = 1000
 
 
-def _truncate_runway_prompt(s: str) -> str:
-    if len(s) <= _RUNWAY_PROMPT_MAX_CHARS:
-        return s
-    logger.info("RUNWAY_PROMPT truncated from len=%s to %s", len(s), _RUNWAY_PROMPT_MAX_CHARS)
-    return s[:_RUNWAY_PROMPT_MAX_CHARS]
+def _headline_runway_block(headline_text: str) -> str:
+    """Short mandatory block; must stay compact so it survives total length limits."""
+    safe = (headline_text or "").replace('"', "'").strip()
+    return (
+        f"No on-screen text before the final frame. Final frame only: burn in this exact headline as part of the footage: «{safe}». "
+        f"Earlier: zero text, logos, captions."
+    )
 
 
-def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> str:
+def _finalize_runway_prompt(headline_prefix: str, body: str) -> Tuple[str, bool]:
+    """
+    Join headline rule (if any) + body. If over max length, truncate body only so headline instruction survives.
+    Returns (final_string, was_truncated).
+    """
+    body = (body or "").strip()
+    hp = (headline_prefix or "").strip()
+    if hp:
+        full = f"{hp} {body}".strip()
+    else:
+        full = body
+    if len(full) <= _RUNWAY_PROMPT_MAX_CHARS:
+        return full, False
+    if hp:
+        sep = " "
+        room = _RUNWAY_PROMPT_MAX_CHARS - len(hp) - len(sep)
+        if room < 32:
+            out = full[: _RUNWAY_PROMPT_MAX_CHARS]
+            return out, True
+        trimmed_body = body[:room]
+        return f"{hp}{sep}{trimmed_body}", True
+    return full[:_RUNWAY_PROMPT_MAX_CHARS], True
+
+
+def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """Shorter ACE→Runway bridge if the detailed builder fails; keeps prior behavior."""
     core = (plan.get("videoPromptCore") or "").strip()
     headline_decision = plan.get("headlineDecision") or "no_headline"
     headline_text = (plan.get("headlineText") or "").strip()
-    product = (plan.get("productNameResolved") or "").strip()
     script = (plan.get("shortReplacementScript") or "").strip()
 
-    parts: List[str] = [
-        "English language commercial video. Cinematic lighting, smooth camera movement, modern advertising style.",
-        "During the main action: no visible readable words, no logos, no packaging print on screen.",
-        "Scene and motion:",
-        core,
-    ]
-    if script:
-        parts.append(f"Replacement beat: {script}")
     if headline_decision != "no_headline" and headline_text:
-        parts.append(
-            "Only in the final moment after motion settles: one clean end-frame line burned into the picture, "
-            f"exactly: {headline_text}"
-        )
-        if headline_decision == "include_product_name" and product and product.lower() not in headline_text.lower():
-            parts.append(f"End frame should align with product: {product}.")
-    else:
-        parts.append("No title cards, supers, or captions; purely visual finish.")
+        hp = _headline_runway_block(headline_text)
+        body_parts = [
+            "English commercial, single shot, soft light.",
+            f"Scene: {core}" if core else "",
+            f"Replacement: {script}" if script else "",
+        ]
+        body = " ".join(p for p in body_parts if p)
+        return _finalize_runway_prompt(hp, body)
 
-    return _truncate_runway_prompt(" ".join(p for p in parts if p))
+    parts = [
+        "No text or logos in-frame.",
+        f"Scene: {core}" if core else "",
+        f"Replacement: {script}" if script else "",
+    ]
+    return _finalize_runway_prompt("", " ".join(p for p in parts if p))
 
 
-def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> str:
+def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Precise creative-direction style prompt: opening, secondary, replacement, tone, end-state, optional end headline.
-    Raises ValueError if the plan lacks required fields for a coherent prompt.
+    Compact ACE→Runway prompt. Headline rule is first when present so truncation never drops it.
     """
     rd = (plan.get("replacementDirection") or "").strip()
     if rd not in ("B_replaces_A", "A_replaces_B"):
@@ -514,78 +535,44 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> str:
     script = (plan.get("shortReplacementScript") or "").strip()
     headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
     headline_text = (plan.get("headlineText") or "").strip()
-    product = (plan.get("productNameResolved") or "").strip()
 
     if not core:
         raise ValueError("missing videoPromptCore")
 
-    a_setup = f"{oa} with its classic contextual prop: {oas}" if oas else oa
-    b_setup = f"{ob} with its classic contextual prop: {obs}" if obs else ob
+    a_setup = f"{oa} + {oas}" if oas else oa
+    b_setup = f"{ob} + {obs}" if obs else ob
 
-    # Opening + replacement choreography (single shot, no montage)
     if rd == "B_replaces_A":
-        opening = (
-            f"Open on one clear, elegant setup: {a_setup}, immediately readable and iconic. "
-            f"The background and spatial world stay tied to side {pbg}; the secondary/context placement stays coherent with side {psf}. "
-            f"The advertising idea to feel (without explaining in words): {promise}. "
-        )
-        transform = (
-            f"The main motion is one continuous replacement: {ob} takes over the exact role, position, and silhouette-read of {oa} — "
-            f"{oa} leaves the frame entirely as {ob} occupies that place — while the surrounding environment and the contextual secondary "
-            f"remain locked to the preserved composition. The transformation must read as one legible REPLACEMENT event, smooth and premium, not a hard cut. "
+        scene = (
+            f"Start: replacement already visible — {b_setup} in {oa}'s place, bg {pbg}, secondary {psf}, promise: {promise}. "
+            f"Motion: {ob} with A's secondary; one smooth shot, no cuts. "
+            f"Action: {core}"
         )
     else:
-        opening = (
-            f"Open on one clear, elegant setup: {b_setup}, immediately readable and iconic. "
-            f"The background and spatial world stay tied to side {pbg}; the secondary/context placement stays coherent with side {psf}. "
-            f"The advertising idea to feel: {promise}. "
+        scene = (
+            f"Start: replacement already visible — {a_setup} in {ob}'s place, bg {pbg}, secondary {psf}, promise: {promise}. "
+            f"Motion: {oa} with B's secondary; one smooth shot, no cuts. "
+            f"Action: {core}"
         )
-        transform = (
-            f"The main motion is one continuous replacement: {oa} takes over the exact role, position, and silhouette-read of {ob} — "
-            f"{ob} yields as {oa} occupies that place — while the surrounding environment and the contextual secondary "
-            f"remain locked to the preserved composition. Same rules: one legible REPLACEMENT, smooth, premium, no gratuitous cuts. "
-        )
+    if script:
+        scene += f" Beat: {script}"
+    scene += " No logos or packaging type. Single clean commercial look."
 
-    director = f"Creative motion and framing: {core}"
-    beat = f"Replacement beat (director note): {script}" if script else ""
-
-    tone = (
-        "Visual style: clean English-language commercial aesthetic; soft cinematic light; restrained camera move; "
-        "avoid clutter, avoid generic stock phrasing, avoid multiple scene changes — one visual idea, immediately grasped."
-    )
-
-    integrity = (
-        "Keep the object pair and the required secondary context central; do not drift into generic scenery as the subject. "
-        "No logos, no brand marks, no packaging typography, no decorative type, no irrelevant props."
-    )
-
-    # Mid-video: no readable words / logos (worded without "text" when no headline, per ACE brief)
     if headline_decision == "no_headline":
-        mid_rule = (
-            "Throughout the moving shot: purely pictorial storytelling — no title cards, no supers, no captions, no readable packaging, no logos."
-        )
-        end_rule = "Resolve on a clean held frame with no title cards or supers."
-    else:
-        if not headline_text:
-            raise ValueError("headline expected but headlineText empty")
-        mid_rule = (
-            "Throughout the replacement motion: no title cards, no supers, no captions, no readable packaging, no logos — "
-            "the movement itself carries meaning until it fully settles."
-        )
-        safe_line = headline_text.replace('"', "'")
-        end_rule = (
-            f"After the action fully settles and the picture holds still, only then — as the final beat — add a single short line "
-            f"integrated into the frame (not subtitles): exactly «{safe_line}». "
-            "Centered or clearly placed, highly readable, one line only, no paragraph, no extra copy, no earlier flashes."
-        )
-        if headline_decision == "include_product_name" and product and product.lower() not in safe_line.lower():
-            end_rule += f" The line should still feel aligned with {product} as the offering."
+        body = f"No on-screen text, captions, or logos. {scene}"
+        out, trunc = _finalize_runway_prompt("", body)
+        if not out.strip():
+            raise ValueError("empty prompt")
+        return out, trunc
 
-    pieces = [opening, transform, director, beat, tone, integrity, mid_rule, end_rule]
-    out = " ".join(p for p in pieces if p).strip()
-    if not out:
+    if not headline_text:
+        raise ValueError("headline expected but headlineText empty")
+
+    hp = _headline_runway_block(headline_text)
+    out, trunc = _finalize_runway_prompt(hp, scene)
+    if not out.strip():
         raise ValueError("empty prompt")
-    return _truncate_runway_prompt(out)
+    return out, trunc
 
 
 def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
@@ -599,21 +586,19 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
     repl = (plan.get("replacementDirection") or "").strip()
 
     try:
-        out = _build_runway_prompt_detailed(plan)
-        logger.info(
-            "RUNWAY_PROMPT build_ok repl=%s headline_present=%s headline=%s",
-            repl or "?",
-            headline_present,
-            (headline_text[:100] + "…") if len(headline_text) > 100 else headline_text,
-        )
-        return out
+        out, truncated = _build_runway_prompt_detailed(plan)
+        path = "detailed"
     except Exception as e:
         logger.warning("RUNWAY_PROMPT detailed_builder_failed (%s); using compact fallback", e)
-        fb = _build_runway_prompt_compact_fallback(plan)
-        logger.info(
-            "RUNWAY_PROMPT fallback_ok repl=%s headline_present=%s headline=%s",
-            repl or "?",
-            headline_present,
-            (headline_text[:100] + "…") if len(headline_text) > 100 else headline_text,
-        )
-        return fb
+        out, truncated = _build_runway_prompt_compact_fallback(plan)
+        path = "compact_fallback"
+
+    logger.info(
+        "RUNWAY_PROMPT final_len=%s truncated=%s headline_instruction_included=%s headline_text=%r path=%s",
+        len(out),
+        truncated,
+        headline_present,
+        (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
+        path,
+    )
+    return out
