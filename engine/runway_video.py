@@ -1,7 +1,7 @@
 """
 ACE Runway video — first MVP path (isolated from the image engine).
 
-Currently: one video output only, simple prompting, gen4_turbo via official REST (image_to_video + neutral first frame when required).
+Currently: one video output only, simple prompting, gen4_turbo via official REST; scene from promptText only (no fixed landmark promptImage).
 Future ACE video engine may produce two outputs and richer concept prompting; keep this module minimal until then.
 """
 
@@ -28,12 +28,6 @@ _POLL_INTERVAL_SECONDS = 5.0
 # Overall wall-clock limit for create + poll (video generation can be slow)
 _MAX_WAIT_SECONDS = 600
 _HTTP_TIMEOUT_SECONDS = 60
-
-# gen4_turbo uses the image_to_video endpoint with a required first frame (Runway API / SDK).
-# MVP: neutral stock frame so product context comes from promptText only (not full ACE visual logic).
-_NEUTRAL_FIRST_FRAME_URL = (
-    "https://upload.wikimedia.org/wikipedia/commons/8/85/Tour_Eiffel_Wikimedia_Commons_(cropped).jpg"
-)
 
 
 class RunwayVideoMVPError(Exception):
@@ -97,21 +91,14 @@ def _create_text_to_video_task(
     prompt_text: str,
 ) -> str:
     url = f"{base_url}/v1/image_to_video"
-    # gen4_turbo: image + text (required first frame per API). gen4.5: text-only supported by omitting promptImage.
+    # Omit promptImage: drive the shot entirely from promptText (ACE plan / fallback), no fixed stock landmark frame.
     body: Dict[str, Any] = {
         "model": model,
         "promptText": prompt_text,
         "ratio": "1280:720",
         "duration": 5,
     }
-    if model == "gen4_turbo":
-        body["promptImage"] = _NEUTRAL_FIRST_FRAME_URL
-    elif model == "gen4.5":
-        pass  # text-to-video: no promptImage (Runway docs)
-    else:
-        # Other models: assume image_to_video-style input; neutral frame avoids crashing unknown models.
-        body["promptImage"] = _NEUTRAL_FIRST_FRAME_URL
-    logger.info("RUNWAY_MVP task_create model=%s", model)
+    logger.info("RUNWAY_MVP task_create model=%s promptImage=omitted", model)
     resp = session.post(url, json=body, headers=_headers(), timeout=_HTTP_TIMEOUT_SECONDS)
     if resp.status_code >= 400:
         logger.error(
