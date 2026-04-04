@@ -19,6 +19,7 @@ from engine.video_planning import (
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
 )
+from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,7 @@ def _extract_video_url(task: Dict[str, Any]) -> Optional[str]:
 def generate_one_video_mvp(
     product_name: str,
     product_description: str,
+    public_base_url: Optional[str] = None,
 ) -> Tuple[str, str]:
     """
     Create one Runway video task, poll until done or timeout.
@@ -193,8 +195,10 @@ def generate_one_video_mvp(
     model = _env_model()
     plan = fetch_video_plan_o3(product_name, product_description)
     prompt_image_data_uri: Optional[str] = None
+    headline_decision: Optional[str] = None
     if plan:
         marketing = (plan.get("headlineText") or "").strip()
+        headline_decision = (plan.get("headlineDecision") or "").strip() or None
         # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
         if model != "gen4.5":
             prompt_image_data_uri = generate_video_start_image_data_uri(plan)
@@ -207,6 +211,7 @@ def generate_one_video_mvp(
     else:
         prompt = build_simple_prompt(product_name, product_description)
         marketing = ""
+        headline_decision = None
         logger.info(
             "RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true "
             "(planning failed; see VIDEO_PLAN_FAIL_* log lines above for this request)"
@@ -229,7 +234,13 @@ def generate_one_video_mvp(
         url = _extract_video_url(task)
         if url:
             logger.info("RUNWAY_MVP polling_done task_id=%s status=SUCCEEDED", task_id)
-            return url, marketing
+            final_url = postprocess_video_headline(
+                url,
+                marketing,
+                public_base_url or "",
+                headline_decision=headline_decision,
+            )
+            return final_url, marketing
         raise RunwayVideoMVPError("generation_failed")
 
     logger.error("RUNWAY_MVP timeout task_id=%s", task_id)

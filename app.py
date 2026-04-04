@@ -24,6 +24,7 @@ from engine.side_by_side_v1 import (
 )
 from engine.openai_retry import OpenAIRateLimitError
 from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
+from engine.video_headline_postprocess import get_headline_video_path
 import db_session
 
 app = Flask(__name__)
@@ -796,6 +797,20 @@ def job_status():
 # Runway video MVP (isolated): one text-to-video only — not part of /api/generate or /api/preview.
 # Future: dedicated ACE video engine may add a second output and richer prompting.
 # -----------------------------------------------------------------------------
+@app.route('/api/video-headline/<token>', methods=['GET'])
+def serve_video_headline(token):
+    """Serve ffmpeg-processed MP4 from post-process headline overlay (token from videoUrl)."""
+    path = get_headline_video_path((token or "").strip())
+    if not path or not path.is_file():
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    return send_file(
+        str(path),
+        mimetype="video/mp4",
+        as_attachment=False,
+        download_name="ace-video.mp4",
+    )
+
+
 @app.route('/api/generate-video', methods=['POST'])
 def generate_video():
     """Runway gen4_turbo video; ACE o3-pro plan when possible, else simple prompt. marketingText = headline only or empty."""
@@ -809,7 +824,10 @@ def generate_video():
         if not product_description:
             return jsonify({"ok": False, "error": "video_generation_failed"}), 200
         product_name = (payload.get("productName") or "").strip()
-        video_url, marketing_text = generate_one_video_mvp(product_name, product_description)
+        base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
+        video_url, marketing_text = generate_one_video_mvp(
+            product_name, product_description, public_base_url=base
+        )
         return jsonify({
             "ok": True,
             "videoUrl": video_url,

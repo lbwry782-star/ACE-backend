@@ -452,18 +452,10 @@ Product description:
 _RUNWAY_PROMPT_MAX_CHARS = 1000
 
 
-def _headline_runway_block(headline_text: str) -> str:
-    """Short mandatory block; must stay compact so it survives total length limits."""
-    safe = (headline_text or "").replace('"', "'").strip()
-    return (
-        f"No on-screen text before the final frame. Final frame only: burn in this exact headline as part of the footage: «{safe}». "
-        f"Earlier: zero text, logos, captions."
-    )
-
-
 def _finalize_runway_prompt(headline_prefix: str, body: str) -> Tuple[str, bool]:
     """
-    Join headline rule (if any) + body. If over max length, truncate body only so headline instruction survives.
+    Join optional prefix + body. If over max length, truncate body so a leading prefix survives when present.
+    Runway prompts do not include headline burn-in (headline is applied server-side after generation).
     Returns (final_string, was_truncated).
     """
     body = (body or "").strip()
@@ -488,19 +480,7 @@ def _finalize_runway_prompt(headline_prefix: str, body: str) -> Tuple[str, bool]
 def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """Shorter ACE→Runway bridge if the detailed builder fails; keeps prior behavior."""
     core = (plan.get("videoPromptCore") or "").strip()
-    headline_decision = plan.get("headlineDecision") or "no_headline"
-    headline_text = (plan.get("headlineText") or "").strip()
     script = (plan.get("shortReplacementScript") or "").strip()
-
-    if headline_decision != "no_headline" and headline_text:
-        hp = _headline_runway_block(headline_text)
-        body_parts = [
-            "English commercial, single shot, soft light.",
-            f"Scene: {core}" if core else "",
-            f"Replacement: {script}" if script else "",
-        ]
-        body = " ".join(p for p in body_parts if p)
-        return _finalize_runway_prompt(hp, body)
 
     parts = [
         "No text or logos in-frame.",
@@ -533,9 +513,6 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     promise = (plan.get("advertisingPromise") or "").strip()
     core = (plan.get("videoPromptCore") or "").strip()
     script = (plan.get("shortReplacementScript") or "").strip()
-    headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
-    headline_text = (plan.get("headlineText") or "").strip()
-
     if not core:
         raise ValueError("missing videoPromptCore")
 
@@ -558,18 +535,8 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
         scene += f" Beat: {script}"
     scene += " No logos or packaging type. Single clean commercial look."
 
-    if headline_decision == "no_headline":
-        body = f"No on-screen text, captions, or logos. {scene}"
-        out, trunc = _finalize_runway_prompt("", body)
-        if not out.strip():
-            raise ValueError("empty prompt")
-        return out, trunc
-
-    if not headline_text:
-        raise ValueError("headline expected but headlineText empty")
-
-    hp = _headline_runway_block(headline_text)
-    out, trunc = _finalize_runway_prompt(hp, scene)
+    body = f"No on-screen text, captions, or logos. {scene}"
+    out, trunc = _finalize_runway_prompt("", body)
     if not out.strip():
         raise ValueError("empty prompt")
     return out, trunc
@@ -583,7 +550,6 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
     headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
     headline_text = (plan.get("headlineText") or "").strip()
     headline_present = headline_decision != "no_headline" and bool(headline_text)
-    repl = (plan.get("replacementDirection") or "").strip()
 
     try:
         out, truncated = _build_runway_prompt_detailed(plan)
@@ -594,9 +560,10 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
         path = "compact_fallback"
 
     logger.info(
-        "RUNWAY_PROMPT final_len=%s truncated=%s headline_instruction_included=%s headline_text=%r path=%s",
+        "RUNWAY_PROMPT final_len=%s truncated=%s runway_burn_in_headline=%s headline_in_plan=%s headline_text=%r path=%s",
         len(out),
         truncated,
+        False,
         headline_present,
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
@@ -627,9 +594,6 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
 
     core = (plan.get("videoPromptCore") or "").strip()
     script = (plan.get("shortReplacementScript") or "").strip()
-    headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
-    headline_text = (plan.get("headlineText") or "").strip()
-
     if not core:
         raise ValueError("missing videoPromptCore")
 
@@ -653,18 +617,8 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
         scene += f" Beat: {script}"
     scene += " No logos or packaging type. Single clean commercial look."
 
-    if headline_decision == "no_headline":
-        body = f"No on-screen text, captions, or logos. {scene}"
-        out, trunc = _finalize_runway_prompt("", body)
-        if not out.strip():
-            raise ValueError("empty prompt")
-        return out, trunc
-
-    if not headline_text:
-        raise ValueError("headline expected but headlineText empty")
-
-    hp = _headline_runway_block(headline_text)
-    out, trunc = _finalize_runway_prompt(hp, scene)
+    body = f"No on-screen text, captions, or logos. {scene}"
+    out, trunc = _finalize_runway_prompt("", body)
     if not out.strip():
         raise ValueError("empty prompt")
     return out, trunc
@@ -673,8 +627,6 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
 def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """Shorter interaction-only bridge if the detailed interaction builder fails."""
     core = (plan.get("videoPromptCore") or "").strip()
-    headline_decision = plan.get("headlineDecision") or "no_headline"
-    headline_text = (plan.get("headlineText") or "").strip()
     script = (plan.get("shortReplacementScript") or "").strip()
     rd = (plan.get("replacementDirection") or "").strip()
     oa = (plan.get("objectA") or "").strip()
@@ -688,17 +640,6 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
         motion = f"{oa} with {obs or 'secondary'}; motion only; start frame supplied."
     else:
         motion = "Motion only; start frame supplied."
-
-    if headline_decision != "no_headline" and headline_text:
-        hp = _headline_runway_block(headline_text)
-        body_parts = [
-            "English commercial, single shot, soft light.",
-            motion,
-            f"Action: {core}" if core else "",
-            f"Beat: {script}" if script else "",
-        ]
-        body = " ".join(p for p in body_parts if p)
-        return _finalize_runway_prompt(hp, body)
 
     parts = [
         "No text or logos in-frame.",
@@ -726,9 +667,10 @@ def build_runway_interaction_prompt_from_plan(plan: Dict[str, Any]) -> str:
         path = "interaction_compact_fallback"
 
     logger.info(
-        "RUNWAY_PROMPT final_len=%s truncated=%s headline_instruction_included=%s headline_text=%r path=%s",
+        "RUNWAY_PROMPT final_len=%s truncated=%s runway_burn_in_headline=%s headline_in_plan=%s headline_text=%r path=%s",
         len(out),
         truncated,
+        False,
         headline_present,
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
