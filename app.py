@@ -23,6 +23,7 @@ from engine.side_by_side_v1 import (
     GOAL_PAIR_RETRY_INSTRUCTION,
 )
 from engine.openai_retry import OpenAIRateLimitError
+from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
 import db_session
 
 app = Flask(__name__)
@@ -789,6 +790,36 @@ def job_status():
         'error': job.get("error"),
         'message': job.get("error_message"),
     }), 200
+
+
+# -----------------------------------------------------------------------------
+# Runway video MVP (isolated): one text-to-video only — not part of /api/generate or /api/preview.
+# Future: dedicated ACE video engine may add a second output and richer prompting.
+# -----------------------------------------------------------------------------
+@app.route('/api/generate-video', methods=['POST'])
+def generate_video():
+    """MVP Runway video (default gen4_turbo); returns one video URL. Isolated from the image ad engine."""
+    try:
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+        product_description = (payload.get("productDescription") or "").strip()
+        if not product_description:
+            return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+        product_name = (payload.get("productName") or "").strip()
+        video_url, marketing_text = generate_one_video_mvp(product_name, product_description)
+        return jsonify({
+            "ok": True,
+            "videoUrl": video_url,
+            "marketingText": marketing_text,
+        }), 200
+    except RunwayVideoMVPError:
+        return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+    except Exception as e:
+        logger.error("generate_video MVP failed: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": "video_generation_failed"}), 200
 
 
 # Security status: frontend uses this to decide whether to enforce redirect/Builder checks
