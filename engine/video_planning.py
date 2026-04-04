@@ -602,3 +602,135 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
         path,
     )
     return out
+
+
+def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
+    """
+    Runway promptText when promptImage is a pre-generated ACE start frame: motion / interaction only
+    (replacement already visible in frame 1).
+    """
+    rd = (plan.get("replacementDirection") or "").strip()
+    if rd not in ("B_replaces_A", "A_replaces_B"):
+        raise ValueError("invalid replacementDirection")
+
+    oa = (plan.get("objectA") or "").strip()
+    oas = (plan.get("objectA_secondary") or "").strip()
+    ob = (plan.get("objectB") or "").strip()
+    obs = (plan.get("objectB_secondary") or "").strip()
+    if not oa or not ob:
+        raise ValueError("missing object A or B")
+
+    pbg = (plan.get("preservedBackgroundFrom") or "A").strip().upper()
+    psf = (plan.get("preservedSecondaryFrom") or "A").strip().upper()
+    if pbg not in ("A", "B") or psf not in ("A", "B"):
+        raise ValueError("invalid preserved side markers")
+
+    core = (plan.get("videoPromptCore") or "").strip()
+    script = (plan.get("shortReplacementScript") or "").strip()
+    headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
+    headline_text = (plan.get("headlineText") or "").strip()
+
+    if not core:
+        raise ValueError("missing videoPromptCore")
+
+    if rd == "B_replaces_A":
+        sec = oas or "the contextual secondary object"
+        scene = (
+            f"The first frame is supplied as the start image; replacement is already complete. "
+            f"Video motion only: {ob} interacts with {sec} in that fixed composition (background side {pbg}, secondary side {psf}); "
+            f"subtle natural movement and camera; do not depict transformation, morphing, or {oa} becoming {ob}. "
+            f"Action: {core}"
+        )
+    else:
+        sec = obs or "the contextual secondary object"
+        scene = (
+            f"The first frame is supplied as the start image; replacement is already complete. "
+            f"Video motion only: {oa} interacts with {sec} in that fixed composition (background side {pbg}, secondary side {psf}); "
+            f"subtle natural movement and camera; do not depict transformation, morphing, or {ob} becoming {oa}. "
+            f"Action: {core}"
+        )
+    if script:
+        scene += f" Beat: {script}"
+    scene += " No logos or packaging type. Single clean commercial look."
+
+    if headline_decision == "no_headline":
+        body = f"No on-screen text, captions, or logos. {scene}"
+        out, trunc = _finalize_runway_prompt("", body)
+        if not out.strip():
+            raise ValueError("empty prompt")
+        return out, trunc
+
+    if not headline_text:
+        raise ValueError("headline expected but headlineText empty")
+
+    hp = _headline_runway_block(headline_text)
+    out, trunc = _finalize_runway_prompt(hp, scene)
+    if not out.strip():
+        raise ValueError("empty prompt")
+    return out, trunc
+
+
+def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
+    """Shorter interaction-only bridge if the detailed interaction builder fails."""
+    core = (plan.get("videoPromptCore") or "").strip()
+    headline_decision = plan.get("headlineDecision") or "no_headline"
+    headline_text = (plan.get("headlineText") or "").strip()
+    script = (plan.get("shortReplacementScript") or "").strip()
+    rd = (plan.get("replacementDirection") or "").strip()
+    oa = (plan.get("objectA") or "").strip()
+    ob = (plan.get("objectB") or "").strip()
+    oas = (plan.get("objectA_secondary") or "").strip()
+    obs = (plan.get("objectB_secondary") or "").strip()
+
+    if rd == "B_replaces_A":
+        motion = f"{ob} with {oas or 'secondary'}; motion only; start frame supplied."
+    elif rd == "A_replaces_B":
+        motion = f"{oa} with {obs or 'secondary'}; motion only; start frame supplied."
+    else:
+        motion = "Motion only; start frame supplied."
+
+    if headline_decision != "no_headline" and headline_text:
+        hp = _headline_runway_block(headline_text)
+        body_parts = [
+            "English commercial, single shot, soft light.",
+            motion,
+            f"Action: {core}" if core else "",
+            f"Beat: {script}" if script else "",
+        ]
+        body = " ".join(p for p in body_parts if p)
+        return _finalize_runway_prompt(hp, body)
+
+    parts = [
+        "No text or logos in-frame.",
+        motion,
+        f"Action: {core}" if core else "",
+        f"Beat: {script}" if script else "",
+    ]
+    return _finalize_runway_prompt("", " ".join(p for p in parts if p))
+
+
+def build_runway_interaction_prompt_from_plan(plan: Dict[str, Any]) -> str:
+    """
+    ACE plan → Runway promptText when promptImage is the generated start frame: interaction/motion only.
+    """
+    headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
+    headline_text = (plan.get("headlineText") or "").strip()
+    headline_present = headline_decision != "no_headline" and bool(headline_text)
+
+    try:
+        out, truncated = _build_runway_interaction_prompt_detailed(plan)
+        path = "interaction_detailed"
+    except Exception as e:
+        logger.warning("RUNWAY_PROMPT interaction_detailed_failed (%s); using interaction compact fallback", e)
+        out, truncated = _build_runway_interaction_prompt_compact_fallback(plan)
+        path = "interaction_compact_fallback"
+
+    logger.info(
+        "RUNWAY_PROMPT final_len=%s truncated=%s headline_instruction_included=%s headline_text=%r path=%s",
+        len(out),
+        truncated,
+        headline_present,
+        (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
+        path,
+    )
+    return out

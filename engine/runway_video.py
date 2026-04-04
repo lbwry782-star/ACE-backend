@@ -14,7 +14,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from engine.video_planning import build_runway_prompt_from_plan, fetch_video_plan_o3
+from engine.video_planning import (
+    build_runway_interaction_prompt_from_plan,
+    build_runway_prompt_from_plan,
+    fetch_video_plan_o3,
+)
+from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +101,7 @@ def _create_text_to_video_task(
     base_url: str,
     model: str,
     prompt_text: str,
+    prompt_image_data_uri: Optional[str] = None,
 ) -> str:
     url = f"{base_url}/v1/image_to_video"
     body: Dict[str, Any] = {
@@ -107,6 +113,9 @@ def _create_text_to_video_task(
     # gen4.5: text-to-video — omit promptImage per Runway docs. gen4_turbo (default): promptImage required.
     if model == "gen4.5":
         logger.info("RUNWAY_MVP task_create model=%s mode=text_only promptImage=omitted", model)
+    elif prompt_image_data_uri:
+        body["promptImage"] = prompt_image_data_uri
+        logger.info("RUNWAY_MVP task_create model=%s promptImage=generated", model)
     else:
         body["promptImage"] = _NEUTRAL_PROMPT_IMAGE_DATA_URI
         logger.info("RUNWAY_MVP task_create model=%s promptImage=neutral", model)
@@ -183,9 +192,18 @@ def generate_one_video_mvp(
     base = _env_base_url()
     model = _env_model()
     plan = fetch_video_plan_o3(product_name, product_description)
+    prompt_image_data_uri: Optional[str] = None
     if plan:
-        prompt = build_runway_prompt_from_plan(plan)
         marketing = (plan.get("headlineText") or "").strip()
+        # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
+        if model != "gen4.5":
+            prompt_image_data_uri = generate_video_start_image_data_uri(plan)
+            if prompt_image_data_uri:
+                prompt = build_runway_interaction_prompt_from_plan(plan)
+            else:
+                prompt = build_runway_prompt_from_plan(plan)
+        else:
+            prompt = build_runway_prompt_from_plan(plan)
     else:
         prompt = build_simple_prompt(product_name, product_description)
         marketing = ""
@@ -195,7 +213,9 @@ def generate_one_video_mvp(
         )
 
     session = requests.Session()
-    task_id = _create_text_to_video_task(session, base, model, prompt)
+    task_id = _create_text_to_video_task(
+        session, base, model, prompt, prompt_image_data_uri=prompt_image_data_uri
+    )
 
     deadline = time.monotonic() + _MAX_WAIT_SECONDS
     logger.info("RUNWAY_MVP polling_started task_id=%s max_wait_s=%s", task_id, _MAX_WAIT_SECONDS)
