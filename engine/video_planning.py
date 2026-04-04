@@ -36,6 +36,9 @@ OUTPUT FORMAT (strict)
 - Use the exact camelCase keys below. Do not omit required keys; use "" only where allowed.
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
+Field notes (must follow in JSON values):
+- morphologicalReason: Briefly justify why A and B are extremely close in overall form (whole-object, painterly grasp — not contour trivia alone).
+
 Required keys (all strings except where noted):
 {
   "productNameResolved": string,
@@ -60,12 +63,25 @@ Required keys (all strings except where noted):
 def _build_video_planner_instructions() -> str:
     return """You are the ACE video planning engine. All user-facing strings must be in English.
 
+VIDEO PIPELINE (non-negotiable)
+- The generative video opens from a first frame that already shows the replacement state: B in A's role, with A's background, A's secondary object, and A's spatial position. The rest of the video shows B interacting with A's secondary in that composition.
+- Therefore Object A and Object B must be EXTREMELY morphologically similar in overall form. This is a core engine rule, not optional. If B is only moderately similar, the replacement will not read; the viewer must feel B belongs in A's place instantly, before any conceptual explanation.
+
 CONTEXT
 - ACE is an ad-generation product. Output is one short commercial video concept for a generative video model.
 - Objects must be concrete, iconic physical nouns (classic situations). No brands, logos, text-as-object, or vague environments (e.g. "forest", "skyline") as primaries.
 - Each main object has a nearby secondary object that is its classic context (not part of the main object): e.g. can+straw, dog+bone, bee+flower. Secondaries are not literal parts of the main object.
-- Object A is chosen from the product description with an intuitive grasp of overall form (like a painter), not narrow contour trivia.
-- Object B is morphologically similar to A. Prefer stronger shape match over forcing the advertising promise; the viewer completes the link. Stop when B is strongly correct morphologically AND plausibly tied to the promise — never swap a better shape match for a weaker one just to verbalize the promise.
+- Object A is chosen from the product description with an intuitive grasp of overall form — like a painter sensing the whole object, not technical contour-only tracing.
+
+EXTREME MORPHOLOGICAL SIMILARITY (A vs B)
+- Object B must be very, very close to Object A in overall silhouette, proportion, and massing. Shape correctness is STRONGLY preferred over verbal explicitness of the advertising promise.
+- Do NOT accept a merely "interesting" conceptual link. Do NOT accept a B that is only somewhat similar. Do NOT choose a less shape-correct B because it makes the promise easier to explain in words.
+- The replacement must be legible at first glance: the viewer should feel B can convincingly occupy A's place before the mind finishes the conceptual leap.
+
+SEARCH RULE FOR B
+- If a candidate B is not morphologically strong enough, keep searching. Do not stop at the first clever conceptual pairing. Stop only when B is BOTH: (a) extremely morphologically close to A in whole form, AND (b) plausibly connected to the advertising promise.
+- Never swap a better shape match for a weaker one to favor the promise.
+
 - Derive the advertising promise (advertisingPromise) from the product description.
 
 REPLACEMENT
@@ -87,7 +103,8 @@ VIDEO (for videoPromptCore)
 QUALITY
 - Prefer morphological correctness and viewer intuition over explicit verbal explanation in videoPromptCore.
 - shortReplacementScript: a brief plain-English line describing the A/B connection for the replacement shot.
-- morphologicalReason and promiseReason: short planner notes (why B matches A; why B fits the promise).
+- morphologicalReason: REQUIRED to state briefly why A and B are extremely close in overall form (whole-object, painterly grasp — not edge-matching alone). Be strict and concrete.
+- promiseReason: short note on how B still ties to the advertising promise without weakening the shape requirement.
 
 """
 
