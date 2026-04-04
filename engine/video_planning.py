@@ -7,6 +7,7 @@ Future: richer ACE video engine (e.g. two outputs); keep this module inspectable
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -70,8 +71,20 @@ VIDEO PIPELINE (non-negotiable)
 CONTEXT
 - ACE is an ad-generation product. Output is one short commercial video concept for a generative video model.
 - Objects must be concrete, iconic physical nouns (classic situations). No brands, logos, text-as-object, or vague environments (e.g. "forest", "skyline") as primaries.
-- Each main object has a nearby secondary object that is its classic context (not part of the main object): e.g. can+straw, dog+bone, bee+flower. Secondaries are not literal parts of the main object.
+- Each main object is paired with a secondary object: a separate, concrete physical thing that plausibly appears in the same everyday scene as the main object, and is not a literal part of the main (not a limb, label, packaging line, or surface detail belonging to the main). Name specific nouns; do not use placeholder wording.
 - Object A is chosen from the product description with an intuitive grasp of overall form — like a painter sensing the whole object, not technical contour-only tracing.
+
+DIVERSITY (DELIBERATE — NOT RANDOM)
+- Across different planning runs for different products or briefs, avoid repeating the same or overly familiar object pairings when other valid choices exist under the rules below.
+- Prefer less obvious but still valid object choices; do not default to the most typical or clichéd examples if another pair meets EXTREME morphological similarity and replacement legibility equally well.
+- Before you commit to objectA and objectB, explore the space of candidates: compare multiple serious alternatives under the same strict constraints, then choose.
+
+MANY VALID PAIRS UNDER THE SAME BAR
+- There are many distinct (A, B) pairs that can satisfy EXTREME morphological similarity; the rule is strict, but the solution set is not a single narrow cliché.
+- Do not treat the first pair that seems workable as sufficient. Continue searching for alternatives at equal morphological strength before deciding.
+
+ANTI-CONVERGENCE
+- If a candidate solution feels like a common, expected, or "first thought" pairing for the product or brief, keep searching for a less obvious alternative that is equally valid on morphology and promise fit.
 
 EXTREME MORPHOLOGICAL SIMILARITY (A vs B)
 - Object B must be very, very close to Object A in overall silhouette, proportion, and massing. Shape correctness is STRONGLY preferred over verbal explicitness of the advertising promise.
@@ -81,6 +94,7 @@ EXTREME MORPHOLOGICAL SIMILARITY (A vs B)
 SEARCH RULE FOR B
 - If a candidate B is not morphologically strong enough, keep searching. Do not stop at the first clever conceptual pairing. Stop only when B is BOTH: (a) extremely morphologically close to A in whole form, AND (b) plausibly connected to the advertising promise.
 - Never swap a better shape match for a weaker one to favor the promise.
+- When more than one pair satisfies (a) and (b) at comparable strength, prefer the pair that is less gratuitously generic or over-repeated, without ever relaxing morphology.
 
 - Derive the advertising promise (advertisingPromise) from the product description.
 
@@ -351,6 +365,12 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     }, None
 
 
+def _object_pair_digest(oa: str, ob: str) -> str:
+    """Short stable hash for diversity debugging (not cryptographic)."""
+    raw = f"{(oa or '').strip()}\n{(ob or '').strip()}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:12]
+
+
 def log_plan_summary(plan: Dict[str, Any]) -> None:
     """Concise server-side log of the chosen plan (no full prompts, no secrets)."""
     logger.info(
@@ -367,6 +387,10 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
         plan.get("replacementDirection"),
         plan.get("preservedBackgroundFrom"),
         plan.get("preservedSecondaryFrom"),
+    )
+    logger.info(
+        "VIDEO_PLAN pair_digest=%s",
+        _object_pair_digest(str(plan.get("objectA") or ""), str(plan.get("objectB") or "")),
     )
     logger.info(
         'VIDEO_PLAN headline_decision=%s headline="%s"',
