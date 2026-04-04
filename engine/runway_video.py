@@ -14,6 +14,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from engine.video_planning import build_runway_prompt_from_plan, fetch_video_plan_o3
+
 logger = logging.getLogger(__name__)
 
 # Official Runway API (see https://docs.dev.runwayml.com/guides/using-the-api)
@@ -86,17 +88,6 @@ def build_simple_prompt(product_name: str, product_description: str) -> str:
     if len(text) > 1000:
         text = text[:1000]
     return text
-
-
-def mvp_marketing_text(product_name: str, product_description: str) -> str:
-    """Temporary companion text until the 50-word copy engine exists."""
-    name = (product_name or "").strip() or "Product"
-    desc = (product_description or "").strip()
-    if not desc:
-        return f"{name} — ACE video preview (MVP)."
-    if len(desc) > 400:
-        desc = desc[:397] + "..."
-    return f"{name}: {desc}"
 
 
 def _create_text_to_video_task(
@@ -182,7 +173,9 @@ def generate_one_video_mvp(
     product_description: str,
 ) -> Tuple[str, str]:
     """
-    Create one Runway video task, poll until done or timeout, return (video_url, marketing_text).
+    Create one Runway video task, poll until done or timeout.
+    Returns (video_url, headline_for_ui): second value is the planned headline text if any (else ""),
+    for the existing marketingText API field — not 50-word body copy.
     Raises RunwayVideoMVPError on any failure.
     """
     if not _env_api_key():
@@ -191,8 +184,14 @@ def generate_one_video_mvp(
 
     base = _env_base_url()
     model = _env_model()
-    prompt = build_simple_prompt(product_name, product_description)
-    marketing = mvp_marketing_text(product_name, product_description)
+    plan = fetch_video_plan_o3(product_name, product_description)
+    if plan:
+        prompt = build_runway_prompt_from_plan(plan)
+        marketing = (plan.get("headlineText") or "").strip()
+    else:
+        prompt = build_simple_prompt(product_name, product_description)
+        marketing = ""
+        logger.info("RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true")
 
     session = requests.Session()
     task_id = _create_text_to_video_task(session, base, model, prompt)

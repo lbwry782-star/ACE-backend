@@ -798,7 +798,7 @@ def job_status():
 # -----------------------------------------------------------------------------
 @app.route('/api/generate-video', methods=['POST'])
 def generate_video():
-    """MVP Runway video (default gen4_turbo); returns one video URL. Isolated from the image ad engine."""
+    """Runway gen4_turbo video; ACE o3-pro plan when possible, else simple prompt. marketingText = headline only or empty."""
     try:
         if not request.is_json:
             return jsonify({"ok": False, "error": "video_generation_failed"}), 200
