@@ -1,7 +1,8 @@
 """
 Post-process Runway MP4: burn in headline locally with ffmpeg (Runway receives visuals-only prompts).
 
-Does not touch image engine routes. On any failure, returns the original video URL.
+Processed files are stored on disk under VIDEO_HEADLINE_STORAGE_DIR as {token}.mp4 so they survive
+worker restarts (lookup is disk-only, not in-memory).
 """
 
 from __future__ import annotations
@@ -12,23 +13,54 @@ import re
 import shutil
 import subprocess
 import tempfile
-import threading
 import uuid
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-_lock = threading.Lock()
-# Ephemeral token -> path on disk (short-lived; process lifetime)
-_video_by_token: Dict[str, Path] = {}
+# Only uuid4().hex tokens (32 lowercase hex chars) map to files — no path traversal
+_TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
 
 _HOLD_SECONDS = float((os.environ.get("VIDEO_HEADLINE_HOLD_SECONDS") or "1.5").strip() or "1.5")
 _HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_SECONDS") or "180").strip() or "180")
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
 _FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "120").strip() or "120")
+
+
+def _storage_root() -> Path:
+    raw = (os.environ.get("VIDEO_HEADLINE_STORAGE_DIR") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(tempfile.gettempdir()) / "ace_video_headline_store"
+
+
+def _path_for_token(token: str) -> Optional[Path]:
+    """Safe resolved path under storage root for a valid token; None if token malformed."""
+    t = (token or "").strip()
+    if not _TOKEN_RE.match(t):
+        return None
+    try:
+        root = _storage_root().resolve()
+        p = (root / f"{t}.mp4").resolve()
+        if p.parent != root:
+            return None
+        return p
+    except OSError:
+        return None
+
+
+def get_headline_video_path(token: str) -> Optional[Path]:
+    """
+    Return path to stored processed MP4 if token is valid and file exists on disk.
+    Survives process restart (no in-memory map).
+    """
+    p = _path_for_token(token)
+    if p is None:
+        return None
+    return p if p.is_file() else None
 
 
 def _default_font_path() -> Optional[str]:
@@ -81,7 +113,6 @@ def _ffprobe_duration_seconds(path: Path, timeout_sec: float) -> float:
 
 
 def _filter_path_for_ffmpeg(p: Path) -> str:
-    # Paths in ffmpeg filter args: escape special chars
     s = str(p.resolve()).replace("\\", "/")
     return s.replace(":", "\\:")
 
@@ -99,11 +130,6 @@ def _sanitize_headline(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"[\r\n]+", " ", t)
     return t
-
-
-def get_headline_video_path(token: str) -> Optional[Path]:
-    with _lock:
-        return _video_by_token.get(token)
 
 
 def postprocess_video_headline(
@@ -147,14 +173,29 @@ def postprocess_video_headline(
     logger.info("VIDEO_HEADLINE_POSTPROCESS start")
     tmp = Path(tempfile.mkdtemp(prefix="ace_vid_headline_"))
     inp = tmp / "in.mp4"
-    out = tmp / "out.mp4"
     text_file = tmp / "headline.txt"
+
+    token = uuid.uuid4().hex
+    out_path = _path_for_token(token)
+    if out_path is None:
+        logger.warning("VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=token_internal_error")
+        return source_video_url
 
     def _fail(reason: str) -> str:
         logger.warning("VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=%s", reason)
+        try:
+            if out_path.exists():
+                out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return source_video_url
 
     try:
+        try:
+            _storage_root().mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return _fail(f"storage_mkdir:{type(e).__name__}")
+
         text_file.write_text(headline_clean, encoding="utf-8")
         try:
             r = requests.get(source_video_url, timeout=_HTTP_DOWNLOAD_TIMEOUT, stream=True)
@@ -208,7 +249,7 @@ def postprocess_video_headline(
             "23",
             "-c:a",
             "copy",
-            str(out),
+            str(out_path),
         ]
         try:
             p = subprocess.run(
@@ -240,7 +281,7 @@ def postprocess_video_headline(
                 "aac",
                 "-b:a",
                 "192k",
-                str(out),
+                str(out_path),
             ]
             try:
                 p2 = subprocess.run(
@@ -258,13 +299,12 @@ def postprocess_video_headline(
                     f"ffmpeg_exit:{p2.returncode}:stderr_len={len(p2.stderr or '')}"
                 )
 
-        token = uuid.uuid4().hex
-        with _lock:
-            _video_by_token[token] = out
-
-        final_url = f"{base}/api/video-headline/{token}"
         preview = headline_clean[:80] + ("…" if len(headline_clean) > 80 else "")
-        logger.info('VIDEO_HEADLINE_POSTPROCESS applied headline="%s"', preview)
+        logger.info(
+            'VIDEO_HEADLINE_POSTPROCESS applied headline="%s" storage=disk',
+            preview,
+        )
+        final_url = f"{base}/api/video-headline/{token}"
         return final_url
     except Exception as e:
         logger.warning(
@@ -272,10 +312,14 @@ def postprocess_video_headline(
             type(e).__name__,
             e,
         )
+        try:
+            if out_path.exists():
+                out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         return source_video_url
     finally:
         try:
-            if inp.exists():
-                inp.unlink(missing_ok=True)
+            shutil.rmtree(tmp, ignore_errors=True)
         except OSError:
             pass

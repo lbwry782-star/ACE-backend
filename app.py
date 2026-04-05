@@ -799,10 +799,12 @@ def job_status():
 # -----------------------------------------------------------------------------
 @app.route('/api/video-headline/<token>', methods=['GET'])
 def serve_video_headline(token):
-    """Serve ffmpeg-processed MP4 from post-process headline overlay (token from videoUrl)."""
+    """Serve ffmpeg-processed MP4 from disk-backed store (token from videoUrl); survives worker restart."""
     path = get_headline_video_path((token or "").strip())
     if not path or not path.is_file():
+        logger.info("VIDEO_HEADLINE_SERVE miss lookup=disk")
         return jsonify({"ok": False, "error": "not_found"}), 404
+    logger.info("VIDEO_HEADLINE_SERVE hit lookup=disk")
     return send_file(
         str(path),
         mimetype="video/mp4",
