@@ -19,6 +19,7 @@ from engine.video_planning import (
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
 )
+from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
@@ -319,9 +320,13 @@ def generate_one_video_mvp(
             url = _extract_video_url(task)
             if url:
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
-                # Headline postprocess + upload disabled temporarily — return Runway URL only (stable E2E completion).
-                logger.info("RUNWAY_MVP headline_postprocess_bypass=1 using_original_runway_url=1")
-                return url, marketing
+                final_url = postprocess_video_headline(
+                    url,
+                    marketing,
+                    public_base_url or "",
+                    headline_decision=headline_decision,
+                )
+                return final_url, marketing
             raise RunwayVideoMVPError("generation_failed")
 
         if status in _FAILED_STATUSES:
