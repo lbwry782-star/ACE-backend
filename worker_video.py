@@ -63,6 +63,7 @@ def main() -> None:
                 public_base_url=public_base_url,
             )
             video_job_mark_done(job_id, video_url, marketing_text or "")
+            logger.info("VIDEO_JOB_RESULT jobId=%s video_url=%s", job_id, video_url)
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
         except RunwayVideoMVPError:
             logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)

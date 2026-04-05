@@ -30,6 +30,8 @@ _HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
 # Single re-encode pass is typically faster than previous concat; default allows headroom on slow hosts.
 _FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "180").strip() or "180")
+# Worker → web upload (split services: ffmpeg runs on worker, GET /api/video-headline/<token> on web)
+_UPLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_UPLOAD_TIMEOUT_SECONDS") or "120").strip() or "120")
 
 
 def _storage_root() -> Path:
@@ -63,6 +65,24 @@ def get_headline_video_path(token: str) -> Optional[Path]:
     if p is None:
         return None
     return p if p.is_file() else None
+
+
+def write_headline_video_bytes(token: str, data: bytes) -> bool:
+    """
+    Persist processed MP4 bytes for a valid token (same path as ffmpeg output).
+    Used by the web service when the worker POSTs the artifact (split deploy).
+    """
+    if not data:
+        return False
+    p = _path_for_token(token)
+    if p is None:
+        return False
+    try:
+        _storage_root().mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        return True
+    except OSError:
+        return False
 
 
 def _default_font_path() -> Optional[str]:
@@ -331,7 +351,66 @@ def postprocess_video_headline(
             elapsed_ms,
             preview,
         )
-        return f"{base}/api/video-headline/{token}"
+        public_url = f"{base}/api/video-headline/{token}"
+        upload_secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
+        if upload_secret:
+            upload_endpoint = f"{base}/api/internal/video-headline-artifact"
+            try:
+                with open(out_path, "rb") as fp:
+                    up = requests.post(
+                        upload_endpoint,
+                        headers={"X-ACE-Video-Headline-Upload-Secret": upload_secret},
+                        files={"file": ("headline.mp4", fp, "video/mp4")},
+                        data={"token": token},
+                        timeout=_UPLOAD_TIMEOUT,
+                    )
+                ok_body = False
+                if up.status_code == 200:
+                    try:
+                        j = up.json()
+                        ok_body = isinstance(j, dict) and j.get("ok") is True
+                    except ValueError:
+                        ok_body = False
+                if ok_body:
+                    local_str = str(out_path)
+                    try:
+                        out_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    logger.info(
+                        "VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s local_path=%s upload=web_ok",
+                        public_url,
+                        local_str,
+                    )
+                    return public_url
+                logger.warning(
+                    "VIDEO_HEADLINE_POSTPROCESS upload_failed http_status=%s body_len=%s fallback_to_original=true",
+                    up.status_code,
+                    len(up.content or b""),
+                )
+            except requests.Timeout:
+                logger.warning("VIDEO_HEADLINE_POSTPROCESS upload_timeout fallback_to_original=true")
+            except requests.RequestException as e:
+                logger.warning(
+                    "VIDEO_HEADLINE_POSTPROCESS upload_error err=%s fallback_to_original=true",
+                    type(e).__name__,
+                )
+            try:
+                if out_path.exists():
+                    out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            logger.warning(
+                "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=artifact_upload_failed"
+            )
+            return source_video_url
+
+        logger.info(
+            "VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s local_path=%s upload=skipped",
+            public_url,
+            str(out_path),
+        )
+        return public_url
     except Exception as e:
         logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=exception:%s", type(e).__name__)
         logger.warning(

@@ -23,7 +23,7 @@ from engine.side_by_side_v1 import (
     GOAL_PAIR_RETRY_INSTRUCTION,
 )
 from engine.openai_retry import OpenAIRateLimitError
-from engine.video_headline_postprocess import get_headline_video_path
+from engine.video_headline_postprocess import get_headline_video_path, write_headline_video_bytes
 from engine.video_jobs_redis import redis_configured, video_job_create, video_job_get
 import db_session
 
@@ -812,6 +812,43 @@ def serve_video_headline(token):
     )
 
 
+@app.route("/api/internal/video-headline-artifact", methods=["POST"])
+def internal_video_headline_artifact():
+    """
+    Background worker POSTs the processed MP4 here so GET /api/video-headline/<token> can read it
+    from this process's disk (split web + worker on Render).
+    """
+    secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
+    if not secret:
+        return jsonify({"ok": False, "error": "not_configured"}), 503
+    if (request.headers.get("X-ACE-Video-Headline-Upload-Secret") or "").strip() != secret:
+        logger.warning("VIDEO_HEADLINE_UPLOAD_REJECT reason=bad_secret")
+        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    _max_raw = (os.environ.get("VIDEO_HEADLINE_MAX_UPLOAD_BYTES") or "").strip()
+    max_bytes = int(_max_raw) if _max_raw else 250 * 1024 * 1024
+    if request.content_length is not None and request.content_length > max_bytes:
+        return jsonify({"ok": False, "error": "too_large"}), 413
+    token = (request.form.get("token") or "").strip()
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "error": "missing_file"}), 400
+    data = upload.stream.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        return jsonify({"ok": False, "error": "too_large"}), 413
+    if not write_headline_video_bytes(token, data):
+        logger.warning(
+            "VIDEO_HEADLINE_UPLOAD_REJECT reason=invalid_token_or_write token_prefix=%s",
+            (token[:8] if len(token) >= 8 else ""),
+        )
+        return jsonify({"ok": False, "error": "invalid_token_or_write"}), 400
+    logger.info(
+        "VIDEO_HEADLINE_UPLOAD_STORED bytes=%s token_prefix=%s",
+        len(data),
+        token[:8] if len(token) >= 8 else token,
+    )
+    return jsonify({"ok": True}), 200
+
+
 @app.route('/api/generate-video', methods=['POST'])
 def generate_video():
     """Enqueue ACE video job in Redis; worker runs pipeline. Poll GET /api/video-status?jobId=."""
@@ -865,8 +902,10 @@ def video_status():
     logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
     out = {"ok": True, "status": status}
     if status == "done":
-        out["videoUrl"] = job.get("videoUrl") or ""
+        vu = job.get("videoUrl") or ""
+        out["videoUrl"] = vu
         out["marketingText"] = job.get("marketingText") or ""
+        logger.info("VIDEO_JOB_RESULT jobId=%s video_url=%s", job_id, vu)
     if status == "error":
         out["error"] = job.get("error") or "video_generation_failed"
     return jsonify(out), 200
