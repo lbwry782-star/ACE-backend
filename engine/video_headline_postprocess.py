@@ -403,7 +403,7 @@ def postprocess_video_headline(
                 pass
             return source_video_url
         if upload_secret:
-            upload_endpoint = f"{base}/api/internal/video-headline-artifact"
+            upload_endpoint = f"{base}/api/video-headline-artifact"
             logger.info(
                 "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=upload_attempt endpoint=%s",
                 upload_endpoint,
