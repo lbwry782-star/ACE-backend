@@ -7,6 +7,7 @@ Future: richer ACE video engine (e.g. two outputs); keep this module inspectable
 
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -22,6 +23,10 @@ logger = logging.getLogger(__name__)
 # Safe preview length for logs (no secrets; truncated model output)
 _LOG_PREVIEW_CHARS = 240
 
+
+class VideoPlanningTimeoutError(Exception):
+    """Hard wall-clock deadline exceeded waiting for o3 planning (see fetch_video_plan_o3)."""
+
 # Match codebase: o4-mini maps to o3-pro
 def _text_model() -> str:
     m = (os.environ.get("VIDEO_PLANNER_MODEL") or os.environ.get("OPENAI_TEXT_MODEL", "") or "").strip() or "o3-pro"
@@ -29,6 +34,11 @@ def _text_model() -> str:
 
 
 _VIDEO_PLAN_TIMEOUT = float((os.environ.get("VIDEO_PLANNER_TIMEOUT_SECONDS") or "120").strip() or "120")
+# Wall-clock cap for the whole planning call (thread join); must not exceed indefinitely if SDK stalls
+_VIDEO_PLAN_HARD_SECONDS = float(
+    (os.environ.get("VIDEO_PLANNER_HARD_TIMEOUT_SECONDS") or str(_VIDEO_PLAN_TIMEOUT + 30.0)).strip()
+    or str(_VIDEO_PLAN_TIMEOUT + 30.0)
+)
 
 
 _JSON_KEYS = """
@@ -404,7 +414,7 @@ def _reasoning_effort() -> str:
     return raw if raw in ("low", "medium") else "low"
 
 
-def fetch_video_plan_o3(product_name: str, product_description: str) -> Optional[Dict[str, Any]]:
+def _fetch_video_plan_o3_sync(product_name: str, product_description: str) -> Optional[Dict[str, Any]]:
     """
     Single o3-pro call returning a validated plan dict, or None on any failure (caller uses fallback).
     """
@@ -422,9 +432,10 @@ Product description:
 """
     instructions = _build_video_planner_instructions()
     full_input = instructions + "\n\n" + user_block
+    _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
         api_key=api_key,
-        timeout=httpx.Timeout(_VIDEO_PLAN_TIMEOUT),
+        timeout=httpx.Timeout(connect=_t, read=_VIDEO_PLAN_TIMEOUT, write=_t, pool=_t),
         max_retries=0,
     )
     try:
@@ -471,6 +482,24 @@ Product description:
             e,
         )
         return None
+
+
+def fetch_video_plan_o3(product_name: str, product_description: str) -> Optional[Dict[str, Any]]:
+    """
+    Same as _fetch_video_plan_o3_sync but with a hard wall-clock deadline so the worker cannot hang here.
+    On deadline exceeded, raises VideoPlanningTimeoutError (caller must fail the job).
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        fut = ex.submit(_fetch_video_plan_o3_sync, product_name, product_description)
+        try:
+            return fut.result(timeout=_VIDEO_PLAN_HARD_SECONDS)
+        except concurrent.futures.TimeoutError:
+            logger.error(
+                "VIDEO_PLAN_FAIL_TIMEOUT hard_seconds=%s (VIDEO_PLANNER_HARD_TIMEOUT_SECONDS or planner+30)",
+                _VIDEO_PLAN_HARD_SECONDS,
+            )
+            logger.info("VIDEO_JOB_STEP step=plan_video timeout")
+            raise VideoPlanningTimeoutError()
 
 
 _RUNWAY_PROMPT_MAX_CHARS = 1000

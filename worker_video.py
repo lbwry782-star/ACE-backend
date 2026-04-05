@@ -96,7 +96,9 @@ def main() -> None:
                 video_url,
             )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
-        except RunwayVideoMVPError:
+        except RunwayVideoMVPError as e:
+            _reason = e.args[0] if getattr(e, "args", None) else "runway_mvp"
+            logger.warning("VIDEO_JOB_FAILED jobId=%s reason=%s", job_id, _reason)
             logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)
             try:
                 video_job_mark_error(job_id, "video_generation_failed")

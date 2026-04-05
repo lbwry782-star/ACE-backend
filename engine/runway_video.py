@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from engine.video_planning import (
+    VideoPlanningTimeoutError,
     build_runway_interaction_prompt_from_plan,
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
@@ -253,7 +254,11 @@ def generate_one_video_mvp(
     base = _env_base_url()
     model = _env_model()
     logger.info("VIDEO_JOB_STEP step=plan_video start")
-    plan = fetch_video_plan_o3(product_name, product_description)
+    try:
+        plan = fetch_video_plan_o3(product_name, product_description)
+    except VideoPlanningTimeoutError:
+        logger.error("VIDEO_JOB_FAILED reason=planning_timeout")
+        raise RunwayVideoMVPError("planning_timeout")
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
     prompt_image_data_uri: Optional[str] = None
     headline_decision: Optional[str] = None
