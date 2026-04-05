@@ -167,6 +167,72 @@ _jobs: Dict[str, dict] = {}  # jobId -> { status, created_at, finished_at, sessi
 _jobs_lock = Lock()
 _preview_executor = ThreadPoolExecutor(max_workers=1)
 
+# Async video jobs for /api/generate-video (background + GET /api/video-status polling)
+_VIDEO_JOB_TTL_SECONDS = 30 * 60
+_video_jobs: Dict[str, dict] = {}
+_video_jobs_lock = Lock()
+_video_executor = ThreadPoolExecutor(max_workers=1)
+
+
+def _cleanup_video_jobs() -> None:
+    now = time.time()
+    with _video_jobs_lock:
+        expired = [
+            jid
+            for jid, job in _video_jobs.items()
+            if now - job.get("created_at", now) > _VIDEO_JOB_TTL_SECONDS
+        ]
+        for jid in expired:
+            _video_jobs.pop(jid, None)
+
+
+def _get_video_job(job_id: str) -> Optional[dict]:
+    _cleanup_video_jobs()
+    with _video_jobs_lock:
+        return _video_jobs.get(job_id)
+
+
+def _set_video_job(job_id: str, data: dict) -> None:
+    with _video_jobs_lock:
+        _video_jobs[job_id] = data
+
+
+def _run_generate_video_job(
+    job_id: str,
+    product_name: str,
+    product_description: str,
+    public_base_url: str,
+) -> None:
+    """Background: full ACE video pipeline (plan, start image, Runway, headline postprocess)."""
+    try:
+        video_url, marketing_text = generate_one_video_mvp(
+            product_name, product_description, public_base_url=public_base_url
+        )
+        with _video_jobs_lock:
+            j = _video_jobs.get(job_id)
+            if j is not None:
+                j["status"] = "done"
+                j["finished_at"] = time.time()
+                j["videoUrl"] = video_url
+                j["marketingText"] = marketing_text or ""
+        logger.info("VIDEO_JOB_DONE jobId=%s", job_id)
+    except RunwayVideoMVPError:
+        with _video_jobs_lock:
+            j = _video_jobs.get(job_id)
+            if j is not None:
+                j["status"] = "error"
+                j["finished_at"] = time.time()
+                j["error"] = "video_generation_failed"
+        logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)
+    except Exception as e:
+        logger.error("VIDEO_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+        with _video_jobs_lock:
+            j = _video_jobs.get(job_id)
+            if j is not None:
+                j["status"] = "error"
+                j["finished_at"] = time.time()
+                j["error"] = "video_generation_failed"
+
 
 def _get_artifact(session_id: str, ad_index: int):
     """Get stored artifact for (session_id, ad_index). Returns None if missing or expired."""
@@ -815,7 +881,7 @@ def serve_video_headline(token):
 
 @app.route('/api/generate-video', methods=['POST'])
 def generate_video():
-    """Runway gen4_turbo video; ACE o3-pro plan when possible, else simple prompt. marketingText = headline only or empty."""
+    """Queue ACE video pipeline; poll GET /api/video-status?jobId= for videoUrl (non-blocking)."""
     try:
         if not request.is_json:
             return jsonify({"ok": False, "error": "video_generation_failed"}), 200
@@ -827,19 +893,65 @@ def generate_video():
             return jsonify({"ok": False, "error": "video_generation_failed"}), 200
         product_name = (payload.get("productName") or "").strip()
         base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
-        video_url, marketing_text = generate_one_video_mvp(
-            product_name, product_description, public_base_url=base
-        )
+        job_id = str(uuid.uuid4())
+        job_record = {
+            "jobId": job_id,
+            "status": "running",
+            "created_at": time.time(),
+            "product_name": product_name,
+            "product_description": product_description,
+            "public_base_url": base,
+            "videoUrl": None,
+            "marketingText": None,
+            "error": None,
+        }
+        _set_video_job(job_id, job_record)
+        try:
+            _video_executor.submit(
+                _run_generate_video_job,
+                job_id,
+                product_name,
+                product_description,
+                base,
+            )
+        except Exception as e:
+            logger.error("VIDEO_JOB_SCHEDULE_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
+            with _video_jobs_lock:
+                j = _video_jobs.get(job_id)
+                if j is not None:
+                    j["status"] = "error"
+                    j["finished_at"] = time.time()
+                    j["error"] = "video_generation_failed"
+            return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+        logger.info("VIDEO_JOB_CREATED jobId=%s", job_id)
         return jsonify({
             "ok": True,
-            "videoUrl": video_url,
-            "marketingText": marketing_text,
+            "jobId": job_id,
+            "status": "running",
         }), 200
-    except RunwayVideoMVPError:
-        return jsonify({"ok": False, "error": "video_generation_failed"}), 200
     except Exception as e:
-        logger.error("generate_video MVP failed: %s", e, exc_info=True)
+        logger.error("generate_video queue failed: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+
+
+@app.route('/api/video-status', methods=['GET'])
+def video_status():
+    """Poll async /api/generate-video job: running | done | error."""
+    job_id = request.args.get("jobId", "").strip()
+    if not job_id:
+        return jsonify({"ok": False, "error": "missing_param", "message": "jobId is required"}), 400
+    job = _get_video_job(job_id)
+    if not job:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    status = (job.get("status") or "running").strip()
+    logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
+    out = {"ok": True, "status": status}
+    if status == "done":
+        out["videoUrl"] = job.get("videoUrl") or ""
+        out["marketingText"] = job.get("marketingText") or ""
+    if status == "error":
+        out["error"] = job.get("error") or "video_generation_failed"
+    return jsonify(out), 200
 
 
 # Security status: frontend uses this to decide whether to enforce redirect/Builder checks
