@@ -34,6 +34,24 @@ _FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS")
 _UPLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_UPLOAD_TIMEOUT_SECONDS") or "120").strip() or "120")
 
 
+def log_video_headline_delivery_startup(service_name: str) -> None:
+    """
+    Log once at process start: whether artifact upload can run (secret) and public base hints.
+    Never logs the secret value — only booleans and lengths.
+    """
+    sec = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
+    pub = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip()
+    logger.info(
+        "VIDEO_HEADLINE_UPLOAD_CONFIG service=%s secret_present=%s secret_len=%s "
+        "public_base_env_present=%s public_base_len=%s",
+        service_name,
+        bool(sec),
+        len(sec),
+        bool(pub),
+        len(pub),
+    )
+
+
 def _storage_root() -> Path:
     raw = (os.environ.get("VIDEO_HEADLINE_STORAGE_DIR") or "").strip()
     if raw:
@@ -351,10 +369,40 @@ def postprocess_video_headline(
             elapsed_ms,
             preview,
         )
-        public_url = f"{base}/api/video-headline/{token}"
         upload_secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
+        out_exists = bool(out_path.is_file())
+        base_ok = bool((base or "").strip())
+        # Unconditional: always shows which path runs (upload vs skip vs abort)
+        logger.info(
+            "VIDEO_HEADLINE_POSTPROCESS_BRANCH diagnostic=post_ok "
+            "secret_present=%s secret_len=%s out_file_exists=%s public_base_present=%s",
+            bool(upload_secret),
+            len(upload_secret),
+            out_exists,
+            base_ok,
+        )
+        if not out_exists:
+            logger.warning(
+                "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=abort reason=no_local_artifact fallback_to_original=true"
+            )
+            return source_video_url
+        public_url = f"{base}/api/video-headline/{token}"
+        if not base_ok:
+            logger.warning(
+                "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=abort reason=no_public_base fallback_to_original=true"
+            )
+            try:
+                if out_path.exists():
+                    out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return source_video_url
         if upload_secret:
             upload_endpoint = f"{base}/api/internal/video-headline-artifact"
+            logger.info(
+                "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=upload_attempt endpoint=%s",
+                upload_endpoint,
+            )
             try:
                 with open(out_path, "rb") as fp:
                     up = requests.post(
@@ -405,6 +453,10 @@ def postprocess_video_headline(
             )
             return source_video_url
 
+        logger.info(
+            "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=skipped_no_secret "
+            "will_return_public_api_url=1 (set ACE_VIDEO_HEADLINE_UPLOAD_SECRET on worker+web for split deploy upload)"
+        )
         logger.info(
             "VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s local_path=%s upload=skipped",
             public_url,

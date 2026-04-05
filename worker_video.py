@@ -28,6 +28,7 @@ def main() -> None:
 
     # Import after env check so engine can read other env vars
     from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
+    from engine.video_headline_postprocess import log_video_headline_delivery_startup
     from engine.video_jobs_redis import (
         get_redis,
         job_key,
@@ -36,6 +37,11 @@ def main() -> None:
         video_job_mark_error,
         QUEUE_KEY,
     )
+
+    try:
+        log_video_headline_delivery_startup("worker")
+    except Exception as e:
+        logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG worker startup failed err=%s", e)
 
     get_redis()  # connect once
     logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)
@@ -62,8 +68,17 @@ def main() -> None:
                 product_description,
                 public_base_url=public_base_url,
             )
+            logger.info(
+                "VIDEO_JOB_CHOSEN_URL jobId=%s video_url=%s before_redis=1",
+                job_id,
+                video_url,
+            )
             video_job_mark_done(job_id, video_url, marketing_text or "")
-            logger.info("VIDEO_JOB_RESULT jobId=%s video_url=%s", job_id, video_url)
+            logger.info(
+                "VIDEO_JOB_RESULT jobId=%s video_url=%s redis_written=1",
+                job_id,
+                video_url,
+            )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
         except RunwayVideoMVPError:
             logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)

@@ -23,7 +23,11 @@ from engine.side_by_side_v1 import (
     GOAL_PAIR_RETRY_INSTRUCTION,
 )
 from engine.openai_retry import OpenAIRateLimitError
-from engine.video_headline_postprocess import get_headline_video_path, write_headline_video_bytes
+from engine.video_headline_postprocess import (
+    get_headline_video_path,
+    write_headline_video_bytes,
+    log_video_headline_delivery_startup,
+)
 from engine.video_jobs_redis import redis_configured, video_job_create, video_job_get
 import db_session
 
@@ -82,6 +86,11 @@ def add_cors_headers(response):
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+try:
+    log_video_headline_delivery_startup("web")
+except Exception as e:
+    logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG web startup failed err=%s", e)
 
 # ACE_TEST_MODE: "1" or "true" = no OpenAI, return demo result immediately
 ACE_TEST_MODE = (os.environ.get("ACE_TEST_MODE", "") or "").strip().lower() in ("1", "true")
