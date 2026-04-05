@@ -204,6 +204,7 @@ def _run_generate_video_job(
     public_base_url: str,
 ) -> None:
     """Background: full ACE video pipeline (plan, start image, Runway, headline postprocess)."""
+    logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
     try:
         video_url, marketing_text = generate_one_video_mvp(
             product_name, product_description, public_base_url=public_base_url
@@ -215,7 +216,7 @@ def _run_generate_video_job(
                 j["finished_at"] = time.time()
                 j["videoUrl"] = video_url
                 j["marketingText"] = marketing_text or ""
-        logger.info("VIDEO_JOB_DONE jobId=%s", job_id)
+        logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
     except RunwayVideoMVPError:
         with _video_jobs_lock:
             j = _video_jobs.get(job_id)
@@ -224,6 +225,7 @@ def _run_generate_video_job(
                 j["finished_at"] = time.time()
                 j["error"] = "video_generation_failed"
         logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)
+        logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
     except Exception as e:
         logger.error("VIDEO_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
         with _video_jobs_lock:
@@ -232,6 +234,7 @@ def _run_generate_video_job(
                 j["status"] = "error"
                 j["finished_at"] = time.time()
                 j["error"] = "video_generation_failed"
+        logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
 
 
 def _get_artifact(session_id: str, ad_index: int):
@@ -907,6 +910,7 @@ def generate_video():
         }
         _set_video_job(job_id, job_record)
         try:
+            # Non-blocking: submit returns immediately; pipeline runs only in the pool thread after response ends.
             _video_executor.submit(
                 _run_generate_video_job,
                 job_id,
