@@ -26,7 +26,9 @@ _lock = threading.Lock()
 _video_by_token: Dict[str, Path] = {}
 
 _HOLD_SECONDS = float((os.environ.get("VIDEO_HEADLINE_HOLD_SECONDS") or "1.5").strip() or "1.5")
-_HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_SECONDS") or "300").strip() or "300")
+_HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_SECONDS") or "180").strip() or "180")
+_FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
+_FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "120").strip() or "120")
 
 
 def _default_font_path() -> Optional[str]:
@@ -53,7 +55,7 @@ def _ffprobe_bin() -> Optional[str]:
     return shutil.which("ffprobe")
 
 
-def _ffprobe_duration_seconds(path: Path) -> float:
+def _ffprobe_duration_seconds(path: Path, timeout_sec: float) -> float:
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         raise RuntimeError("ffprobe not found")
@@ -71,6 +73,7 @@ def _ffprobe_duration_seconds(path: Path) -> float:
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout_sec,
     )
     if r.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {r.stderr or r.stdout}")
@@ -147,16 +150,34 @@ def postprocess_video_headline(
     out = tmp / "out.mp4"
     text_file = tmp / "headline.txt"
 
+    def _fail(reason: str) -> str:
+        logger.warning("VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=%s", reason)
+        return source_video_url
+
     try:
         text_file.write_text(headline_clean, encoding="utf-8")
-        r = requests.get(source_video_url, timeout=_HTTP_DOWNLOAD_TIMEOUT, stream=True)
-        r.raise_for_status()
+        try:
+            r = requests.get(source_video_url, timeout=_HTTP_DOWNLOAD_TIMEOUT, stream=True)
+            r.raise_for_status()
+        except requests.Timeout:
+            logger.warning("VIDEO_HEADLINE_POSTPROCESS download_timeout")
+            return _fail("download_timeout")
+        except requests.RequestException as e:
+            return _fail(f"download_error:{type(e).__name__}")
+
         with open(inp, "wb") as f:
             for chunk in r.iter_content(chunk_size=1024 * 256):
                 if chunk:
                     f.write(chunk)
 
-        duration = _ffprobe_duration_seconds(inp)
+        try:
+            duration = _ffprobe_duration_seconds(inp, _FFPROBE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            logger.warning("VIDEO_HEADLINE_POSTPROCESS ffprobe_timeout")
+            return _fail("ffprobe_timeout")
+        except Exception as e:
+            return _fail(f"ffprobe_error:{type(e).__name__}")
+
         hold = min(_HOLD_SECONDS, max(0.4, duration * 0.35))
         start_t = max(0.0, duration - hold)
         fs = _fontsize_for_headline(headline_clean)
@@ -172,7 +193,7 @@ def postprocess_video_headline(
             f"box=1:boxcolor=black@0.45:boxborderw=12"
         )
 
-        cmd = [
+        cmd_copy = [
             ffmpeg,
             "-y",
             "-i",
@@ -182,17 +203,27 @@ def postprocess_video_headline(
             "-c:v",
             "libx264",
             "-preset",
-            "fast",
+            "veryfast",
             "-crf",
             "23",
             "-c:a",
             "copy",
             str(out),
         ]
-        p = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        try:
+            p = subprocess.run(
+                cmd_copy,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_FFMPEG_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("VIDEO_HEADLINE_POSTPROCESS ffmpeg_timeout")
+            return _fail("ffmpeg_timeout")
+
         if p.returncode != 0:
-            # Retry with AAC if audio copy failed
-            cmd2 = [
+            cmd_aac = [
                 ffmpeg,
                 "-y",
                 "-i",
@@ -202,7 +233,7 @@ def postprocess_video_headline(
                 "-c:v",
                 "libx264",
                 "-preset",
-                "fast",
+                "veryfast",
                 "-crf",
                 "23",
                 "-c:a",
@@ -211,14 +242,21 @@ def postprocess_video_headline(
                 "192k",
                 str(out),
             ]
-            p2 = subprocess.run(cmd2, capture_output=True, text=True, check=False)
-            if p2.returncode != 0:
-                logger.warning(
-                    "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true err_type=ffmpeg rc=%s stderr_len=%s",
-                    p2.returncode,
-                    len(p2.stderr or ""),
+            try:
+                p2 = subprocess.run(
+                    cmd_aac,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=_FFMPEG_TIMEOUT,
                 )
-                return source_video_url
+            except subprocess.TimeoutExpired:
+                logger.warning("VIDEO_HEADLINE_POSTPROCESS ffmpeg_timeout")
+                return _fail("ffmpeg_timeout")
+            if p2.returncode != 0:
+                return _fail(
+                    f"ffmpeg_exit:{p2.returncode}:stderr_len={len(p2.stderr or '')}"
+                )
 
         token = uuid.uuid4().hex
         with _lock:
@@ -230,7 +268,7 @@ def postprocess_video_headline(
         return final_url
     except Exception as e:
         logger.warning(
-            "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true err_type=%s err=%s",
+            "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=exception:%s err=%s",
             type(e).__name__,
             e,
         )
