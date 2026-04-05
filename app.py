@@ -804,23 +804,9 @@ def job_status():
 # -----------------------------------------------------------------------------
 # Runway video MVP (isolated): one text-to-video only — not part of /api/generate or /api/preview.
 # Future: dedicated ACE video engine may add a second output and richer prompting.
+# Register POST /api/video-headline-artifact before GET /api/video-headline/<token> so the
+# literal upload path is matched reliably (avoids 404 on some Werkzeug/Flask orderings).
 # -----------------------------------------------------------------------------
-@app.route('/api/video-headline/<token>', methods=['GET'])
-def serve_video_headline(token):
-    """Serve ffmpeg-processed MP4 from disk-backed store (token from videoUrl); survives worker restart."""
-    path = get_headline_video_path((token or "").strip())
-    if not path or not path.is_file():
-        logger.info("VIDEO_HEADLINE_SERVE miss lookup=disk")
-        return jsonify({"ok": False, "error": "not_found"}), 404
-    logger.info("VIDEO_HEADLINE_SERVE hit lookup=disk")
-    return send_file(
-        str(path),
-        mimetype="video/mp4",
-        as_attachment=False,
-        download_name="ace-video.mp4",
-    )
-
-
 @app.route("/api/video-headline-artifact", methods=["POST"], strict_slashes=False)
 def internal_video_headline_artifact():
     """
@@ -865,6 +851,22 @@ def internal_video_headline_artifact():
         token[:8] if len(token) >= 8 else token,
     )
     return jsonify({"ok": True}), 200
+
+
+@app.route('/api/video-headline/<token>', methods=['GET'])
+def serve_video_headline(token):
+    """Serve ffmpeg-processed MP4 from disk-backed store (token from videoUrl); survives worker restart."""
+    path = get_headline_video_path((token or "").strip())
+    if not path or not path.is_file():
+        logger.info("VIDEO_HEADLINE_SERVE miss lookup=disk")
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    logger.info("VIDEO_HEADLINE_SERVE hit lookup=disk")
+    return send_file(
+        str(path),
+        mimetype="video/mp4",
+        as_attachment=False,
+        download_name="ace-video.mp4",
+    )
 
 
 @app.route('/api/generate-video', methods=['POST'])
