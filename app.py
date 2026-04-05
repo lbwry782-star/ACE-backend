@@ -33,6 +33,24 @@ import db_session
 
 app = Flask(__name__)
 
+
+@app.before_request
+def _video_headline_artifact_incoming_trace():
+    """Log any request to upload paths so we can see traffic even when routing returns 404."""
+    try:
+        p = request.path or ""
+    except Exception:
+        return
+    if "video-headline-artifact" not in p:
+        return
+    logger.info(
+        "VIDEO_HEADLINE_UPLOAD_INCOMING method=%s path=%s url_rule=%s",
+        request.method,
+        p,
+        getattr(request.url_rule, "rule", None) if request.url_rule else None,
+    )
+
+
 # ============================================================================
 # CORS Configuration (Manual Implementation)
 # ============================================================================
@@ -1105,6 +1123,24 @@ def _log_video_headline_upload_routes_registered() -> None:
             rule.endpoint,
             methods,
         )
+    # Self-test: POST must hit the view (401/403/503), not Flask 404 (route missing).
+    try:
+        with app.test_client() as client:
+            tc = client.post("/api/video-headline-artifact")
+            st = tc.status_code
+        if st == 404:
+            logger.error(
+                "VIDEO_HEADLINE_UPLOAD_ROUTE_SELFTEST_FAIL path=/api/video-headline-artifact "
+                "http_status=404 (route not registered in this process)"
+            )
+        else:
+            logger.info(
+                "VIDEO_HEADLINE_UPLOAD_ROUTE_READY path=/api/video-headline-artifact "
+                "self_test_http_status=%s (404 means route missing; 401/503/400 means route exists)",
+                st,
+            )
+    except Exception as ex:
+        logger.error("VIDEO_HEADLINE_UPLOAD_ROUTE_SELFTEST_ERR err=%s", ex, exc_info=True)
 
 
 _log_video_headline_upload_routes_registered()
