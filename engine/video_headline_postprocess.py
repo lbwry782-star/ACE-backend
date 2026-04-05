@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 _TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
 
 _HOLD_SECONDS = float((os.environ.get("VIDEO_HEADLINE_HOLD_SECONDS") or "1.5").strip() or "1.5")
+# Linear text opacity ramp at start of end card (seconds); default 0.5s within the 1.5s hold
+_TEXT_FADE_SECONDS = float((os.environ.get("VIDEO_HEADLINE_TEXT_FADE_SECONDS") or "0.5").strip() or "0.5")
 _HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_SECONDS") or "180").strip() or "180")
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
 # Single re-encode pass is typically faster than previous concat; default allows headroom on slow hosts.
@@ -301,12 +303,19 @@ def postprocess_video_headline(
         font_e = _filter_path_for_ffmpeg(Path(font))
         tf_e = _filter_path_for_ffmpeg(text_file)
 
-        # One pass: clone-extend tail, then black full frame + white text only when t >= original duration.
+        fade_s = max(0.05, min(_TEXT_FADE_SECONDS, max(hold - 0.05, 0.05)))
+        fade_end = duration_sec + fade_s
+        fade_end_str = f"{fade_end:.4f}"
+        # One pass: clone-extend tail, black full frame on end card, white text with linear alpha fade-in only.
+        # alpha: 0 before original end; 0→1 from t=duration to t=duration+fade_s; 1 after (no motion/scale).
+        alpha_expr = (
+            f"if(lt(t\\,{d_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{d_str})/{fade_s}\\,1))"
+        )
         vf = (
             f"tpad=stop_mode=clone:stop_duration={hold},"
             f"drawbox=x=0:y=0:w=iw:h=ih:color=black@1:t=fill:enable='gte(t\\,{d_str})',"
             f"drawtext=fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white:"
-            f"enable='gte(t\\,{d_str})':x=(w-text_w)/2:y=(h-text_h)/2"
+            f"alpha='{alpha_expr}':enable='gte(t\\,{d_str})':x=(w-text_w)/2:y=(h-text_h)/2"
         )
 
         cmd: list[str] = [
@@ -334,8 +343,9 @@ def postprocess_video_headline(
 
         vf_preview = vf[:220] + ("…" if len(vf) > 220 else "")
         logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_CMD hold_s=%s duration_s=%s has_audio=%s vf_preview=%r",
+            "VIDEO_HEADLINE_POSTPROCESS_CMD hold_s=%s text_fade_s=%s duration_s=%s has_audio=%s vf_preview=%r",
             hold,
+            fade_s,
             duration_sec,
             has_audio,
             vf_preview,

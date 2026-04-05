@@ -19,6 +19,7 @@ from engine.video_planning import (
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
 )
+from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
@@ -331,10 +332,15 @@ def generate_one_video_mvp(
             if url:
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
-                logger.info(
-                    "RUNWAY_MVP headline_postprocess_bypass=1 headline_upload_disabled=1 using_original_runway_url=1"
+                logger.info("VIDEO_JOB_STEP step=headline_postprocess start")
+                final_url = postprocess_video_headline(
+                    url,
+                    marketing,
+                    public_base_url or "",
+                    headline_decision=headline_decision,
                 )
-                return url, marketing
+                logger.info("VIDEO_JOB_STEP step=headline_postprocess done")
+                return final_url, marketing
             raise RunwayVideoMVPError("generation_failed")
 
         if status in _FAILED_STATUSES:
