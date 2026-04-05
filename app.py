@@ -821,7 +821,8 @@ def serve_video_headline(token):
     )
 
 
-@app.route("/api/internal/video-headline-artifact", methods=["POST"])
+@app.route("/api/video-headline-artifact", methods=["POST"], strict_slashes=False)
+@app.route("/api/internal/video-headline-artifact", methods=["POST"], strict_slashes=False)
 def internal_video_headline_artifact():
     """
     Background worker POSTs the processed MP4 here so GET /api/video-headline/<token> can read it
@@ -1084,6 +1085,25 @@ def health():
     return 'ok', 200
 
 
+
+
+def _log_video_headline_upload_routes_registered() -> None:
+    """Confirm POST upload routes exist on this process (gunicorn import)."""
+    needle = ("video-headline-artifact", "video-headline/<")
+    for rule in app.url_map.iter_rules():
+        r = str(rule.rule)
+        if not any(n in r for n in needle):
+            continue
+        methods = sorted((rule.methods or set()) - {"OPTIONS", "HEAD"})
+        logger.info(
+            "VIDEO_HEADLINE_UPLOAD_ROUTE_REGISTERED rule=%s endpoint=%s methods=%s",
+            r,
+            rule.endpoint,
+            methods,
+        )
+
+
+_log_video_headline_upload_routes_registered()
 
 
 if __name__ == '__main__':
