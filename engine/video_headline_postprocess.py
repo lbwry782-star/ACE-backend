@@ -4,8 +4,8 @@ Post-process Runway MP4: black end card with product name + advertising purpose 
 Processed files are stored on disk under VIDEO_HEADLINE_STORAGE_DIR as {token}.mp4 so they survive
 worker restarts (lookup is disk-only, not in-memory).
 
-TEST-ONLY: set ACE_VIDEO_TEST_OUTPUT=1 to skip worker→web POST and save the processed MP4 under
-ACE_VIDEO_TEST_OUTPUT_DIR (default <temp>/ace_video_test_output) for GET /api/video-test-output/<job_id>/<token>.
+TEST-ONLY (HARD): set ACE_VIDEO_HARD_TEST_MODE=1 to skip all worker→web upload; save to
+/tmp/ace_video_test_<jobId>.mp4 and serve via GET /api/test-video/<jobId>. No secret, no POST upload.
 """
 
 from __future__ import annotations
@@ -37,47 +37,40 @@ _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS
 _FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "180").strip() or "180")
 # Worker → web upload (split services: ffmpeg runs on worker, GET /api/video-headline/<token> on web)
 _UPLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_UPLOAD_TIMEOUT_SECONDS") or "120").strip() or "120")
-# TEST-ONLY: save processed MP4 to local dir + serve via GET /api/video-test-output/... (no POST upload, no S3)
-_VIDEO_TEST_JOB_RE = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
+# HARD TEST MODE: /tmp/ace_video_test_<jobId>.mp4 + GET /api/test-video/<jobId> (no upload, no secret)
+_HARD_TEST_JOB_RE = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
 
 
-def video_test_output_enabled() -> bool:
-    v = (os.environ.get("ACE_VIDEO_TEST_OUTPUT") or "").strip().lower()
+def hard_test_mode_enabled() -> bool:
+    v = (os.environ.get("ACE_VIDEO_HARD_TEST_MODE") or "").strip().lower()
     return v in ("1", "true", "yes")
-
-
-def _video_test_output_dir() -> Path:
-    raw = (os.environ.get("ACE_VIDEO_TEST_OUTPUT_DIR") or "").strip()
-    if raw:
-        return Path(raw).expanduser()
-    return Path(tempfile.gettempdir()) / "ace_video_test_output"
 
 
 def _safe_job_id_segment(job_id: str) -> str:
     s = (job_id or "").strip()
     if not s:
-        return "unknown"
-    if _VIDEO_TEST_JOB_RE.fullmatch(s):
+        return ""
+    if _HARD_TEST_JOB_RE.fullmatch(s):
         return s
-    return re.sub(r"[^a-zA-Z0-9._-]+", "_", s)[:128] or "unknown"
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", s)[:128] or ""
 
 
-def get_video_test_output_path(job_id: str, token: str) -> Optional[Path]:
-    """Resolve test-output file written by the worker when ACE_VIDEO_TEST_OUTPUT is set."""
-    if not video_test_output_enabled():
-        return None
-    t = (token or "").strip()
-    if not _TOKEN_RE.match(t):
-        return None
+def hard_test_video_path(job_id: str) -> Optional[Path]:
+    """
+    Predictable path: /tmp/ace_video_test_<jobId>.mp4 (jobId passed through _safe_job_id_segment).
+    Used by worker (write) and web (send_file).
+    """
     seg = _safe_job_id_segment(job_id)
+    if not seg:
+        return None
     try:
-        root = _video_test_output_dir().resolve()
-        p = (root / f"ace_video_test_{seg}_{t}.mp4").resolve()
+        root = Path("/tmp").resolve()
+        p = (root / f"ace_video_test_{seg}.mp4").resolve()
         if p.parent != root:
             return None
+        return p
     except OSError:
         return None
-    return p if p.is_file() else None
 
 
 def log_video_headline_delivery_startup(service_name: str) -> None:
@@ -432,60 +425,43 @@ def postprocess_video_headline(
             preview,
         )
         out_exists = bool(out_path.is_file())
-        if video_test_output_enabled() and out_exists:
-            job_seg = _safe_job_id_segment(job_id)
-            td = _video_test_output_dir()
-            dest: Optional[Path] = None
+
+        if hard_test_mode_enabled():
+            if not out_exists:
+                logger.warning(
+                    "VIDEO_HARD_TEST no_local_file_after_ffmpeg fallback_to_original=true"
+                )
+                return source_video_url
+            dest = hard_test_video_path(job_id)
+            if dest is None:
+                logger.warning("VIDEO_HARD_TEST invalid_job_id fallback_to_original=true")
+                try:
+                    out_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return source_video_url
             try:
-                td.mkdir(parents=True, exist_ok=True)
-                dest = td / f"ace_video_test_{job_seg}_{token}.mp4"
                 shutil.copy2(out_path, dest)
             except OSError as e:
                 logger.warning(
-                    "VIDEO_TEST_OUTPUT_SAVE_FAIL err=%s job_seg=%s token_prefix=%s",
+                    "VIDEO_HARD_TEST_SAVE_FAIL err=%s path=%s fallback_to_original=true",
                     type(e).__name__,
-                    job_seg,
-                    token[:8] if len(token) >= 8 else "",
-                )
-            else:
-                logger.info(
-                    "VIDEO_TEST_OUTPUT_NOTE split_deploy=set_ACE_VIDEO_TEST_OUTPUT_DIR_identically_on_web_and_worker"
-                )
-                test_http_url = ""
-                if base_ok := bool((base or "").strip()):
-                    test_http_url = f"{base}/api/video-test-output/{job_seg}/{token}"
-                logger.info(
-                    "VIDEO_TEST_OUTPUT_URL url=%s local_path=%s",
-                    test_http_url or "(no ACE_PUBLIC_BASE_URL — open local_path or set public base)",
-                    str(dest) if dest else "",
+                    str(dest),
                 )
                 try:
                     out_path.unlink(missing_ok=True)
                 except OSError:
                     pass
-                if base_ok and test_http_url:
-                    logger.info(
-                        "VIDEO_HEADLINE_POSTPROCESS_RESULT mode=test_local public_url=%s",
-                        test_http_url,
-                    )
-                    return test_http_url
-                logger.warning(
-                    "VIDEO_TEST_OUTPUT fallback_to_original=true reason=no_public_base_for_test_url "
-                    "file_saved_for_manual_review=1 path=%s",
-                    str(dest) if dest else "",
-                )
                 return source_video_url
-
-        if video_test_output_enabled() and out_exists:
-            # Test mode: never POST artifact to web; copy failed above
-            logger.warning(
-                "VIDEO_TEST_OUTPUT_SAVE_FAILED skipping_headline_upload fallback_to_original=true"
-            )
+            seg = _safe_job_id_segment(job_id)
+            test_url = f"{base}/api/test-video/{seg}"
+            logger.info("VIDEO_TEST_OUTPUT_URL url=%s local_path=%s", test_url, str(dest))
             try:
                 out_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            return source_video_url
+            logger.info("VIDEO_HEADLINE_POSTPROCESS_RESULT mode=hard_test public_url=%s", test_url)
+            return test_url
 
         upload_secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
         base_ok = bool((base or "").strip())

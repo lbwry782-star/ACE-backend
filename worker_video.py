@@ -30,7 +30,7 @@ def main() -> None:
     from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
     from engine.video_headline_postprocess import (
         log_video_headline_delivery_startup,
-        video_test_output_enabled,
+        hard_test_mode_enabled,
     )
     from engine.video_jobs_redis import (
         get_redis,
@@ -46,11 +46,9 @@ def main() -> None:
     except Exception as e:
         logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG worker startup failed err=%s", e)
 
-    if video_test_output_enabled():
-        _td = (os.environ.get("ACE_VIDEO_TEST_OUTPUT_DIR") or "").strip()
+    if hard_test_mode_enabled():
         logger.info(
-            "VIDEO_TEST_OUTPUT_ENABLED worker=1 dir=%s",
-            _td or "(default: <temp>/ace_video_test_output)",
+            "VIDEO_HARD_TEST_ENABLED worker=1 path=/tmp/ace_video_test_<jobId>.mp4 upload=disabled"
         )
 
     get_redis()  # connect once
