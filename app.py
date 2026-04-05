@@ -827,6 +827,7 @@ def internal_video_headline_artifact():
     Background worker POSTs the processed MP4 here so GET /api/video-headline/<token> can read it
     from this process's disk (split web + worker on Render).
     """
+    logger.info("VIDEO_HEADLINE_UPLOAD_ENDPOINT_HIT")
     logger.info(
         "VIDEO_HEADLINE_UPLOAD_ENDPOINT_HIT path=%s content_length=%s remote_addr=%s user_agent=%s",
         request.path,
@@ -857,6 +858,7 @@ def internal_video_headline_artifact():
             (token[:8] if len(token) >= 8 else ""),
         )
         return jsonify({"ok": False, "error": "invalid_token_or_write"}), 400
+    logger.info("VIDEO_HEADLINE_UPLOAD_STORED")
     logger.info(
         "VIDEO_HEADLINE_UPLOAD_STORED bytes=%s token_prefix=%s",
         len(data),

@@ -80,6 +80,7 @@ def main() -> None:
             )
             logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp done jobId=%s", job_id)
 
+            logger.info("VIDEO_JOB_CHOSEN_URL video_url=%s jobId=%s", video_url, job_id)
             logger.info(
                 "VIDEO_JOB_CHOSEN_URL jobId=%s video_url=%s before_redis=1",
                 job_id,
@@ -88,6 +89,7 @@ def main() -> None:
             logger.info("VIDEO_JOB_STEP step=redis_mark_done start jobId=%s", job_id)
             video_job_mark_done(job_id, video_url, marketing_text or "")
             logger.info("VIDEO_JOB_STEP step=redis_mark_done done jobId=%s", job_id)
+            logger.info("VIDEO_JOB_RESULT video_url=%s jobId=%s", video_url, job_id)
             logger.info(
                 "VIDEO_JOB_RESULT jobId=%s video_url=%s redis_written=1",
                 job_id,
