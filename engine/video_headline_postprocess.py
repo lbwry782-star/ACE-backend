@@ -1,5 +1,5 @@
 """
-Post-process Runway MP4: extend with black tail + white headline in one ffmpeg pass (no separate endcard file, no concat).
+Post-process Runway MP4: black end card with product name + advertising purpose (two lines, white on black, fade-in).
 
 Processed files are stored on disk under VIDEO_HEADLINE_STORAGE_DIR as {token}.mp4 so they survive
 worker restarts (lookup is disk-only, not in-memory).
@@ -193,7 +193,7 @@ def _fontsize_for_headline(text: str) -> int:
     return 32
 
 
-def _sanitize_headline(text: str) -> str:
+def _sanitize_endcard_line(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"[\r\n]+", " ", t)
     return t
@@ -201,22 +201,29 @@ def _sanitize_headline(text: str) -> str:
 
 def postprocess_video_headline(
     source_video_url: str,
-    headline: str,
     public_base_url: str,
-    headline_decision: Optional[str] = None,
+    *,
+    product_name: str = "",
+    advertising_purpose: str = "",
 ) -> str:
     """
-    Download MP4, one ffmpeg pass: extend tail with tpad, black full-frame + white headline only for t>=duration.
+    Download MP4, one ffmpeg pass: extend tail with tpad, black end card + two lines (product name, advertising purpose).
+    Does not use marketing headline text.
     """
-    dec = (headline_decision or "").strip()
-    if dec == "no_headline":
-        logger.info("VIDEO_HEADLINE_POSTPROCESS skipped no_headline")
+    pn = _sanitize_endcard_line(product_name)
+    ap = _sanitize_endcard_line(advertising_purpose)
+    if not pn and not ap:
+        logger.info("VIDEO_HEADLINE_POSTPROCESS skipped empty_endcard")
         return source_video_url
 
-    headline_clean = _sanitize_headline(headline)
-    if not headline_clean:
-        logger.info("VIDEO_HEADLINE_POSTPROCESS skipped no_headline")
-        return source_video_url
+    endcard_text = "\n".join(x for x in (pn, ap) if x)
+    logger.info(
+        "ENDCARD_TEXT product_name=%r advertising_purpose=%r",
+        pn[:200],
+        ap[:200],
+    )
+
+    headline_clean = endcard_text
 
     base = (public_base_url or "").strip().rstrip("/")
     if not base:
@@ -375,7 +382,7 @@ def postprocess_video_headline(
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         preview = headline_clean[:80] + ("…" if len(headline_clean) > 80 else "")
         logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_OK elapsed_ms=%s headline=%r single_pass=true storage=disk",
+            "VIDEO_HEADLINE_POSTPROCESS_OK elapsed_ms=%s endcard_preview=%r single_pass=true storage=disk",
             elapsed_ms,
             preview,
         )
@@ -438,6 +445,8 @@ def postprocess_video_headline(
                     up.status_code,
                     len(up.content or b""),
                 )
+                if up.status_code == 200:
+                    logger.info("VIDEO_HEADLINE_UPLOAD_RESPONSE status_code=200")
                 ok_body = False
                 if up.status_code == 200:
                     try:

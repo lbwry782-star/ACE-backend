@@ -804,9 +804,10 @@ def job_status():
 # -----------------------------------------------------------------------------
 # Runway video MVP (isolated): one text-to-video only — not part of /api/generate or /api/preview.
 # Future: dedicated ACE video engine may add a second output and richer prompting.
-# Register POST /api/video-headline-artifact before GET /api/video-headline/<token> so the
-# literal upload path is matched reliably (avoids 404 on some Werkzeug/Flask orderings).
+# Register POST upload before GET /api/video-headline/<token>. Two POST paths so workers
+# hitting either /api/video-headline-artifact or /api/internal/video-headline-artifact succeed.
 # -----------------------------------------------------------------------------
+@app.route("/api/internal/video-headline-artifact", methods=["POST"], strict_slashes=False)
 @app.route("/api/video-headline-artifact", methods=["POST"], strict_slashes=False)
 def internal_video_headline_artifact():
     """

@@ -261,10 +261,8 @@ def generate_one_video_mvp(
         raise RunwayVideoMVPError("planning_timeout")
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
     prompt_image_data_uri: Optional[str] = None
-    headline_decision: Optional[str] = None
     if plan:
         marketing = (plan.get("headlineText") or "").strip()
-        headline_decision = (plan.get("headlineDecision") or "").strip() or None
         # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
         if model != "gen4.5":
             logger.info("VIDEO_JOB_STEP step=build_start_image start")
@@ -283,7 +281,6 @@ def generate_one_video_mvp(
     else:
         prompt = build_simple_prompt(product_name, product_description)
         marketing = ""
-        headline_decision = None
         logger.info(
             "RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true "
             "(planning failed; see VIDEO_PLAN_FAIL_* log lines above for this request)"
@@ -338,11 +335,17 @@ def generate_one_video_mvp(
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
                 logger.info("VIDEO_JOB_STEP step=headline_postprocess start")
+                if plan:
+                    end_pn = (plan.get("productNameResolved") or product_name or "").strip()
+                    end_ap = (plan.get("advertisingPromise") or "").strip()
+                else:
+                    end_pn = (product_name or "").strip()
+                    end_ap = (product_description or "").strip()
                 final_url = postprocess_video_headline(
                     url,
-                    marketing,
                     public_base_url or "",
-                    headline_decision=headline_decision,
+                    product_name=end_pn,
+                    advertising_purpose=end_ap,
                 )
                 logger.info("VIDEO_JOB_STEP step=headline_postprocess done")
                 return final_url, marketing
