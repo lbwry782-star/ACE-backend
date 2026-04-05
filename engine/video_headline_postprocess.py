@@ -4,8 +4,8 @@ Post-process Runway MP4: black end card with product name + advertising purpose 
 Processed files are stored on disk under VIDEO_HEADLINE_STORAGE_DIR as {token}.mp4 so they survive
 worker restarts (lookup is disk-only, not in-memory).
 
-TEST-ONLY (HARD): set ACE_VIDEO_HARD_TEST_MODE=1 to skip all worker→web upload; save to
-/tmp/ace_video_test_<jobId>.mp4 and serve via GET /api/test-video/<jobId>. No secret, no POST upload.
+Success path: save processed MP4 to /tmp/ace_video_test_<jobId>.mp4 and return
+{ACE_PUBLIC_BASE_URL}/api/test-video/<jobId>. No worker→web POST upload.
 """
 
 from __future__ import annotations
@@ -35,15 +35,8 @@ _HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
 # Single re-encode pass is typically faster than previous concat; default allows headroom on slow hosts.
 _FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "180").strip() or "180")
-# Worker → web upload (split services: ffmpeg runs on worker, GET /api/video-headline/<token> on web)
-_UPLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_UPLOAD_TIMEOUT_SECONDS") or "120").strip() or "120")
-# HARD TEST MODE: /tmp/ace_video_test_<jobId>.mp4 + GET /api/test-video/<jobId> (no upload, no secret)
+# After postprocess: copy to /tmp/ace_video_test_<jobId>.mp4; GET /api/test-video/<jobId> (no worker→web upload).
 _HARD_TEST_JOB_RE = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
-
-
-def hard_test_mode_enabled() -> bool:
-    v = (os.environ.get("ACE_VIDEO_HARD_TEST_MODE") or "").strip().lower()
-    return v in ("1", "true", "yes")
 
 
 def _safe_job_id_segment(job_id: str) -> str:
@@ -425,171 +418,41 @@ def postprocess_video_headline(
             preview,
         )
         out_exists = bool(out_path.is_file())
-
-        if hard_test_mode_enabled():
-            if not out_exists:
-                logger.warning(
-                    "VIDEO_HARD_TEST no_local_file_after_ffmpeg fallback_to_original=true"
-                )
-                return source_video_url
-            dest = hard_test_video_path(job_id)
-            if dest is None:
-                logger.warning("VIDEO_HARD_TEST invalid_job_id fallback_to_original=true")
-                try:
-                    out_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                return source_video_url
-            try:
-                shutil.copy2(out_path, dest)
-            except OSError as e:
-                logger.warning(
-                    "VIDEO_HARD_TEST_SAVE_FAIL err=%s path=%s fallback_to_original=true",
-                    type(e).__name__,
-                    str(dest),
-                )
-                try:
-                    out_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                return source_video_url
-            seg = _safe_job_id_segment(job_id)
-            test_url = f"{base}/api/test-video/{seg}"
-            logger.info("VIDEO_TEST_OUTPUT_URL url=%s local_path=%s", test_url, str(dest))
-            try:
-                out_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            logger.info("VIDEO_HEADLINE_POSTPROCESS_RESULT mode=hard_test public_url=%s", test_url)
-            return test_url
-
-        upload_secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
-        base_ok = bool((base or "").strip())
-        env_public = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip()
-        logger.info(
-            "VIDEO_HEADLINE_FORCE_UPLOAD_CHECK secret_present=%s public_base_present=%s out_file_exists=%s "
-            "public_base=%s env_secret_len=%s env_ACE_PUBLIC_BASE_URL_len=%s job_public_base_url_param=%s",
-            bool(upload_secret),
-            base_ok,
-            out_exists,
-            base,
-            len(upload_secret),
-            len(env_public),
-            (public_base_url or "")[:256],
-        )
-        # Next line is before any return/skip — confirms we reached the delivery gate
-        logger.info("VIDEO_HEADLINE_ENTER_UPLOAD_BLOCK")
         if not out_exists:
             logger.warning(
                 "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=abort reason=no_local_artifact fallback_to_original=true"
             )
             return source_video_url
-        public_url = f"{base}/api/video-headline/{token}"
-        if not base_ok:
-            logger.warning(
-                "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=abort reason=no_public_base fallback_to_original=true"
-            )
+        dest = hard_test_video_path(job_id)
+        if dest is None:
+            logger.warning("VIDEO_HEADLINE_POSTPROCESS invalid_job_id fallback_to_original=true")
             try:
-                if out_path.exists():
-                    out_path.unlink(missing_ok=True)
+                out_path.unlink(missing_ok=True)
             except OSError:
                 pass
             return source_video_url
-        if upload_secret:
-            upload_endpoint = f"{base}/api/video-headline-artifact"
-            logger.info(
-                "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=upload_attempt endpoint=%s",
-                upload_endpoint,
+        try:
+            shutil.copy2(out_path, dest)
+        except OSError as e:
+            logger.warning(
+                "VIDEO_HEADLINE_POSTPROCESS save_test_mp4_fail err=%s path=%s fallback_to_original=true",
+                type(e).__name__,
+                str(dest),
             )
             try:
-                logger.info(
-                    "VIDEO_HEADLINE_UPLOAD_ATTEMPT url=%s timeout_s=%s token_prefix=%s",
-                    upload_endpoint,
-                    _UPLOAD_TIMEOUT,
-                    token[:8] if len(token) >= 8 else token,
-                )
-                with open(out_path, "rb") as fp:
-                    up = requests.post(
-                        upload_endpoint,
-                        headers={"X-ACE-Video-Headline-Upload-Secret": upload_secret},
-                        files={"file": ("headline.mp4", fp, "video/mp4")},
-                        data={"token": token},
-                        timeout=_UPLOAD_TIMEOUT,
-                    )
-                logger.info(
-                    "VIDEO_HEADLINE_UPLOAD_RESPONSE status_code=%s body_len=%s",
-                    up.status_code,
-                    len(up.content or b""),
-                )
-                if up.status_code == 200:
-                    logger.info("VIDEO_HEADLINE_UPLOAD_RESPONSE status_code=200")
-                ok_body = False
-                if up.status_code == 200:
-                    try:
-                        j = up.json()
-                        ok_body = isinstance(j, dict) and j.get("ok") is True
-                    except ValueError:
-                        ok_body = False
-                if ok_body:
-                    local_str = str(out_path)
-                    try:
-                        out_path.unlink(missing_ok=True)
-                    except OSError:
-                        pass
-                    logger.info(
-                        "VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s local_path=%s upload=web_ok",
-                        public_url,
-                        local_str,
-                    )
-                    return public_url
-                logger.warning(
-                    "VIDEO_HEADLINE_POSTPROCESS upload_failed http_status=%s body_len=%s fallback_to_original=true",
-                    up.status_code,
-                    len(up.content or b""),
-                )
-            except requests.Timeout as e:
-                logger.warning(
-                    "VIDEO_HEADLINE_UPLOAD_EXCEPTION error=Timeout detail=%s fallback_to_original=true",
-                    e,
-                )
-                logger.warning("VIDEO_HEADLINE_POSTPROCESS upload_timeout fallback_to_original=true")
-            except requests.RequestException as e:
-                logger.warning(
-                    "VIDEO_HEADLINE_UPLOAD_EXCEPTION error=%s detail=%s fallback_to_original=true",
-                    type(e).__name__,
-                    e,
-                )
-                logger.warning(
-                    "VIDEO_HEADLINE_POSTPROCESS upload_error err=%s fallback_to_original=true",
-                    type(e).__name__,
-                )
-            except Exception as e:
-                logger.warning(
-                    "VIDEO_HEADLINE_UPLOAD_EXCEPTION error=%s detail=%s fallback_to_original=true",
-                    type(e).__name__,
-                    e,
-                    exc_info=True,
-                )
-            try:
-                if out_path.exists():
-                    out_path.unlink(missing_ok=True)
+                out_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            logger.warning(
-                "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=artifact_upload_failed"
-            )
             return source_video_url
-
-        logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=skipped_no_secret "
-            "will_return_public_api_url=1 (set ACE_VIDEO_HEADLINE_UPLOAD_SECRET on worker+web for split deploy upload)"
-        )
-        logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s local_path=%s upload=skipped",
-            public_url,
-            str(out_path),
-        )
-        return public_url
+        seg = _safe_job_id_segment(job_id)
+        test_url = f"{base}/api/test-video/{seg}"
+        logger.info("VIDEO_TEST_OUTPUT_URL url=%s local_path=%s", test_url, str(dest))
+        try:
+            out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        logger.info("VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s", test_url)
+        return test_url
     except Exception as e:
         logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=exception:%s", type(e).__name__)
         logger.warning(

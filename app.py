@@ -25,7 +25,6 @@ from engine.side_by_side_v1 import (
 from engine.openai_retry import OpenAIRateLimitError
 from engine.video_headline_postprocess import (
     get_headline_video_path,
-    hard_test_mode_enabled,
     hard_test_video_path,
     write_headline_video_bytes,
     log_video_headline_delivery_startup,
@@ -111,14 +110,6 @@ try:
     log_video_headline_delivery_startup("web")
 except Exception as e:
     logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG web startup failed err=%s", e)
-
-try:
-    if hard_test_mode_enabled():
-        logger.info(
-            "VIDEO_HARD_TEST_ENABLED web=1 path=/tmp/ace_video_test_<jobId>.mp4 route=GET /api/test-video/<jobId>"
-        )
-except Exception as e:
-    logger.warning("VIDEO_HARD_TEST web startup log failed err=%s", e)
 
 # ACE_TEST_MODE: "1" or "true" = no OpenAI, return demo result immediately
 ACE_TEST_MODE = (os.environ.get("ACE_TEST_MODE", "") or "").strip().lower() in ("1", "true")
@@ -833,17 +824,15 @@ def job_status():
 # Runway video MVP (isolated): one text-to-video only — not part of /api/generate or /api/preview.
 # Future: dedicated ACE video engine may add a second output and richer prompting.
 # Register POST upload before GET /api/video-headline/<token>. Primary path first for workers.
-# TEST-ONLY (HARD): GET /tmp/ace_video_test_<jobId>.mp4 — ACE_VIDEO_HARD_TEST_MODE=1; no upload, no secret.
+# Processed MP4 from worker: /tmp/ace_video_test_<jobId>.mp4 (no worker→web upload).
 # -----------------------------------------------------------------------------
 @app.route("/api/test-video/<job_id>", methods=["GET"])
 def serve_test_video(job_id):
-    """Serve processed MP4 written by worker in hard test mode only."""
-    if not hard_test_mode_enabled():
-        return jsonify({"ok": False, "error": "hard_test_disabled"}), 404
+    """Serve processed MP4 saved by postprocess_video_headline on the worker host."""
     path = hard_test_video_path(job_id or "")
     if not path or not path.is_file():
         return jsonify({"ok": False, "error": "not_found"}), 404
-    logger.info("VIDEO_HARD_TEST_SERVE path=%s", str(path))
+    logger.info("VIDEO_TEST_SERVE path=%s", str(path))
     return send_file(
         str(path),
         mimetype="video/mp4",

@@ -28,10 +28,7 @@ def main() -> None:
 
     # Import after env check so engine can read other env vars
     from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
-    from engine.video_headline_postprocess import (
-        log_video_headline_delivery_startup,
-        hard_test_mode_enabled,
-    )
+    from engine.video_headline_postprocess import log_video_headline_delivery_startup
     from engine.video_jobs_redis import (
         get_redis,
         job_key,
@@ -45,11 +42,6 @@ def main() -> None:
         log_video_headline_delivery_startup("worker")
     except Exception as e:
         logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG worker startup failed err=%s", e)
-
-    if hard_test_mode_enabled():
-        logger.info(
-            "VIDEO_HARD_TEST_ENABLED worker=1 path=/tmp/ace_video_test_<jobId>.mp4 upload=disabled"
-        )
 
     get_redis()  # connect once
     logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)

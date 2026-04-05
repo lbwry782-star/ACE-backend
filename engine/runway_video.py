@@ -344,6 +344,7 @@ def generate_one_video_mvp(
                     # No plan: end card uses product name only; do not use description (may be long body copy elsewhere).
                     end_pn = (product_name or "").strip()
                     end_ap = ""
+                # postprocess writes /tmp/ace_video_test_<jobId>.mp4 and returns .../api/test-video/<jobId>
                 final_url = postprocess_video_headline(
                     url,
                     public_base_url or "",
