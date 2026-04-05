@@ -25,6 +25,8 @@ from engine.side_by_side_v1 import (
 from engine.openai_retry import OpenAIRateLimitError
 from engine.video_headline_postprocess import (
     get_headline_video_path,
+    get_video_test_output_path,
+    video_test_output_enabled,
     write_headline_video_bytes,
     log_video_headline_delivery_startup,
 )
@@ -109,6 +111,16 @@ try:
     log_video_headline_delivery_startup("web")
 except Exception as e:
     logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG web startup failed err=%s", e)
+
+try:
+    if video_test_output_enabled():
+        _td = (os.environ.get("ACE_VIDEO_TEST_OUTPUT_DIR") or "").strip()
+        logger.info(
+            "VIDEO_TEST_OUTPUT_ENABLED web=1 dir=%s route=GET /api/video-test-output/<job_id>/<token>",
+            _td or "(default: <temp>/ace_video_test_output)",
+        )
+except Exception as e:
+    logger.warning("VIDEO_TEST_OUTPUT web startup log failed err=%s", e)
 
 # ACE_TEST_MODE: "1" or "true" = no OpenAI, return demo result immediately
 ACE_TEST_MODE = (os.environ.get("ACE_TEST_MODE", "") or "").strip().lower() in ("1", "true")
@@ -823,7 +835,25 @@ def job_status():
 # Runway video MVP (isolated): one text-to-video only — not part of /api/generate or /api/preview.
 # Future: dedicated ACE video engine may add a second output and richer prompting.
 # Register POST upload before GET /api/video-headline/<token>. Primary path first for workers.
+# TEST-ONLY: GET processed MP4 for manual review (ACE_VIDEO_TEST_OUTPUT=1; same dir on worker+web if split).
 # -----------------------------------------------------------------------------
+@app.route("/api/video-test-output/<job_id>/<token>", methods=["GET"])
+def serve_video_test_output(job_id, token):
+    """Serve worker-written test artifact; enable with ACE_VIDEO_TEST_OUTPUT=1 only."""
+    if not video_test_output_enabled():
+        return jsonify({"ok": False, "error": "test_output_disabled"}), 404
+    path = get_video_test_output_path(job_id or "", (token or "").strip())
+    if not path:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    logger.info("VIDEO_TEST_SERVE path=%s", str(path))
+    return send_file(
+        str(path),
+        mimetype="video/mp4",
+        as_attachment=False,
+        download_name="ace-video-test.mp4",
+    )
+
+
 @app.route("/api/video-headline-artifact", methods=["POST"], strict_slashes=False)
 @app.route("/api/internal/video-headline-artifact", methods=["POST"], strict_slashes=False)
 def internal_video_headline_artifact():

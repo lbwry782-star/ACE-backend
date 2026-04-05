@@ -28,7 +28,10 @@ def main() -> None:
 
     # Import after env check so engine can read other env vars
     from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
-    from engine.video_headline_postprocess import log_video_headline_delivery_startup
+    from engine.video_headline_postprocess import (
+        log_video_headline_delivery_startup,
+        video_test_output_enabled,
+    )
     from engine.video_jobs_redis import (
         get_redis,
         job_key,
@@ -42,6 +45,13 @@ def main() -> None:
         log_video_headline_delivery_startup("worker")
     except Exception as e:
         logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG worker startup failed err=%s", e)
+
+    if video_test_output_enabled():
+        _td = (os.environ.get("ACE_VIDEO_TEST_OUTPUT_DIR") or "").strip()
+        logger.info(
+            "VIDEO_TEST_OUTPUT_ENABLED worker=1 dir=%s",
+            _td or "(default: <temp>/ace_video_test_output)",
+        )
 
     get_redis()  # connect once
     logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)
@@ -77,6 +87,7 @@ def main() -> None:
                 product_name,
                 product_description,
                 public_base_url=public_base_url,
+                job_id=job_id,
             )
             logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp done jobId=%s", job_id)
 

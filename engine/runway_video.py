@@ -240,6 +240,7 @@ def generate_one_video_mvp(
     product_name: str,
     product_description: str,
     public_base_url: Optional[str] = None,
+    job_id: str = "",
 ) -> Tuple[str, str]:
     """
     Create one Runway video task, poll until done or timeout.
@@ -348,6 +349,7 @@ def generate_one_video_mvp(
                     public_base_url or "",
                     product_name=end_pn,
                     advertising_purpose=end_ap,
+                    job_id=job_id,
                 )
                 logger.info("VIDEO_JOB_STEP step=headline_postprocess done")
                 return final_url, marketing
