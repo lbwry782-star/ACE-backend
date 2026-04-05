@@ -9,9 +9,10 @@ timeout = int(os.getenv("GUNICORN_TIMEOUT", str(_DEFAULT_TIMEOUT)))
 graceful_timeout = timeout
 keepalive = int(os.getenv("GUNICORN_KEEPALIVE", str(_DEFAULT_KEEPALIVE)))
 
-# Two+ sync workers so one can serve /health while another handles long /api/generate-video (Render health checks).
+# At least 2 sync workers so one can serve /health while another handles long /api/generate-video.
+# Host env may set GUNICORN_WORKERS=1; clamp minimum to 2 so health checks are not starved.
 _workers_raw = int(os.getenv("GUNICORN_WORKERS", "2"))
-workers = max(1, _workers_raw)
+workers = max(2, _workers_raw)
 worker_class = "sync"
 
 # Prove config is loaded on boot
