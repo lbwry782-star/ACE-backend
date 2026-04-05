@@ -262,6 +262,7 @@ def generate_one_video_mvp(
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
     prompt_image_data_uri: Optional[str] = None
     if plan:
+        # marketingText API field only (planner headline); not burned into video end card — end card uses product + promise below.
         marketing = (plan.get("headlineText") or "").strip()
         # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
         if model != "gen4.5":
@@ -339,8 +340,9 @@ def generate_one_video_mvp(
                     end_pn = (plan.get("productNameResolved") or product_name or "").strip()
                     end_ap = (plan.get("advertisingPromise") or "").strip()
                 else:
+                    # No plan: end card uses product name only; do not use description (may be long body copy elsewhere).
                     end_pn = (product_name or "").strip()
-                    end_ap = (product_description or "").strip()
+                    end_ap = ""
                 final_url = postprocess_video_headline(
                     url,
                     public_base_url or "",

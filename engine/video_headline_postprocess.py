@@ -208,7 +208,7 @@ def postprocess_video_headline(
 ) -> str:
     """
     Download MP4, one ffmpeg pass: extend tail with tpad, black end card + two lines (product name, advertising purpose).
-    Does not use marketing headline text.
+    Does not use headlineText, Redis marketingText, or long body copy — only the two kwargs above.
     """
     pn = _sanitize_endcard_line(product_name)
     ap = _sanitize_endcard_line(advertising_purpose)
