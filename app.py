@@ -821,7 +821,6 @@ def serve_video_headline(token):
     )
 
 
-@app.route("/api/video-headline-artifact", methods=["POST"], strict_slashes=False)
 @app.route("/api/internal/video-headline-artifact", methods=["POST"], strict_slashes=False)
 def internal_video_headline_artifact():
     """
@@ -829,7 +828,8 @@ def internal_video_headline_artifact():
     from this process's disk (split web + worker on Render).
     """
     logger.info(
-        "VIDEO_HEADLINE_UPLOAD_ENDPOINT_HIT content_length=%s remote_addr=%s user_agent=%s",
+        "VIDEO_HEADLINE_UPLOAD_ENDPOINT_HIT path=%s content_length=%s remote_addr=%s user_agent=%s",
+        request.path,
         request.content_length,
         request.remote_addr,
         (request.headers.get("User-Agent") or "")[:120],
@@ -1089,7 +1089,7 @@ def health():
 
 def _log_video_headline_upload_routes_registered() -> None:
     """Confirm POST upload routes exist on this process (gunicorn import)."""
-    needle = ("video-headline-artifact", "video-headline/<")
+    needle = ("internal/video-headline-artifact", "video-headline/<")
     for rule in app.url_map.iter_rules():
         r = str(rule.rule)
         if not any(n in r for n in needle):
