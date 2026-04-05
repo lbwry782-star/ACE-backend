@@ -372,15 +372,20 @@ def postprocess_video_headline(
         upload_secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
         out_exists = bool(out_path.is_file())
         base_ok = bool((base or "").strip())
-        # Unconditional: always shows which path runs (upload vs skip vs abort)
+        env_public = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip()
         logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_BRANCH diagnostic=post_ok "
-            "secret_present=%s secret_len=%s out_file_exists=%s public_base_present=%s",
+            "VIDEO_HEADLINE_FORCE_UPLOAD_CHECK secret_present=%s public_base_present=%s out_file_exists=%s "
+            "public_base=%s env_secret_len=%s env_ACE_PUBLIC_BASE_URL_len=%s job_public_base_url_param=%s",
             bool(upload_secret),
-            len(upload_secret),
-            out_exists,
             base_ok,
+            out_exists,
+            base,
+            len(upload_secret),
+            len(env_public),
+            (public_base_url or "")[:256],
         )
+        # Next line is before any return/skip — confirms we reached the delivery gate
+        logger.info("VIDEO_HEADLINE_ENTER_UPLOAD_BLOCK")
         if not out_exists:
             logger.warning(
                 "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=abort reason=no_local_artifact fallback_to_original=true"
@@ -404,6 +409,12 @@ def postprocess_video_headline(
                 upload_endpoint,
             )
             try:
+                logger.info(
+                    "VIDEO_HEADLINE_UPLOAD_ATTEMPT url=%s timeout_s=%s token_prefix=%s",
+                    upload_endpoint,
+                    _UPLOAD_TIMEOUT,
+                    token[:8] if len(token) >= 8 else token,
+                )
                 with open(out_path, "rb") as fp:
                     up = requests.post(
                         upload_endpoint,
@@ -412,6 +423,11 @@ def postprocess_video_headline(
                         data={"token": token},
                         timeout=_UPLOAD_TIMEOUT,
                     )
+                logger.info(
+                    "VIDEO_HEADLINE_UPLOAD_RESPONSE status_code=%s body_len=%s",
+                    up.status_code,
+                    len(up.content or b""),
+                )
                 ok_body = False
                 if up.status_code == 200:
                     try:
@@ -436,12 +452,28 @@ def postprocess_video_headline(
                     up.status_code,
                     len(up.content or b""),
                 )
-            except requests.Timeout:
+            except requests.Timeout as e:
+                logger.warning(
+                    "VIDEO_HEADLINE_UPLOAD_EXCEPTION error=Timeout detail=%s fallback_to_original=true",
+                    e,
+                )
                 logger.warning("VIDEO_HEADLINE_POSTPROCESS upload_timeout fallback_to_original=true")
             except requests.RequestException as e:
                 logger.warning(
+                    "VIDEO_HEADLINE_UPLOAD_EXCEPTION error=%s detail=%s fallback_to_original=true",
+                    type(e).__name__,
+                    e,
+                )
+                logger.warning(
                     "VIDEO_HEADLINE_POSTPROCESS upload_error err=%s fallback_to_original=true",
                     type(e).__name__,
+                )
+            except Exception as e:
+                logger.warning(
+                    "VIDEO_HEADLINE_UPLOAD_EXCEPTION error=%s detail=%s fallback_to_original=true",
+                    type(e).__name__,
+                    e,
+                    exc_info=True,
                 )
             try:
                 if out_path.exists():

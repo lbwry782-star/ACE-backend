@@ -827,6 +827,12 @@ def internal_video_headline_artifact():
     Background worker POSTs the processed MP4 here so GET /api/video-headline/<token> can read it
     from this process's disk (split web + worker on Render).
     """
+    logger.info(
+        "VIDEO_HEADLINE_UPLOAD_ENDPOINT_HIT content_length=%s remote_addr=%s user_agent=%s",
+        request.content_length,
+        request.remote_addr,
+        (request.headers.get("User-Agent") or "")[:120],
+    )
     secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
     if not secret:
         return jsonify({"ok": False, "error": "not_configured"}), 503
