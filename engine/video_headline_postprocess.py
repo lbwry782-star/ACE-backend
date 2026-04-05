@@ -1,5 +1,5 @@
 """
-Post-process Runway MP4: append a black end card with headline (no text on original footage).
+Post-process Runway MP4: extend with black tail + white headline in one ffmpeg pass (no separate endcard file, no concat).
 
 Processed files are stored on disk under VIDEO_HEADLINE_STORAGE_DIR as {token}.mp4 so they survive
 worker restarts (lookup is disk-only, not in-memory).
@@ -7,16 +7,16 @@ worker restarts (lookup is disk-only, not in-memory).
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional
 
 import requests
 
@@ -28,7 +28,8 @@ _TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
 _HOLD_SECONDS = float((os.environ.get("VIDEO_HEADLINE_HOLD_SECONDS") or "1.5").strip() or "1.5")
 _HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_SECONDS") or "180").strip() or "180")
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
-_FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "120").strip() or "120")
+# Single re-encode pass is typically faster than previous concat; default allows headroom on slow hosts.
+_FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "180").strip() or "180")
 
 
 def _storage_root() -> Path:
@@ -88,12 +89,21 @@ def _ffprobe_bin() -> Optional[str]:
     return shutil.which("ffprobe")
 
 
-def _ffprobe_streams_json(path: Path, timeout_sec: float) -> Dict[str, Any]:
+def _ffprobe_duration_seconds(path: Path, timeout_sec: float) -> float:
     ffprobe = _ffprobe_bin()
     if not ffprobe:
         raise RuntimeError("ffprobe not found")
     r = subprocess.run(
-        [ffprobe, "-v", "error", "-show_streams", "-of", "json", str(path)],
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -101,33 +111,32 @@ def _ffprobe_streams_json(path: Path, timeout_sec: float) -> Dict[str, Any]:
     )
     if r.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {r.stderr or r.stdout}")
-    return json.loads(r.stdout or "{}")
+    return float((r.stdout or "").strip() or 0.0)
 
 
-def _video_size_and_audio(
-    path: Path, timeout_sec: float
-) -> Tuple[int, int, Optional[Tuple[int, int]]]:
-    """
-    First video stream WxH; first audio (sample_rate, channels) or None.
-    """
-    data = _ffprobe_streams_json(path, timeout_sec)
-    streams: List[Dict[str, Any]] = data.get("streams") or []
-    w, h = 1280, 720
-    audio: Optional[Tuple[int, int]] = None
-    for s in streams:
-        if s.get("codec_type") == "video":
-            tw = int(s.get("width") or 0)
-            th = int(s.get("height") or 0)
-            if tw > 0 and th > 0:
-                w, h = tw, th
-            break
-    for s in streams:
-        if s.get("codec_type") == "audio":
-            sr = int(float(s.get("sample_rate") or 48000))
-            ch = int(s.get("channels") or 2)
-            audio = (sr, ch)
-            break
-    return w, h, audio
+def _input_has_audio(path: Path, timeout_sec: float) -> bool:
+    ffprobe = _ffprobe_bin()
+    if not ffprobe:
+        return False
+    r = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout_sec,
+    )
+    return r.returncode == 0 and bool((r.stdout or "").strip())
 
 
 def _filter_path_for_ffmpeg(p: Path) -> str:
@@ -157,7 +166,7 @@ def postprocess_video_headline(
     headline_decision: Optional[str] = None,
 ) -> str:
     """
-    Download MP4, append black end card with white headline (original video unchanged), return URL.
+    Download MP4, one ffmpeg pass: extend tail with tpad, black full-frame + white headline only for t>=duration.
     """
     dec = (headline_decision or "").strip()
     if dec == "no_headline":
@@ -171,6 +180,7 @@ def postprocess_video_headline(
 
     base = (public_base_url or "").strip().rstrip("/")
     if not base:
+        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=no_public_base_url")
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=no_public_base_url"
         )
@@ -179,6 +189,7 @@ def postprocess_video_headline(
     ffmpeg = _ffmpeg_bin()
     font = _default_font_path()
     if not ffmpeg or not font:
+        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=missing_ffmpeg_or_font")
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=missing_ffmpeg_or_font "
             "ffmpeg=%s font=%s",
@@ -187,19 +198,22 @@ def postprocess_video_headline(
         )
         return source_video_url
 
-    logger.info("VIDEO_HEADLINE_POSTPROCESS start")
+    t0 = time.monotonic()
+    logger.info("VIDEO_HEADLINE_POSTPROCESS_START")
+
     tmp = Path(tempfile.mkdtemp(prefix="ace_vid_headline_"))
     inp = tmp / "in.mp4"
-    endcard = tmp / "endcard.mp4"
     text_file = tmp / "headline.txt"
 
     token = uuid.uuid4().hex
     out_path = _path_for_token(token)
     if out_path is None:
+        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=token_internal_error")
         logger.warning("VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=token_internal_error")
         return source_video_url
 
     def _fail(reason: str) -> str:
+        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=%s", reason)
         logger.warning("VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=%s", reason)
         try:
             if out_path.exists():
@@ -232,174 +246,94 @@ def postprocess_video_headline(
                     f.write(chunk)
 
         try:
-            w, h, audio_info = _video_size_and_audio(inp, _FFPROBE_TIMEOUT)
+            duration_sec = _ffprobe_duration_seconds(inp, _FFPROBE_TIMEOUT)
         except subprocess.TimeoutExpired:
             logger.warning("VIDEO_HEADLINE_POSTPROCESS ffprobe_timeout")
             return _fail("ffprobe_timeout")
         except Exception as e:
             return _fail(f"ffprobe_error:{type(e).__name__}")
 
+        if duration_sec <= 0:
+            return _fail("invalid_duration")
+
+        d_str = f"{duration_sec:.4f}"
+        has_audio = _input_has_audio(inp, _FFPROBE_TIMEOUT)
+
         fs = _fontsize_for_headline(headline_clean)
         font_e = _filter_path_for_ffmpeg(Path(font))
         tf_e = _filter_path_for_ffmpeg(text_file)
 
-        # Solid black frame + white text only (no overlay on main video)
-        vf_end = (
-            f"drawtext=fontfile='{font_e}':textfile='{tf_e}':"
-            f"fontsize={fs}:fontcolor=white:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2"
+        # One pass: clone-extend tail, then black full frame + white text only when t >= original duration.
+        vf = (
+            f"tpad=stop_mode=clone:stop_duration={hold},"
+            f"drawbox=x=0:y=0:w=iw:h=ih:color=black@1:t=fill:enable='gte(t\\,{d_str})',"
+            f"drawtext=fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white:"
+            f"enable='gte(t\\,{d_str})':x=(w-text_w)/2:y=(h-text_h)/2"
         )
 
-        if audio_info:
-            sr, ch = audio_info
-            layout = "stereo" if ch >= 2 else "mono"
-            cmd_end: List[str] = [
-                ffmpeg,
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                f"color=c=black:s={w}x{h}:d={hold}",
-                "-f",
-                "lavfi",
-                "-i",
-                f"anullsrc=channel_layout={layout}:sample_rate={sr}",
-                "-vf",
-                vf_end,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                "-t",
-                str(hold),
-                "-shortest",
-                str(endcard),
-            ]
+        cmd: list[str] = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(inp),
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        if has_audio:
+            cmd.extend(["-af", f"apad=pad_dur={hold}", "-c:a", "aac", "-b:a", "192k"])
         else:
-            cmd_end = [
-                ffmpeg,
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                f"color=c=black:s={w}x{h}:d={hold}",
-                "-vf",
-                vf_end,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-                "-pix_fmt",
-                "yuv420p",
-                "-t",
-                str(hold),
-                str(endcard),
-            ]
+            cmd.append("-an")
+
+        cmd.extend(["-movflags", "+faststart", str(out_path)])
+
+        vf_preview = vf[:220] + ("…" if len(vf) > 220 else "")
+        logger.info(
+            "VIDEO_HEADLINE_POSTPROCESS_CMD hold_s=%s duration_s=%s has_audio=%s vf_preview=%r",
+            hold,
+            duration_sec,
+            has_audio,
+            vf_preview,
+        )
 
         try:
-            pe = subprocess.run(
-                cmd_end,
+            p = subprocess.run(
+                cmd,
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=_FFMPEG_TIMEOUT,
             )
         except subprocess.TimeoutExpired:
+            logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=ffmpeg_timeout")
             logger.warning("VIDEO_HEADLINE_POSTPROCESS ffmpeg_timeout")
-            return _fail("ffmpeg_timeout_endcard")
+            return _fail("ffmpeg_timeout")
 
-        if pe.returncode != 0:
-            return _fail(f"ffmpeg_endcard_exit:{pe.returncode}:stderr_len={len(pe.stderr or '')}")
-
-        # Concat: [original][endcard] — no text on original frames
-        if audio_info:
-            fc = (
-                f"[0:v:0][0:a:0][1:v:0][1:a:0]concat=n=2:v=1:a=1[outv][outa]"
+        if p.returncode != 0:
+            logger.warning(
+                "VIDEO_HEADLINE_POSTPROCESS_FAIL reason=ffmpeg_exit rc=%s stderr_len=%s",
+                p.returncode,
+                len(p.stderr or ""),
             )
-            cmd_cat = [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(inp),
-                "-i",
-                str(endcard),
-                "-filter_complex",
-                fc,
-                "-map",
-                "[outv]",
-                "-map",
-                "[outa]",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "192k",
-                str(out_path),
-            ]
-        else:
-            fc = "[0:v][1:v]concat=n=2:v=1[outv]"
-            cmd_cat = [
-                ffmpeg,
-                "-y",
-                "-i",
-                str(inp),
-                "-i",
-                str(endcard),
-                "-filter_complex",
-                fc,
-                "-map",
-                "[outv]",
-                "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "23",
-                str(out_path),
-            ]
+            return _fail(f"ffmpeg_exit:{p.returncode}:stderr_len={len(p.stderr or '')}")
 
-        concat_timeout = max(_FFMPEG_TIMEOUT, 180.0)
-        try:
-            pc = subprocess.run(
-                cmd_cat,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=concat_timeout,
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("VIDEO_HEADLINE_POSTPROCESS ffmpeg_timeout")
-            return _fail("ffmpeg_timeout_concat")
-
-        if pc.returncode != 0:
-            return _fail(
-                f"ffmpeg_concat_exit:{pc.returncode}:stderr_len={len(pc.stderr or '')}"
-            )
-
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
         preview = headline_clean[:80] + ("…" if len(headline_clean) > 80 else "")
         logger.info(
-            'VIDEO_HEADLINE_POSTPROCESS applied headline="%s" endcard=true storage=disk',
+            "VIDEO_HEADLINE_POSTPROCESS_OK elapsed_ms=%s headline=%r single_pass=true storage=disk",
+            elapsed_ms,
             preview,
         )
-        final_url = f"{base}/api/video-headline/{token}"
-        return final_url
+        return f"{base}/api/video-headline/{token}"
     except Exception as e:
+        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=exception:%s", type(e).__name__)
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=exception:%s err=%s",
             type(e).__name__,
