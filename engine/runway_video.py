@@ -33,7 +33,19 @@ DEFAULT_VIDEO_MODEL = "gen4_turbo"
 _POLL_INTERVAL_SECONDS = 5.0
 # Overall wall-clock limit for create + poll (video generation can be slow)
 _MAX_WAIT_SECONDS = 600
+# Task create + non-poll calls
 _HTTP_TIMEOUT_SECONDS = 60
+# Per poll GET — must never block indefinitely (network stalls)
+_POLL_HTTP_TIMEOUT_SECONDS = float((os.environ.get("RUNWAY_POLL_HTTP_TIMEOUT_SECONDS") or "25").strip() or "25")
+
+# Runway task status (normalized upper); extend as API evolves
+_RUNNING_STATUSES = frozenset(
+    {"PENDING", "THROTTLED", "RUNNING", "QUEUED", "IN_PROGRESS", "STARTING", "PREPARING"}
+)
+_SUCCESS_STATUSES = frozenset({"SUCCEEDED", "COMPLETED", "SUCCESS"})
+_FAILED_STATUSES = frozenset(
+    {"FAILED", "CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "ERROR", "ERRORED"}
+)
 
 # gen4_turbo image_to_video requires promptImage (API returns 400 if omitted). Opaque light neutral frame
 # (soft gray-beige, no transparency) so Runway does not substitute a default color (e.g. red) for alpha.
@@ -141,39 +153,86 @@ def _create_text_to_video_task(
     return task_id
 
 
-def _get_task(session: requests.Session, base_url: str, task_id: str) -> Dict[str, Any]:
+def _poll_get_task_once(
+    session: requests.Session,
+    base_url: str,
+    task_id: str,
+    timeout: float,
+) -> Optional[Dict[str, Any]]:
+    """
+    Single poll GET with hard timeout. Returns None on timeout/transport/HTTP/JSON parse errors
+    so the outer loop can retry until monotonic deadline (never hang forever on one socket).
+    """
     url = f"{base_url}/v1/tasks/{task_id}"
-    resp = session.get(url, headers=_headers(), timeout=_HTTP_TIMEOUT_SECONDS)
+    try:
+        resp = session.get(url, headers=_headers(), timeout=timeout)
+    except requests.exceptions.Timeout:
+        logger.warning(
+            "RUNWAY_MVP poll_timeout task_id=%s timeout_s=%s",
+            task_id,
+            timeout,
+        )
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.warning(
+            "RUNWAY_MVP poll_http_error task_id=%s err_type=%s err=%s",
+            task_id,
+            type(e).__name__,
+            e,
+        )
+        return None
     if resp.status_code >= 400:
         logger.error(
-            "RUNWAY_MVP task_poll_http_failed task_id=%s status=%s",
+            "RUNWAY_MVP poll_http_error task_id=%s http_status=%s body_len=%s",
             task_id,
             resp.status_code,
+            len(resp.content or b""),
         )
-        raise RunwayVideoMVPError("poll_failed")
+        return None
     try:
-        return resp.json()
+        data = resp.json()
     except ValueError:
-        logger.error("RUNWAY_MVP task_poll_invalid_json task_id=%s", task_id)
-        raise RunwayVideoMVPError("poll_failed")
+        logger.error("RUNWAY_MVP poll_invalid_json task_id=%s", task_id)
+        return None
+    if not isinstance(data, dict):
+        logger.error("RUNWAY_MVP poll_invalid_payload task_id=%s type=%s", task_id, type(data).__name__)
+        return None
+    return data
+
+
+def _normalize_task_status(task: Dict[str, Any]) -> str:
+    raw = task.get("status")
+    return (str(raw).strip() if raw is not None else "").upper()
 
 
 def _extract_video_url(task: Dict[str, Any]) -> Optional[str]:
-    status = (task.get("status") or "").strip()
-    if status == "SUCCEEDED":
+    status = _normalize_task_status(task)
+    if status in _SUCCESS_STATUSES:
         out: List[Any] = task.get("output") or []
         if out and isinstance(out[0], str):
             return out[0].strip() or None
-        logger.error("RUNWAY_MVP succeeded_but_no_output_url")
+        logger.error("RUNWAY_MVP succeeded_but_no_output_url task_id=%s", task.get("id"))
         return None
-    if status == "FAILED":
+    if status in _FAILED_STATUSES:
         code = task.get("failureCode")
-        logger.error("RUNWAY_MVP task_failed task_id=%s failure_code=%s", task.get("id"), code)
-        return None
-    if status == "CANCELLED":
-        logger.error("RUNWAY_MVP task_cancelled task_id=%s", task.get("id"))
+        logger.error(
+            "RUNWAY_MVP task_failed task_id=%s failure_code=%s status=%s",
+            task.get("id"),
+            code,
+            status,
+        )
         return None
     return None
+
+
+def _sleep_poll_interval(deadline: float) -> None:
+    """Sleep up to _POLL_INTERVAL_SECONDS without exceeding deadline."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return
+    sleep_s = min(_POLL_INTERVAL_SECONDS, remaining)
+    logger.info("RUNWAY_MVP poll_sleep seconds=%s", round(sleep_s, 2))
+    time.sleep(sleep_s)
 
 
 def generate_one_video_mvp(
@@ -222,28 +281,66 @@ def generate_one_video_mvp(
         session, base, model, prompt, prompt_image_data_uri=prompt_image_data_uri
     )
 
-    deadline = time.monotonic() + _MAX_WAIT_SECONDS
-    logger.info("RUNWAY_MVP polling_started task_id=%s max_wait_s=%s", task_id, _MAX_WAIT_SECONDS)
+    poll_start = time.monotonic()
+    deadline = poll_start + _MAX_WAIT_SECONDS
+    logger.info(
+        "RUNWAY_MVP polling_started task_id=%s max_wait_s=%s poll_http_timeout_s=%s",
+        task_id,
+        _MAX_WAIT_SECONDS,
+        _POLL_HTTP_TIMEOUT_SECONDS,
+    )
 
+    poll_attempt = 0
     while time.monotonic() < deadline:
-        task = _get_task(session, base, task_id)
-        status = (task.get("status") or "").strip()
-        if status in ("PENDING", "THROTTLED", "RUNNING"):
-            time.sleep(_POLL_INTERVAL_SECONDS)
-            continue
-        url = _extract_video_url(task)
-        if url:
-            logger.info("RUNWAY_MVP polling_done task_id=%s status=SUCCEEDED", task_id)
-            final_url = postprocess_video_headline(
-                url,
-                marketing,
-                public_base_url or "",
-                headline_decision=headline_decision,
-            )
-            return final_url, marketing
-        raise RunwayVideoMVPError("generation_failed")
+        poll_attempt += 1
+        elapsed_s = round(time.monotonic() - poll_start, 1)
+        logger.info(
+            "RUNWAY_MVP poll_attempt=%s elapsed_s=%s task_id=%s deadline_remaining_s=%s",
+            poll_attempt,
+            elapsed_s,
+            task_id,
+            round(max(0.0, deadline - time.monotonic()), 1),
+        )
 
-    logger.error("RUNWAY_MVP timeout task_id=%s", task_id)
+        task = _poll_get_task_once(session, base, task_id, _POLL_HTTP_TIMEOUT_SECONDS)
+        if task is None:
+            if time.monotonic() >= deadline:
+                break
+            _sleep_poll_interval(deadline)
+            continue
+
+        status = _normalize_task_status(task)
+        logger.info("RUNWAY_MVP poll_status status=%s task_id=%s", status or "(empty)", task_id)
+
+        if status in _RUNNING_STATUSES:
+            _sleep_poll_interval(deadline)
+            continue
+
+        if status in _SUCCESS_STATUSES:
+            url = _extract_video_url(task)
+            if url:
+                logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
+                final_url = postprocess_video_headline(
+                    url,
+                    marketing,
+                    public_base_url or "",
+                    headline_decision=headline_decision,
+                )
+                return final_url, marketing
+            raise RunwayVideoMVPError("generation_failed")
+
+        if status in _FAILED_STATUSES:
+            _extract_video_url(task)
+            raise RunwayVideoMVPError("generation_failed")
+
+        logger.warning(
+            "RUNWAY_MVP poll_unknown_status status=%s task_id=%s (will_retry_until_deadline)",
+            status,
+            task_id,
+        )
+        _sleep_poll_interval(deadline)
+
+    logger.error("RUNWAY_MVP timeout task_id=%s max_wait_s=%s", task_id, _MAX_WAIT_SECONDS)
     raise RunwayVideoMVPError("timeout")
 
 
