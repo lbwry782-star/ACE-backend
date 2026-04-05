@@ -252,7 +252,9 @@ def generate_one_video_mvp(
 
     base = _env_base_url()
     model = _env_model()
+    logger.info("VIDEO_JOB_STEP step=plan_video start")
     plan = fetch_video_plan_o3(product_name, product_description)
+    logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
     prompt_image_data_uri: Optional[str] = None
     headline_decision: Optional[str] = None
     if plan:
@@ -260,12 +262,18 @@ def generate_one_video_mvp(
         headline_decision = (plan.get("headlineDecision") or "").strip() or None
         # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
         if model != "gen4.5":
+            logger.info("VIDEO_JOB_STEP step=build_start_image start")
             prompt_image_data_uri = generate_video_start_image_data_uri(plan)
+            logger.info(
+                "VIDEO_JOB_STEP step=build_start_image done has_uri=%s",
+                bool(prompt_image_data_uri),
+            )
             if prompt_image_data_uri:
                 prompt = build_runway_interaction_prompt_from_plan(plan)
             else:
                 prompt = build_runway_prompt_from_plan(plan)
         else:
+            logger.info("VIDEO_JOB_STEP step=build_start_image skipped model=gen4.5")
             prompt = build_runway_prompt_from_plan(plan)
     else:
         prompt = build_simple_prompt(product_name, product_description)
@@ -277,9 +285,11 @@ def generate_one_video_mvp(
         )
 
     session = requests.Session()
+    logger.info("VIDEO_JOB_STEP step=runway_create_task start")
     task_id = _create_text_to_video_task(
         session, base, model, prompt, prompt_image_data_uri=prompt_image_data_uri
     )
+    logger.info("VIDEO_JOB_STEP step=runway_create_task done task_id=%s", task_id)
 
     poll_start = time.monotonic()
     deadline = poll_start + _MAX_WAIT_SECONDS
@@ -289,6 +299,7 @@ def generate_one_video_mvp(
         _MAX_WAIT_SECONDS,
         _POLL_HTTP_TIMEOUT_SECONDS,
     )
+    logger.info("VIDEO_JOB_STEP step=runway_poll_loop start")
 
     poll_attempt = 0
     while time.monotonic() < deadline:
@@ -320,12 +331,15 @@ def generate_one_video_mvp(
             url = _extract_video_url(task)
             if url:
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
+                logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
+                logger.info("VIDEO_JOB_STEP step=headline_postprocess start")
                 final_url = postprocess_video_headline(
                     url,
                     marketing,
                     public_base_url or "",
                     headline_decision=headline_decision,
                 )
+                logger.info("VIDEO_JOB_STEP step=headline_postprocess done")
                 return final_url, marketing
             raise RunwayVideoMVPError("generation_failed")
 
@@ -341,6 +355,7 @@ def generate_one_video_mvp(
         _sleep_poll_interval(deadline)
 
     logger.error("RUNWAY_MVP timeout task_id=%s max_wait_s=%s", task_id, _MAX_WAIT_SECONDS)
+    logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=timeout")
     raise RunwayVideoMVPError("timeout")
 
 

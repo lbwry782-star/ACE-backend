@@ -1,7 +1,7 @@
 """
 Standalone ACE video worker: consume Redis queue and run generate_one_video_mvp.
 
-Deploy on Render as a separate Background Worker service:
+Deploy on Render as a Background Worker service:
   start command: python worker_video.py
   env: same REDIS_URL, RUNWAY_*, OPENAI_*, ACE_PUBLIC_BASE_URL, etc. as web service.
 
@@ -52,28 +52,42 @@ def main() -> None:
             continue
 
         logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
-        r = get_redis()
-        data = r.hgetall(job_key(job_id))
-        if not data:
-            logger.warning("VIDEO_JOB_MISSING jobId=%s (no hash)", job_id)
-            continue
-
-        product_name = data.get("product_name") or ""
-        product_description = data.get("product_description") or ""
-        public_base_url = data.get("public_base_url") or ""
-
         try:
+            logger.info("VIDEO_JOB_STEP step=redis_get_client start jobId=%s", job_id)
+            r = get_redis()
+            logger.info("VIDEO_JOB_STEP step=redis_get_client done jobId=%s", job_id)
+
+            logger.info("VIDEO_JOB_STEP step=load_job_data start jobId=%s", job_id)
+            data = r.hgetall(job_key(job_id))
+            logger.info(
+                "VIDEO_JOB_STEP step=load_job_data done jobId=%s fields=%s",
+                job_id,
+                len(data),
+            )
+            if not data:
+                logger.warning("VIDEO_JOB_MISSING jobId=%s (no hash)", job_id)
+                continue
+
+            product_name = data.get("product_name") or ""
+            product_description = data.get("product_description") or ""
+            public_base_url = data.get("public_base_url") or ""
+
+            logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp start jobId=%s", job_id)
             video_url, marketing_text = generate_one_video_mvp(
                 product_name,
                 product_description,
                 public_base_url=public_base_url,
             )
+            logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp done jobId=%s", job_id)
+
             logger.info(
                 "VIDEO_JOB_CHOSEN_URL jobId=%s video_url=%s before_redis=1",
                 job_id,
                 video_url,
             )
+            logger.info("VIDEO_JOB_STEP step=redis_mark_done start jobId=%s", job_id)
             video_job_mark_done(job_id, video_url, marketing_text or "")
+            logger.info("VIDEO_JOB_STEP step=redis_mark_done done jobId=%s", job_id)
             logger.info(
                 "VIDEO_JOB_RESULT jobId=%s video_url=%s redis_written=1",
                 job_id,
@@ -82,11 +96,27 @@ def main() -> None:
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
         except RunwayVideoMVPError:
             logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)
-            video_job_mark_error(job_id, "video_generation_failed")
+            try:
+                video_job_mark_error(job_id, "video_generation_failed")
+            except Exception as mark_err:
+                logger.error(
+                    "VIDEO_JOB_ERROR mark_failed jobId=%s err=%s",
+                    job_id,
+                    mark_err,
+                    exc_info=True,
+                )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
         except Exception as e:
-            logger.error("VIDEO_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
-            video_job_mark_error(job_id, "video_generation_failed")
+            logger.error("VIDEO_JOB_FATAL jobId=%s error=%s", job_id, e, exc_info=True)
+            try:
+                video_job_mark_error(job_id, "video_generation_failed")
+            except Exception as mark_err:
+                logger.error(
+                    "VIDEO_JOB_FATAL mark_error_failed jobId=%s err=%s",
+                    job_id,
+                    mark_err,
+                    exc_info=True,
+                )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
 
 

@@ -37,7 +37,14 @@ def get_redis():
         raise RuntimeError("REDIS_URL is not set")
     import redis as redis_lib
 
-    _redis = redis_lib.Redis.from_url(url, decode_responses=True)
+    # Avoid indefinite hangs if Redis is unreachable (worker would stop after VIDEO_JOB_STARTED).
+    _t = float((os.environ.get("REDIS_SOCKET_TIMEOUT_SECONDS") or "60").strip() or "60")
+    _redis = redis_lib.Redis.from_url(
+        url,
+        decode_responses=True,
+        socket_connect_timeout=_t,
+        socket_timeout=_t,
+    )
     return _redis
 
 
