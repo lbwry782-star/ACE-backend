@@ -843,7 +843,9 @@ def serve_test_video(job_id):
 
 
 @app.route("/api/video-headline-artifact", methods=["POST"], strict_slashes=False)
+@app.route("/video-headline-artifact", methods=["POST"], strict_slashes=False)
 @app.route("/api/internal/video-headline-artifact", methods=["POST"], strict_slashes=False)
+@app.route("/internal/video-headline-artifact", methods=["POST"], strict_slashes=False)
 def internal_video_headline_artifact():
     """
     Background worker POSTs the processed MP4 here so GET /api/video-headline/<token> can read it
@@ -889,7 +891,8 @@ def internal_video_headline_artifact():
     return jsonify({"ok": True}), 200
 
 
-@app.route('/api/video-headline/<token>', methods=['GET'])
+@app.route('/api/video-headline/<token>', methods=['GET'], strict_slashes=False)
+@app.route('/video-headline/<token>', methods=['GET'], strict_slashes=False)
 def serve_video_headline(token):
     """Serve ffmpeg-processed MP4 from disk-backed store (token from videoUrl); survives worker restart."""
     path = get_headline_video_path((token or "").strip())
