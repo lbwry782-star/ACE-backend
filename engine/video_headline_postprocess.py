@@ -246,14 +246,13 @@ def postprocess_video_headline(
     """
     headline_clean = _sanitize_headline_line(headline)
     if not headline_clean:
-        logger.info("VIDEO_HEADLINE_POSTPROCESS skipped empty_headline")
+        logger.info(
+            "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=empty_headline"
+        )
         return source_video_url
-
-    logger.info("HEADLINE_OVERLAY_TEXT headline=%r", headline_clean[:500])
 
     base = (public_base_url or "").strip().rstrip("/")
     if not base:
-        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=no_public_base_url")
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=no_public_base_url"
         )
@@ -262,7 +261,6 @@ def postprocess_video_headline(
     ffmpeg = _ffmpeg_bin()
     font = _default_font_path()
     if not ffmpeg or not font:
-        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=missing_ffmpeg_or_font")
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=missing_ffmpeg_or_font "
             "ffmpeg=%s font=%s",
@@ -272,7 +270,7 @@ def postprocess_video_headline(
         return source_video_url
 
     t0 = time.monotonic()
-    logger.info("VIDEO_HEADLINE_POSTPROCESS_START")
+    logger.info("VIDEO_HEADLINE_POSTPROCESS start")
 
     tmp = Path(tempfile.mkdtemp(prefix="ace_vid_headline_"))
     inp = tmp / "in.mp4"
@@ -281,13 +279,16 @@ def postprocess_video_headline(
     token = uuid.uuid4().hex
     out_path = _path_for_token(token)
     if out_path is None:
-        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=token_internal_error")
-        logger.warning("VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=token_internal_error")
+        logger.warning(
+            "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=token_internal_error"
+        )
         return source_video_url
 
     def _fail(reason: str) -> str:
-        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=%s", reason)
-        logger.warning("VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=%s", reason)
+        logger.warning(
+            "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=%s",
+            reason,
+        )
         try:
             if out_path.exists():
                 out_path.unlink(missing_ok=True)
@@ -306,7 +307,6 @@ def postprocess_video_headline(
             r = requests.get(source_video_url, timeout=_HTTP_DOWNLOAD_TIMEOUT, stream=True)
             r.raise_for_status()
         except requests.Timeout:
-            logger.warning("VIDEO_HEADLINE_POSTPROCESS download_timeout")
             return _fail("download_timeout")
         except requests.RequestException as e:
             return _fail(f"download_error:{type(e).__name__}")
@@ -319,7 +319,6 @@ def postprocess_video_headline(
         try:
             duration_sec = _ffprobe_duration_seconds(inp, _FFPROBE_TIMEOUT)
         except subprocess.TimeoutExpired:
-            logger.warning("VIDEO_HEADLINE_POSTPROCESS ffprobe_timeout")
             return _fail("ffprobe_timeout")
         except Exception as e:
             return _fail(f"ffprobe_error:{type(e).__name__}")
@@ -391,34 +390,29 @@ def postprocess_video_headline(
                 timeout=_FFMPEG_TIMEOUT,
             )
         except subprocess.TimeoutExpired:
-            logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=ffmpeg_timeout")
-            logger.warning("VIDEO_HEADLINE_POSTPROCESS ffmpeg_timeout")
             return _fail("ffmpeg_timeout")
 
         if p.returncode != 0:
-            logger.warning(
-                "VIDEO_HEADLINE_POSTPROCESS_FAIL reason=ffmpeg_exit rc=%s stderr_len=%s",
-                p.returncode,
-                len(p.stderr or ""),
-            )
             return _fail(f"ffmpeg_exit:{p.returncode}:stderr_len={len(p.stderr or '')}")
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
-        preview = headline_clean[:80] + ("…" if len(headline_clean) > 80 else "")
+        preview = headline_clean[:200] + ("…" if len(headline_clean) > 200 else "")
         logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_OK elapsed_ms=%s headline_preview=%r single_pass=true storage=disk",
-            elapsed_ms,
+            'VIDEO_HEADLINE_POSTPROCESS applied headline="%s" elapsed_ms=%s',
             preview,
+            elapsed_ms,
         )
         out_exists = bool(out_path.is_file())
         if not out_exists:
             logger.warning(
-                "VIDEO_HEADLINE_POSTPROCESS_BRANCH action=abort reason=no_local_artifact fallback_to_original=true"
+                "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=no_local_artifact_after_ffmpeg"
             )
             return source_video_url
         dest = hard_test_video_path(job_id)
         if dest is None:
-            logger.warning("VIDEO_HEADLINE_POSTPROCESS invalid_job_id fallback_to_original=true")
+            logger.warning(
+                "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=invalid_job_id"
+            )
             try:
                 out_path.unlink(missing_ok=True)
             except OSError:
@@ -428,7 +422,7 @@ def postprocess_video_headline(
             shutil.copy2(out_path, dest)
         except OSError as e:
             logger.warning(
-                "VIDEO_HEADLINE_POSTPROCESS save_test_mp4_fail err=%s path=%s fallback_to_original=true",
+                "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=save_test_mp4:%s path=%s",
                 type(e).__name__,
                 str(dest),
             )
@@ -447,11 +441,11 @@ def postprocess_video_headline(
         logger.info("VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s", test_url)
         return test_url
     except Exception as e:
-        logger.warning("VIDEO_HEADLINE_POSTPROCESS_FAIL reason=exception:%s", type(e).__name__)
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=exception:%s err=%s",
             type(e).__name__,
             e,
+            exc_info=True,
         )
         try:
             if out_path.exists():
