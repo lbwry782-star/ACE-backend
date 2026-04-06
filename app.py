@@ -908,6 +908,31 @@ def serve_video_headline(token):
     )
 
 
+@app.route("/api/video-headline-debug", methods=["GET"])
+def video_headline_debug():
+    """Diagnosis: which video-headline routes exist in this process + ACE_PUBLIC_BASE_URL (no secrets)."""
+    routes = []
+    for rule in app.url_map.iter_rules():
+        r = str(rule.rule)
+        if "video-headline" not in r:
+            continue
+        routes.append(
+            {
+                "rule": r,
+                "methods": sorted((rule.methods or set()) - {"HEAD", "OPTIONS"}),
+                "endpoint": rule.endpoint,
+            }
+        )
+    return jsonify(
+        {
+            "ok": True,
+            "ace_public_base_url": (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip(),
+            "video_headline_routes": sorted(routes, key=lambda x: x["rule"]),
+            "hint": "POST uploads must hit THIS service's hostname; set ACE_PUBLIC_BASE_URL (web + worker) to the live Render URL for this deploy.",
+        }
+    ), 200
+
+
 @app.route('/api/generate-video', methods=['POST'])
 def generate_video():
     """Enqueue ACE video job in Redis; worker runs pipeline. Poll GET /api/video-status?jobId=."""
@@ -1166,6 +1191,23 @@ def _log_video_headline_upload_routes_registered() -> None:
             )
     except Exception as ex:
         logger.error("VIDEO_HEADLINE_UPLOAD_ROUTE_SELFTEST_ERR err=%s", ex, exc_info=True)
+
+    upload_reg = 0
+    serve_reg = 0
+    for rule in app.url_map.iter_rules():
+        r = str(rule.rule)
+        methods = rule.methods or set()
+        if "video-headline-artifact" in r and "POST" in methods:
+            upload_reg = 1
+        if "<token>" in r and "video-headline" in r and "artifact" not in r and "GET" in methods:
+            serve_reg = 1
+    pub_base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/")
+    logger.info(
+        "VIDEO_HEADLINE_ROUTE_BOOT upload_routes_registered=%s serve_routes_registered=%s public_base_url=%s",
+        upload_reg,
+        serve_reg,
+        pub_base or "(unset)",
+    )
 
 
 _log_video_headline_upload_routes_registered()
