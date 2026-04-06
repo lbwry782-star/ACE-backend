@@ -225,10 +225,10 @@ def _filter_path_for_ffmpeg(p: Path) -> str:
 def _fontsize_for_headline(text: str) -> int:
     n = len(text)
     if n <= 28:
-        return 52
+        return 58
     if n <= 45:
-        return 40
-    return 32
+        return 46
+    return 38
 
 
 def _sanitize_headline_line(text: str) -> str:
@@ -348,9 +348,16 @@ def postprocess_video_headline(
         alpha_expr = (
             f"if(lt(t\\,{t0_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{t0_str})/{fade_s}\\,1))"
         )
+        # Three drawtext passes: two 1px-offset whites (faux weight, no stroke), then main white with tight soft shadow.
+        dt = (
+            f"fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white:"
+            f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
+        )
         vf = (
-            f"drawtext=fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white:"
-            f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})':x=(w-text_w)/2:y=(h-text_h)/2"
+            f"drawtext={dt}:x=(w-text_w)/2+1:y=(h-text_h)/2,"
+            f"drawtext={dt}:x=(w-text_w)/2:y=(h-text_h)/2+1,"
+            f"drawtext={dt}:shadowcolor=black@0.18:shadowx=1:shadowy=1:"
+            f"x=(w-text_w)/2:y=(h-text_h)/2"
         )
 
         cmd: list[str] = [
