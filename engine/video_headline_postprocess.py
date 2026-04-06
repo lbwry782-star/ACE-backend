@@ -6,8 +6,8 @@ No black card, no tail extension — same duration as source; original picture s
 Processed files are stored on disk under VIDEO_HEADLINE_STORAGE_DIR as {token}.mp4 so they survive
 worker restarts (lookup is disk-only, not in-memory).
 
-Success path: save processed MP4 to /tmp/ace_video_test_<jobId>.mp4 and return
-{ACE_PUBLIC_BASE_URL}/api/test-video/<jobId>. No worker→web POST upload.
+Success path (split deploy): worker POSTs bytes to {ACE_PUBLIC_BASE_URL}/api/video-headline-artifact
+with ACE_VIDEO_HEADLINE_UPLOAD_SECRET; web stores file; final URL is /api/video-headline/<token>.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ _HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
 # Single re-encode pass is typically faster than previous concat; default allows headroom on slow hosts.
 _FFMPEG_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFMPEG_TIMEOUT_SECONDS") or "180").strip() or "180")
-# After postprocess: copy to /tmp/ace_video_test_<jobId>.mp4; GET /api/test-video/<jobId> (no worker→web upload).
+_UPLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_UPLOAD_TIMEOUT_SECONDS") or "120").strip() or "120")
 _HARD_TEST_JOB_RE = re.compile(r"^[a-zA-Z0-9._-]{1,128}$")
 
 
@@ -408,38 +408,72 @@ def postprocess_video_headline(
                 "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=no_local_artifact_after_ffmpeg"
             )
             return source_video_url
-        dest = hard_test_video_path(job_id)
-        if dest is None:
+
+        upload_secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
+        if not upload_secret:
             logger.warning(
-                "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=invalid_job_id"
+                "VIDEO_HEADLINE_UPLOAD failed fallback_to_original=true reason=no_upload_secret"
             )
             try:
                 out_path.unlink(missing_ok=True)
             except OSError:
                 pass
             return source_video_url
+
+        upload_endpoint = f"{base}/api/video-headline-artifact"
+        logger.info(
+            "VIDEO_HEADLINE_UPLOAD start endpoint=%s token_prefix=%s",
+            upload_endpoint,
+            token[:8] if len(token) >= 8 else token,
+        )
         try:
-            shutil.copy2(out_path, dest)
-        except OSError as e:
+            with open(out_path, "rb") as fp:
+                up = requests.post(
+                    upload_endpoint,
+                    headers={"X-ACE-Video-Headline-Upload-Secret": upload_secret},
+                    files={"file": ("headline.mp4", fp, "video/mp4")},
+                    data={"token": token},
+                    timeout=_UPLOAD_TIMEOUT,
+                )
+        except requests.RequestException as e:
             logger.warning(
-                "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=save_test_mp4:%s path=%s",
+                "VIDEO_HEADLINE_UPLOAD failed fallback_to_original=true reason=request_exception:%s",
                 type(e).__name__,
-                str(dest),
             )
             try:
                 out_path.unlink(missing_ok=True)
             except OSError:
                 pass
             return source_video_url
-        seg = _safe_job_id_segment(job_id)
-        test_url = f"{base}/api/test-video/{seg}"
-        logger.info("VIDEO_TEST_OUTPUT_URL url=%s local_path=%s", test_url, str(dest))
+
+        ok_body = False
+        if up.status_code == 200:
+            try:
+                j = up.json()
+                ok_body = isinstance(j, dict) and j.get("ok") is True
+            except ValueError:
+                ok_body = False
+
+        if not ok_body:
+            logger.warning(
+                "VIDEO_HEADLINE_UPLOAD failed fallback_to_original=true http_status=%s body_len=%s",
+                up.status_code,
+                len(up.content or b""),
+            )
+            try:
+                out_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return source_video_url
+
+        public_url = f"{base}/api/video-headline/{token}"
+        logger.info("VIDEO_HEADLINE_UPLOAD success final_url=%s", public_url)
         try:
             out_path.unlink(missing_ok=True)
         except OSError:
             pass
-        logger.info("VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s", test_url)
-        return test_url
+        logger.info("VIDEO_HEADLINE_POSTPROCESS_RESULT public_url=%s", public_url)
+        return public_url
     except Exception as e:
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=exception:%s err=%s",

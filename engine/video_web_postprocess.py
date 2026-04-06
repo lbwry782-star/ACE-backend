@@ -20,7 +20,13 @@ def ensure_video_postprocessed_for_poll(job_id: str, job: Dict[str, Any]) -> Non
     if (job.get("postprocessRan") or "") == "1":
         return
     source_url = (job.get("videoUrl") or "").strip()
-    # Older Redis rows may already store the final web URL from worker-era deploys.
+    # Worker already uploaded artifact; web serves GET /api/video-headline/<token> — do not re-postprocess.
+    if "/api/video-headline/" in source_url and "/api/video-headline-artifact" not in source_url:
+        from engine.video_jobs_redis import video_job_set_postprocess_ran_only
+
+        video_job_set_postprocess_ran_only(job_id)
+        return
+    # Older Redis rows: /api/test-video/<jobId> only on same host as file.
     if "/api/test-video/" in source_url:
         from engine.video_jobs_redis import video_job_set_postprocess_ran_only
 

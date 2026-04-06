@@ -365,6 +365,11 @@ def generate_one_video_mvp(
                         "VIDEO_JOB_CHOSEN_URL source=runway_fallback jobId=%s",
                         job_id,
                     )
+                elif "/api/video-headline/" in final_url and "/api/video-headline-artifact" not in final_url:
+                    logger.info(
+                        "VIDEO_JOB_CHOSEN_URL source=processed_uploaded jobId=%s",
+                        job_id,
+                    )
                 else:
                     logger.info(
                         "VIDEO_JOB_CHOSEN_URL source=processed jobId=%s",
