@@ -77,6 +77,11 @@ def log_video_headline_delivery_startup(service_name: str) -> None:
     sec = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
     pub = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip()
     logger.info(
+        "ACE_PUBLIC_BASE_URL_RUNTIME service=%s value=%s",
+        service_name,
+        pub,
+    )
+    logger.info(
         "VIDEO_HEADLINE_UPLOAD_CONFIG service=%s secret_present=%s secret_len=%s "
         "public_base_env_present=%s public_base_len=%s",
         service_name,
@@ -420,6 +425,7 @@ def postprocess_video_headline(
                 pass
             return source_video_url
 
+        logger.info("VIDEO_HEADLINE_UPLOAD_RESOLVED_BASE_URL value=%s", base)
         upload_endpoint = f"{base}/api/video-headline-artifact"
         logger.info(
             "VIDEO_HEADLINE_UPLOAD start endpoint=%s token_prefix=%s",
