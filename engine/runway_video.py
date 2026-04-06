@@ -244,8 +244,9 @@ def generate_one_video_mvp(
 ) -> Tuple[str, str]:
     """
     Create one Runway video task, poll until done or timeout.
-    Returns (video_url, headline_for_ui): second value is the planned headline text if any (else ""),
-    for the existing marketingText API field — not 50-word body copy.
+    Returns (video_url, marketing_text_api): second value is 45–55 word marketing copy for Redis/API
+    (generate_marketing_copy) when a plan exists; empty when planning failed. Video overlay uses only
+    plan headlineText in postprocess — not this string.
     Raises RunwayVideoMVPError on any failure.
     """
     if not _env_api_key():
@@ -263,8 +264,6 @@ def generate_one_video_mvp(
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
     prompt_image_data_uri: Optional[str] = None
     if plan:
-        # marketingText API field only (planner headline); not burned into video end card — end card uses product + promise below.
-        marketing = (plan.get("headlineText") or "").strip()
         # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
         if model != "gen4.5":
             logger.info("VIDEO_JOB_STEP step=build_start_image start")
@@ -282,7 +281,6 @@ def generate_one_video_mvp(
             prompt = build_runway_prompt_from_plan(plan)
     else:
         prompt = build_simple_prompt(product_name, product_description)
-        marketing = ""
         logger.info(
             "RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true "
             "(planning failed; see VIDEO_PLAN_FAIL_* log lines above for this request)"
@@ -337,23 +335,33 @@ def generate_one_video_mvp(
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
                 logger.info("VIDEO_JOB_STEP step=headline_postprocess start")
+                # Overlay: planner headlineText only (max ~7 words). API marketingText: separate 45–55 word body.
+                headline_for_overlay = (plan.get("headlineText") or "").strip() if plan else ""
+                marketing_text_for_api = ""
                 if plan:
-                    end_pn = (plan.get("productNameResolved") or product_name or "").strip()
-                    end_ap = (plan.get("advertisingPromise") or "").strip()
-                else:
-                    # No plan: end card uses product name only; do not use description (may be long body copy elsewhere).
-                    end_pn = (product_name or "").strip()
-                    end_ap = ""
+                    try:
+                        from engine.side_by_side_v1 import generate_marketing_copy
+
+                        ad_goal = (plan.get("advertisingPromise") or "").strip()
+                        if not ad_goal:
+                            ad_goal = (product_description or "").strip() or "Drive product awareness."
+                        marketing_text_for_api = generate_marketing_copy(
+                            (product_name or "").strip() or "Product",
+                            (product_description or "").strip(),
+                            ad_goal,
+                        )
+                    except Exception as e:
+                        logger.warning("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
+                        marketing_text_for_api = ""
                 # postprocess writes /tmp/ace_video_test_<jobId>.mp4 and returns .../api/test-video/<jobId>
                 final_url = postprocess_video_headline(
                     url,
                     public_base_url or "",
-                    product_name=end_pn,
-                    advertising_purpose=end_ap,
+                    headline=headline_for_overlay,
                     job_id=job_id,
                 )
                 logger.info("VIDEO_JOB_STEP step=headline_postprocess done")
-                return final_url, marketing
+                return final_url, marketing_text_for_api
             raise RunwayVideoMVPError("generation_failed")
 
         if status in _FAILED_STATUSES:

@@ -1,5 +1,7 @@
 """
-Post-process Runway MP4: black end card with product name + advertising purpose (two lines, white on black, fade-in).
+Post-process Runway MP4: overlay planner headline on the last ~1.5s of the video (white, centered, fade-in only).
+
+No black card, no tail extension — same duration as source; original picture stays visible underneath.
 
 Processed files are stored on disk under VIDEO_HEADLINE_STORAGE_DIR as {token}.mp4 so they survive
 worker restarts (lookup is disk-only, not in-memory).
@@ -28,8 +30,9 @@ logger = logging.getLogger(__name__)
 # Only uuid4().hex tokens (32 lowercase hex chars) map to files — no path traversal
 _TOKEN_RE = re.compile(r"^[a-f0-9]{32}$")
 
+# Duration (seconds) of headline overlay on the final part of the video (default last 1.5s)
 _HOLD_SECONDS = float((os.environ.get("VIDEO_HEADLINE_HOLD_SECONDS") or "1.5").strip() or "1.5")
-# Linear text opacity ramp at start of end card (seconds); default 0.5s within the 1.5s hold
+# Opacity fade-in at the start of that overlay window (seconds)
 _TEXT_FADE_SECONDS = float((os.environ.get("VIDEO_HEADLINE_TEXT_FADE_SECONDS") or "0.5").strip() or "0.5")
 _HTTP_DOWNLOAD_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_DOWNLOAD_TIMEOUT_SECONDS") or "180").strip() or "180")
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
@@ -223,7 +226,7 @@ def _fontsize_for_headline(text: str) -> int:
     return 32
 
 
-def _sanitize_endcard_line(text: str) -> str:
+def _sanitize_headline_line(text: str) -> str:
     t = (text or "").strip()
     t = re.sub(r"[\r\n]+", " ", t)
     return t
@@ -233,28 +236,20 @@ def postprocess_video_headline(
     source_video_url: str,
     public_base_url: str,
     *,
-    product_name: str = "",
-    advertising_purpose: str = "",
+    headline: str = "",
     job_id: str = "",
 ) -> str:
     """
-    Download MP4, one ffmpeg pass: extend tail with tpad, black end card + two lines (product name, advertising purpose).
-    Does not use headlineText, Redis marketingText, or long body copy — only the two kwargs above.
+    Download MP4, one ffmpeg pass: draw the short planner headline (headlineText, not marketing body copy)
+    on top of the video for the last HOLD_SECONDS only (white, centered, opacity fade-in).
+    Same length as input; no black frame, no tpad.
     """
-    pn = _sanitize_endcard_line(product_name)
-    ap = _sanitize_endcard_line(advertising_purpose)
-    if not pn and not ap:
-        logger.info("VIDEO_HEADLINE_POSTPROCESS skipped empty_endcard")
+    headline_clean = _sanitize_headline_line(headline)
+    if not headline_clean:
+        logger.info("VIDEO_HEADLINE_POSTPROCESS skipped empty_headline")
         return source_video_url
 
-    endcard_text = "\n".join(x for x in (pn, ap) if x)
-    logger.info(
-        "ENDCARD_TEXT product_name=%r advertising_purpose=%r",
-        pn[:200],
-        ap[:200],
-    )
-
-    headline_clean = endcard_text
+    logger.info("HEADLINE_OVERLAY_TEXT headline=%r", headline_clean[:500])
 
     base = (public_base_url or "").strip().rstrip("/")
     if not base:
@@ -300,8 +295,6 @@ def postprocess_video_headline(
             pass
         return source_video_url
 
-    hold = max(0.4, _HOLD_SECONDS)
-
     try:
         try:
             _storage_root().mkdir(parents=True, exist_ok=True)
@@ -334,26 +327,26 @@ def postprocess_video_headline(
         if duration_sec <= 0:
             return _fail("invalid_duration")
 
-        d_str = f"{duration_sec:.4f}"
         has_audio = _input_has_audio(inp, _FFPROBE_TIMEOUT)
 
         fs = _fontsize_for_headline(headline_clean)
         font_e = _filter_path_for_ffmpeg(Path(font))
         tf_e = _filter_path_for_ffmpeg(text_file)
 
-        fade_s = max(0.05, min(_TEXT_FADE_SECONDS, max(hold - 0.05, 0.05)))
-        fade_end = duration_sec + fade_s
+        # Last N seconds of the source video (or full length if shorter than N)
+        overlay_s = min(max(0.4, _HOLD_SECONDS), duration_sec)
+        t_overlay_start = duration_sec - overlay_s
+        t0_str = f"{t_overlay_start:.4f}"
+        fade_s = max(0.05, min(_TEXT_FADE_SECONDS, max(overlay_s - 0.05, 0.05)))
+        fade_end = t_overlay_start + fade_s
         fade_end_str = f"{fade_end:.4f}"
-        # One pass: clone-extend tail, black full frame on end card, white text with linear alpha fade-in only.
-        # alpha: 0 before original end; 0→1 from t=duration to t=duration+fade_s; 1 after (no motion/scale).
+        # Opacity: 0 before overlay window; linear 0→1 during fade_s at start of window; 1 until end (no motion/scale).
         alpha_expr = (
-            f"if(lt(t\\,{d_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{d_str})/{fade_s}\\,1))"
+            f"if(lt(t\\,{t0_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{t0_str})/{fade_s}\\,1))"
         )
         vf = (
-            f"tpad=stop_mode=clone:stop_duration={hold},"
-            f"drawbox=x=0:y=0:w=iw:h=ih:color=black@1:t=fill:enable='gte(t\\,{d_str})',"
             f"drawtext=fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white:"
-            f"alpha='{alpha_expr}':enable='gte(t\\,{d_str})':x=(w-text_w)/2:y=(h-text_h)/2"
+            f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})':x=(w-text_w)/2:y=(h-text_h)/2"
         )
 
         cmd: list[str] = [
@@ -373,7 +366,7 @@ def postprocess_video_headline(
             "yuv420p",
         ]
         if has_audio:
-            cmd.extend(["-af", f"apad=pad_dur={hold}", "-c:a", "aac", "-b:a", "192k"])
+            cmd.extend(["-c:a", "copy"])
         else:
             cmd.append("-an")
 
@@ -381,8 +374,8 @@ def postprocess_video_headline(
 
         vf_preview = vf[:220] + ("…" if len(vf) > 220 else "")
         logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_CMD hold_s=%s text_fade_s=%s duration_s=%s has_audio=%s vf_preview=%r",
-            hold,
+            "VIDEO_HEADLINE_POSTPROCESS_CMD overlay_last_s=%s text_fade_s=%s duration_s=%s has_audio=%s vf_preview=%r",
+            overlay_s,
             fade_s,
             duration_sec,
             has_audio,
@@ -413,7 +406,7 @@ def postprocess_video_headline(
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         preview = headline_clean[:80] + ("…" if len(headline_clean) > 80 else "")
         logger.info(
-            "VIDEO_HEADLINE_POSTPROCESS_OK elapsed_ms=%s endcard_preview=%r single_pass=true storage=disk",
+            "VIDEO_HEADLINE_POSTPROCESS_OK elapsed_ms=%s headline_preview=%r single_pass=true storage=disk",
             elapsed_ms,
             preview,
         )
