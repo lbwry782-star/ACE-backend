@@ -20,9 +20,14 @@ from engine.video_planning import (
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
     sanitize_runway_prompt_for_video_text_policy,
+    video_plan_required_fields_for_runway,
 )
 from engine.video_headline_postprocess import postprocess_video_headline
-from engine.video_language import log_video_language_decision
+from engine.video_language import (
+    detect_product_description_language,
+    log_video_language_decision,
+    normalize_video_content_language,
+)
 from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
@@ -96,22 +101,41 @@ def _headers() -> Dict[str, str]:
     }
 
 
-def build_simple_prompt(product_name: str, product_description: str) -> str:
-    """Minimal robust prompt from product fields (no ACE A/B or advanced ad logic)."""
-    _ = (product_name or "").strip()  # not embedded in prompt — avoids inviting brand-as-text in-frame
-    desc = (product_description or "").strip()
-    text = (
-        "Clean commercial video, modern advertising style, cinematic lighting, "
-        "smooth camera movement, abstract product-focused scene. "
-        "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, "
-        "packaging typography, title cards, watermarks, or brand names in the video frames; "
-        "purely pictorial motion only — do not render any product or brand name as visible text. "
-        f"Scene mood and subject matter suggested by the brief: {desc}"
-    ).strip()
-    # API: up to 1000 UTF-16 code units; slice by Python len is safe enough for MVP
-    if len(text) > 1000:
-        text = text[:1000]
-    return text
+def _enforce_headline_overlay_language(required_lang: str, headline: str) -> None:
+    """When the job is Hebrew-classified, end headline must read as Hebrew (no English-only overlay)."""
+    req = normalize_video_content_language(required_lang)
+    if req != "he":
+        return
+    h = (headline or "").strip()
+    if not h:
+        return
+    _d, applied, _, _ = detect_product_description_language(h)
+    if applied != "he":
+        logger.error(
+            "VIDEO_JOB_FAILED_INTEGRITY reason=headline_language_mismatch required=he actual=%s",
+            applied,
+        )
+        raise RunwayVideoMVPError("headline_language_mismatch")
+
+
+def _enforce_marketing_copy_language(required_lang: str, marketing_text: str) -> None:
+    """
+    Log required vs detector-applied language on generated copy.
+    For Hebrew jobs, reject English (or non-Hebrew) marketing output — no silent English fallback.
+    """
+    req = normalize_video_content_language(required_lang)
+    logger.info("VIDEO_COPY_LANGUAGE_REQUIRED=%s", req)
+    if not (marketing_text or "").strip():
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_empty")
+        raise RunwayVideoMVPError("marketing_copy_empty")
+    _det, applied, _conf, _ = detect_product_description_language(marketing_text)
+    logger.info("VIDEO_COPY_LANGUAGE_ACTUAL=%s", applied)
+    if req == "he" and applied != "he":
+        logger.error(
+            "VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_language_mismatch required=he actual=%s",
+            applied,
+        )
+        raise RunwayVideoMVPError("marketing_language_mismatch")
 
 
 def _create_text_to_video_task(
@@ -251,8 +275,8 @@ def generate_one_video_mvp(
     Returns (final_video_url, marketing_text_api, overlay_headline):
     - final_video_url: postprocess_video_headline output when overlay succeeds; else Runway URL on failure/skip.
     - marketing_text_api: 45–55 word copy for Redis/API when a plan exists (unchanged; not overlaid on video).
-    - overlay_headline: planner headlineText for Redis (empty if no plan).
-    Raises RunwayVideoMVPError on any failure.
+    - overlay_headline: planner headlineText for Redis (non-empty on success; planning must pass gate).
+    Raises RunwayVideoMVPError on any failure (no generic prompt fallback).
     """
     if not _env_api_key():
         logger.error("RUNWAY_MVP aborted missing_api_key")
@@ -265,34 +289,44 @@ def generate_one_video_mvp(
     try:
         plan = fetch_video_plan_o3(product_name, product_description, content_language=video_lang)
     except VideoPlanningTimeoutError:
-        logger.error("VIDEO_JOB_FAILED reason=planning_timeout")
+        logger.info("VIDEO_PLAN_ABORTED reason=planning_timeout")
+        logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=planning_timeout")
         raise RunwayVideoMVPError("planning_timeout")
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
+
     if not plan:
+        logger.info("VIDEO_PLAN_ABORTED reason=no_valid_plan")
+        logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=no_valid_plan")
         logger.info("VIDEO_PLAN_INTEGRITY skipped reason=no_valid_plan")
+        raise RunwayVideoMVPError("planning_failed")
+
+    gate_ok, gate_reason = video_plan_required_fields_for_runway(plan)
+    if not gate_ok:
+        logger.info("VIDEO_PLAN_ABORTED reason=%s", gate_reason)
+        logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate_reason)
+        raise RunwayVideoMVPError("plan_integrity_failed")
+
+    logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
+
     prompt_image_data_uri: Optional[str] = None
-    if plan:
-        # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
-        if model != "gen4.5":
-            logger.info("VIDEO_JOB_STEP step=build_start_image start")
-            prompt_image_data_uri = generate_video_start_image_data_uri(plan)
-            logger.info(
-                "VIDEO_JOB_STEP step=build_start_image done has_uri=%s",
-                bool(prompt_image_data_uri),
-            )
-            if prompt_image_data_uri:
-                prompt = build_runway_interaction_prompt_from_plan(plan)
-            else:
-                prompt = build_runway_prompt_from_plan(plan)
+    # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
+    if model != "gen4.5":
+        logger.info("VIDEO_JOB_STEP step=build_start_image start")
+        prompt_image_data_uri = generate_video_start_image_data_uri(plan)
+        logger.info(
+            "VIDEO_JOB_STEP step=build_start_image done has_uri=%s",
+            bool(prompt_image_data_uri),
+        )
+        if prompt_image_data_uri:
+            prompt = build_runway_interaction_prompt_from_plan(plan)
         else:
-            logger.info("VIDEO_JOB_STEP step=build_start_image skipped model=gen4.5")
             prompt = build_runway_prompt_from_plan(plan)
     else:
-        prompt = build_simple_prompt(product_name, product_description)
-        logger.info(
-            "RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true "
-            "(planning failed; see VIDEO_PLAN_FAIL_* log lines above for this request)"
-        )
+        logger.info("VIDEO_JOB_STEP step=build_start_image skipped model=gen4.5")
+        prompt = build_runway_prompt_from_plan(plan)
 
     prompt, text_policy_sanitized = sanitize_runway_prompt_for_video_text_policy(prompt)
     logger.info("VIDEO_TEXT_POLICY_SANITIZED=%s", text_policy_sanitized)
@@ -346,24 +380,24 @@ def generate_one_video_mvp(
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
                 logger.info("VIDEO_JOB_STEP step=packaging_result start")
-                headline_for_overlay = (plan.get("headlineText") or "").strip() if plan else ""
-                marketing_text_for_api = ""
-                if plan:
-                    try:
-                        from engine.side_by_side_v1 import generate_marketing_copy
+                headline_for_overlay = (plan.get("headlineText") or "").strip()
+                try:
+                    from engine.side_by_side_v1 import generate_marketing_copy
 
-                        ad_goal = (plan.get("advertisingPromise") or "").strip()
-                        if not ad_goal:
-                            ad_goal = (product_description or "").strip() or "Drive product awareness."
-                        marketing_text_for_api = generate_marketing_copy(
-                            (product_name or "").strip() or "Product",
-                            (product_description or "").strip(),
-                            ad_goal,
-                            output_language=video_lang,
-                        )
-                    except Exception as e:
-                        logger.warning("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
-                        marketing_text_for_api = ""
+                    ad_goal = (plan.get("advertisingPromise") or "").strip()
+                    marketing_text_for_api = generate_marketing_copy(
+                        (product_name or "").strip() or "Product",
+                        (product_description or "").strip(),
+                        ad_goal,
+                        output_language=video_lang,
+                    )
+                except Exception as e:
+                    logger.error("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
+                    logger.info("VIDEO_PLAN_ABORTED reason=marketing_copy_exception")
+                    logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_failed")
+                    raise RunwayVideoMVPError("marketing_copy_failed") from e
+                _enforce_marketing_copy_language(video_lang, marketing_text_for_api)
+                _enforce_headline_overlay_language(video_lang, headline_for_overlay)
                 logger.info("VIDEO_JOB_STEP step=packaging_result done")
                 final_url = postprocess_video_headline(
                     url,

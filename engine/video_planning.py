@@ -1,7 +1,7 @@
 """
 ACE video engine — o3-pro planning layer (isolated from image /preview /generate).
 
-Produces a structured plan for Runway prompt assembly. On failure, callers fall back to simple prompts.
+Produces a structured plan for Runway prompt assembly. On failure, video jobs abort (no generic Runway prompt).
 Future: richer ACE video engine (e.g. two outputs); keep this module inspectable and logged.
 """
 
@@ -394,6 +394,39 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         "headlineText": headline_text,
         "videoPromptCore": core,
     }, None
+
+
+def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
+    """
+    Hard gate before Runway: validated plan dict must include all ACE video structural fields
+    and a non-empty end headline (video jobs always use ffmpeg overlay copy).
+    Returns (ok, reason_code) with reason_code for logs only when ok is False.
+    """
+    if not plan:
+        return False, "no_plan"
+    if not (plan.get("advertisingPromise") or "").strip():
+        return False, "missing_advertisingPromise"
+    if not (plan.get("objectA") or "").strip():
+        return False, "missing_objectA"
+    if not (plan.get("objectA_secondary") or "").strip():
+        return False, "missing_objectA_secondary"
+    if not (plan.get("objectB") or "").strip():
+        return False, "missing_objectB"
+    if not (plan.get("objectB_secondary") or "").strip():
+        return False, "missing_objectB_secondary"
+    rd = (plan.get("replacementDirection") or "").strip()
+    if rd not in ("B_replaces_A", "A_replaces_B"):
+        return False, "invalid_replacementDirection"
+    hd = (plan.get("headlineDecision") or "").strip()
+    if hd not in ("include_product_name", "product_name_only", "no_headline"):
+        return False, "invalid_headlineDecision"
+    if hd == "no_headline":
+        return False, "headlineDecision_no_headline_forbidden_for_video"
+    if not (plan.get("headlineText") or "").strip():
+        return False, "missing_headlineText"
+    if not (plan.get("videoPromptCore") or "").strip():
+        return False, "missing_videoPromptCore"
+    return True, ""
 
 
 def _object_pair_digest(oa: str, ob: str) -> str:
