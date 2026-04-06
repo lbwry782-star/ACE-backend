@@ -20,6 +20,7 @@ from engine.video_planning import (
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
 )
+from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
@@ -243,10 +244,10 @@ def generate_one_video_mvp(
 ) -> Tuple[str, str, str]:
     """
     Create one Runway video task, poll until done or timeout.
-    Returns (source_video_url, marketing_text_api, overlay_headline):
-    - source_video_url: Runway CDN URL only; headline overlay runs on the web service (see video_web_postprocess /api/video-status).
+    Returns (final_video_url, marketing_text_api, overlay_headline):
+    - final_video_url: postprocess_video_headline output when overlay succeeds; else Runway URL on failure/skip.
     - marketing_text_api: 45–55 word copy for Redis/API when a plan exists (unchanged; not overlaid on video).
-    - overlay_headline: planner headlineText for web-side postprocess (empty if no plan).
+    - overlay_headline: planner headlineText for Redis (empty if no plan).
     Raises RunwayVideoMVPError on any failure.
     """
     if not _env_api_key():
@@ -353,7 +354,23 @@ def generate_one_video_mvp(
                         logger.warning("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
                         marketing_text_for_api = ""
                 logger.info("VIDEO_JOB_STEP step=packaging_result done")
-                return url, marketing_text_for_api, headline_for_overlay
+                final_url = postprocess_video_headline(
+                    url,
+                    public_base_url or "",
+                    headline=headline_for_overlay,
+                    job_id=job_id,
+                )
+                if final_url.rstrip("/") == url.rstrip("/"):
+                    logger.info(
+                        "VIDEO_JOB_CHOSEN_URL source=runway_fallback jobId=%s",
+                        job_id,
+                    )
+                else:
+                    logger.info(
+                        "VIDEO_JOB_CHOSEN_URL source=processed jobId=%s",
+                        job_id,
+                    )
+                return final_url, marketing_text_for_api, headline_for_overlay
             raise RunwayVideoMVPError("generation_failed")
 
         if status in _FAILED_STATUSES:
