@@ -20,7 +20,6 @@ from engine.video_planning import (
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
 )
-from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
@@ -241,12 +240,13 @@ def generate_one_video_mvp(
     product_description: str,
     public_base_url: Optional[str] = None,
     job_id: str = "",
-) -> Tuple[str, str]:
+) -> Tuple[str, str, str]:
     """
     Create one Runway video task, poll until done or timeout.
-    Returns (video_url, marketing_text_api): second value is 45–55 word marketing copy for Redis/API
-    (generate_marketing_copy) when a plan exists; empty when planning failed. Video overlay uses only
-    plan headlineText in postprocess — not this string.
+    Returns (source_video_url, marketing_text_api, overlay_headline):
+    - source_video_url: Runway CDN URL (worker stores this; web runs ffmpeg postprocess on poll).
+    - marketing_text_api: 45–55 word copy for Redis/API when a plan exists.
+    - overlay_headline: planner headlineText for web-side postprocess (empty if no plan).
     Raises RunwayVideoMVPError on any failure.
     """
     if not _env_api_key():
@@ -334,8 +334,8 @@ def generate_one_video_mvp(
             if url:
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
-                logger.info("VIDEO_JOB_STEP step=headline_postprocess start")
-                # Overlay: planner headlineText only (max ~7 words). API marketingText: separate 45–55 word body.
+                logger.info("VIDEO_JOB_STEP step=packaging_result start")
+                # Overlay headline + marketing copy for Redis; ffmpeg postprocess runs on web service (poll).
                 headline_for_overlay = (plan.get("headlineText") or "").strip() if plan else ""
                 marketing_text_for_api = ""
                 if plan:
@@ -353,15 +353,8 @@ def generate_one_video_mvp(
                     except Exception as e:
                         logger.warning("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
                         marketing_text_for_api = ""
-                # postprocess writes /tmp/ace_video_test_<jobId>.mp4 and returns .../api/test-video/<jobId>
-                final_url = postprocess_video_headline(
-                    url,
-                    public_base_url or "",
-                    headline=headline_for_overlay,
-                    job_id=job_id,
-                )
-                logger.info("VIDEO_JOB_STEP step=headline_postprocess done")
-                return final_url, marketing_text_for_api
+                logger.info("VIDEO_JOB_STEP step=packaging_result done")
+                return url, marketing_text_for_api, headline_for_overlay
             raise RunwayVideoMVPError("generation_failed")
 
         if status in _FAILED_STATUSES:

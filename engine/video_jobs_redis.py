@@ -71,6 +71,8 @@ def video_job_create(
             "public_base_url": public_base_url or "",
             "video_url": "",
             "marketing_text": "",
+            "overlay_headline": "",
+            "postprocess_ran": "0",
             "error": "",
         },
     )
@@ -90,11 +92,19 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
         "status": (data.get("status") or "running").strip(),
         "videoUrl": data.get("video_url") or "",
         "marketingText": data.get("marketing_text") or "",
+        "overlayHeadline": data.get("overlay_headline") or "",
+        "publicBaseUrl": data.get("public_base_url") or "",
+        "postprocessRan": (data.get("postprocess_ran") or "").strip(),
         "error": data.get("error") or "",
     }
 
 
-def video_job_mark_done(job_id: str, video_url: str, marketing_text: str) -> None:
+def video_job_mark_done(
+    job_id: str,
+    video_url: str,
+    marketing_text: str,
+    overlay_headline: str = "",
+) -> None:
     r = get_redis()
     r.hset(
         job_key(job_id),
@@ -102,9 +112,28 @@ def video_job_mark_done(job_id: str, video_url: str, marketing_text: str) -> Non
             "status": "done",
             "video_url": video_url or "",
             "marketing_text": marketing_text or "",
+            "overlay_headline": overlay_headline or "",
+            "postprocess_ran": "0",
             "error": "",
         },
     )
+
+
+def video_job_set_postprocess_result(job_id: str, final_video_url: str) -> None:
+    """Web service: after local ffmpeg postprocess, store final URL and mark postprocess complete."""
+    r = get_redis()
+    r.hset(
+        job_key(job_id),
+        mapping={
+            "video_url": final_video_url or "",
+            "postprocess_ran": "1",
+        },
+    )
+
+
+def video_job_set_postprocess_ran_only(job_id: str) -> None:
+    """Mark postprocess as finished without changing video_url (edge cases)."""
+    get_redis().hset(job_key(job_id), "postprocess_ran", "1")
 
 
 def video_job_mark_error(job_id: str, error_code: str = "video_generation_failed") -> None:

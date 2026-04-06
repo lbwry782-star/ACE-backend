@@ -30,6 +30,7 @@ from engine.video_headline_postprocess import (
     log_video_headline_delivery_startup,
 )
 from engine.video_jobs_redis import redis_configured, video_job_create, video_job_get
+from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 import db_session
 
 app = Flask(__name__)
@@ -828,7 +829,7 @@ def job_status():
 # -----------------------------------------------------------------------------
 @app.route("/api/test-video/<job_id>", methods=["GET"])
 def serve_test_video(job_id):
-    """Serve processed MP4 saved by postprocess_video_headline on the worker host."""
+    """Serve processed MP4 saved by postprocess_video_headline on this web service host."""
     path = hard_test_video_path(job_id or "")
     if not path or not path.is_file():
         return jsonify({"ok": False, "error": "not_found"}), 404
@@ -957,6 +958,10 @@ def video_status():
     logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
     out = {"ok": True, "status": status}
     if status == "done":
+        ensure_video_postprocessed_for_poll(job_id, job)
+        job = video_job_get(job_id)
+        if not job:
+            return jsonify({"ok": False, "error": "not_found"}), 404
         vu = job.get("videoUrl") or ""
         out["videoUrl"] = vu
         out["marketingText"] = job.get("marketingText") or ""

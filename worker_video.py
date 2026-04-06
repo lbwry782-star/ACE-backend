@@ -73,7 +73,7 @@ def main() -> None:
             public_base_url = data.get("public_base_url") or ""
 
             logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp start jobId=%s", job_id)
-            video_url, marketing_text = generate_one_video_mvp(
+            video_url, marketing_text, overlay_headline = generate_one_video_mvp(
                 product_name,
                 product_description,
                 public_base_url=public_base_url,
@@ -88,7 +88,7 @@ def main() -> None:
                 video_url,
             )
             logger.info("VIDEO_JOB_STEP step=redis_mark_done start jobId=%s", job_id)
-            video_job_mark_done(job_id, video_url, marketing_text or "")
+            video_job_mark_done(job_id, video_url, marketing_text or "", overlay_headline or "")
             logger.info("VIDEO_JOB_STEP step=redis_mark_done done jobId=%s", job_id)
             logger.info("VIDEO_JOB_RESULT video_url=%s jobId=%s", video_url, job_id)
             logger.info(
