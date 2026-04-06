@@ -12,13 +12,71 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import sys
+import threading
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("worker_video")
+
+_active_lock = threading.Lock()
+_active_job_id: str | None = None
+_heartbeat_stop = threading.Event()
+
+
+def _get_active_job_id() -> str | None:
+    with _active_lock:
+        return _active_job_id
+
+
+def _set_active_job_id(job_id: str | None) -> None:
+    global _active_job_id
+    with _active_lock:
+        _active_job_id = job_id
+
+
+def _heartbeat_loop() -> None:
+    from engine.video_jobs_redis import video_job_touch_progress
+
+    while not _heartbeat_stop.wait(30.0):
+        jid = _get_active_job_id()
+        if not jid:
+            continue
+        try:
+            video_job_touch_progress(jid)
+        except Exception:
+            logger.debug("VIDEO_JOB_HEARTBEAT_FAIL jobId=%s", jid, exc_info=True)
+
+
+def _install_shutdown_signals() -> None:
+    def _handle(signum: int, frame: object | None) -> None:
+        jid = _get_active_job_id()
+        logger.info(
+            "VIDEO_JOB_INTERRUPT_CAUGHT jobId=%s reason=worker_shutdown_during_job",
+            jid or "(none)",
+        )
+        if jid:
+            try:
+                from engine.video_jobs_redis import video_job_mark_error
+
+                video_job_mark_error(jid, "worker_shutdown_during_job")
+                logger.info("VIDEO_JOB_ERROR_FINALIZED jobId=%s reason=worker_shutdown_during_job", jid)
+            except Exception as e:
+                logger.error(
+                    "VIDEO_JOB_ERROR_FINALIZE_FAILED jobId=%s err=%s",
+                    jid,
+                    e,
+                    exc_info=True,
+                )
+        _heartbeat_stop.set()
+        sys.exit(128 + signum if signum > 0 else 0)
+
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _handle)
+    signal.signal(signal.SIGINT, _handle)
 
 
 def main() -> None:
@@ -35,6 +93,7 @@ def main() -> None:
         video_job_brpop,
         video_job_mark_done,
         video_job_mark_error,
+        video_job_touch_progress,
         QUEUE_KEY,
     )
 
@@ -44,6 +103,9 @@ def main() -> None:
         logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG worker startup failed err=%s", e)
 
     get_redis()  # connect once
+    _install_shutdown_signals()
+    hb_thread = threading.Thread(target=_heartbeat_loop, name="video_job_heartbeat", daemon=True)
+    hb_thread.start()
     logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)
 
     while True:
@@ -52,7 +114,12 @@ def main() -> None:
             continue
 
         logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
+        _set_active_job_id(job_id)
         try:
+            try:
+                video_job_touch_progress(job_id)
+            except Exception as e:
+                logger.warning("VIDEO_JOB_TOUCH_PROGRESS_FAIL jobId=%s err=%s", job_id, e)
             logger.info("VIDEO_JOB_STEP step=redis_get_client start jobId=%s", job_id)
             r = get_redis()
             logger.info("VIDEO_JOB_STEP step=redis_get_client done jobId=%s", job_id)
@@ -123,6 +190,8 @@ def main() -> None:
                     exc_info=True,
                 )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
+        finally:
+            _set_active_job_id(None)
 
 
 if __name__ == "__main__":

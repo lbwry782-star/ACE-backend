@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 QUEUE_KEY = "ace:video:queue"
 JOB_KEY_PREFIX = "ace:video:job:"
 _JOB_TTL_SECONDS = 7 * 24 * 3600
+# No heartbeat update for this long while status=running → poll finalizes as terminal error (SIGKILL / lost worker).
+_STALE_RUNNING_SECONDS = int((os.environ.get("VIDEO_JOB_STALE_SECONDS") or "900").strip() or "900")
 
 _redis = None
 
@@ -61,6 +64,7 @@ def video_job_create(
     """Persist job hash and push job_id onto the queue."""
     r = get_redis()
     key = job_key(job_id)
+    now = int(time.time())
     pipe = r.pipeline()
     pipe.hset(
         key,
@@ -74,6 +78,7 @@ def video_job_create(
             "overlay_headline": "",
             "postprocess_ran": "0",
             "error": "",
+            "last_progress_ts": str(now),
         },
     )
     pipe.expire(key, _JOB_TTL_SECONDS)
@@ -99,6 +104,53 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def video_job_touch_progress(job_id: str) -> None:
+    """Worker heartbeat: refresh last_progress_ts while job is in progress."""
+    get_redis().hset(job_key(job_id), "last_progress_ts", str(int(time.time())))
+
+
+def video_job_try_finalize_stale_running(job_id: str) -> bool:
+    """
+    If job is still running and last_progress_ts is older than VIDEO_JOB_STALE_SECONDS, set terminal error.
+    Returns True if this call transitioned the job to error (caller should re-read the job).
+    """
+    r = get_redis()
+    key = job_key(job_id)
+    data = r.hgetall(key)
+    if not data:
+        return False
+    if (data.get("status") or "").strip() != "running":
+        return False
+    raw_ts = (data.get("last_progress_ts") or "").strip()
+    now = int(time.time())
+    if not raw_ts:
+        # Legacy hashes without heartbeat field: start grace window from first observation.
+        r.hset(key, "last_progress_ts", str(now))
+        logger.info("VIDEO_JOB_PROGRESS_BOOTSTRAP jobId=%s", job_id)
+        return False
+    try:
+        last = int(raw_ts)
+    except ValueError:
+        last = 0
+    age = now - last
+    if age <= _STALE_RUNNING_SECONDS:
+        return False
+    r.hset(
+        key,
+        mapping={
+            "status": "error",
+            "error": "stale_job_no_worker_progress",
+        },
+    )
+    logger.info(
+        "VIDEO_JOB_STALE_DETECTED jobId=%s age_s=%s threshold_s=%s",
+        job_id,
+        age,
+        _STALE_RUNNING_SECONDS,
+    )
+    return True
+
+
 def video_job_mark_done(
     job_id: str,
     video_url: str,
@@ -115,6 +167,7 @@ def video_job_mark_done(
             "overlay_headline": overlay_headline or "",
             "postprocess_ran": "0",
             "error": "",
+            "last_progress_ts": str(int(time.time())),
         },
     )
 
@@ -143,6 +196,7 @@ def video_job_mark_error(job_id: str, error_code: str = "video_generation_failed
         mapping={
             "status": "error",
             "error": error_code or "video_generation_failed",
+            "last_progress_ts": str(int(time.time())),
         },
     )
 

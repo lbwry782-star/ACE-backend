@@ -29,7 +29,12 @@ from engine.video_headline_postprocess import (
     write_headline_video_bytes,
     log_video_headline_delivery_startup,
 )
-from engine.video_jobs_redis import redis_configured, video_job_create, video_job_get
+from engine.video_jobs_redis import (
+    redis_configured,
+    video_job_create,
+    video_job_get,
+    video_job_try_finalize_stale_running,
+)
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 import db_session
 
@@ -983,6 +988,15 @@ def video_status():
     if not job:
         return jsonify({"ok": False, "error": "not_found"}), 404
     status = (job.get("status") or "running").strip()
+    if status == "running":
+        try:
+            if video_job_try_finalize_stale_running(job_id):
+                job = video_job_get(job_id)
+                if not job:
+                    return jsonify({"ok": False, "error": "not_found"}), 404
+                status = (job.get("status") or "error").strip()
+        except Exception as e:
+            logger.error("VIDEO_JOB_STALE_CHECK_ERR jobId=%s err=%s", job_id, e, exc_info=True)
     logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
     out = {"ok": True, "status": status}
     if status == "done":
@@ -995,7 +1009,9 @@ def video_status():
         out["marketingText"] = job.get("marketingText") or ""
         logger.info("VIDEO_JOB_RESULT jobId=%s video_url=%s", job_id, vu)
     if status == "error":
-        out["error"] = job.get("error") or "video_generation_failed"
+        err = job.get("error") or "video_generation_failed"
+        logger.info("VIDEO_JOB_POLL terminal_error jobId=%s reason=%s", job_id, err)
+        out["error"] = err
     return jsonify(out), 200
 
 
