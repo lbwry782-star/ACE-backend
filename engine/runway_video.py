@@ -22,6 +22,7 @@ from engine.video_planning import (
     sanitize_runway_prompt_for_video_text_policy,
 )
 from engine.video_headline_postprocess import postprocess_video_headline
+from engine.video_language import log_video_language_decision
 from engine.video_start_image import generate_video_start_image_data_uri
 
 logger = logging.getLogger(__name__)
@@ -259,9 +260,10 @@ def generate_one_video_mvp(
 
     base = _env_base_url()
     model = _env_model()
+    video_lang, _, _ = log_video_language_decision(product_description)
     logger.info("VIDEO_JOB_STEP step=plan_video start")
     try:
-        plan = fetch_video_plan_o3(product_name, product_description)
+        plan = fetch_video_plan_o3(product_name, product_description, content_language=video_lang)
     except VideoPlanningTimeoutError:
         logger.error("VIDEO_JOB_FAILED reason=planning_timeout")
         raise RunwayVideoMVPError("planning_timeout")
@@ -357,6 +359,7 @@ def generate_one_video_mvp(
                             (product_name or "").strip() or "Product",
                             (product_description or "").strip(),
                             ad_goal,
+                            output_language=video_lang,
                         )
                     except Exception as e:
                         logger.warning("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
@@ -367,6 +370,7 @@ def generate_one_video_mvp(
                     public_base_url or "",
                     headline=headline_for_overlay,
                     job_id=job_id,
+                    overlay_language=video_lang,
                 )
                 if final_url.rstrip("/") == url.rstrip("/"):
                     logger.info(

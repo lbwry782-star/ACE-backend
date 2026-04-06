@@ -24,6 +24,7 @@ from PIL import Image, ImageDraw, ImageFont
 from threading import Lock
 
 from . import openai_retry
+from engine.video_language import normalize_video_content_language, video_language_display_name
 
 logger = logging.getLogger(__name__)
 
@@ -3028,27 +3029,52 @@ Requirements:
     raise Exception("Failed to select shape pair after retries")
 
 
+def _marketing_copy_fallback(product_name: str, ad_goal: str, lang: str) -> str:
+    """Short deterministic fallback in the requested language (video path)."""
+    lang = normalize_video_content_language(lang)
+    ag = (ad_goal or "").strip()
+    pn = (product_name or "").strip() or "Product"
+    if lang == "he":
+        return (
+            f"{pn} נבנה כדי לענות בדיוק על הצורך הזה: {ag}. "
+            f"הציעו חוויה ברורה, אמינה וממוקדת תוצאה למשתמשים שמחפשים פתרון אמיתי. "
+            f"אל תפספסו את ההזדמנות לבחור במוצר שמקדם אתכם קדימה בביטחון. "
+            f"גלו עוד, השוו והחליטו — והתחילו עוד היום."
+        )
+    if lang == "ru":
+        return (
+            f"{pn} создан для того, чтобы закрыть задачу: {ag}. "
+            f"Понятное ценностное предложение, акцент на пользе и практическом результате без лишнего шума. "
+            f"Сравните, попробуйте и убедитесь сами — сделайте следующий шаг уже сегодня."
+        )
+    if lang == "ar":
+        return (
+            f"صُمم {pn} ليلبي احتياجك: {ag}. "
+            f"تجربة واضحة وموثوقة تركز على المنفعة الحقيقية للمستخدم دون مبالغة. "
+            f"اكتشف المزيد، قارن الخيارات، ثم ابدأ اليوم بخطوة بسيطة نحو نتيجة أفضل."
+        )
+    return (
+        f"{pn} helps you achieve {ag.lower()}. Discover how {pn} can transform your workflow. Get started today."
+    )
+
+
 def generate_marketing_copy(
     product_name: str,
     product_description: str,
     ad_goal: str,
-    max_retries: int = 2
+    max_retries: int = 2,
+    output_language: str = "en",
 ) -> str:
     """
-    Generate marketing copy: 45-55 words, English, product-specific, with CTA.
-    
-    Args:
-        product_name: Product name
-        product_description: Product description
-        ad_goal: Advertising goal
-        max_retries: Maximum retry attempts
-    
-    Returns:
-        str: Marketing copy (45-55 words)
+    Generate marketing copy: 45-55 words, product-specific, with CTA, in output_language.
+
+    output_language: he | en | ru | ar (invalid values are treated as en for image pipeline; video path passes detected lang).
     """
+    lang = normalize_video_content_language(output_language)
+    lang_name = video_language_display_name(lang)
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = _get_text_model()
-    
+
     prompt = f"""Generate marketing copy for an advertisement.
 
 Product name: {product_name}
@@ -3056,7 +3082,7 @@ Product description: {product_description}
 Advertising goal: {ad_goal}
 
 Requirements:
-- English only
+- {lang_name} only — write the entire copy in {lang_name}. No other languages, no mixing.
 - Exactly 45-55 words (count carefully)
 - Must include product name
 - Must be product-specific (not generic marketing language)
@@ -3065,12 +3091,18 @@ Requirements:
 - No fluff, no generic phrases
 
 Marketing copy:"""
-    
+
     max_attempts = max_retries + 1
+    system_msg = (
+        f"You are a marketing copywriter. Output must be in {lang_name} only. "
+        f"Return only the marketing copy text, no JSON, no quotes."
+    )
     for attempt in range(max_attempts):
         try:
-            logger.info(f"MARKETING_COPY attempt={attempt+1} model={model_name} product={product_name[:50]}")
-            
+            logger.info(
+                f"MARKETING_COPY attempt={attempt+1} model={model_name} product={product_name[:50]} lang={lang}"
+            )
+
             def _copy_call():
                 is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
                 if is_o_model:
@@ -3079,22 +3111,20 @@ Marketing copy:"""
                 r = client.chat.completions.create(
                     model=model_name,
                     messages=[
-                        {"role": "system", "content": "You are a marketing copywriter. Output must be in English only. Return only the marketing copy text, no JSON, no quotes."},
-                        {"role": "user", "content": prompt}
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": prompt},
                     ],
                     temperature=0.7,
-                    max_tokens=200
+                    max_tokens=200,
                 )
                 return r.choices[0].message.content.strip()
+
             copy_text = openai_retry.openai_call_with_retry(_copy_call, endpoint="responses")
-            # Clean copy
-            copy_text = copy_text.strip('"\'')
-            
-            # Count words
+            copy_text = copy_text.strip("\"'")
+
             words = copy_text.split()
             word_count = len(words)
-            
-            # Validate word count
+
             if word_count < 45:
                 if attempt < max_attempts - 1:
                     logger.warning(f"MARKETING_COPY: word_count={word_count} < 45, retrying...")
@@ -3105,7 +3135,7 @@ Product description: {product_description}
 Advertising goal: {ad_goal}
 
 Requirements:
-- English only
+- {lang_name} only — write the entire copy in {lang_name}. No other languages, no mixing.
 - MUST be 45-55 words (current attempt was {word_count} words - too short)
 - Must include product name
 - Must be product-specific (not generic marketing language)
@@ -3116,13 +3146,12 @@ Requirements:
 Marketing copy:"""
                     continue
                 else:
-                    # Final attempt: pad with product-specific content
                     logger.warning(f"MARKETING_COPY: word_count={word_count} < 45, padding...")
                     needed = 45 - word_count
-                    padding = f"{product_name} delivers on {ad_goal.lower()}. " * (needed // 3 + 1)
+                    padding = _marketing_copy_fallback(product_name, ad_goal, lang)
                     copy_text = f"{copy_text} {padding}".strip()
                     words = copy_text.split()
-                    copy_text = " ".join(words[:55])  # Cap at 55
+                    copy_text = " ".join(words[:55])
             elif word_count > 55:
                 if attempt < max_attempts - 1:
                     logger.warning(f"MARKETING_COPY: word_count={word_count} > 55, retrying...")
@@ -3133,7 +3162,7 @@ Product description: {product_description}
 Advertising goal: {ad_goal}
 
 Requirements:
-- English only
+- {lang_name} only — write the entire copy in {lang_name}. No other languages, no mixing.
 - MUST be 45-55 words (current attempt was {word_count} words - too long)
 - Must include product name
 - Must be product-specific (not generic marketing language)
@@ -3144,26 +3173,23 @@ Requirements:
 Marketing copy:"""
                     continue
                 else:
-                    # Final attempt: truncate to 55 words
                     logger.warning(f"MARKETING_COPY: word_count={word_count} > 55, truncating...")
                     words = copy_text.split()
                     copy_text = " ".join(words[:55])
-            
+
             final_word_count = len(copy_text.split())
             logger.info(f"MARKETING_COPY SUCCESS: word_count={final_word_count} copy='{copy_text[:100]}...'")
             return copy_text
-            
+
         except openai_retry.OpenAIRateLimitError:
             raise
         except Exception as e:
             logger.error(f"MARKETING_COPY failed (attempt {attempt+1}/{max_attempts}): {e}")
             if attempt < max_attempts - 1:
                 continue
-            # Fallback: return minimal copy
-            logger.warning(f"MARKETING_COPY: Using fallback copy")
-            return f"{product_name} helps you achieve {ad_goal.lower()}. Discover how {product_name} can transform your workflow. Get started today."
-    # Final fallback
-    return f"{product_name} helps you achieve {ad_goal.lower()}. Discover how {product_name} can transform your workflow. Get started today."
+            logger.warning("MARKETING_COPY: Using fallback copy")
+            return _marketing_copy_fallback(product_name, ad_goal, lang)
+    return _marketing_copy_fallback(product_name, ad_goal, lang)
 
 
 def generate_headline_only(

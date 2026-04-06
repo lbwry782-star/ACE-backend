@@ -25,6 +25,8 @@ from typing import Optional
 
 import requests
 
+from engine.video_language import normalize_video_content_language, normalize_video_overlay_text
+
 logger = logging.getLogger(__name__)
 
 # Only uuid4().hex tokens (32 lowercase hex chars) map to files — no path traversal
@@ -143,16 +145,36 @@ def write_headline_video_bytes(token: str, data: bytes) -> bool:
         return False
 
 
-def _default_font_path() -> Optional[str]:
+def _default_font_path(overlay_language: str = "he") -> Optional[str]:
+    """Prefer fonts with Hebrew/Arabic coverage when overlay_language requires it."""
     env = (os.environ.get("VIDEO_HEADLINE_FONT") or "").strip()
     if env and Path(env).is_file():
         return env
-    candidates = [
-        r"C:\Windows\Fonts\arial.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-    ]
+    lang = normalize_video_content_language(overlay_language)
+    candidates: list[str] = []
+    if lang == "ar":
+        candidates.extend(
+            [
+                "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.otf",
+            ]
+        )
+    if lang == "he":
+        candidates.extend(
+            [
+                "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+                "/usr/share/fonts/opentype/noto/NotoSansHebrew-Regular.otf",
+            ]
+        )
+    candidates.extend(
+        [
+            r"C:\Windows\Fonts\arial.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+        ]
+    )
     for p in candidates:
         if Path(p).is_file():
             return p
@@ -243,13 +265,16 @@ def postprocess_video_headline(
     *,
     headline: str = "",
     job_id: str = "",
+    overlay_language: str = "he",
 ) -> str:
     """
     Download MP4, one ffmpeg pass: draw the short planner headline (headlineText, not marketing body copy)
     on top of the video for the last HOLD_SECONDS only (white, centered, opacity fade-in).
     Same length as input; no black frame, no tpad.
     """
+    olang = normalize_video_content_language(overlay_language)
     headline_clean = _sanitize_headline_line(headline)
+    headline_clean = normalize_video_overlay_text(headline_clean, olang)
     if not headline_clean:
         logger.info(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=empty_headline"
@@ -264,7 +289,7 @@ def postprocess_video_headline(
         return source_video_url
 
     ffmpeg = _ffmpeg_bin()
-    font = _default_font_path()
+    font = _default_font_path(olang)
     if not ffmpeg or not font:
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=missing_ffmpeg_or_font "
@@ -349,8 +374,10 @@ def postprocess_video_headline(
             f"if(lt(t\\,{t0_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{t0_str})/{fade_s}\\,1))"
         )
         # Three drawtext passes: two 1px-offset whites (faux weight, no stroke), then main white with soft shadow (no borderw).
+        # text_shaping=1: HarfBuzz/fribidi for Hebrew and Arabic RTL shaping (ffmpeg build-dependent).
+        shaping = ":text_shaping=1" if olang in ("he", "ar") else ""
         dt = (
-            f"fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white:"
+            f"fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white{shaping}:"
             f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
         )
         vf = (

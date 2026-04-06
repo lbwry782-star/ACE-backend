@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from openai import OpenAI
 
+from engine.video_language import normalize_video_content_language, video_language_display_name
+
 logger = logging.getLogger(__name__)
 
 # Safe preview length for logs (no secrets; truncated model output)
@@ -71,8 +73,15 @@ Required keys (all strings except where noted):
 """
 
 
-def _build_video_planner_instructions() -> str:
-    return """You are the ACE video planning engine. All user-facing strings must be in English.
+def _build_video_planner_instructions(content_language: str = "he") -> str:
+    lang = normalize_video_content_language(content_language)
+    lang_name = video_language_display_name(lang)
+    return f"""You are the ACE video planning engine.
+
+OUTPUT LANGUAGE (locked — strict)
+- Classified output language for this job: {lang_name} (code {lang}).
+- You MUST write every user-facing string in {lang_name} only: advertisingPromise, headlineText (when non-empty), shortReplacementScript, morphologicalReason, promiseReason.
+- Do not mix languages in those fields. Object identifiers objectA, objectB, objectA_secondary, objectB_secondary may use conventional short English nouns for morphological consistency when required by the engine; all explanatory and advertising copy must remain {lang_name} only.
 
 VIDEO PIPELINE (non-negotiable)
 - The generative video opens from a first frame that already shows the replacement state: B in A's role, with A's background, A's secondary object, and A's spatial position. The rest of the video shows B interacting with A's secondary in that composition.
@@ -116,7 +125,7 @@ REPLACEMENT
 
 HEADLINE (for end-of-video on-screen text only; NOT for body copy)
 - headlineDecision: include_product_name | product_name_only | no_headline — choose whether the visuals alone already convey the promise.
-- headlineText: English, maximum 7 words. Empty string if and only if headlineDecision is no_headline.
+- headlineText: {lang_name} only, maximum 7 words. Empty string if and only if headlineDecision is no_headline.
 - If product name is missing in input, invent a concise productNameResolved and you may use it in headline when appropriate.
 - NEVER instruct Runway or any video model to render headlineText, productNameResolved, or any brand/product name as visible pixels. Headline exists only for the separate server-side ffmpeg overlay, never as an in-model burn-in.
 
@@ -133,9 +142,9 @@ VIDEO (for videoPromptCore)
 
 QUALITY
 - Prefer morphological correctness and viewer intuition over explicit verbal explanation in videoPromptCore.
-- shortReplacementScript: a brief plain-English line describing the A/B connection for the replacement shot.
-- morphologicalReason: REQUIRED to state briefly why A and B are extremely close in overall form (whole-object, painterly grasp — not edge-matching alone). Be strict and concrete.
-- promiseReason: short note on how B still ties to the advertising promise without weakening the shape requirement.
+- shortReplacementScript: a brief line in {lang_name} describing the A/B connection for the replacement shot.
+- morphologicalReason: REQUIRED in {lang_name} — state briefly why A and B are extremely close in overall form (whole-object, painterly grasp — not edge-matching alone). Be strict and concrete.
+- promiseReason: short note in {lang_name} on how B still ties to the advertising promise without weakening the shape requirement.
 
 """
 
@@ -441,7 +450,11 @@ def _reasoning_effort() -> str:
     return raw if raw in ("low", "medium") else "low"
 
 
-def _fetch_video_plan_o3_sync(product_name: str, product_description: str) -> Optional[Dict[str, Any]]:
+def _fetch_video_plan_o3_sync(
+    product_name: str,
+    product_description: str,
+    content_language: str = "he",
+) -> Optional[Dict[str, Any]]:
     """
     Single o3-pro call returning a validated plan dict, or None on any failure (caller uses fallback).
     """
@@ -450,14 +463,18 @@ def _fetch_video_plan_o3_sync(product_name: str, product_description: str) -> Op
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
         return None
 
+    lang = normalize_video_content_language(content_language)
+    lang_name = video_language_display_name(lang)
     model = _text_model()
     user_block = f"""Product name (may be empty): {product_name or "(empty)"}
 Product description:
 {product_description}
 
+Locked output language for all user-facing plan fields (from description classification): {lang_name} ({lang})
+
 {_JSON_KEYS}
 """
-    instructions = _build_video_planner_instructions()
+    instructions = _build_video_planner_instructions(lang)
     full_input = instructions + "\n\n" + user_block
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
@@ -514,13 +531,17 @@ Product description:
         return None
 
 
-def fetch_video_plan_o3(product_name: str, product_description: str) -> Optional[Dict[str, Any]]:
+def fetch_video_plan_o3(
+    product_name: str,
+    product_description: str,
+    content_language: str = "he",
+) -> Optional[Dict[str, Any]]:
     """
     Same as _fetch_video_plan_o3_sync but with a hard wall-clock deadline so the worker cannot hang here.
     On deadline exceeded, raises VideoPlanningTimeoutError (caller must fail the job).
     """
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(_fetch_video_plan_o3_sync, product_name, product_description)
+        fut = ex.submit(_fetch_video_plan_o3_sync, product_name, product_description, content_language)
         try:
             return fut.result(timeout=_VIDEO_PLAN_HARD_SECONDS)
         except concurrent.futures.TimeoutError:
