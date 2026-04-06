@@ -34,7 +34,8 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
     psf = (plan.get("preservedSecondaryFrom") or "A").strip().upper()
 
     no_text = (
-        "No text, no letters, no logos, no watermark, no headline, no UI, no packaging typography in the image."
+        "No text, letters, words, numbers as graphics, captions, labels, signage, packaging typography, "
+        "title cards, watermarks, headline, UI, or brand names in the image — blank/generic surfaces only."
     )
 
     if rd == "B_replaces_A":

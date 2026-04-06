@@ -19,6 +19,7 @@ from engine.video_planning import (
     build_runway_interaction_prompt_from_plan,
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
+    sanitize_runway_prompt_for_video_text_policy,
 )
 from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_start_image import generate_video_start_image_data_uri
@@ -96,13 +97,15 @@ def _headers() -> Dict[str, str]:
 
 def build_simple_prompt(product_name: str, product_description: str) -> str:
     """Minimal robust prompt from product fields (no ACE A/B or advanced ad logic)."""
-    name = (product_name or "").strip() or "the product"
+    _ = (product_name or "").strip()  # not embedded in prompt — avoids inviting brand-as-text in-frame
     desc = (product_description or "").strip()
     text = (
         "Clean commercial video, modern advertising style, cinematic lighting, "
-        "smooth camera movement, product-focused scene. "
-        f"Feature {name}. "
-        f"{desc}"
+        "smooth camera movement, abstract product-focused scene. "
+        "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, "
+        "packaging typography, title cards, watermarks, or brand names in the video frames; "
+        "purely pictorial motion only — do not render any product or brand name as visible text. "
+        f"Scene mood and subject matter suggested by the brief: {desc}"
     ).strip()
     # API: up to 1000 UTF-16 code units; slice by Python len is safe enough for MVP
     if len(text) > 1000:
@@ -263,6 +266,8 @@ def generate_one_video_mvp(
         logger.error("VIDEO_JOB_FAILED reason=planning_timeout")
         raise RunwayVideoMVPError("planning_timeout")
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
+    if not plan:
+        logger.info("VIDEO_PLAN_INTEGRITY skipped reason=no_valid_plan")
     prompt_image_data_uri: Optional[str] = None
     if plan:
         # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
@@ -286,6 +291,9 @@ def generate_one_video_mvp(
             "RUNWAY_MVP ACE_video_planning_fallback simple_prompt=true "
             "(planning failed; see VIDEO_PLAN_FAIL_* log lines above for this request)"
         )
+
+    prompt, text_policy_sanitized = sanitize_runway_prompt_for_video_text_policy(prompt)
+    logger.info("VIDEO_TEXT_POLICY_SANITIZED=%s", text_policy_sanitized)
 
     session = requests.Session()
     logger.info("VIDEO_JOB_STEP step=runway_create_task start")

@@ -118,11 +118,18 @@ HEADLINE (for end-of-video on-screen text only; NOT for body copy)
 - headlineDecision: include_product_name | product_name_only | no_headline — choose whether the visuals alone already convey the promise.
 - headlineText: English, maximum 7 words. Empty string if and only if headlineDecision is no_headline.
 - If product name is missing in input, invent a concise productNameResolved and you may use it in headline when appropriate.
+- NEVER instruct Runway or any video model to render headlineText, productNameResolved, or any brand/product name as visible pixels. Headline exists only for the separate server-side ffmpeg overlay, never as an in-model burn-in.
+
+TEXT-FREE GENERATED VIDEO (ABSOLUTE — MODEL OUTPUT)
+- The generative video frames must contain ZERO readable text of any kind.
+- FORBIDDEN in the generated video (not only in prompts; this is the product requirement): any letters, words, numbers as graphics, captions, subtitles, labels, stickers, signage, storefront text, book/page text, UI, chyrons, lower-thirds, title cards, watermarks, packaging typography, logo-like lettermarks, or brand names shown visually.
+- Do NOT describe or request text, typography, captions, titles, “words on screen”, “packaging copy”, “a sign saying…”, or any readable string in videoPromptCore or shortReplacementScript.
+- Brand and product may appear ONLY in advertisingPromise, promiseReason, headlineText metadata — never as something to paint into the scene.
 
 VIDEO (for videoPromptCore)
-- Describe scene and motion only: cinematic commercial, smooth camera, product-focused, modern lighting.
-- Do NOT put the headline text inside videoPromptCore. videoPromptCore is the main action only; headline is specified separately via headlineText/headlineDecision.
-- No on-screen text, logos, or readable words during the main action in this core description.
+- Describe scene and motion only: cinematic commercial, smooth camera, product-focused, modern lighting; purely pictorial and physical (objects, light, materials, motion).
+- Do NOT put the headline text inside videoPromptCore. videoPromptCore is the main action only; headline is specified separately via headlineText/headlineDecision for ffmpeg only.
+- No on-screen text, logos, readable words, or textual overlays during the main action in this core description.
 
 QUALITY
 - Prefer morphological correctness and viewer intuition over explicit verbal explanation in videoPromptCore.
@@ -308,7 +315,7 @@ def _coerce_plan_keys(data: Dict[str, Any]) -> Dict[str, Any]:
 def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Return (plan, None) or (None, reason_code) for logging.
-    reason_code: missing_videoPromptCore | missing_advertisingPromise | missing_objectA_or_B
+    reason_code: missing_videoPromptCore | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
     """
     if not data:
         return None, "missing_videoPromptCore"
@@ -330,6 +337,11 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     ob = (data.get("objectB") or "").strip()
     if not oa or not ob:
         return None, "missing_objectA_or_B"
+
+    oa_sec = (data.get("objectA_secondary") or "").strip()
+    ob_sec = (data.get("objectB_secondary") or "").strip()
+    if not oa_sec or not ob_sec:
+        return None, "missing_object_secondary"
 
     pn = (data.get("productNameResolved") or "").strip() or "Product"
 
@@ -360,9 +372,9 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         "productNameResolved": pn,
         "advertisingPromise": apromise,
         "objectA": oa,
-        "objectA_secondary": (data.get("objectA_secondary") or "").strip(),
+        "objectA_secondary": oa_sec,
         "objectB": ob,
-        "objectB_secondary": (data.get("objectB_secondary") or "").strip(),
+        "objectB_secondary": ob_sec,
         "morphologicalReason": (data.get("morphologicalReason") or "").strip(),
         "promiseReason": (data.get("promiseReason") or "").strip(),
         "replacementDirection": repl,
@@ -381,31 +393,46 @@ def _object_pair_digest(oa: str, ob: str) -> str:
     return hashlib.sha256(raw).hexdigest()[:12]
 
 
-def log_plan_summary(plan: Dict[str, Any]) -> None:
-    """Concise server-side log of the chosen plan (no full prompts, no secrets)."""
+def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
+    """Structured A/B/sub-object + promise + headline fields for every validated plan (video job trace)."""
     logger.info(
-        'VIDEO_PLAN productNameResolved="%s" promise="%s"',
-        (plan.get("productNameResolved") or "")[:120],
-        (plan.get("advertisingPromise") or "")[:160],
+        'VIDEO_PLAN_INTEGRITY advertisingPromise="%s"',
+        (plan.get("advertisingPromise") or "")[:260],
     )
     logger.info(
-        'VIDEO_PLAN objects A="%s" A_sub="%s" B="%s" B_sub="%s" repl=%s bg=%s sec=%s',
+        'VIDEO_PLAN_INTEGRITY objectA="%s" objectA_secondary="%s" objectB="%s" objectB_secondary="%s"',
         plan.get("objectA"),
         plan.get("objectA_secondary"),
         plan.get("objectB"),
         plan.get("objectB_secondary"),
+    )
+    logger.info(
+        "VIDEO_PLAN_INTEGRITY replacementDirection=%s preservedBackgroundFrom=%s preservedSecondaryFrom=%s",
         plan.get("replacementDirection"),
         plan.get("preservedBackgroundFrom"),
         plan.get("preservedSecondaryFrom"),
     )
     logger.info(
+        'VIDEO_PLAN_INTEGRITY headlineDecision=%s headlineText="%s"',
+        plan.get("headlineDecision"),
+        (plan.get("headlineText") or "")[:160],
+    )
+
+
+def log_plan_summary(plan: Dict[str, Any]) -> None:
+    """Concise server-side log of the chosen plan (no full prompts, no secrets)."""
+    logger.info(
+        'VIDEO_PLAN productNameResolved="%s"',
+        (plan.get("productNameResolved") or "")[:120],
+    )
+    log_video_job_plan_integrity(plan)
+    logger.info(
         "VIDEO_PLAN pair_digest=%s",
         _object_pair_digest(str(plan.get("objectA") or ""), str(plan.get("objectB") or "")),
     )
     logger.info(
-        'VIDEO_PLAN headline_decision=%s headline="%s"',
-        plan.get("headlineDecision"),
-        (plan.get("headlineText") or "")[:80],
+        'VIDEO_PLAN morphologicalReason_preview="%s"',
+        (plan.get("morphologicalReason") or "")[:200],
     )
 
 
@@ -469,7 +496,10 @@ Product description:
 
         plan, v_err = validate_and_normalize_plan(parsed)
         if not plan:
-            logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
+            if v_err == "missing_object_secondary":
+                logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
+            else:
+                logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
             return None
 
         log_plan_summary(plan)
@@ -530,13 +560,99 @@ def _finalize_runway_prompt(headline_prefix: str, body: str) -> Tuple[str, bool]
     return full[:_RUNWAY_PROMPT_MAX_CHARS], True
 
 
+def _sentence_invites_visible_text(sentence: str) -> bool:
+    """
+    True if this sentence likely instructs the video model to render readable text/UI (drop it).
+    Conservative: keep sentences that are clearly negations (no/forbidden/without … text).
+    """
+    sl = sentence.lower().strip()
+    if not sl:
+        return False
+    if re.search(
+        r"\b(no|never|not|without|don't|do not|forbidden|avoid|must not|zero)\s+"
+        r"(?:readable\s+)?(?:text|letters|words|logos?|captions?|headlines?|titles?|subtitles?|watermarks?|signage|labels?)\b",
+        sl,
+    ):
+        return False
+    if "no text" in sl or "no letters" in sl or "no logos" in sl or "no readable" in sl:
+        return False
+    if "no caption" in sl or "no subtitles" in sl or "no headline" in sl:
+        return False
+    danger_snippets = (
+        "include a headline",
+        "include the headline",
+        "include headline",
+        "headline in the",
+        "headline on",
+        "headline must",
+        "title card",
+        "on-screen text",
+        "readable text",
+        "show the text",
+        "display the text",
+        "show text",
+        "text overlay",
+        "lower third",
+        "chyron",
+        "watermark",
+        "packaging text",
+        "signage",
+        "brand name on",
+        "spell out",
+        "written on",
+        "letters on screen",
+        "words on screen",
+        "typography in the",
+        "feature the name",
+        "burn-in",
+        "burn in",
+        "show caption",
+        "add caption",
+        "open captions",
+        "closed caption",
+        "add subtitles",
+        "show subtitles",
+    )
+    return any(d in sl for d in danger_snippets)
+
+
+def sanitize_runway_prompt_for_video_text_policy(prompt: str) -> Tuple[str, bool]:
+    """
+    Last-line defense before Runway: drop sentences that invite on-screen text; trim length.
+    Returns (sanitized_prompt, was_modified).
+    """
+    original = (prompt or "").strip()
+    if not original:
+        return "", False
+
+    chunks = re.split(r"(?<=[.!?])\s+", original)
+    kept: List[str] = []
+    for c in chunks:
+        c = c.strip()
+        if not c:
+            continue
+        if _sentence_invites_visible_text(c):
+            continue
+        kept.append(c)
+    out = " ".join(kept).strip()
+    out = re.sub(r"\s+", " ", out)
+    if len(out) > _RUNWAY_PROMPT_MAX_CHARS:
+        out = out[:_RUNWAY_PROMPT_MAX_CHARS]
+    if not out:
+        out = (
+            "Cinematic commercial motion only; no readable text, letters, logos, captions, "
+            "or labels in-frame."
+        )
+    return out, out != original
+
+
 def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """Shorter ACE→Runway bridge if the detailed builder fails; keeps prior behavior."""
     core = (plan.get("videoPromptCore") or "").strip()
     script = (plan.get("shortReplacementScript") or "").strip()
 
     parts = [
-        "No text or logos in-frame.",
+        "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
         f"Scene: {core}" if core else "",
         f"Replacement: {script}" if script else "",
     ]
@@ -588,7 +704,11 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
         scene += f" Beat: {script}"
     scene += " No logos or packaging type. Single clean commercial look."
 
-    body = f"No on-screen text, captions, or logos. {scene}"
+    body = (
+        "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
+        "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
+        f"{scene}"
+    )
     out, trunc = _finalize_runway_prompt("", body)
     if not out.strip():
         raise ValueError("empty prompt")
@@ -670,7 +790,11 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
         scene += f" Beat: {script}"
     scene += " No logos or packaging type. Single clean commercial look."
 
-    body = f"No on-screen text, captions, or logos. {scene}"
+    body = (
+        "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
+        "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
+        f"{scene}"
+    )
     out, trunc = _finalize_runway_prompt("", body)
     if not out.strip():
         raise ValueError("empty prompt")
@@ -695,7 +819,7 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
         motion = "Motion only; start frame supplied."
 
     parts = [
-        "No text or logos in-frame.",
+        "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
         motion,
         f"Action: {core}" if core else "",
         f"Beat: {script}" if script else "",
