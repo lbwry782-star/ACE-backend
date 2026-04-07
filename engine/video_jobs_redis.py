@@ -55,6 +55,20 @@ def job_key(job_id: str) -> str:
     return f"{JOB_KEY_PREFIX}{job_id}"
 
 
+def video_job_set_resolved_product_name(job_id: str, resolved: str, source: str) -> None:
+    """Worker/video engine: canonical product name for this job (user or auto)."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return
+    get_redis().hset(
+        job_key(jid),
+        mapping={
+            "resolved_product_name": (resolved or "").strip(),
+            "product_name_source": (source or "").strip(),
+        },
+    )
+
+
 def video_job_create(
     job_id: str,
     product_name: str,
@@ -101,6 +115,8 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
         "publicBaseUrl": data.get("public_base_url") or "",
         "postprocessRan": (data.get("postprocess_ran") or "").strip(),
         "error": data.get("error") or "",
+        "resolvedProductName": (data.get("resolved_product_name") or "").strip(),
+        "productNameSource": (data.get("product_name_source") or "").strip(),
     }
 
 

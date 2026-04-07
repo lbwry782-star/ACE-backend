@@ -3082,7 +3082,9 @@ Product description: {product_description}
 Advertising goal: {ad_goal}
 
 Requirements:
-- {lang_name} only — write the entire copy in {lang_name}. No other languages, no mixing.
+- Write primarily in {lang_name}. The copy must read naturally in {lang_name}.
+- Short foreign loanwords are allowed when natural: AI, SaaS, CRM, abbreviations, brand/product names — keep them untranslated; do not flip the whole piece to another language because of a few such terms.
+- Avoid chaotic mixed-language paragraphs; stay coherent and {lang_name}-dominant.
 - Exactly 45-55 words (count carefully)
 - Must include product name
 - Must be product-specific (not generic marketing language)
@@ -3094,7 +3096,8 @@ Marketing copy:"""
 
     max_attempts = max_retries + 1
     system_msg = (
-        f"You are a marketing copywriter. Output must be in {lang_name} only. "
+        f"You are a marketing copywriter. Output must read primarily in {lang_name}; "
+        f"short Latin technical/brand terms (e.g. AI, SaaS) may stay as-is when natural. "
         f"Return only the marketing copy text, no JSON, no quotes."
     )
     for attempt in range(max_attempts):
@@ -3135,7 +3138,7 @@ Product description: {product_description}
 Advertising goal: {ad_goal}
 
 Requirements:
-- {lang_name} only — write the entire copy in {lang_name}. No other languages, no mixing.
+- Write primarily in {lang_name}; short loanwords (AI, SaaS, brand names, abbreviations) may stay untranslated when natural; stay {lang_name}-dominant.
 - MUST be 45-55 words (current attempt was {word_count} words - too short)
 - Must include product name
 - Must be product-specific (not generic marketing language)
@@ -3162,7 +3165,7 @@ Product description: {product_description}
 Advertising goal: {ad_goal}
 
 Requirements:
-- {lang_name} only — write the entire copy in {lang_name}. No other languages, no mixing.
+- Write primarily in {lang_name}; short loanwords (AI, SaaS, brand names, abbreviations) may stay untranslated when natural; stay {lang_name}-dominant.
 - MUST be 45-55 words (current attempt was {word_count} words - too long)
 - Must include product name
 - Must be product-specific (not generic marketing language)

@@ -7,6 +7,7 @@ Future ACE video engine may produce two outputs and richer concept prompting; ke
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -23,10 +24,18 @@ from engine.video_planning import (
     video_plan_required_fields_for_runway,
 )
 from engine.video_headline_postprocess import postprocess_video_headline
+from engine.video_jobs_redis import video_job_set_resolved_product_name
 from engine.video_language import (
-    detect_product_description_language,
     log_video_language_decision,
     normalize_video_content_language,
+    text_predominantly_matches_language,
+)
+from engine.video_product_name import (
+    VideoProductNameError,
+    apply_canonical_product_name_to_video_plan,
+    product_name_reused_in_copy,
+    product_name_reused_in_headline,
+    resolve_video_product_name,
 )
 from engine.video_start_image import generate_video_start_image_data_uri
 
@@ -102,38 +111,34 @@ def _headers() -> Dict[str, str]:
 
 
 def _enforce_headline_overlay_language(required_lang: str, headline: str) -> None:
-    """When the job is Hebrew-classified, end headline must read as Hebrew (no English-only overlay)."""
+    """End headline must be predominantly in the classified language (short Latin terms like AI allowed)."""
     req = normalize_video_content_language(required_lang)
-    if req != "he":
-        return
     h = (headline or "").strip()
     if not h:
         return
-    _d, applied, _, _ = detect_product_description_language(h)
-    if applied != "he":
+    if not text_predominantly_matches_language(h, req):
         logger.error(
-            "VIDEO_JOB_FAILED_INTEGRITY reason=headline_language_mismatch required=he actual=%s",
-            applied,
+            "VIDEO_JOB_FAILED_INTEGRITY reason=headline_language_mismatch required=%s plurality_check=false",
+            req,
         )
         raise RunwayVideoMVPError("headline_language_mismatch")
 
 
 def _enforce_marketing_copy_language(required_lang: str, marketing_text: str) -> None:
-    """
-    Log required vs detector-applied language on generated copy.
-    For Hebrew jobs, reject English (or non-Hebrew) marketing output — no silent English fallback.
-    """
+    """Marketing copy must be predominantly in the classified language; loanwords/abbreviations allowed."""
     req = normalize_video_content_language(required_lang)
     logger.info("VIDEO_COPY_LANGUAGE_REQUIRED=%s", req)
     if not (marketing_text or "").strip():
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_empty")
         raise RunwayVideoMVPError("marketing_copy_empty")
-    _det, applied, _conf, _ = detect_product_description_language(marketing_text)
-    logger.info("VIDEO_COPY_LANGUAGE_ACTUAL=%s", applied)
-    if req == "he" and applied != "he":
+    logger.info(
+        "VIDEO_COPY_LANGUAGE_ACTUAL=%s",
+        "predominant_match" if text_predominantly_matches_language(marketing_text, req) else "predominant_mismatch",
+    )
+    if not text_predominantly_matches_language(marketing_text, req):
         logger.error(
-            "VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_language_mismatch required=he actual=%s",
-            applied,
+            "VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_language_mismatch required=%s plurality_check=false",
+            req,
         )
         raise RunwayVideoMVPError("marketing_language_mismatch")
 
@@ -285,9 +290,30 @@ def generate_one_video_mvp(
     base = _env_base_url()
     model = _env_model()
     video_lang, _, _ = log_video_language_decision(product_description)
+    try:
+        pn_source, canonical_name = resolve_video_product_name(
+            product_name, product_description, video_lang
+        )
+    except VideoProductNameError as e:
+        reason = (e.args[0] if getattr(e, "args", None) else None) or "error"
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_%s", reason)
+        raise RunwayVideoMVPError("product_name_generation_failed")
+    logger.info("VIDEO_PRODUCT_NAME_SOURCE=%s", pn_source)
+    logger.info("VIDEO_PRODUCT_NAME_LANGUAGE=%s", video_lang)
+    logger.info("VIDEO_PRODUCT_NAME_CHOSEN=%s", json.dumps(canonical_name, ensure_ascii=False))
+    if job_id:
+        try:
+            video_job_set_resolved_product_name(job_id, canonical_name, pn_source)
+        except Exception as e:
+            logger.warning(
+                "VIDEO_JOB_RESOLVED_NAME_REDIS_WRITE_FAIL jobId=%s err=%s",
+                job_id,
+                e,
+            )
+
     logger.info("VIDEO_JOB_STEP step=plan_video start")
     try:
-        plan = fetch_video_plan_o3(product_name, product_description, content_language=video_lang)
+        plan = fetch_video_plan_o3(canonical_name, product_description, content_language=video_lang)
     except VideoPlanningTimeoutError:
         logger.info("VIDEO_PLAN_ABORTED reason=planning_timeout")
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
@@ -310,6 +336,8 @@ def generate_one_video_mvp(
         raise RunwayVideoMVPError("plan_integrity_failed")
 
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
+
+    apply_canonical_product_name_to_video_plan(plan, canonical_name)
 
     prompt_image_data_uri: Optional[str] = None
     # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
@@ -381,12 +409,13 @@ def generate_one_video_mvp(
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
                 logger.info("VIDEO_JOB_STEP step=packaging_result start")
                 headline_for_overlay = (plan.get("headlineText") or "").strip()
+                headline_decision = (plan.get("headlineDecision") or "").strip()
                 try:
                     from engine.side_by_side_v1 import generate_marketing_copy
 
                     ad_goal = (plan.get("advertisingPromise") or "").strip()
                     marketing_text_for_api = generate_marketing_copy(
-                        (product_name or "").strip() or "Product",
+                        canonical_name,
                         (product_description or "").strip(),
                         ad_goal,
                         output_language=video_lang,
@@ -396,6 +425,18 @@ def generate_one_video_mvp(
                     logger.info("VIDEO_PLAN_ABORTED reason=marketing_copy_exception")
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_failed")
                     raise RunwayVideoMVPError("marketing_copy_failed") from e
+                reuse_h = product_name_reused_in_headline(
+                    canonical_name, headline_for_overlay, headline_decision
+                )
+                reuse_c = product_name_reused_in_copy(canonical_name, marketing_text_for_api)
+                logger.info("VIDEO_PRODUCT_NAME_REUSED_IN_HEADLINE=%s", str(reuse_h).lower())
+                logger.info("VIDEO_PRODUCT_NAME_REUSED_IN_COPY=%s", str(reuse_c).lower())
+                if not reuse_h:
+                    logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_headline")
+                    raise RunwayVideoMVPError("product_name_headline_mismatch")
+                if not reuse_c:
+                    logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_marketing_copy")
+                    raise RunwayVideoMVPError("product_name_copy_mismatch")
                 _enforce_marketing_copy_language(video_lang, marketing_text_for_api)
                 _enforce_headline_overlay_language(video_lang, headline_for_overlay)
                 logger.info("VIDEO_JOB_STEP step=packaging_result done")

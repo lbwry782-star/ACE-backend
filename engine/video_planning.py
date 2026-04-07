@@ -78,10 +78,11 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang_name = video_language_display_name(lang)
     return f"""You are the ACE video planning engine.
 
-OUTPUT LANGUAGE (locked — strict)
-- Classified output language for this job: {lang_name} (code {lang}).
-- You MUST write every user-facing string in {lang_name} only: advertisingPromise, headlineText (when non-empty), shortReplacementScript, morphologicalReason, promiseReason.
-- Do not mix languages in those fields. Object identifiers objectA, objectB, objectA_secondary, objectB_secondary may use conventional short English nouns for morphological consistency when required by the engine; all explanatory and advertising copy must remain {lang_name} only.
+OUTPUT LANGUAGE (locked — dominant language)
+- Classified output language for this job: {lang_name} (code {lang}) — determined by the majority of letters in the product description among Hebrew / English / Russian / Arabic.
+- Write advertisingPromise, headlineText (when non-empty), shortReplacementScript, morphologicalReason, and promiseReason so they read primarily in {lang_name}.
+- Short foreign terms may remain unchanged when natural in {lang_name} prose: e.g. AI, SaaS, CRM, common abbreviations, international brand names, product names, and brief professional English terms. Do not force-translate those into {lang_name}. The overall tone must still be clearly {lang_name}, not a chaotic mix.
+- Object identifiers objectA, objectB, objectA_secondary, objectB_secondary may use conventional short English nouns for morphological consistency when required by the engine.
 
 VIDEO PIPELINE (non-negotiable)
 - The generative video opens from a first frame that already shows the replacement state: B in A's role, with A's background, A's secondary object, and A's spatial position. The rest of the video shows B interacting with A's secondary in that composition.

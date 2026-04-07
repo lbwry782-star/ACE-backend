@@ -1,8 +1,10 @@
 """
-Video pipeline: strict language detection from product description (no LLM guessing).
+Video pipeline: language detection from product description for headline + marketing copy.
 
 Allowed output languages: Hebrew (he), English (en), Russian (ru), Arabic (ar).
-Default when unclear or unsupported: Hebrew.
+Dominant language = plurality among letter counts (Hebrew / Arabic / Cyrillic / Latin).
+Short Latin loanwords (e.g. AI, SaaS) do not flip the dominant script when Hebrew/Russian/Arabic letters lead.
+Default Hebrew only when empty, disallowed script dominates, or Latin-plurality without English-like text.
 """
 
 from __future__ import annotations
@@ -22,10 +24,7 @@ def normalize_video_content_language(code: str) -> str:
     c = (code or "he").strip().lower()
     return c if c in ALLOWED_VIDEO_LANGUAGES else "he"
 
-# Dominant script must reach this share of letter characters to be "clear"
-_DOMINANCE_MIN = 0.55
-# Second-place script must stay at or below this share for a clear winner (avoids mixed)
-_SECOND_MAX_FOR_CLEAR = 0.28
+# Latin-plurality descriptions: treat as English output only if lexicon suggests English
 # Latin text: classify as English only if enough common English tokens appear
 _EN_WORD_HIT_RATIO = 0.22
 _EN_WORD_HIT_MIN = 5
@@ -168,6 +167,25 @@ def normalize_video_overlay_text(headline: str, language: str) -> str:
     return t
 
 
+def text_predominantly_matches_language(text: str, lang_code: str) -> bool:
+    """
+    True if the text's letter-count plurality matches lang_code (he|en|ru|ar).
+    Ignores disallowed 'other' letters for plurality among the four supported buckets.
+    Empty or no supported letters → True (nothing to contradict).
+    """
+    lang = normalize_video_content_language(lang_code)
+    h, a, r, lat, _other, _total = _letter_category_counts(text)
+    supported = h + a + r + lat
+    if supported == 0:
+        return True
+    counts_map = {"he": h, "ar": a, "ru": r, "en": lat}
+    max_v = max(counts_map.values())
+    winners = [k for k, v in counts_map.items() if v == max_v]
+    tie_break = ("he", "ar", "ru", "en")
+    top = next(k for k in tie_break if k in winners)
+    return top == lang
+
+
 def video_language_display_name(code: str) -> str:
     return {
         "he": "Hebrew",
@@ -182,10 +200,10 @@ def detect_product_description_language(product_description: str) -> Tuple[str, 
     Classify product description into allowed video output language.
 
     Returns:
-        detected_label: "he" | "en" | "ru" | "ar" | "mixed" | "unsupported_latin" | "empty"
+        detected_label: winning script code, or mixed_plurality (tie), unsupported_latin, unsupported_script, empty
         applied_code: always one of he|en|ru|ar (Hebrew when defaulting)
-        confidence: 0.0–1.0 (heuristic, deterministic per input)
-        used_default_hebrew: True if applied Hebrew due to unclear/unsupported/empty
+        confidence: 0.0–1.0 (top script share among letter counts)
+        used_default_hebrew: True if applied Hebrew due to empty / unsupported_script / unsupported_latin
     """
     raw = (product_description or "").strip()
     if not raw:
@@ -195,36 +213,32 @@ def detect_product_description_language(product_description: str) -> Tuple[str, 
     if total == 0:
         return "empty", "he", 0.0, True
 
-    # Non-allowed scripts (e.g. Greek) present → unclear → default Hebrew
-    if other > 0:
-        return "mixed", "he", 0.42, True
+    # Disallowed script (e.g. Greek) is the largest bucket → cannot pick he/ar/ru/en reliably
+    if other > max(h, a, r, lat):
+        return "unsupported_script", "he", 0.4, True
 
-    shares = [
-        ("he", h / total),
-        ("ar", a / total),
-        ("ru", r / total),
-        ("en", lat / total),  # provisional label for Latin bucket
-    ]
-    shares.sort(key=lambda x: x[1], reverse=True)
-    top_name, top_s = shares[0]
-    second_s = shares[1][1]
+    counts_map = {"he": h, "ar": a, "ru": r, "en": lat}
+    max_v = max(counts_map.values())
+    winners = [k for k, v in counts_map.items() if v == max_v]
+    tie_break = ("he", "ar", "ru", "en")
+    top_name = next(k for k in tie_break if k in winners)
+    det_label = top_name if len(winners) == 1 else "mixed_plurality"
 
-    clear_dominance = top_s >= _DOMINANCE_MIN and second_s <= _SECOND_MAX_FOR_CLEAR
-
-    if not clear_dominance:
-        return "mixed", "he", 0.45, True
+    sorted_counts = sorted(counts_map.values(), reverse=True)
+    second_v = sorted_counts[1] if len(sorted_counts) > 1 else 0
+    confidence = max_v / total if total else 0.0
 
     if top_name == "he":
-        return "he", "he", 0.92, False
+        return det_label, "he", confidence, False
     if top_name == "ar":
-        return "ar", "ar", 0.92, False
+        return det_label, "ar", confidence, False
     if top_name == "ru":
-        return "ru", "ru", 0.92, False
+        return det_label, "ru", confidence, False
 
-    # Latin-dominant clear: English only if lexicon heuristic passes; else unsupported → Hebrew
+    # Latin has plurality among letter buckets
     if _latin_looks_english(raw):
-        return "en", "en", 0.88, False
-    return "unsupported_latin", "he", 0.5, True
+        return det_label, "en", confidence, False
+    return "unsupported_latin", "he", confidence, True
 
 
 def log_video_language_decision(
@@ -234,8 +248,18 @@ def log_video_language_decision(
     Run detection, emit required logs, return (applied_code, confidence, default_hebrew).
     """
     det_label, applied, conf, default_he = detect_product_description_language(product_description)
+    raw = (product_description or "").strip()
+    h, a, r, lat, _o, tot = _letter_category_counts(raw) if raw else (0, 0, 0, 0, 0, 0)
+    counts_map = {"he": h, "ar": a, "ru": r, "en": lat}
+    sorted_counts = sorted(counts_map.values(), reverse=True)
+    second_v = sorted_counts[1] if tot and len(sorted_counts) > 1 else 0
+    second_share = (second_v / tot) if tot else 0.0
+    # Policy: allow short foreign/loan terms in outputs when description had secondary script activity
+    mixed_terms_allowed = second_share >= 0.03
+
     logger.info("VIDEO_LANGUAGE_DETECTED=%s", det_label)
     logger.info("VIDEO_LANGUAGE_CONFIDENCE=%s", round(conf, 3))
     logger.info("VIDEO_LANGUAGE_APPLIED=%s", applied)
     logger.info("VIDEO_LANGUAGE_DEFAULT_HEBREW=%s", default_he)
+    logger.info("VIDEO_MIXED_LANGUAGE_TERMS_ALLOWED=%s", mixed_terms_allowed)
     return applied, conf, default_he
