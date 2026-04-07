@@ -25,6 +25,7 @@ from threading import Lock
 
 from . import openai_retry
 from engine.video_language import normalize_video_content_language, video_language_display_name
+from engine.video_product_name import product_name_reused_in_copy
 
 logger = logging.getLogger(__name__)
 
@@ -3029,6 +3030,60 @@ Requirements:
     raise Exception("Failed to select shape pair after retries")
 
 
+def _prepend_verbatim_product_name(copy_text: str, product_name: str) -> str:
+    """Ensure canonical name appears at least once by prefixing when missing."""
+    n = (product_name or "").strip()
+    t = (copy_text or "").strip()
+    if not n or not t:
+        return t or n
+    if product_name_reused_in_copy(n, t):
+        return t
+    return f"{n}. {t}".strip()
+
+
+def _build_marketing_copy_user_prompt(
+    product_name: str,
+    product_description: str,
+    ad_goal: str,
+    lang_name: str,
+    *,
+    strict_verbatim_name: bool,
+    retry_tail: str = "",
+) -> str:
+    canon = (product_name or "").strip()
+    desc = (product_description or "").strip()
+    goal = (ad_goal or "").strip()
+    verbatim = ""
+    if strict_verbatim_name:
+        verbatim = f"""
+CANONICAL PRODUCT NAME — mandatory verbatim substring (at least once), exact characters:
+{json.dumps(canon, ensure_ascii=False)}
+- Paste this exact string into the marketing copy at least once (do not translate, transliterate, or rephrase it).
+- Do NOT use the product description text (e.g. opening words like category phrases) as the product name. Description is context only.
+- Do NOT invent an alternate brand or substitute name.{retry_tail}
+"""
+    else:
+        verbatim = retry_tail
+    return f"""Generate marketing copy for an advertisement.
+{verbatim}
+Product name: {canon}
+Product description (context only): {desc}
+Advertising goal: {goal}
+
+Requirements:
+- Write primarily in {lang_name}. The copy must read naturally in {lang_name}.
+- Short foreign loanwords are allowed when natural: AI, SaaS, CRM, abbreviations, brand/product names — keep them untranslated; do not flip the whole piece to another language because of a few such terms.
+- Avoid chaotic mixed-language paragraphs; stay coherent and {lang_name}-dominant.
+- Exactly 45-55 words (count carefully)
+- Must include product name
+- Must be product-specific (not generic marketing language)
+- Must include one short CTA (call-to-action) at the end
+- Professional, compelling, clear
+- No fluff, no generic phrases
+
+Marketing copy:"""
+
+
 def _marketing_copy_fallback(product_name: str, ad_goal: str, lang: str) -> str:
     """Short deterministic fallback in the requested language (video path)."""
     lang = normalize_video_content_language(lang)
@@ -3058,52 +3113,63 @@ def _marketing_copy_fallback(product_name: str, ad_goal: str, lang: str) -> str:
     )
 
 
+class MarketingCopyVerbatimProductNameFailed(Exception):
+    """Strict marketing copy could not include the canonical product name substring after repair."""
+
+
 def generate_marketing_copy(
     product_name: str,
     product_description: str,
     ad_goal: str,
     max_retries: int = 2,
     output_language: str = "en",
+    *,
+    require_verbatim_product_name: bool = False,
 ) -> str:
     """
     Generate marketing copy: 45-55 words, product-specific, with CTA, in output_language.
 
     output_language: he | en | ru | ar (invalid values are treated as en for image pipeline; video path passes detected lang).
+    When require_verbatim_product_name is True, the copy must contain the exact product_name substring
+    (repair via prefix or fail); the model must not substitute the description as the name.
     """
     lang = normalize_video_content_language(output_language)
     lang_name = video_language_display_name(lang)
+    canon = (product_name or "").strip() or "Product"
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = _get_text_model()
 
-    prompt = f"""Generate marketing copy for an advertisement.
-
-Product name: {product_name}
-Product description: {product_description}
-Advertising goal: {ad_goal}
-
-Requirements:
-- Write primarily in {lang_name}. The copy must read naturally in {lang_name}.
-- Short foreign loanwords are allowed when natural: AI, SaaS, CRM, abbreviations, brand/product names — keep them untranslated; do not flip the whole piece to another language because of a few such terms.
-- Avoid chaotic mixed-language paragraphs; stay coherent and {lang_name}-dominant.
-- Exactly 45-55 words (count carefully)
-- Must include product name
-- Must be product-specific (not generic marketing language)
-- Must include one short CTA (call-to-action) at the end
-- Professional, compelling, clear
-- No fluff, no generic phrases
-
-Marketing copy:"""
-
     max_attempts = max_retries + 1
+    retry_tail = ""
     system_msg = (
         f"You are a marketing copywriter. Output must read primarily in {lang_name}; "
         f"short Latin technical/brand terms (e.g. AI, SaaS) may stay as-is when natural. "
         f"Return only the marketing copy text, no JSON, no quotes."
     )
+    if require_verbatim_product_name:
+        system_msg += (
+            " When the user message includes a canonical product name as a JSON-quoted literal, "
+            "include that exact character sequence in the copy at least once. "
+            "Do not use paraphrases from the product description as the product name."
+        )
+
     for attempt in range(max_attempts):
+        prompt = _build_marketing_copy_user_prompt(
+            canon,
+            product_description,
+            ad_goal,
+            lang_name,
+            strict_verbatim_name=require_verbatim_product_name,
+            retry_tail=retry_tail,
+        )
         try:
             logger.info(
-                f"MARKETING_COPY attempt={attempt+1} model={model_name} product={product_name[:50]} lang={lang}"
+                "MARKETING_COPY attempt=%s model=%s product=%s lang=%s verbatim=%s",
+                attempt + 1,
+                model_name,
+                canon[:50],
+                lang,
+                require_verbatim_product_name,
             )
 
             def _copy_call():
@@ -3125,74 +3191,109 @@ Marketing copy:"""
             copy_text = openai_retry.openai_call_with_retry(_copy_call, endpoint="responses")
             copy_text = copy_text.strip("\"'")
 
-            words = copy_text.split()
-            word_count = len(words)
+            word_count = len(copy_text.split())
 
             if word_count < 45:
                 if attempt < max_attempts - 1:
-                    logger.warning(f"MARKETING_COPY: word_count={word_count} < 45, retrying...")
-                    prompt = f"""Generate marketing copy for an advertisement.
-
-Product name: {product_name}
-Product description: {product_description}
-Advertising goal: {ad_goal}
-
-Requirements:
-- Write primarily in {lang_name}; short loanwords (AI, SaaS, brand names, abbreviations) may stay untranslated when natural; stay {lang_name}-dominant.
-- MUST be 45-55 words (current attempt was {word_count} words - too short)
-- Must include product name
-- Must be product-specific (not generic marketing language)
-- Must include one short CTA (call-to-action) at the end
-- Professional, compelling, clear
-- No fluff, no generic phrases
-
-Marketing copy:"""
+                    logger.warning("MARKETING_COPY: word_count=%s < 45, retrying...", word_count)
+                    retry_tail = (
+                        (retry_tail + "\n\n" if retry_tail else "")
+                        + f"MUST be 45-55 words (previous attempt was {word_count} words — too short)."
+                    )
                     continue
-                else:
-                    logger.warning(f"MARKETING_COPY: word_count={word_count} < 45, padding...")
-                    needed = 45 - word_count
-                    padding = _marketing_copy_fallback(product_name, ad_goal, lang)
-                    copy_text = f"{copy_text} {padding}".strip()
-                    words = copy_text.split()
-                    copy_text = " ".join(words[:55])
+                logger.warning("MARKETING_COPY: word_count=%s < 45, padding...", word_count)
+                copy_text = f"{copy_text} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
+                copy_text = " ".join(copy_text.split()[:55])
             elif word_count > 55:
                 if attempt < max_attempts - 1:
-                    logger.warning(f"MARKETING_COPY: word_count={word_count} > 55, retrying...")
-                    prompt = f"""Generate marketing copy for an advertisement.
-
-Product name: {product_name}
-Product description: {product_description}
-Advertising goal: {ad_goal}
-
-Requirements:
-- Write primarily in {lang_name}; short loanwords (AI, SaaS, brand names, abbreviations) may stay untranslated when natural; stay {lang_name}-dominant.
-- MUST be 45-55 words (current attempt was {word_count} words - too long)
-- Must include product name
-- Must be product-specific (not generic marketing language)
-- Must include one short CTA (call-to-action) at the end
-- Professional, compelling, clear
-- No fluff, no generic phrases
-
-Marketing copy:"""
+                    logger.warning("MARKETING_COPY: word_count=%s > 55, retrying...", word_count)
+                    retry_tail = (
+                        (retry_tail + "\n\n" if retry_tail else "")
+                        + f"MUST be 45-55 words (previous attempt was {word_count} words — too long)."
+                    )
                     continue
-                else:
-                    logger.warning(f"MARKETING_COPY: word_count={word_count} > 55, truncating...")
-                    words = copy_text.split()
-                    copy_text = " ".join(words[:55])
+                logger.warning("MARKETING_COPY: word_count=%s > 55, truncating...", word_count)
+                if require_verbatim_product_name:
+                    copy_text = _prepend_verbatim_product_name(copy_text, canon)
+                copy_text = " ".join(copy_text.split()[:55])
+
+            while len(copy_text.split()) < 45:
+                copy_text = f"{copy_text} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
+                copy_text = " ".join(copy_text.split()[:55])
+
+            if len(copy_text.split()) > 55:
+                if require_verbatim_product_name:
+                    copy_text = _prepend_verbatim_product_name(copy_text, canon)
+                copy_text = " ".join(copy_text.split()[:55])
+
+            if require_verbatim_product_name and not product_name_reused_in_copy(canon, copy_text):
+                if attempt < max_attempts - 1:
+                    logger.warning(
+                        "MARKETING_COPY: verbatim product name missing, retrying (attempt %s)",
+                        attempt + 1,
+                    )
+                    retry_tail = (
+                        (retry_tail + "\n\n" if retry_tail else "")
+                        + "The previous answer did not contain this exact substring: "
+                        + json.dumps(canon, ensure_ascii=False)
+                        + ". Include it verbatim at least once. Do not use the description as the name."
+                    )
+                    continue
+                copy_text = _prepend_verbatim_product_name(copy_text, canon)
+                copy_text = " ".join(copy_text.split()[:55])
+                while len(copy_text.split()) < 45:
+                    copy_text = f"{copy_text} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
+                    copy_text = " ".join(copy_text.split()[:55])
+                if not product_name_reused_in_copy(canon, copy_text):
+                    raise MarketingCopyVerbatimProductNameFailed(
+                        "marketing_copy_verbatim_product_name_failed"
+                    )
 
             final_word_count = len(copy_text.split())
-            logger.info(f"MARKETING_COPY SUCCESS: word_count={final_word_count} copy='{copy_text[:100]}...'")
+            logger.info(
+                "MARKETING_COPY SUCCESS: word_count=%s copy='%s...'",
+                final_word_count,
+                copy_text[:100],
+            )
             return copy_text
 
         except openai_retry.OpenAIRateLimitError:
             raise
+        except MarketingCopyVerbatimProductNameFailed:
+            raise
         except Exception as e:
-            logger.error(f"MARKETING_COPY failed (attempt {attempt+1}/{max_attempts}): {e}")
+            logger.error(
+                "MARKETING_COPY failed (attempt %s/%s): %s",
+                attempt + 1,
+                max_attempts,
+                e,
+            )
             if attempt < max_attempts - 1:
                 continue
             logger.warning("MARKETING_COPY: Using fallback copy")
-            return _marketing_copy_fallback(product_name, ad_goal, lang)
-    return _marketing_copy_fallback(product_name, ad_goal, lang)
+            fb = _marketing_copy_fallback(canon, ad_goal, lang)
+            if require_verbatim_product_name:
+                fb = _prepend_verbatim_product_name(fb, canon)
+                fb = " ".join(fb.split()[:55])
+                while len(fb.split()) < 45:
+                    fb = f"{fb} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
+                    fb = " ".join(fb.split()[:55])
+                if not product_name_reused_in_copy(canon, fb):
+                    raise MarketingCopyVerbatimProductNameFailed(
+                        "marketing_copy_verbatim_product_name_failed"
+                    ) from e
+            return fb
+
+    fb = _marketing_copy_fallback(canon, ad_goal, lang)
+    if require_verbatim_product_name:
+        fb = _prepend_verbatim_product_name(fb, canon)
+        fb = " ".join(fb.split()[:55])
+        while len(fb.split()) < 45:
+            fb = f"{fb} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
+            fb = " ".join(fb.split()[:55])
+        if not product_name_reused_in_copy(canon, fb):
+            raise MarketingCopyVerbatimProductNameFailed("marketing_copy_verbatim_product_name_failed")
+    return fb
 
 
 def generate_headline_only(

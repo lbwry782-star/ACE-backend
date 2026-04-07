@@ -300,7 +300,9 @@ def generate_one_video_mvp(
         raise RunwayVideoMVPError("product_name_generation_failed")
     logger.info("VIDEO_PRODUCT_NAME_SOURCE=%s", pn_source)
     logger.info("VIDEO_PRODUCT_NAME_LANGUAGE=%s", video_lang)
-    logger.info("VIDEO_PRODUCT_NAME_CHOSEN=%s", json.dumps(canonical_name, ensure_ascii=False))
+    logger.info(
+        "VIDEO_PRODUCT_NAME_RESOLVED=%s", json.dumps(canonical_name, ensure_ascii=False)
+    )
     if job_id:
         try:
             video_job_set_resolved_product_name(job_id, canonical_name, pn_source)
@@ -414,11 +416,16 @@ def generate_one_video_mvp(
                     from engine.side_by_side_v1 import generate_marketing_copy
 
                     ad_goal = (plan.get("advertisingPromise") or "").strip()
+                    logger.info(
+                        "VIDEO_COPY_INPUT_PRODUCT_NAME=%s",
+                        json.dumps(canonical_name, ensure_ascii=False),
+                    )
                     marketing_text_for_api = generate_marketing_copy(
                         canonical_name,
                         (product_description or "").strip(),
                         ad_goal,
                         output_language=video_lang,
+                        require_verbatim_product_name=True,
                     )
                 except Exception as e:
                     logger.error("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
@@ -430,7 +437,10 @@ def generate_one_video_mvp(
                 )
                 reuse_c = product_name_reused_in_copy(canonical_name, marketing_text_for_api)
                 logger.info("VIDEO_PRODUCT_NAME_REUSED_IN_HEADLINE=%s", str(reuse_h).lower())
-                logger.info("VIDEO_PRODUCT_NAME_REUSED_IN_COPY=%s", str(reuse_c).lower())
+                logger.info("VIDEO_COPY_USED_PRODUCT_NAME=%s", str(reuse_c).lower())
+                logger.info(
+                    "VIDEO_COPY_PRODUCT_NAME_MISMATCH=%s", str(not reuse_c).lower()
+                )
                 if not reuse_h:
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_headline")
                     raise RunwayVideoMVPError("product_name_headline_mismatch")
