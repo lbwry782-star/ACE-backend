@@ -6,6 +6,7 @@ Uses U+200E LEFT-TO-RIGHT MARK as invisible anchors around Latin segments (no vi
 
 from __future__ import annotations
 
+import re
 from typing import Tuple
 
 from engine.video_language import normalize_video_content_language
