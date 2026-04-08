@@ -50,7 +50,8 @@ OUTPUT FORMAT (strict)
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
 Field notes (must follow in JSON values):
-- morphologicalReason: Briefly justify why A and B are extremely close in overall form (whole-object, painterly grasp — not contour trivia alone).
+- morphologicalReason: Briefly justify why A and B are extremely close in overall form (whole-object, painterly grasp — not contour trivia alone). Also one short phrase on why the viewer will instantly read “B replaced A” (iconic identity, not just similar silhouette).
+- objectPairViewerClarityOk: MUST be true. Set true only if BOTH objectA and objectB are classic, iconic, standalone physical things AND replacement is immediately legible. If the pair fails the iconic/viewer-clarity bar, do not output false to bypass — choose a different B (or A) until the bar is met, then set true.
 
 Required keys (all strings except where noted):
 {
@@ -68,7 +69,8 @@ Required keys (all strings except where noted):
   "shortReplacementScript": string,
   "headlineDecision": "include_product_name" or "product_name_only" or "no_headline",
   "headlineText": string,
-  "videoPromptCore": string
+  "videoPromptCore": string,
+  "objectPairViewerClarityOk": boolean
 }
 """
 
@@ -93,6 +95,13 @@ CONTEXT
 - Objects must be concrete, iconic physical nouns (classic situations). No brands, logos, text-as-object, or vague environments (e.g. "forest", "skyline") as primaries.
 - Each main object is paired with a secondary object: a separate, concrete physical thing that plausibly appears in the same everyday scene as the main object, and is not a literal part of the main (not a limb, label, packaging line, or surface detail belonging to the main). Name specific nouns; do not use placeholder wording.
 - Object A is chosen from the product description with an intuitive grasp of overall form — like a painter sensing the whole object, not technical contour-only tracing.
+
+ICONIC STANDALONE OBJECTS & VIEWER CLARITY (HARD — NOT OPTIONAL)
+- Shape similarity alone is NOT sufficient. Object B must NOT be a merely commercial, packaging, contextual, or generic utilitarian variant of Object A’s form class. Both A and B must each read as a classic, clearly defined, physical, iconic object that a viewer names in one beat without hesitation.
+- Reject any candidate B (or A, when direction reverses) that is mainly: (1) a packaging subtype, (2) a utilitarian variant of a more generic form, (3) not visually iconic on its own, or (4) likely to make replacement ambiguous (“two anonymous boxes” / “which thing replaced which?”).
+- DISQUALIFIED EXAMPLES (non-exhaustive): gift box with ribbon ↔ shoe box; generic box ↔ product/shipping/cardboard box; plain container ↔ packaging variant; generic bag ↔ shopping/grocery bag as the “object”; any pair where B is a weak-identity box/bag/envelope/mailer whose identity is “commerce logistics” rather than a named everyday object.
+- VIEWER TEST: After replacement, the viewer must intuitively feel: “Object B has replaced Object A.” If that read is weak, reject the pair even if silhouettes match. Do not keep shoe-box-type or mailer-type candidates just because they are shape-similar to a nicer box.
+- Before finalizing objectA/objectB, explicitly discard weak-B candidates and search again until both primaries pass the iconic + clarity bar alongside morphological fit.
 
 DIVERSITY (DELIBERATE — NOT RANDOM)
 - Across different planning runs for different products or briefs, avoid repeating the same or overly familiar object pairings when other valid choices exist under the rules below.
@@ -248,6 +257,94 @@ def _word_limit(s: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
+# Packaging / logistics primaries — not iconic enough as standalone A/B subjects for replacement clarity.
+_WEAK_ICONIC_OBJECT_PHRASES: Tuple[str, ...] = (
+    "shoe box",
+    "shoebox",
+    "shipping box",
+    "mailer box",
+    "product box",
+    "cardboard box",
+    "pizza box",
+    "takeout box",
+    "take-out box",
+    "moving box",
+    "storage box",
+    "delivery box",
+    "shipping carton",
+    "shopping bag",
+    "grocery bag",
+    "produce bag",
+    "plastic mailer",
+    "bubble mailer",
+    "padded envelope",
+    "mailing envelope",
+    "poly mailer",
+    "shipping envelope",
+    "bubble envelope",
+    "product packaging",
+    "generic box",
+    "generic bag",
+    "generic container",
+    "empty box",
+    "plain box",
+    "plain bag",
+    "storage bin",
+    "plastic bin",
+)
+
+_TRIVIAL_BOX_LABELS = frozenset(
+    {"box", "a box", "plain box", "empty box", "the box", "generic box", "a plain box"}
+)
+
+
+def _normalize_object_label_for_trivial_check(s: str) -> str:
+    t = re.sub(r"[^\w\s]", " ", (s or "").lower())
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _object_label_is_trivially_weak(s: str) -> bool:
+    return _normalize_object_label_for_trivial_check(s) in _TRIVIAL_BOX_LABELS
+
+
+def _object_string_has_weak_packaging_phrase(s: str) -> bool:
+    low = (s or "").lower()
+    return any(p in low for p in _WEAK_ICONIC_OBJECT_PHRASES)
+
+
+def _object_pair_fails_weak_identity_heuristic(oa: str, ob: str) -> bool:
+    """
+    True → reject plan: A or B reads as packaging / weak-identity primary (server-side guardrail).
+    """
+    if _object_string_has_weak_packaging_phrase(oa) or _object_string_has_weak_packaging_phrase(ob):
+        return True
+    if _object_label_is_trivially_weak(oa) or _object_label_is_trivially_weak(ob):
+        return True
+    if re.search(
+        r"\bgeneric\s+(?:box|bag|container|package|packaging)\b",
+        (oa or "").lower(),
+    ) or re.search(
+        r"\bgeneric\s+(?:box|bag|container|package|packaging)\b",
+        (ob or "").lower(),
+    ):
+        return True
+    return False
+
+
+def _parse_viewer_clarity_ok(raw: Any) -> Optional[bool]:
+    """True / False from JSON bool or common string forms; None = missing or invalid."""
+    if raw is True:
+        return True
+    if raw is False:
+        return False
+    s = str(raw or "").strip().lower()
+    if s in ("true", "yes", "1"):
+        return True
+    if s in ("false", "no", "0"):
+        return False
+    return None
+
+
 def _norm_enum(value: Any, allowed: List[str], default: str) -> str:
     v = (str(value) if value is not None else "").strip()
     return v if v in allowed else default
@@ -307,6 +404,7 @@ _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("headline_decision", "headlineDecision"),
     ("headline_text", "headlineText"),
     ("video_prompt_core", "videoPromptCore"),
+    ("object_pair_viewer_clarity_ok", "objectPairViewerClarityOk"),
 )
 
 
@@ -326,6 +424,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     """
     Return (plan, None) or (None, reason_code) for logging.
     reason_code: missing_videoPromptCore | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
+    | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed
     """
     if not data:
         return None, "missing_videoPromptCore"
@@ -347,6 +446,10 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     ob = (data.get("objectB") or "").strip()
     if not oa or not ob:
         return None, "missing_objectA_or_B"
+
+    if _object_pair_fails_weak_identity_heuristic(oa, ob):
+        logger.info("VIDEO_PLAN_OBJECT_CLARITY_OK=false")
+        return None, "object_pair_weak_identity"
 
     oa_sec = (data.get("objectA_secondary") or "").strip()
     ob_sec = (data.get("objectB_secondary") or "").strip()
@@ -377,6 +480,13 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
 
     bg = _norm_ab_side(data.get("preservedBackgroundFrom"), "A")
     sec = _norm_ab_side(data.get("preservedSecondaryFrom"), "A")
+
+    clarity_raw = data.get("objectPairViewerClarityOk")
+    if _parse_viewer_clarity_ok(clarity_raw) is not True:
+        logger.info("VIDEO_PLAN_OBJECT_CLARITY_OK=false")
+        return None, "object_pair_viewer_clarity_not_affirmed"
+
+    logger.info("VIDEO_PLAN_OBJECT_CLARITY_OK=true")
 
     return {
         "productNameResolved": pn,
