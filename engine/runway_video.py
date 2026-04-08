@@ -23,6 +23,7 @@ from engine.video_planning import (
     sanitize_runway_prompt_for_video_text_policy,
     video_plan_required_fields_for_runway,
 )
+from engine.video_bidi import stabilize_hebrew_embedded_latin_bidi
 from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_jobs_redis import video_job_set_resolved_product_name
 from engine.video_language import (
@@ -442,6 +443,16 @@ def generate_one_video_mvp(
                     raise RunwayVideoMVPError("product_name_copy_mismatch")
                 _enforce_marketing_copy_language(video_lang, marketing_text_for_api)
                 _enforce_headline_overlay_language(video_lang, headline_for_overlay)
+                marketing_text_for_api, bidi_copy = stabilize_hebrew_embedded_latin_bidi(
+                    marketing_text_for_api, content_language=video_lang
+                )
+                headline_for_overlay, bidi_headline = stabilize_hebrew_embedded_latin_bidi(
+                    headline_for_overlay, content_language=video_lang
+                )
+                logger.info(
+                    "VIDEO_BIDI_FIX_APPLIED=%s",
+                    str(bidi_copy or bidi_headline).lower(),
+                )
                 logger.info("VIDEO_JOB_STEP step=packaging_result done")
                 final_url = postprocess_video_headline(
                     url,
