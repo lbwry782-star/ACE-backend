@@ -13,7 +13,10 @@ from typing import Any, Dict, Tuple
 import httpx
 from openai import OpenAI
 
-from engine.video_language import normalize_video_content_language, video_language_display_name
+from engine.video_language import (
+    is_english_only_product_name_script,
+    normalize_video_content_language,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,26 +42,44 @@ def _timeout_s() -> float:
 
 def generate_auto_product_name(product_description: str, content_language: str) -> str:
     """
-    One short natural product name in the classified content language. Raises VideoProductNameError on failure.
+    Auto product name for video: Hebrew jobs → Hebrew or English (Latin) name; English jobs → English (Latin script) only.
+    Raises VideoProductNameError on failure.
     """
     desc = (product_description or "").strip()
     if not desc:
         raise VideoProductNameError("empty_description")
 
     lang = normalize_video_content_language(content_language)
-    lang_name = video_language_display_name(lang)
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise VideoProductNameError("no_openai_key")
 
     model = _product_name_model()
-    user_prompt = f"""Product description:
+    if lang == "en":
+        user_prompt = f"""Product description:
 {desc}
 
-Task: Output exactly ONE short product name (2–5 words) in {lang_name} that fits this description.
+Task: Output exactly ONE short product name (2–5 words) in English using Latin letters only.
 Rules:
 - Output only the name on a single line: no quotes, no labels (no "Name:"), no explanation, no second line.
-- The name must be natural in {lang_name}. Short international loanwords (e.g. AI, SaaS) are allowed only when natural in that language."""
+- Use Latin script only (A–Z, a–z). No Hebrew, Arabic, or Cyrillic characters. Digits allowed if natural.
+- Short loanwords (e.g. AI, SaaS) are allowed when natural."""
+
+        system_msg = (
+            "You reply with only an English product name, 2–5 words, Latin script only, one line, no quotes."
+        )
+    else:
+        user_prompt = f"""Product description:
+{desc}
+
+Task: Output exactly ONE short product name (2–5 words) that fits this description.
+Rules:
+- Output only the name on a single line: no quotes, no labels (no "Name:"), no explanation, no second line.
+- The name may be in Hebrew or in English (Latin), whichever fits the product best. Short loanwords (e.g. AI, SaaS) are allowed."""
+
+        system_msg = (
+            "You reply with only a product name, 2–5 words, Hebrew or English (Latin), one line, no quotes."
+        )
 
     t = min(15.0, _timeout_s())
     client = OpenAI(
@@ -66,28 +87,36 @@ Rules:
         timeout=httpx.Timeout(connect=t, read=_timeout_s(), write=t, pool=t),
         max_retries=0,
     )
-    try:
-        r = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": f"You reply with only a product name in {lang_name}, 2–5 words, one line, no quotes.",
-                },
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.4,
-            max_tokens=80,
-        )
-        raw = (r.choices[0].message.content or "") if r.choices else ""
-    except Exception as e:
-        logger.error("VIDEO_PRODUCT_NAME_AUTO_FAIL err_type=%s err=%s", type(e).__name__, e)
-        raise VideoProductNameError("openai_call_failed") from e
+    extra_user = ""
+    for attempt in range(2):
+        try:
+            r = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {
+                        "role": "user",
+                        "content": user_prompt + extra_user,
+                    },
+                ],
+                temperature=0.4,
+                max_tokens=80,
+            )
+            raw = (r.choices[0].message.content or "") if r.choices else ""
+        except Exception as e:
+            logger.error("VIDEO_PRODUCT_NAME_AUTO_FAIL err_type=%s err=%s", type(e).__name__, e)
+            raise VideoProductNameError("openai_call_failed") from e
 
-    name = _clean_single_line_name(raw)
-    if not name or len(name) > 200:
-        raise VideoProductNameError("empty_or_invalid_model_output")
-    return name
+        name = _clean_single_line_name(raw)
+        if not name or len(name) > 200:
+            raise VideoProductNameError("empty_or_invalid_model_output")
+        if lang == "en" and not is_english_only_product_name_script(name):
+            if attempt == 0:
+                extra_user = "\n\nYour previous answer contained non-Latin letters. Reply again with Latin letters only (English product name)."
+                continue
+            raise VideoProductNameError("auto_product_name_not_english")
+        return name
+    raise VideoProductNameError("empty_or_invalid_model_output")
 
 
 def _clean_single_line_name(raw: str) -> str:
@@ -106,11 +135,17 @@ def resolve_video_product_name(
 ) -> Tuple[str, str]:
     """
     Returns (source 'user'|'auto', canonical_name).
+    English content jobs: resolved name must be Latin-script English only.
     """
+    lang = normalize_video_content_language(content_language)
     u = (user_product_name or "").strip()
     if u:
+        if lang == "en" and not is_english_only_product_name_script(u):
+            raise VideoProductNameError("product_name_not_english")
         return "user", u
-    auto = generate_auto_product_name(product_description, content_language)
+    auto = generate_auto_product_name(product_description, lang)
+    if lang == "en" and not is_english_only_product_name_script(auto):
+        raise VideoProductNameError("auto_product_name_not_english")
     return "auto", auto
 
 

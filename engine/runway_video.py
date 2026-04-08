@@ -127,14 +127,9 @@ def _enforce_headline_overlay_language(required_lang: str, headline: str) -> Non
 def _enforce_marketing_copy_language(required_lang: str, marketing_text: str) -> None:
     """Marketing copy must be predominantly in the classified language; loanwords/abbreviations allowed."""
     req = normalize_video_content_language(required_lang)
-    logger.info("VIDEO_COPY_LANGUAGE_REQUIRED=%s", req)
     if not (marketing_text or "").strip():
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_empty")
         raise RunwayVideoMVPError("marketing_copy_empty")
-    logger.info(
-        "VIDEO_COPY_LANGUAGE_ACTUAL=%s",
-        "predominant_match" if text_predominantly_matches_language(marketing_text, req) else "predominant_mismatch",
-    )
     if not text_predominantly_matches_language(marketing_text, req):
         logger.error(
             "VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_language_mismatch required=%s plurality_check=false",
@@ -299,7 +294,6 @@ def generate_one_video_mvp(
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_%s", reason)
         raise RunwayVideoMVPError("product_name_generation_failed")
     logger.info("VIDEO_PRODUCT_NAME_SOURCE=%s", pn_source)
-    logger.info("VIDEO_PRODUCT_NAME_LANGUAGE=%s", video_lang)
     logger.info(
         "VIDEO_PRODUCT_NAME_RESOLVED=%s", json.dumps(canonical_name, ensure_ascii=False)
     )
@@ -436,11 +430,10 @@ def generate_one_video_mvp(
                     canonical_name, headline_for_overlay, headline_decision
                 )
                 reuse_c = product_name_reused_in_copy(canonical_name, marketing_text_for_api)
-                logger.info("VIDEO_PRODUCT_NAME_REUSED_IN_HEADLINE=%s", str(reuse_h).lower())
+                logger.info("VIDEO_HEADLINE_USED_PRODUCT_NAME=%s", str(reuse_h).lower())
                 logger.info("VIDEO_COPY_USED_PRODUCT_NAME=%s", str(reuse_c).lower())
-                logger.info(
-                    "VIDEO_COPY_PRODUCT_NAME_MISMATCH=%s", str(not reuse_c).lower()
-                )
+                name_mismatch = not reuse_h or not reuse_c
+                logger.info("VIDEO_PRODUCT_NAME_MISMATCH=%s", str(name_mismatch).lower())
                 if not reuse_h:
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_headline")
                     raise RunwayVideoMVPError("product_name_headline_mismatch")

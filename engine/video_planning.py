@@ -79,7 +79,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     return f"""You are the ACE video planning engine.
 
 OUTPUT LANGUAGE (locked — dominant language)
-- Classified output language for this job: {lang_name} (code {lang}) — determined by the majority of letters in the product description among Hebrew / English / Russian / Arabic.
+- Classified output language for this job: {lang_name} (code {lang}) — determined from the product description only, Hebrew or English.
 - Write advertisingPromise, headlineText (when non-empty), shortReplacementScript, morphologicalReason, and promiseReason so they read primarily in {lang_name}.
 - Short foreign terms may remain unchanged when natural in {lang_name} prose: e.g. AI, SaaS, CRM, common abbreviations, international brand names, product names, and brief professional English terms. Do not force-translate those into {lang_name}. The overall tone must still be clearly {lang_name}, not a chaotic mix.
 - Object identifiers objectA, objectB, objectA_secondary, objectB_secondary may use conventional short English nouns for morphological consistency when required by the engine.

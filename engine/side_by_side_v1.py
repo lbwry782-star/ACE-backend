@@ -3096,18 +3096,6 @@ def _marketing_copy_fallback(product_name: str, ad_goal: str, lang: str) -> str:
             f"אל תפספסו את ההזדמנות לבחור במוצר שמקדם אתכם קדימה בביטחון. "
             f"גלו עוד, השוו והחליטו — והתחילו עוד היום."
         )
-    if lang == "ru":
-        return (
-            f"{pn} создан для того, чтобы закрыть задачу: {ag}. "
-            f"Понятное ценностное предложение, акцент на пользе и практическом результате без лишнего шума. "
-            f"Сравните, попробуйте и убедитесь сами — сделайте следующий шаг уже сегодня."
-        )
-    if lang == "ar":
-        return (
-            f"صُمم {pn} ليلبي احتياجك: {ag}. "
-            f"تجربة واضحة وموثوقة تركز على المنفعة الحقيقية للمستخدم دون مبالغة. "
-            f"اكتشف المزيد، قارن الخيارات، ثم ابدأ اليوم بخطوة بسيطة نحو نتيجة أفضل."
-        )
     return (
         f"{pn} helps you achieve {ag.lower()}. Discover how {pn} can transform your workflow. Get started today."
     )
@@ -3129,7 +3117,7 @@ def generate_marketing_copy(
     """
     Generate marketing copy: 45-55 words, product-specific, with CTA, in output_language.
 
-    output_language: he | en | ru | ar (invalid values are treated as en for image pipeline; video path passes detected lang).
+    output_language: he | en (video path uses description-based detection; unknown codes normalize to he).
     When require_verbatim_product_name is True, the copy must contain the exact product_name substring
     (repair via prefix or fail); the model must not substitute the description as the name.
     """

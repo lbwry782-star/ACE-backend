@@ -1,10 +1,7 @@
 """
-Video pipeline: language detection from product description for headline + marketing copy.
+Video pipeline: language detection from product description only (headline + marketing copy).
 
-Allowed output languages: Hebrew (he), English (en), Russian (ru), Arabic (ar).
-Dominant language = plurality among letter counts (Hebrew / Arabic / Cyrillic / Latin).
-Short Latin loanwords (e.g. AI, SaaS) do not flip the dominant script when Hebrew/Russian/Arabic letters lead.
-Default Hebrew only when empty, disallowed script dominates, or Latin-plurality without English-like text.
+Supported content languages: Hebrew (he) and English (en) only.
 """
 
 from __future__ import annotations
@@ -16,20 +13,21 @@ from typing import Tuple
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_VIDEO_LANGUAGES = frozenset({"he", "en", "ru", "ar"})
+ALLOWED_VIDEO_LANGUAGES = frozenset({"he", "en"})
 
 
 def normalize_video_content_language(code: str) -> str:
-    """Allowed: he | en | ru | ar. Anything invalid or missing → he (fixed default)."""
+    """Allowed: he | en. Legacy ru/ar/unknown → he."""
     c = (code or "he").strip().lower()
-    return c if c in ALLOWED_VIDEO_LANGUAGES else "he"
+    if c in ALLOWED_VIDEO_LANGUAGES:
+        return c
+    return "he"
 
-# Latin-plurality descriptions: treat as English output only if lexicon suggests English
+
 # Latin text: classify as English only if enough common English tokens appear
 _EN_WORD_HIT_RATIO = 0.22
 _EN_WORD_HIT_MIN = 5
 
-# Deterministic English lexicon for Latin-only classification (no external langid)
 _EN_COMMON_WORDS = frozenset(
     x.lower()
     for x in """
@@ -81,7 +79,6 @@ def _is_latin_letter(ch: str) -> bool:
     if "A" <= ch <= "Z" or "a" <= ch <= "z":
         return True
     o = ord(ch)
-    # Latin-1 supplement + Latin Extended-A/B (covers é, ñ, etc. — treated as Latin script, not English)
     if 0x00C0 <= o <= 0x024F:
         return True
     if 0x1E00 <= o <= 0x1EFF:
@@ -89,26 +86,26 @@ def _is_latin_letter(ch: str) -> bool:
     return False
 
 
-def _letter_category_counts(text: str) -> Tuple[int, int, int, int, int, int]:
-    """Returns (he, ar, ru, latin, other_letters, total_letters)."""
-    h = a = r = lat = other = 0
+def _letter_buckets_for_video(text: str) -> Tuple[int, int, int, int]:
+    """
+    Returns (hebrew_count, latin_count, foreign_letter_count, total_letters).
+    foreign = Arabic, Cyrillic, and other alphabetic letters (not Hebrew/Latin).
+    """
+    h = lat = foreign = 0
     for ch in text:
         if ch.isspace() or ch.isdigit():
             continue
         cat = unicodedata.category(ch)
         if _is_hebrew_letter(ch):
             h += 1
-        elif _is_arabic_letter(ch):
-            a += 1
-        elif _is_cyrillic_letter(ch):
-            r += 1
         elif _is_latin_letter(ch):
             lat += 1
+        elif _is_arabic_letter(ch) or _is_cyrillic_letter(ch):
+            foreign += 1
         elif cat in ("Lu", "Ll", "Lt", "Lo", "Lm"):
-            # Other alphabets (e.g. Greek) — not an allowed video language
-            other += 1
-    total = h + a + r + lat + other
-    return h, a, r, lat, other, total
+            foreign += 1
+    total = h + lat + foreign
+    return h, lat, foreign, total
 
 
 def _latin_words(text: str) -> list[str]:
@@ -133,133 +130,119 @@ def strip_hebrew_niqqud(s: str) -> str:
         o = ord(ch)
         if 0x0591 <= o <= 0x05C7:
             continue
-        if ch == "\u05BF":  # rafe
-            continue
-        out.append(ch)
-    return "".join(out)
-
-
-def strip_arabic_diacritics(s: str) -> str:
-    """Remove Arabic harakat / tatweel (no vowel marks in overlay)."""
-    out = []
-    for ch in s:
-        o = ord(ch)
-        if o == 0x0640:  # tatweel
-            continue
-        if 0x064B <= o <= 0x065F:
-            continue
-        if 0x0610 <= o <= 0x061A:
-            continue
-        if 0x06D6 <= o <= 0x06ED:
+        if ch == "\u05BF":
             continue
         out.append(ch)
     return "".join(out)
 
 
 def normalize_video_overlay_text(headline: str, language: str) -> str:
-    """Strip vocalization marks; language is he|en|ru|ar."""
-    lang = (language or "he").strip().lower()
+    """Strip vocalization for Hebrew overlay; English unchanged."""
+    lang = normalize_video_content_language(language)
     t = headline
     if lang == "he":
         t = strip_hebrew_niqqud(t)
-    elif lang == "ar":
-        t = strip_arabic_diacritics(t)
     return t
+
+
+def is_english_only_product_name_script(s: str) -> bool:
+    """
+    True if the string has no Hebrew, Arabic, Cyrillic, or non-Latin letters.
+    Empty / whitespace-only → False.
+    """
+    raw = (s or "").strip()
+    if not raw:
+        return False
+    for ch in raw:
+        if _is_hebrew_letter(ch) or _is_arabic_letter(ch) or _is_cyrillic_letter(ch):
+            return False
+        cat = unicodedata.category(ch)
+        if cat in ("Lu", "Ll", "Lt", "Lo", "Lm") and not _is_latin_letter(ch):
+            return False
+    return True
 
 
 def text_predominantly_matches_language(text: str, lang_code: str) -> bool:
     """
-    True if the text's letter-count plurality matches lang_code (he|en|ru|ar).
-    Ignores disallowed 'other' letters for plurality among the four supported buckets.
-    Empty or no supported letters → True (nothing to contradict).
+    True if letter plurality matches the required video language (he | en).
+    Hebrew: Hebrew letters strictly outrank Latin (ties favor Hebrew unless text looks English).
+    English: Latin outranks Hebrew, or tie with English-like Latin vocabulary.
+    Ignores foreign-script letters for the he vs en decision unless they dominate.
     """
     lang = normalize_video_content_language(lang_code)
-    h, a, r, lat, _other, _total = _letter_category_counts(text)
-    supported = h + a + r + lat
-    if supported == 0:
+    h, lat, foreign, total = _letter_buckets_for_video(text)
+    if total == 0:
         return True
-    counts_map = {"he": h, "ar": a, "ru": r, "en": lat}
-    max_v = max(counts_map.values())
-    winners = [k for k, v in counts_map.items() if v == max_v]
-    tie_break = ("he", "ar", "ru", "en")
-    top = next(k for k in tie_break if k in winners)
-    return top == lang
+    if foreign > max(h, lat):
+        return False
+    if lang == "he":
+        if h > lat:
+            return True
+        if lat > h:
+            return False
+        return not _latin_looks_english(text)
+    # en
+    if lat > h:
+        return True
+    if h > lat:
+        return False
+    return _latin_looks_english(text)
 
 
 def video_language_display_name(code: str) -> str:
-    return {
-        "he": "Hebrew",
-        "en": "English",
-        "ru": "Russian",
-        "ar": "Arabic",
-    }.get((code or "he").strip().lower(), "Hebrew")
+    return {"he": "Hebrew", "en": "English"}.get(
+        normalize_video_content_language(code), "Hebrew"
+    )
 
 
 def detect_product_description_language(product_description: str) -> Tuple[str, str, float, bool]:
     """
-    Classify product description into allowed video output language.
+    Classify product description into he | en (from description text only).
 
     Returns:
-        detected_label: winning script code, or mixed_plurality (tie), unsupported_latin, unsupported_script, empty
-        applied_code: always one of he|en|ru|ar (Hebrew when defaulting)
-        confidence: 0.0–1.0 (top script share among letter counts)
-        used_default_hebrew: True if applied Hebrew due to empty / unsupported_script / unsupported_latin
+        detected_label: he | en | empty | unsupported_script | unsupported_latin | mixed_tie
+        applied_code: always he or en
+        confidence: top bucket share among Hebrew vs Latin (foreign excluded from share)
+        used_default_hebrew: True if applied Hebrew due to empty / unsupported / non-English Latin
     """
     raw = (product_description or "").strip()
     if not raw:
         return "empty", "he", 0.0, True
 
-    h, a, r, lat, other, total = _letter_category_counts(raw)
+    h, lat, foreign, total = _letter_buckets_for_video(raw)
     if total == 0:
         return "empty", "he", 0.0, True
 
-    # Disallowed script (e.g. Greek) is the largest bucket → cannot pick he/ar/ru/en reliably
-    if other > max(h, a, r, lat):
+    if foreign > max(h, lat):
         return "unsupported_script", "he", 0.4, True
 
-    counts_map = {"he": h, "ar": a, "ru": r, "en": lat}
-    max_v = max(counts_map.values())
-    winners = [k for k, v in counts_map.items() if v == max_v]
-    tie_break = ("he", "ar", "ru", "en")
-    top_name = next(k for k in tie_break if k in winners)
-    det_label = top_name if len(winners) == 1 else "mixed_plurality"
+    denom = h + lat
+    if denom == 0:
+        return "unsupported_script", "he", 0.4, True
 
-    sorted_counts = sorted(counts_map.values(), reverse=True)
-    second_v = sorted_counts[1] if len(sorted_counts) > 1 else 0
-    confidence = max_v / total if total else 0.0
+    if h > lat:
+        conf = h / denom
+        return "he", "he", conf, False
+    if lat > h:
+        conf = lat / denom
+        if _latin_looks_english(raw):
+            return "en", "en", conf, False
+        return "unsupported_latin", "he", conf, True
 
-    if top_name == "he":
-        return det_label, "he", confidence, False
-    if top_name == "ar":
-        return det_label, "ar", confidence, False
-    if top_name == "ru":
-        return det_label, "ru", confidence, False
-
-    # Latin has plurality among letter buckets
+    # tie h == lat
+    conf = h / denom if denom else 0.0
     if _latin_looks_english(raw):
-        return det_label, "en", confidence, False
-    return "unsupported_latin", "he", confidence, True
+        return "mixed_tie", "en", conf, False
+    return "mixed_tie", "he", conf, False
 
 
 def log_video_language_decision(
     product_description: str,
 ) -> Tuple[str, float, bool]:
     """
-    Run detection, emit required logs, return (applied_code, confidence, default_hebrew).
+    Run detection, emit VIDEO_LANGUAGE_DETECTED and VIDEO_LANGUAGE_APPLIED, return (applied_code, confidence, default_hebrew).
     """
     det_label, applied, conf, default_he = detect_product_description_language(product_description)
-    raw = (product_description or "").strip()
-    h, a, r, lat, _o, tot = _letter_category_counts(raw) if raw else (0, 0, 0, 0, 0, 0)
-    counts_map = {"he": h, "ar": a, "ru": r, "en": lat}
-    sorted_counts = sorted(counts_map.values(), reverse=True)
-    second_v = sorted_counts[1] if tot and len(sorted_counts) > 1 else 0
-    second_share = (second_v / tot) if tot else 0.0
-    # Policy: allow short foreign/loan terms in outputs when description had secondary script activity
-    mixed_terms_allowed = second_share >= 0.03
-
     logger.info("VIDEO_LANGUAGE_DETECTED=%s", det_label)
-    logger.info("VIDEO_LANGUAGE_CONFIDENCE=%s", round(conf, 3))
     logger.info("VIDEO_LANGUAGE_APPLIED=%s", applied)
-    logger.info("VIDEO_LANGUAGE_DEFAULT_HEBREW=%s", default_he)
-    logger.info("VIDEO_MIXED_LANGUAGE_TERMS_ALLOWED=%s", mixed_terms_allowed)
     return applied, conf, default_he

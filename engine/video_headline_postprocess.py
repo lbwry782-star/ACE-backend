@@ -146,20 +146,12 @@ def write_headline_video_bytes(token: str, data: bytes) -> bool:
 
 
 def _default_font_path(overlay_language: str = "he") -> Optional[str]:
-    """Prefer fonts with Hebrew/Arabic coverage when overlay_language requires it."""
+    """Prefer fonts with Hebrew coverage when overlay_language is Hebrew."""
     env = (os.environ.get("VIDEO_HEADLINE_FONT") or "").strip()
     if env and Path(env).is_file():
         return env
     lang = normalize_video_content_language(overlay_language)
     candidates: list[str] = []
-    if lang == "ar":
-        candidates.extend(
-            [
-                "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-                "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.otf",
-            ]
-        )
     if lang == "he":
         candidates.extend(
             [
@@ -374,8 +366,8 @@ def postprocess_video_headline(
             f"if(lt(t\\,{t0_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{t0_str})/{fade_s}\\,1))"
         )
         # Three drawtext passes: two 1px-offset whites (faux weight, no stroke), then main white with soft shadow (no borderw).
-        # text_shaping=1: HarfBuzz/fribidi for Hebrew and Arabic RTL shaping (ffmpeg build-dependent).
-        shaping = ":text_shaping=1" if olang in ("he", "ar") else ""
+        # text_shaping=1: HarfBuzz/fribidi for Hebrew RTL shaping (ffmpeg build-dependent).
+        shaping = ":text_shaping=1" if olang == "he" else ""
         dt = (
             f"fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white{shaping}:"
             f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
