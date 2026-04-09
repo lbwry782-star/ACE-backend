@@ -117,6 +117,7 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
         "error": data.get("error") or "",
         "resolvedProductName": (data.get("resolved_product_name") or "").strip(),
         "productNameSource": (data.get("product_name_source") or "").strip(),
+        "productDescription": (data.get("product_description") or "").strip(),
     }
 
 
