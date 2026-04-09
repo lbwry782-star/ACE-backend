@@ -35,11 +35,12 @@ def _text_model() -> str:
     return "o3-pro" if m == "o4-mini" else m
 
 
-_VIDEO_PLAN_TIMEOUT = float((os.environ.get("VIDEO_PLANNER_TIMEOUT_SECONDS") or "120").strip() or "120")
-# Wall-clock cap for the whole planning call (thread join); must not exceed indefinitely if SDK stalls
+# HTTP read timeout for the planning API call (seconds). Slightly raised default vs older 120s to cut false timeouts.
+_VIDEO_PLAN_TIMEOUT = float((os.environ.get("VIDEO_PLANNER_TIMEOUT_SECONDS") or "150").strip() or "150")
+# Wall-clock cap for the whole planning call (thread join); must exceed client read timeout so the SDK can surface errors
 _VIDEO_PLAN_HARD_SECONDS = float(
-    (os.environ.get("VIDEO_PLANNER_HARD_TIMEOUT_SECONDS") or str(_VIDEO_PLAN_TIMEOUT + 30.0)).strip()
-    or str(_VIDEO_PLAN_TIMEOUT + 30.0)
+    (os.environ.get("VIDEO_PLANNER_HARD_TIMEOUT_SECONDS") or str(_VIDEO_PLAN_TIMEOUT + 45.0)).strip()
+    or str(_VIDEO_PLAN_TIMEOUT + 45.0)
 )
 
 
@@ -49,9 +50,9 @@ OUTPUT FORMAT (strict)
 - Use the exact camelCase keys below. Do not omit required keys; use "" only where allowed.
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
-Field notes (must follow in JSON values):
-- morphologicalReason: Briefly justify why A and B are extremely close in overall form (whole-object, painterly grasp — not contour trivia alone). Also one short phrase on why the viewer will instantly read “B replaced A” (iconic identity, not just similar silhouette).
-- objectPairViewerClarityOk: MUST be true. Set true only if BOTH objectA and objectB are classic, iconic, standalone physical things AND replacement is immediately legible. If the pair fails the iconic/viewer-clarity bar, do not output false to bypass — choose a different B (or A) until the bar is met, then set true.
+Field notes:
+- morphologicalReason: Why A/B match in whole-object form + why viewer instantly reads “B replaced A” (iconic identity).
+- objectPairViewerClarityOk: boolean true only if both primaries are iconic standalone objects and replacement is legible; if not, pick another pair—never false to bypass.
 
 Required keys (all strings except where noted):
 {
@@ -80,81 +81,35 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang_name = video_language_display_name(lang)
     return f"""You are the ACE video planning engine.
 
-OUTPUT LANGUAGE (locked — dominant language)
-- Classified output language for this job: {lang_name} (code {lang}) — determined from the product description only, Hebrew or English.
-- Write advertisingPromise, headlineText (when non-empty), shortReplacementScript, morphologicalReason, and promiseReason so they read primarily in {lang_name}.
-- Short foreign terms may remain unchanged when natural in {lang_name} prose: e.g. AI, SaaS, CRM, common abbreviations, international brand names, product names, and brief professional English terms. Do not force-translate those into {lang_name}. The overall tone must still be clearly {lang_name}, not a chaotic mix.
-- Object identifiers objectA, objectB, objectA_secondary, objectB_secondary may use conventional short English nouns for morphological consistency when required by the engine.
+LANGUAGE
+- Job: {lang_name} ({lang}), from product description only (Hebrew or English). advertisingPromise, headlineText, shortReplacementScript, morphologicalReason, promiseReason: primarily {lang_name}. Loanwords/brands (AI, SaaS, etc.) OK. objectA/objectB/objectA_secondary/objectB_secondary: short English nouns allowed for morphology.
 
-VIDEO PIPELINE (non-negotiable)
-- The generative video opens from a first frame that already shows the replacement state: B in A's role, with A's background, A's secondary object, and A's spatial position. The rest of the video shows B interacting with A's secondary in that composition.
-- Therefore Object A and Object B must be EXTREMELY morphologically similar in overall form. This is a core engine rule, not optional. If B is only moderately similar, the replacement will not read; the viewer must feel B belongs in A's place instantly, before any conceptual explanation.
+PIPELINE (fixed)
+- Frame 1 already shows replacement: B in A’s role, A’s background, A’s secondary, A’s pose; motion continues B with A’s secondary. A and B must be EXTREMELY close in overall silhouette, proportion, mass—non-negotiable; viewer must feel B belongs in A’s place before any verbal explanation.
 
-CONTEXT
-- ACE is an ad-generation product. Output is one short commercial video concept for a generative video model.
-- Objects must be concrete, iconic physical nouns (classic situations). No brands, logos, text-as-object, or vague environments (e.g. "forest", "skyline") as primaries.
-- Each main object is paired with a secondary object: a separate, concrete physical thing that plausibly appears in the same everyday scene as the main object, and is not a literal part of the main (not a limb, label, packaging line, or surface detail belonging to the main). Name specific nouns; do not use placeholder wording.
-- Object A is chosen from the product description with an intuitive grasp of overall form — like a painter sensing the whole object, not technical contour-only tracing.
+OBJECTS
+- Iconic concrete physical primaries; no brands/logos/text-as-object/vague environments. Secondary: separate concrete prop in the same everyday scene; not part of the main (no label/packaging-line-as-secondary). A from product description (whole-object grasp, not contour trivia).
 
-ICONIC STANDALONE OBJECTS & VIEWER CLARITY (HARD — NOT OPTIONAL)
-- Shape similarity alone is NOT sufficient. Object B must NOT be a merely commercial, packaging, contextual, or generic utilitarian variant of Object A’s form class. Both A and B must each read as a classic, clearly defined, physical, iconic object that a viewer names in one beat without hesitation.
-- Reject any candidate B (or A, when direction reverses) that is mainly: (1) a packaging subtype, (2) a utilitarian variant of a more generic form, (3) not visually iconic on its own, or (4) likely to make replacement ambiguous (“two anonymous boxes” / “which thing replaced which?”).
-- DISQUALIFIED EXAMPLES (non-exhaustive): gift box with ribbon ↔ shoe box; generic box ↔ product/shipping/cardboard box; plain container ↔ packaging variant; generic bag ↔ shopping/grocery bag as the “object”; any pair where B is a weak-identity box/bag/envelope/mailer whose identity is “commerce logistics” rather than a named everyday object.
-- VIEWER TEST: After replacement, the viewer must intuitively feel: “Object B has replaced Object A.” If that read is weak, reject the pair even if silhouettes match. Do not keep shoe-box-type or mailer-type candidates just because they are shape-similar to a nicer box.
-- Before finalizing objectA/objectB, explicitly discard weak-B candidates and search again until both primaries pass the iconic + clarity bar alongside morphological fit.
+ICONIC + VIEWER CLARITY (HARD)
+- Silhouette match alone is NOT enough. Reject weak B: packaging subtype, utilitarian generic variant, non-iconic identity, ambiguous swap (“which box?”). Examples to reject: gift box↔shoe box; generic↔shipping/cardboard/product box; generic bag↔shopping bag as weak B; mailer/logistics identity vs named object. VIEWER TEST: instant “B replaced A”; discard weak-B even if shape-close—no shoe-box/mailer shortcuts.
 
-DIVERSITY (DELIBERATE — NOT RANDOM)
-- Across different planning runs for different products or briefs, avoid repeating the same or overly familiar object pairings when other valid choices exist under the rules below.
-- Prefer less obvious but still valid object choices; do not default to the most typical or clichéd examples if another pair meets EXTREME morphological similarity and replacement legibility equally well.
-- Before you commit to objectA and objectB, explore the space of candidates: compare multiple serious alternatives under the same strict constraints, then choose.
+SEARCH
+- Compare multiple serious candidates; do not stop at first OK pair. Prefer less clichéd pairs only if morphology stays equally extreme. B must satisfy (a) extreme whole-form match to A AND (b) promise fit—never trade shape for promise.
 
-MANY VALID PAIRS UNDER THE SAME BAR
-- There are many distinct (A, B) pairs that can satisfy EXTREME morphological similarity; the rule is strict, but the solution set is not a single narrow cliché.
-- Do not treat the first pair that seems workable as sufficient. Continue searching for alternatives at equal morphological strength before deciding.
+REPLACEMENT + PROMISE
+- Prefer B_replaces_A (keep A bg + secondary). Else A_replaces_B. Set replacementDirection, preservedBackgroundFrom, preservedSecondaryFrom. advertisingPromise from product description.
 
-ANTI-CONVERGENCE
-- If a candidate solution feels like a common, expected, or "first thought" pairing for the product or brief, keep searching for a less obvious alternative that is equally valid on morphology and promise fit.
+HEADLINE (ffmpeg overlay metadata only—never pixels in generated video)
+- headlineDecision: include_product_name | product_name_only | no_headline. headlineText: ≤7 words {lang_name}; "" iff no_headline. Invent productNameResolved if name empty. Never instruct rendering headline/name in-frame.
 
-EXTREME MORPHOLOGICAL SIMILARITY (A vs B)
-- Object B must be very, very close to Object A in overall silhouette, proportion, and massing. Shape correctness is STRONGLY preferred over verbal explicitness of the advertising promise.
-- Do NOT accept a merely "interesting" conceptual link. Do NOT accept a B that is only somewhat similar. Do NOT choose a less shape-correct B because it makes the promise easier to explain in words.
-- The replacement must be legible at first glance: the viewer should feel B can convincingly occupy A's place before the mind finishes the conceptual leap.
+TEXT-FREE VIDEO
+- Generated frames: zero readable text (captions, UI, signs, packaging type, logos, watermarks, numbers as graphics). No readable strings in videoPromptCore or shortReplacementScript. Brands only in advertisingPromise/promiseReason/headline metadata.
 
-SEARCH RULE FOR B
-- If a candidate B is not morphologically strong enough, keep searching. Do not stop at the first clever conceptual pairing. Stop only when B is BOTH: (a) extremely morphologically close to A in whole form, AND (b) plausibly connected to the advertising promise.
-- Never swap a better shape match for a weaker one to favor the promise.
-- When more than one pair satisfies (a) and (b) at comparable strength, prefer the pair that is less gratuitously generic or over-repeated, without ever relaxing morphology.
-
-- Derive the advertising promise (advertisingPromise) from the product description.
-
-REPLACEMENT
-- Prefer: Object B replaces Object A while keeping A's background, A's secondary, and A's position.
-- If impossible: Object A replaces Object B while keeping B's background, B's secondary, and B's position.
-- Set replacementDirection to B_replaces_A or A_replaces_B accordingly.
-- Set preservedBackgroundFrom and preservedSecondaryFrom to A or B matching what is preserved in the preferred case.
-
-HEADLINE (for end-of-video on-screen text only; NOT for body copy)
-- headlineDecision: include_product_name | product_name_only | no_headline — choose whether the visuals alone already convey the promise.
-- headlineText: {lang_name} only, maximum 7 words. Empty string if and only if headlineDecision is no_headline.
-- If product name is missing in input, invent a concise productNameResolved and you may use it in headline when appropriate.
-- NEVER instruct Runway or any video model to render headlineText, productNameResolved, or any brand/product name as visible pixels. Headline exists only for the separate server-side ffmpeg overlay, never as an in-model burn-in.
-
-TEXT-FREE GENERATED VIDEO (ABSOLUTE — MODEL OUTPUT)
-- The generative video frames must contain ZERO readable text of any kind.
-- FORBIDDEN in the generated video (not only in prompts; this is the product requirement): any letters, words, numbers as graphics, captions, subtitles, labels, stickers, signage, storefront text, book/page text, UI, chyrons, lower-thirds, title cards, watermarks, packaging typography, logo-like lettermarks, or brand names shown visually.
-- Do NOT describe or request text, typography, captions, titles, “words on screen”, “packaging copy”, “a sign saying…”, or any readable string in videoPromptCore or shortReplacementScript.
-- Brand and product may appear ONLY in advertisingPromise, promiseReason, headlineText metadata — never as something to paint into the scene.
-
-VIDEO (for videoPromptCore)
-- Describe scene and motion only: cinematic commercial, smooth camera, product-focused, modern lighting; purely pictorial and physical (objects, light, materials, motion).
-- Do NOT put the headline text inside videoPromptCore. videoPromptCore is the main action only; headline is specified separately via headlineText/headlineDecision for ffmpeg only.
-- No on-screen text, logos, readable words, or textual overlays during the main action in this core description.
+VIDEO (videoPromptCore)
+- Pictorial scene/motion: cinematic commercial, smooth camera, objects/light/materials. No headline in core; no on-screen text/logos.
 
 QUALITY
-- Prefer morphological correctness and viewer intuition over explicit verbal explanation in videoPromptCore.
-- shortReplacementScript: a brief line in {lang_name} describing the A/B connection for the replacement shot.
-- morphologicalReason: REQUIRED in {lang_name} — state briefly why A and B are extremely close in overall form (whole-object, painterly grasp — not edge-matching alone). Be strict and concrete.
-- promiseReason: short note in {lang_name} on how B still ties to the advertising promise without weakening the shape requirement.
+- shortReplacementScript, morphologicalReason, promiseReason in {lang_name}. morphologicalReason: strict whole-object shape + iconic clarity. videoPromptCore: intuitive replacement over long exposition.
 
 """
 
@@ -600,7 +555,7 @@ def _fetch_video_plan_o3_sync(
     content_language: str = "he",
 ) -> Optional[Dict[str, Any]]:
     """
-    Single o3-pro call returning a validated plan dict, or None on any failure (caller uses fallback).
+    Single planning model call returning a validated plan dict, or None on any failure (no generic video fallback).
     """
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
@@ -626,6 +581,11 @@ Locked output language for all user-facing plan fields (from description classif
         timeout=httpx.Timeout(connect=_t, read=_VIDEO_PLAN_TIMEOUT, write=_t, pool=_t),
         max_retries=0,
     )
+
+    logger.info("VIDEO_PLAN_REQUEST_START model=%s", model)
+    logger.info("VIDEO_PLAN_REQUEST_TIMEOUT_S=%s", _VIDEO_PLAN_TIMEOUT)
+    logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(full_input))
+
     try:
         response = client.responses.create(
             model=model,
@@ -640,12 +600,14 @@ Locked output language for all user-facing plan fields (from description classif
             err_type,
             e,
         )
+        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
         return None
 
     try:
         raw = _extract_responses_output_text(response)
         if not raw:
             logger.error("VIDEO_PLAN_FAIL_EMPTY_OUTPUT model=%s", model)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None
 
         _log_output_preview(raw)
@@ -653,6 +615,7 @@ Locked output language for all user-facing plan fields (from description classif
         parsed = _parse_json_from_response(raw)
         if not parsed:
             logger.error("VIDEO_PLAN_FAIL_JSON_PARSE model=%s", model)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None
 
         plan, v_err = validate_and_normalize_plan(parsed)
@@ -661,10 +624,12 @@ Locked output language for all user-facing plan fields (from description classif
                 logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
             else:
                 logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
+            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None
 
         log_plan_summary(plan)
         logger.info("VIDEO_PLAN_OK model=%s", model)
+        logger.info("VIDEO_PLAN_RESPONSE_OK=true")
         return plan
     except Exception as e:
         logger.warning(
@@ -672,6 +637,7 @@ Locked output language for all user-facing plan fields (from description classif
             type(e).__name__,
             e,
         )
+        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
         return None
 
 
@@ -689,8 +655,9 @@ def fetch_video_plan_o3(
         try:
             return fut.result(timeout=_VIDEO_PLAN_HARD_SECONDS)
         except concurrent.futures.TimeoutError:
+            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             logger.error(
-                "VIDEO_PLAN_FAIL_TIMEOUT hard_seconds=%s (VIDEO_PLANNER_HARD_TIMEOUT_SECONDS or planner+30)",
+                "VIDEO_PLAN_FAIL_TIMEOUT hard_seconds=%s (VIDEO_PLANNER_HARD_TIMEOUT_SECONDS or planner+45)",
                 _VIDEO_PLAN_HARD_SECONDS,
             )
             logger.info("VIDEO_JOB_STEP step=plan_video timeout")
