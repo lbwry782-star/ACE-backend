@@ -476,10 +476,6 @@ def generate_one_video_mvp(
                     "VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s",
                     overlay_bidi_strategy,
                 )
-                logger.info(
-                    "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
-                    json.dumps(headline_for_overlay, ensure_ascii=False),
-                )
                 logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
                 logger.info("VIDEO_JOB_STEP step=packaging_result done")
                 final_url = postprocess_video_headline(

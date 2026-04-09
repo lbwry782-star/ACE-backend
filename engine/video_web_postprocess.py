@@ -48,10 +48,6 @@ def ensure_video_postprocessed_for_poll(job_id: str, job: Dict[str, Any]) -> Non
         canonical_name=_rp,
     )
     logger.info("VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s", overlay_strat)
-    logger.info(
-        "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
-        json.dumps(headline, ensure_ascii=False),
-    )
     logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
     logger.info("VIDEO_BIDI_FIX_APPLIED_COPY=false")
     logger.info("VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s", json.dumps([], ensure_ascii=False))
