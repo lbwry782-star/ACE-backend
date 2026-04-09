@@ -1,18 +1,22 @@
 """
-Bidirectional text: stabilize embedded Latin in Hebrew (RTL) for display / ffmpeg overlay.
+Bidirectional text for video outputs.
 
-Uses U+2066 LEFT-TO-RIGHT ISOLATE + U+2069 POP DIRECTIONAL ISOLATE around Latin runs
-(Unicode TR9 embedding); marks are non-printing. LRM-only was insufficient for
-multi-word English (e.g. product names) inside RTL paragraphs.
+- Marketing copy (API / UI): LRI+PDI around Latin islands (finalize_hebrew_mixed_bidi_for_display).
+- ffmpeg drawtext headline: separate path — many ffmpeg builds show isolate controls as boxes;
+  use prepare_ffmpeg_overlay_headline (no LRI/PDI/LRM) for Hebrew + Latin product names.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import List, Tuple
 
-from engine.video_language import normalize_video_content_language
+from engine.video_language import (
+    is_english_only_product_name_script,
+    normalize_video_content_language,
+)
 
 _LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
 _PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
@@ -117,3 +121,49 @@ def finalize_hebrew_mixed_bidi_for_display(
 def format_bidi_segments_for_log(segments: List[str]) -> str:
     """JSON list for VIDEO_BIDI_LATIN_SEGMENTS_* logs."""
     return json.dumps(segments, ensure_ascii=False)
+
+
+def prepare_ffmpeg_overlay_headline(
+    headline: str,
+    *,
+    content_language: str,
+    canonical_name: str,
+) -> Tuple[str, str]:
+    """
+    Build ffmpeg drawtext-safe headline for mixed Hebrew + Latin product names.
+
+    Never inserts LRI, PDI, LRM, or RLM. Strips any such marks from input.
+    For Hebrew content with a Latin-script canonical name and Hebrew in the headline,
+    uses deterministic ``{canonical} · {hebrew_remainder}`` after removing the
+    canonical substring (case-insensitive).
+
+    Returns (final_headline, strategy_key).
+    """
+    raw_in = headline or ""
+    h = unicodedata.normalize("NFC", _strip_bidi_embedding_marks(raw_in)).strip()
+    cn = unicodedata.normalize("NFC", (canonical_name or "").strip())
+    lang = normalize_video_content_language(content_language)
+
+    if lang != "he":
+        return (h if h else raw_in.strip(), "overlay_non_hebrew_strip_marks")
+
+    if not h:
+        return (raw_in.strip(), "overlay_empty")
+
+    if not cn or not is_english_only_product_name_script(cn):
+        return (h, "overlay_hebrew_or_mixed_canonical_strip_only")
+
+    if not _contains_hebrew_letter(h):
+        return (h, "overlay_latin_headline_strip_only")
+
+    sep = " · "
+    # Worker already composed; web postprocess may run again on the same Redis headline.
+    if h.lower().startswith(cn.lower() + sep):
+        return (h, "overlay_passthrough_already_latin_dot_hebrew")
+
+    remainder = re.sub(re.escape(cn), "", h, flags=re.I)
+    remainder = re.sub(r"\s+", " ", remainder).strip()
+    if not remainder:
+        return (cn, "overlay_latin_canonical_only")
+
+    return (f"{cn}{sep}{remainder}", "overlay_latin_dot_hebrew_remainder")

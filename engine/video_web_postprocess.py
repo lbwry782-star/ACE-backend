@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any, Dict
 
-from engine.video_bidi import finalize_hebrew_mixed_bidi_for_display, format_bidi_segments_for_log
+from engine.video_bidi import prepare_ffmpeg_overlay_headline
 from engine.video_language import detect_product_description_language
 
 logger = logging.getLogger(__name__)
@@ -37,22 +37,22 @@ def ensure_video_postprocessed_for_poll(job_id: str, job: Dict[str, Any]) -> Non
         video_job_set_postprocess_ran_only(job_id)
         return
     base = (job.get("publicBaseUrl") or "").strip()
-    headline = (job.get("overlayHeadline") or "").strip()
+    headline_raw = (job.get("overlayHeadline") or "").strip()
     _, content_lang, _, _ = detect_product_description_language(
         job.get("productDescription") or ""
     )
     _rp = (job.get("resolvedProductName") or "").strip()
-    _prot = (_rp,) if _rp else ()
-    headline, bidi_hl, segs_hl = finalize_hebrew_mixed_bidi_for_display(
-        headline,
+    headline, overlay_strat = prepare_ffmpeg_overlay_headline(
+        headline_raw,
         content_language=content_lang,
-        protected_phrases=_prot,
+        canonical_name=_rp,
     )
-    logger.info("VIDEO_BIDI_FIX_APPLIED_HEADLINE=%s", str(bidi_hl).lower())
+    logger.info("VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s", overlay_strat)
     logger.info(
-        "VIDEO_BIDI_LATIN_SEGMENTS_HEADLINE=%s",
-        format_bidi_segments_for_log(segs_hl),
+        "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
+        json.dumps(headline, ensure_ascii=False),
     )
+    logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
     logger.info("VIDEO_BIDI_FIX_APPLIED_COPY=false")
     logger.info("VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s", json.dumps([], ensure_ascii=False))
     if not source_url:

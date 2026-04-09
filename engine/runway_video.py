@@ -23,7 +23,11 @@ from engine.video_planning import (
     sanitize_runway_prompt_for_video_text_policy,
     video_plan_required_fields_for_runway,
 )
-from engine.video_bidi import finalize_hebrew_mixed_bidi_for_display, format_bidi_segments_for_log
+from engine.video_bidi import (
+    finalize_hebrew_mixed_bidi_for_display,
+    format_bidi_segments_for_log,
+    prepare_ffmpeg_overlay_headline,
+)
 from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_jobs_redis import video_job_set_resolved_product_name
 from engine.video_language import (
@@ -455,29 +459,28 @@ def generate_one_video_mvp(
                         protected_phrases=_bidi_prot,
                     )
                 )
-                headline_for_overlay, bidi_headline, segs_headline = (
-                    finalize_hebrew_mixed_bidi_for_display(
-                        headline_for_overlay,
-                        content_language=video_lang,
-                        protected_phrases=_bidi_prot,
-                    )
-                )
-                logger.info(
-                    "VIDEO_BIDI_FIX_APPLIED_HEADLINE=%s",
-                    str(bidi_headline).lower(),
+                headline_for_overlay, overlay_bidi_strategy = prepare_ffmpeg_overlay_headline(
+                    headline_for_overlay,
+                    content_language=video_lang,
+                    canonical_name=canonical_name,
                 )
                 logger.info(
                     "VIDEO_BIDI_FIX_APPLIED_COPY=%s",
                     str(bidi_copy).lower(),
                 )
                 logger.info(
-                    "VIDEO_BIDI_LATIN_SEGMENTS_HEADLINE=%s",
-                    format_bidi_segments_for_log(segs_headline),
-                )
-                logger.info(
                     "VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s",
                     format_bidi_segments_for_log(segs_copy),
                 )
+                logger.info(
+                    "VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s",
+                    overlay_bidi_strategy,
+                )
+                logger.info(
+                    "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
+                    json.dumps(headline_for_overlay, ensure_ascii=False),
+                )
+                logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
                 logger.info("VIDEO_JOB_STEP step=packaging_result done")
                 final_url = postprocess_video_headline(
                     url,
