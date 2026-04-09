@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -89,6 +90,7 @@ PIPELINE (fixed)
 
 OBJECTS
 - Iconic concrete physical primaries; no brands/logos/text-as-object/vague environments. Secondary: separate concrete prop in the same everyday scene; not part of the main (no label/packaging-line-as-secondary). A from product description (whole-object grasp, not contour trivia).
+- If objectA and objectB differ, objectA_secondary and objectB_secondary MUST differ: each primary gets its own classic contextual prop (not the same noun under underscores vs spaces). Reusing one secondary for both sides when A≠B is invalid.
 
 ICONIC + VIEWER CLARITY (HARD)
 - Silhouette match alone is NOT enough. Reject weak B: packaging subtype, utilitarian generic variant, non-iconic identity, ambiguous swap (“which box?”). Examples to reject: gift box↔shoe box; generic↔shipping/cardboard/product box; generic bag↔shopping bag as weak B; mailer/logistics identity vs named object. VIEWER TEST: instant “B replaced A”; discard weak-B even if shape-close—no shoe-box/mailer shortcuts.
@@ -210,6 +212,27 @@ def _word_limit(s: str, max_words: int) -> str:
     if len(words) <= max_words:
         return " ".join(words)
     return " ".join(words[:max_words])
+
+
+def _normalize_object_identifier_for_compare(s: str) -> str:
+    """Lowercase NFC label for equality checks (underscores/hyphens → space, collapse spaces)."""
+    t = unicodedata.normalize("NFC", (s or "").strip().lower())
+    t = re.sub(r"[-_]+", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _primaries_differ_norm(oa: str, ob: str) -> bool:
+    return _normalize_object_identifier_for_compare(oa) != _normalize_object_identifier_for_compare(ob)
+
+
+def _secondaries_violate_distinct_rule(oa: str, ob: str, oa_sec: str, ob_sec: str) -> bool:
+    """True when A≠B but secondaries match after trivial normalization (invalid plan)."""
+    if not _primaries_differ_norm(oa, ob):
+        return False
+    return _normalize_object_identifier_for_compare(oa_sec) == _normalize_object_identifier_for_compare(
+        ob_sec
+    )
 
 
 # Packaging / logistics primaries — not iconic enough as standalone A/B subjects for replacement clarity.
@@ -379,7 +402,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     """
     Return (plan, None) or (None, reason_code) for logging.
     reason_code: missing_videoPromptCore | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
-    | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed
+    | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | secondary_objects_not_distinct
     """
     if not data:
         return None, "missing_videoPromptCore"
@@ -410,6 +433,10 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     ob_sec = (data.get("objectB_secondary") or "").strip()
     if not oa_sec or not ob_sec:
         return None, "missing_object_secondary"
+
+    if _secondaries_violate_distinct_rule(oa, ob, oa_sec, ob_sec):
+        logger.info("VIDEO_PLAN_SECONDARY_DISTINCT_OK=false")
+        return None, "secondary_objects_not_distinct"
 
     pn = (data.get("productNameResolved") or "").strip() or "Product"
 
@@ -492,6 +519,14 @@ def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tup
         return False, "missing_headlineText"
     if not (plan.get("videoPromptCore") or "").strip():
         return False, "missing_videoPromptCore"
+    oa = (plan.get("objectA") or "").strip()
+    ob = (plan.get("objectB") or "").strip()
+    oa_sec = (plan.get("objectA_secondary") or "").strip()
+    ob_sec = (plan.get("objectB_secondary") or "").strip()
+    if _secondaries_violate_distinct_rule(oa, ob, oa_sec, ob_sec):
+        logger.info("VIDEO_PLAN_SECONDARY_DISTINCT_OK=false")
+        return False, "secondary_objects_not_distinct"
+    logger.info("VIDEO_PLAN_SECONDARY_DISTINCT_OK=true")
     return True, ""
 
 
@@ -620,6 +655,8 @@ Locked output language for all user-facing plan fields (from description classif
 
         plan, v_err = validate_and_normalize_plan(parsed)
         if not plan:
+            if v_err == "secondary_objects_not_distinct":
+                logger.info("VIDEO_PLAN_ABORTED reason=secondary_objects_not_distinct")
             if v_err == "missing_object_secondary":
                 logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
             else:
