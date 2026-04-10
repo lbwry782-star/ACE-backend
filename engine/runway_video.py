@@ -31,6 +31,7 @@ from engine.video_bidi import (
 from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_jobs_redis import video_job_set_resolved_product_name
 from engine.video_language import (
+    evaluate_headline_overlay_language,
     log_video_language_decision,
     normalize_video_content_language,
     text_predominantly_matches_language,
@@ -115,13 +116,27 @@ def _headers() -> Dict[str, str]:
     }
 
 
-def _enforce_headline_overlay_language(required_lang: str, headline: str) -> None:
-    """End headline must be predominantly in the classified language (short Latin terms like AI allowed)."""
+def _enforce_headline_overlay_language(
+    required_lang: str, headline: str, canonical_name: str = ""
+) -> None:
+    """
+    Headline must match required content language, with an exception for Hebrew jobs where the
+    only Latin is the resolved English product name and the rest is Hebrew.
+    """
     req = normalize_video_content_language(required_lang)
     h = (headline or "").strip()
     if not h:
         return
-    if not text_predominantly_matches_language(h, req):
+    logger.info("VIDEO_HEADLINE_LANGUAGE_REQUIRED=%s", req)
+    ok, actual, allowed_latin_product = evaluate_headline_overlay_language(
+        h, req, canonical_name
+    )
+    logger.info("VIDEO_HEADLINE_LANGUAGE_ACTUAL=%s", actual)
+    logger.info(
+        "VIDEO_HEADLINE_ALLOWED_LATIN_PRODUCT_NAME=%s",
+        str(allowed_latin_product).lower(),
+    )
+    if not ok:
         logger.error(
             "VIDEO_JOB_FAILED_INTEGRITY reason=headline_language_mismatch required=%s plurality_check=false",
             req,
@@ -446,7 +461,9 @@ def generate_one_video_mvp(
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_marketing_copy")
                     raise RunwayVideoMVPError("product_name_copy_mismatch")
                 _enforce_marketing_copy_language(video_lang, marketing_text_for_api)
-                _enforce_headline_overlay_language(video_lang, headline_for_overlay)
+                _enforce_headline_overlay_language(
+                    video_lang, headline_for_overlay, canonical_name
+                )
                 _bidi_prot = (
                     (canonical_name.strip(),)
                     if (canonical_name or "").strip()

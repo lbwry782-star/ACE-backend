@@ -162,6 +162,56 @@ def is_english_only_product_name_script(s: str) -> bool:
     return True
 
 
+def _hebrew_letter_in(s: str) -> bool:
+    return any(0x0590 <= ord(ch) <= 0x05FF for ch in (s or ""))
+
+
+def _has_ascii_latin_letter(s: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", s or ""))
+
+
+def hebrew_headline_allows_embedded_english_product_name(headline: str, canonical_name: str) -> bool:
+    """
+    Hebrew job: the headline may contain the resolved English product name as the only Latin segment.
+    True when, after removing that name (case-insensitive, word-boundary safe), the remainder
+    contains Hebrew and contains no Latin letters (no extra English beyond the product name).
+    """
+    cn = (canonical_name or "").strip()
+    if not cn or not is_english_only_product_name_script(cn):
+        return False
+    h = unicodedata.normalize("NFC", (headline or "").strip())
+    pat = re.compile(r"(?<![A-Za-z0-9])" + re.escape(cn) + r"(?![A-Za-z0-9])", re.I)
+    remainder = pat.sub("", h)
+    remainder = re.sub(r"[\s·\u00b7\-–—:|]+", " ", remainder).strip()
+    if not _hebrew_letter_in(remainder):
+        return False
+    if _has_ascii_latin_letter(remainder):
+        return False
+    return True
+
+
+def evaluate_headline_overlay_language(
+    headline: str,
+    required_lang: str,
+    canonical_name: str,
+) -> Tuple[bool, str, bool]:
+    """
+    Headline language check for ffmpeg overlay. Returns (passes, log_label, allowed_latin_product_exception).
+    """
+    req = normalize_video_content_language(required_lang)
+    h = (headline or "").strip()
+    if not h:
+        return True, "empty", False
+    if req == "en":
+        ok = text_predominantly_matches_language(h, "en")
+        return ok, ("plurality_english_ok" if ok else "plurality_english_failed"), False
+    if text_predominantly_matches_language(h, "he"):
+        return True, "plurality_hebrew_ok", False
+    if hebrew_headline_allows_embedded_english_product_name(h, canonical_name):
+        return True, "hebrew_with_only_canonical_english_product_name", True
+    return False, "headline_language_rules_failed", False
+
+
 def text_predominantly_matches_language(text: str, lang_code: str) -> bool:
     """
     True if letter plurality matches the required video language (he | en).
