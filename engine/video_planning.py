@@ -568,7 +568,6 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
         'VIDEO_PLAN productNameResolved="%s"',
         (plan.get("productNameResolved") or "")[:120],
     )
-    log_video_job_plan_integrity(plan)
     logger.info(
         "VIDEO_PLAN pair_digest=%s",
         _object_pair_digest(str(plan.get("objectA") or ""), str(plan.get("objectB") or "")),

@@ -20,6 +20,7 @@ from engine.video_planning import (
     build_runway_interaction_prompt_from_plan,
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
+    log_video_job_plan_integrity,
     sanitize_runway_prompt_for_video_text_policy,
     video_plan_required_fields_for_runway,
 )
@@ -354,6 +355,7 @@ def generate_one_video_mvp(
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
 
     apply_canonical_product_name_to_video_plan(plan, canonical_name)
+    log_video_job_plan_integrity(plan)
 
     prompt_image_data_uri: Optional[str] = None
     # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
