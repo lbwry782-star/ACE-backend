@@ -44,6 +44,11 @@ _VIDEO_PLAN_HARD_SECONDS = float(
     or str(_VIDEO_PLAN_TIMEOUT + 45.0)
 )
 
+# Conceptual parity with ACE image engine (engine/side_by_side_v1.py): there,
+# mode_decision = REPLACEMENT if silhouette_similarity >= SIMILARITY_THRESHOLD_REPLACEMENT (85) else SIDE_BY_SIDE,
+# and replacement-grade pairs must not be functionally interchangeable variants (see GOAL_PAIR prompts).
+# Video maps that gate to replacementClarityOk ∧ similarityStrongEnoughForReplacement; the server may coerce
+# REPLACEMENT → SIDE_BY_SIDE when that bar is not met (see validate_and_normalize_plan).
 
 _JSON_KEYS = """
 OUTPUT FORMAT (strict)
@@ -56,10 +61,10 @@ Field notes:
 - objectPairViewerClarityOk: boolean true only if both primaries are iconic standalone objects and replacement is legible; if not, pick another pair—never false to bypass.
 - objectPairIdentityDistinctOk: boolean true only if A and B are photographically similar yet clearly two different objects (not a subtype/variant/upgrade); never false to bypass.
 - identityDistinctnessNote: one short line on why the pair passes or fails identity distinctness (English OK).
-- videoVisualMode: "REPLACEMENT" (preferred) or "SIDE_BY_SIDE" only when the MODE DECISION rules require it.
+- videoVisualMode: "REPLACEMENT" (preferred) or "SIDE_BY_SIDE" only when the MODE DECISION rules require it. If you output REPLACEMENT but either clarity or similarity flag is false, the server will coerce to SIDE_BY_SIDE (same conceptual rule as the image engine’s replacement bar).
 - replacementClarityOk: true if the viewer would immediately understand what replaced what in a single-subject replacement shot; false if that read would be weak or ambiguous.
-- similarityStrongEnoughForReplacement: true if photographic similarity is strong enough for a clear replacement composition; false if not.
-- sideBySideReason: required non-empty string when videoVisualMode is SIDE_BY_SIDE (why coexistence beats replacement); use "" when REPLACEMENT.
+- similarityStrongEnoughForReplacement: true if photographic similarity is replacement-grade (image engine: analogous to silhouette_similarity ≥ 85 for interchangeability); false if not.
+- sideBySideReason: required non-empty string when videoVisualMode is SIDE_BY_SIDE (why coexistence beats replacement); use "" when REPLACEMENT. If coerced to SIDE_BY_SIDE, supply a short reason if you did not already.
 
 Required keys (all strings except where noted):
 {
@@ -97,15 +102,16 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
 LANGUAGE
 - Job: {lang_name} ({lang}), from product description only (Hebrew or English). advertisingPromise, headlineText, shortReplacementScript, morphologicalReason, promiseReason: primarily {lang_name}. Loanwords/brands (AI, SaaS, etc.) OK. objectA/objectB/objectA_secondary/objectB_secondary: short English nouns allowed for morphology.
 
-VISUAL MODE (REPLACEMENT preferred; SIDE_BY_SIDE only when rules below say so)
-- REPLACEMENT is always preferred. Use SIDE_BY_SIDE only when ALL are true: (1) Strong pair — A and B form a strong ACE-worthy comparison, visually and conceptually meaningful. (2) Replacement is weak — the viewer would NOT immediately understand what replaced what, or replacement would feel forced or ambiguous. (3) Coexistence is stronger — the idea is communicated better by showing both objects together than by replacing one with the other.
+VISUAL MODE (aligned with ACE image engine decision logic — do not change image code; this is the video analogue)
+- Image engine rule (reference): REPLACEMENT only when silhouette_similarity ≥ 85 (replacement-grade interchangeability); otherwise SIDE_BY_SIDE. Replacement-grade pairs also require clearly distinct functional roles — functionally similar variants belong in SIDE_BY_SIDE.
+- Video analogue: REPLACEMENT only when BOTH replacementClarityOk AND similarityStrongEnoughForReplacement are true (clear substitution read AND replacement-grade similarity). If either is false, choose SIDE_BY_SIDE for a strong pair — do not keep weak REPLACEMENT. The server enforces this: REPLACEMENT requested without both flags true is coerced to SIDE_BY_SIDE.
 
 STRICT PROHIBITION (SIDE_BY_SIDE)
-- DO NOT use SIDE_BY_SIDE if visual similarity is strong enough for clear REPLACEMENT. If the viewer can clearly and immediately understand “Object B replaces Object A” (or the chosen direction), you MUST set videoVisualMode to REPLACEMENT. SIDE_BY_SIDE is forbidden in that case.
+- DO NOT use SIDE_BY_SIDE if BOTH replacement clarity AND replacement-grade similarity are clearly true (viewer instantly reads substitution and similarity is strong enough). In that case you MUST set videoVisualMode to REPLACEMENT.
 
 MODE DECISION
-- Choose REPLACEMENT when: visual similarity is strong, replacement is immediately legible, and the viewer instantly understands the substitution.
-- Choose SIDE_BY_SIDE when: the pair is strong, but replacement clarity is weak (or replacement would be forced), and interaction-based comparison is stronger than a single-subject replacement shot.
+- Choose REPLACEMENT when: replacementClarityOk and similarityStrongEnoughForReplacement are both true (image-engine replacement bar met).
+- Choose SIDE_BY_SIDE when: the pair is still strong for ACE, but replacement clarity and/or replacement-grade similarity is not met, and showing both objects together with meaningful interaction communicates the idea better than a weak replacement shot.
 
 REPLACEMENT PIPELINE (when videoVisualMode is REPLACEMENT)
 - Frame 1 already shows replacement: B in A’s role, A’s background, A’s secondary, A’s pose; motion continues B with A’s secondary. Choose objectA and objectB using PHOTOGRAPHIC SIMILARITY (below)—the only selection rule for visual fit; viewer must feel B belongs in A’s place before any verbal explanation.
@@ -615,8 +621,27 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     sim_strong = ss_parsed is True
 
     sbs_reason = (data.get("sideBySideReason") or "").strip()
+    replacement_bar_met = repl_clear and sim_strong
+    replacement_reject_reason = ""
+
+    # Image-engine-adapted rule: weak REPLACEMENT must not stand — coerce to SIDE_BY_SIDE (pair can stay strong).
+    if mode_raw == "REPLACEMENT" and not replacement_bar_met:
+        mode_raw = "SIDE_BY_SIDE"
+        if not repl_clear and not sim_strong:
+            replacement_reject_reason = "replacement_bar_not_met_clarity_and_similarity"
+        elif not repl_clear:
+            replacement_reject_reason = "replacement_bar_not_met_clarity"
+        else:
+            replacement_reject_reason = "replacement_bar_not_met_similarity"
+        if not sbs_reason:
+            sbs_reason = (
+                "Image-engine rule (adapted): REPLACEMENT requires both clear substitution read and "
+                "replacement-grade similarity (image: ≥85 silhouette-equivalent); using SIDE_BY_SIDE for comparison."
+            )
+
     if mode_raw == "SIDE_BY_SIDE":
         if repl_clear and sim_strong:
+            logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=image_engine_rule_adapted")
             logger.info("VIDEO_PLAN_MODE=SIDE_BY_SIDE")
             logger.info(
                 "VIDEO_PLAN_REPLACEMENT_CLARITY_OK=%s",
@@ -627,6 +652,10 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
                 "true" if sim_strong else "false",
             )
             logger.info(
+                'VIDEO_PLAN_REPLACEMENT_REJECT_REASON="%s"',
+                "side_by_side_forbidden_when_image_engine_replacement_bar_met",
+            )
+            logger.info(
                 'VIDEO_PLAN_SIDE_BY_SIDE_REASON="%s"',
                 (sbs_reason or "")[:300],
             )
@@ -634,6 +663,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         if not sbs_reason:
             return None, "missing_sideBySideReason"
 
+    logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=image_engine_rule_adapted")
     logger.info("VIDEO_PLAN_MODE=%s", mode_raw)
     logger.info(
         "VIDEO_PLAN_REPLACEMENT_CLARITY_OK=%s",
@@ -642,6 +672,10 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     logger.info(
         "VIDEO_PLAN_SIMILARITY_STRONG_ENOUGH_FOR_REPLACEMENT=%s",
         "true" if sim_strong else "false",
+    )
+    logger.info(
+        'VIDEO_PLAN_REPLACEMENT_REJECT_REASON="%s"',
+        (replacement_reject_reason or "")[:300],
     )
     logger.info(
         'VIDEO_PLAN_SIDE_BY_SIDE_REASON="%s"',
@@ -668,6 +702,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         "replacementClarityOk": repl_clear,
         "similarityStrongEnoughForReplacement": sim_strong,
         "sideBySideReason": sbs_reason if mode_raw == "SIDE_BY_SIDE" else "",
+        "replacementRejectReason": replacement_reject_reason,
     }, None
 
 
@@ -758,6 +793,7 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
         plan.get("headlineDecision"),
         (plan.get("headlineText") or "")[:160],
     )
+    logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=image_engine_rule_adapted")
     logger.info("VIDEO_PLAN_MODE=%s", plan.get("videoVisualMode") or "REPLACEMENT")
     logger.info(
         "VIDEO_PLAN_REPLACEMENT_CLARITY_OK=%s",
@@ -766,6 +802,10 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
     logger.info(
         "VIDEO_PLAN_SIMILARITY_STRONG_ENOUGH_FOR_REPLACEMENT=%s",
         "true" if plan.get("similarityStrongEnoughForReplacement") is True else "false",
+    )
+    logger.info(
+        'VIDEO_PLAN_REPLACEMENT_REJECT_REASON="%s"',
+        ((plan.get("replacementRejectReason") or "")[:260]),
     )
     logger.info(
         'VIDEO_PLAN_SIDE_BY_SIDE_REASON="%s"',
