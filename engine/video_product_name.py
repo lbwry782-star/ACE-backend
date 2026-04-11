@@ -15,6 +15,7 @@ from openai import OpenAI
 
 from engine.video_language import (
     is_english_only_product_name_script,
+    is_hebrew_or_english_product_name_script,
     normalize_video_content_language,
 )
 
@@ -40,16 +41,18 @@ def _timeout_s() -> float:
     return float((os.environ.get("VIDEO_PRODUCT_NAME_TIMEOUT_SECONDS") or "45").strip() or "45")
 
 
-def generate_auto_product_name(product_description: str, content_language: str) -> str:
+def generate_auto_product_name(product_description: str, marketing_language: str) -> str:
     """
-    Auto product name for video: Hebrew jobs → Hebrew or English (Latin) name; English jobs → English (Latin script) only.
+    Auto product name when user left name empty.
+    marketing_language he: name may be Hebrew or English (Latin) only.
+    marketing_language en: name must be English (Latin) only.
     Raises VideoProductNameError on failure.
     """
     desc = (product_description or "").strip()
     if not desc:
         raise VideoProductNameError("empty_description")
 
-    lang = normalize_video_content_language(content_language)
+    lang = normalize_video_content_language(marketing_language)
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise VideoProductNameError("no_openai_key")
@@ -59,26 +62,29 @@ def generate_auto_product_name(product_description: str, content_language: str) 
         user_prompt = f"""Product description:
 {desc}
 
-Task: Output exactly ONE short product name (2–5 words) in English using Latin letters only.
+Task: Invent a product name in English only.
+Output exactly ONE short brand-like name (2–5 words) using Latin letters only.
 Rules:
 - Output only the name on a single line: no quotes, no labels (no "Name:"), no explanation, no second line.
-- Use Latin script only (A–Z, a–z). No Hebrew, Arabic, or Cyrillic characters. Digits allowed if natural.
-- Short loanwords (e.g. AI, SaaS) are allowed when natural."""
+- English only: Latin script (A–Z, a–z). No Hebrew, Arabic, Cyrillic, or other scripts. Digits allowed if natural.
+- Do not generate names in any other language. Short loanwords (e.g. AI, SaaS) are allowed when natural."""
 
         system_msg = (
-            "You reply with only an English product name, 2–5 words, Latin script only, one line, no quotes."
+            "Invent a product name in English only. Reply with only that name: 2–5 words, Latin script, one line, no quotes."
         )
     else:
         user_prompt = f"""Product description:
 {desc}
 
-Task: Output exactly ONE short product name (2–5 words) that fits this description.
+Task: Invent a product name in Hebrew or English only.
+Output exactly ONE short brand-like name (2–5 words) that fits this description.
 Rules:
 - Output only the name on a single line: no quotes, no labels (no "Name:"), no explanation, no second line.
-- The name may be in Hebrew or in English (Latin), whichever fits the product best. Short loanwords (e.g. AI, SaaS) are allowed."""
+- Use Hebrew letters and/or Latin (English) letters only — no Arabic, Cyrillic, or other alphabets. Prefer a cohesive name in Hebrew or in English; short Latin acronyms inside a Hebrew name are fine when natural.
+- Do not generate names in any other language."""
 
         system_msg = (
-            "You reply with only a product name, 2–5 words, Hebrew or English (Latin), one line, no quotes."
+            "Invent a product name in Hebrew or English only. Reply with only that name: 2–5 words, one line, no quotes."
         )
 
     t = min(15.0, _timeout_s())
@@ -115,6 +121,14 @@ Rules:
                 extra_user = "\n\nYour previous answer contained non-Latin letters. Reply again with Latin letters only (English product name)."
                 continue
             raise VideoProductNameError("auto_product_name_not_english")
+        if lang == "he" and not is_hebrew_or_english_product_name_script(name):
+            if attempt == 0:
+                extra_user = (
+                    "\n\nYour previous answer used letters outside Hebrew or English. "
+                    "Reply again with a name in Hebrew script OR English (Latin) only — no other alphabets."
+                )
+                continue
+            raise VideoProductNameError("auto_product_name_invalid_script")
         return name
     raise VideoProductNameError("empty_or_invalid_model_output")
 
@@ -132,20 +146,33 @@ def resolve_video_product_name(
     user_product_name: str,
     product_description: str,
     content_language: str,
+    *,
+    marketing_language: str | None = None,
 ) -> Tuple[str, str]:
     """
     Returns (source 'user'|'auto', canonical_name).
-    English content jobs: resolved name must be Latin-script English only.
+
+    User-provided name: validated with content_language (video/headline context).
+    Auto-generated name: uses marketing_language (from product description letter counts);
+    if marketing_language is omitted, falls back to content_language.
     """
     lang = normalize_video_content_language(content_language)
+    mk = normalize_video_content_language(marketing_language) if marketing_language is not None else lang
     u = (user_product_name or "").strip()
     if u:
         if lang == "en" and not is_english_only_product_name_script(u):
             raise VideoProductNameError("product_name_not_english")
         return "user", u
-    auto = generate_auto_product_name(product_description, lang)
-    if lang == "en" and not is_english_only_product_name_script(auto):
+    logger.info("PRODUCT_NAME_GENERATION_REQUIRED=true")
+    if mk == "he":
+        logger.info("PRODUCT_NAME_LANGUAGE_POLICY marketing_lang=he allowed=he|en")
+    else:
+        logger.info("PRODUCT_NAME_LANGUAGE_POLICY marketing_lang=en allowed=en")
+    auto = generate_auto_product_name(product_description, mk)
+    if mk == "en" and not is_english_only_product_name_script(auto):
         raise VideoProductNameError("auto_product_name_not_english")
+    if mk == "he" and not is_hebrew_or_english_product_name_script(auto):
+        raise VideoProductNameError("auto_product_name_invalid_script")
     return "auto", auto
 
 

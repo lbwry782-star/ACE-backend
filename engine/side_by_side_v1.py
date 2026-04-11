@@ -3051,6 +3051,7 @@ def _build_marketing_copy_user_prompt(
     ad_goal: str,
     lang_name: str,
     *,
+    lang_code: str,
     strict_verbatim_name: bool,
     retry_tail: str = "",
 ) -> str:
@@ -3068,6 +3069,12 @@ CANONICAL PRODUCT NAME — mandatory verbatim substring (at least once), exact c
 """
     else:
         verbatim = retry_tail
+    hebrew_embedded = ""
+    if lang_code == "he":
+        hebrew_embedded = """
+- Write natural, fluent Hebrew sentence structure.
+- If you include an English product name, brand name, or English multi-word phrase inside a Hebrew sentence, keep normal left-to-right word order inside that English segment (e.g. "Fast Delivery" reads left-to-right as a phrase). Do not reverse English word order.
+"""
     return f"""Generate marketing copy for an advertisement.
 {verbatim}
 Product name: {canon}
@@ -3077,7 +3084,7 @@ Advertising goal: {goal}
 Requirements:
 - You MUST write the entire marketing copy in {lang_name}. Do not use any other language for sentences or clauses.
 - Exception: short unavoidable loanwords (AI, SaaS, CRM, common abbreviations, or the canonical product name if Latin) may stay as-is; everything else must be {lang_name}.
-- No mixed-language paragraphs; no alternating Hebrew/English sentences unless the job language is the only prose language.
+- No mixed-language paragraphs; no alternating Hebrew/English sentences unless the job language is the only prose language.{hebrew_embedded}
 - Exactly 45-55 words (count carefully)
 - Must include product name
 - Must be product-specific (not generic marketing language)
@@ -3136,8 +3143,10 @@ def generate_marketing_copy(
     if lang == "he":
         system_msg = (
             "You are a marketing copywriter. You MUST write the marketing text entirely in Hebrew. "
-            "Do not produce English sentences or English marketing copy. "
-            "Short Latin loanwords (e.g. AI, SaaS) or the exact canonical product name if given in Latin may appear as-is. "
+            "Use natural, fluent Hebrew sentence structure. "
+            "Do not produce English sentences or English marketing copy as the main prose. "
+            "Short Latin loanwords (e.g. AI, SaaS) or the exact canonical product name if given in Latin may appear as-is; "
+            "multi-word English phrases inside Hebrew must keep normal English left-to-right word order within the phrase. "
             "Return only the marketing copy text, no JSON, no quotes."
         )
     else:
@@ -3159,6 +3168,7 @@ def generate_marketing_copy(
             product_description,
             ad_goal,
             lang_name,
+            lang_code=lang,
             strict_verbatim_name=require_verbatim_product_name,
             retry_tail=retry_tail,
         )

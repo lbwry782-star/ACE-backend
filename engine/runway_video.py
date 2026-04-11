@@ -310,7 +310,10 @@ def generate_one_video_mvp(
     video_lang, _, _ = log_video_language_decision(product_description)
     try:
         pn_source, canonical_name = resolve_video_product_name(
-            product_name, product_description, video_lang
+            product_name,
+            product_description,
+            video_lang,
+            marketing_language=marketing_lang,
         )
     except VideoProductNameError as e:
         reason = (e.args[0] if getattr(e, "args", None) else None) or "error"
@@ -482,6 +485,15 @@ def generate_one_video_mvp(
                         protected_phrases=_bidi_prot,
                     )
                 )
+                if marketing_lang == "he":
+                    logger.info(
+                        "MARKETING_TEXT_BIDI_NORMALIZED applied=%s lang=he",
+                        "true" if bidi_copy else "false",
+                    )
+                else:
+                    logger.info(
+                        "MARKETING_TEXT_BIDI_NORMALIZED applied=false lang=en",
+                    )
                 headline_for_overlay, overlay_bidi_strategy = prepare_ffmpeg_overlay_headline(
                     headline_for_overlay,
                     content_language=video_lang,

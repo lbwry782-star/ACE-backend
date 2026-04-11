@@ -121,6 +121,23 @@ def _is_latin_letter(ch: str) -> bool:
     return False
 
 
+def is_hebrew_or_english_product_name_script(s: str) -> bool:
+    """
+    True if every letter in s is Hebrew or Latin (no Arabic, Cyrillic, or other scripts).
+    Non-letters (digits, punctuation, spaces) are allowed. Empty → False.
+    """
+    raw = (s or "").strip()
+    if not raw:
+        return False
+    for ch in raw:
+        cat = unicodedata.category(ch)
+        if cat in ("Lu", "Ll", "Lt", "Lo", "Lm"):
+            if _is_hebrew_letter(ch) or _is_latin_letter(ch):
+                continue
+            return False
+    return True
+
+
 def _letter_buckets_for_video(text: str) -> Tuple[int, int, int, int]:
     """
     Returns (hebrew_count, latin_count, foreign_letter_count, total_letters).
