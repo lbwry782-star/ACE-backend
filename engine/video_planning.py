@@ -432,6 +432,112 @@ def _runway_vertical_axis_hard_constraints_english() -> str:
     )
 
 
+# SIDE_BY_SIDE: explicit motion so the clip does not read as a still image (camera is the safe default).
+_SBS_CAMERA_MOTION_DESCRIPTION = (
+    "Subtle camera motion around the paired composition: slow arc, gentle orbit, mild parallax, slight curved lateral drift, "
+    "or slight push-in with small sideways drift—calm advertising pace. Both primaries stay fully in frame and readable; "
+    "no fast motion, no dramatic cinematic moves, no aggressive rotation, no multi-angle showcase, no cuts, no multi-shot."
+)
+
+_SBS_OBJECT_MOTION_DESCRIPTION = (
+    "Very small in-scene motion only: subtle tilt, slight sway, tiny posture adjustment, or minimal interaction with the nearby "
+    "secondary—synchronized enough to keep the comparison fair. Preserve silhouette readability; no transformation, replacement, "
+    "large translation, morphing, or complex action."
+)
+
+_SBS_CAMERA_MOTION_RUNWAY_APPEND = (
+    " SIDE_BY_SIDE MOTION (required—not a still): Visible motion must come primarily from subtle camera movement—"
+    "a slow arc, gentle orbit, mild parallax, or slight push/drift around the locked composition. "
+    "Both objects remain sharp and fully in frame throughout; no static still-image feel or micro-flicker only; "
+    "no cuts; no dramatic moves."
+)
+
+_SBS_OBJECT_MOTION_RUNWAY_APPEND = (
+    " SIDE_BY_SIDE MOTION (required—not a still): Visible motion must come from very small subject movement—"
+    "subtle tilt, slight sway, tiny cue with the secondary—while preserving side-by-side comparison clarity. "
+    "No transformation, replacement, large moves, or morphing; avoid motion so tiny it reads as a still."
+)
+
+
+def _decide_side_by_side_motion_strategy(sbs_ms: str) -> Tuple[str, str]:
+    """
+    Choose object_motion vs camera_motion for SIDE_BY_SIDE. Safe default: camera_motion.
+
+    Returns (strategy, detail_reason). detail_reason is used for fallback logging when strategy is camera_motion.
+    """
+    raw = (sbs_ms or "").strip()
+    low = raw.lower()
+
+    if not raw or len(raw) < 35:
+        return "camera_motion", "weak_object_interaction"
+
+    unsafe = (
+        "morph",
+        "swap",
+        "replace",
+        "replacing",
+        "cut to",
+        "dissolve",
+        "transform",
+        "wild",
+        "whip pan",
+        "360",
+        "crash zoom",
+        "jump cut",
+        "time-lapse",
+        "fast pan",
+    )
+    if any(u in low for u in unsafe):
+        return "camera_motion", "unsafe_script_keywords"
+
+    camera_primary = (
+        "camera orbits",
+        "camera circles",
+        "dolly in",
+        "dolly out",
+        "truck",
+        "crane",
+        "handheld shake",
+        "whip",
+    )
+    if any(c in low for c in camera_primary):
+        return "camera_motion", "weak_object_interaction"
+
+    safe_cues = ("subtle", "slight", "tiny", "minimal", "gentle", "small", "micro", "very slow", "barely")
+    object_cues = (
+        "tilt",
+        "sway",
+        "lean",
+        "nudge",
+        "rock",
+        "wobble",
+        "shifts slightly",
+        "turns slightly",
+        "interaction",
+        "approach",
+        "retreat",
+    )
+    safe_hits = sum(1 for s in safe_cues if s in low)
+    obj_hits = sum(1 for s in object_cues if s in low)
+    if safe_hits >= 1 and obj_hits >= 1 and len(raw) >= 55:
+        return "object_motion", "script_supports_safe_object_motion"
+
+    return "camera_motion", "weak_object_interaction"
+
+
+def _runway_side_by_side_scene_motion_preamble(strategy: str) -> str:
+    """Short English clause for Runway detailed scene when SIDE_BY_SIDE."""
+    if (strategy or "").strip() == "object_motion":
+        return (
+            "Meaningful motion is mandatory (not a static still): prioritize very small natural subject motion that keeps both "
+            "primaries readable for comparison. "
+        )
+    return (
+        "Meaningful motion is mandatory (not a static still): prioritize subtle camera motion—a slow arc, gentle orbit, or mild "
+        "parallax around the paired composition—so the frame feels alive; both objects stay fully in frame and sharp. "
+    )
+
+
 def _parse_viewer_clarity_ok(raw: Any) -> Optional[bool]:
     """True / False from JSON bool or common string forms; None = missing or invalid."""
     if raw is True:
@@ -528,6 +634,8 @@ _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("object_pair_identity_distinct_ok", "objectPairIdentityDistinctOk"),
     ("identity_distinctness_note", "identityDistinctnessNote"),
     ("shape_alignment", "shapeAlignment"),
+    ("side_by_side_motion_strategy", "sideBySideMotionStrategy"),
+    ("side_by_side_camera_motion_description", "sideBySideCameraMotionDescription"),
 )
 
 
@@ -675,6 +783,8 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     )
     logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=image_engine_rule_adapted")
     shape_alignment = ""
+    side_by_side_motion_strategy = ""
+    side_by_side_camera_motion_description = ""
     if chosen_mode == "REPLACEMENT":
         core = rms
         opening_fd = rep_open
@@ -688,6 +798,20 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
             logger.info("VIDEO_SHAPE_ALIGNMENT axis=vertical applied=true")
         else:
             logger.info("VIDEO_SHAPE_ALIGNMENT axis=vertical applied=false")
+
+        strat, strat_reason = _decide_side_by_side_motion_strategy(sbs_ms)
+        side_by_side_motion_strategy = strat
+        logger.info("VIDEO_SIDE_BY_SIDE_MOTION_STRATEGY strategy=%s", strat)
+        if strat == "camera_motion":
+            side_by_side_camera_motion_description = _SBS_CAMERA_MOTION_DESCRIPTION
+            core = f"{core}{_SBS_CAMERA_MOTION_RUNWAY_APPEND}".strip()
+            if strat_reason in ("weak_object_interaction", "unsafe_script_keywords"):
+                logger.info(
+                    "VIDEO_SIDE_BY_SIDE_MOTION_FALLBACK strategy=camera_motion reason=%s",
+                    strat_reason,
+                )
+        else:
+            core = f"{core}{_SBS_OBJECT_MOTION_RUNWAY_APPEND}".strip()
 
     logger.info("VIDEO_PLAN_MODE=%s", chosen_mode)
 
@@ -716,6 +840,8 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         "chosenMode": chosen_mode,
         "silhouetteSimilarity": silhouette_similarity,
         "shapeAlignment": shape_alignment,
+        "sideBySideMotionStrategy": side_by_side_motion_strategy,
+        "sideBySideCameraMotionDescription": side_by_side_camera_motion_description,
     }, None
 
 
@@ -1079,7 +1205,7 @@ def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bo
     if _is_side_by_side_plan(plan):
         parts = [
             "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
-            f"Side-by-side comparison: both {oa} and {ob} fully visible; meaningful interaction; balanced.",
+            f"Side-by-side: both {oa} and {ob} stay fully visible; require visible motion (subtle camera arc/orbit/parallax or tiny subject move per Action)—not a static still; balanced composition.",
             f"Scene: {core}" if core else "",
             f"Beat: {script}" if script else "",
         ]
@@ -1127,11 +1253,14 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     if _is_side_by_side_plan(plan):
         ofd = (plan.get("openingFrameDescription") or "").strip()
         open_block = f"Opening intent: {ofd} " if ofd else ""
+        sbs_strat = (plan.get("sideBySideMotionStrategy") or "camera_motion").strip()
+        motion_pre = _runway_side_by_side_scene_motion_preamble(sbs_strat)
         scene = (
             f"{open_block}"
-            f"SIDE_BY_SIDE (no replacement): single continuous shot; tight unified composition; {a_setup} and {b_setup} "
+            f"SIDE_BY_SIDE (no replacement): single continuous shot; {motion_pre}"
+            f"tight unified composition; {a_setup} and {b_setup} "
             f"both visible from the first frame, close together or slightly overlapping, same world and scale; "
-            f"promise: {promise}. Subtle comparison-only motion; no morphing, swapping, disappearance, or cuts. "
+            f"promise: {promise}. No morphing, swapping, disappearance, or cuts. "
             f"Action: {core}"
         )
         if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
@@ -1227,11 +1356,23 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
     b_setup = f"{ob} + {obs}" if obs else ob
 
     if _is_side_by_side_plan(plan):
+        sbs_strat = (plan.get("sideBySideMotionStrategy") or "camera_motion").strip()
+        if sbs_strat == "object_motion":
+            motion_focus = (
+                "Video motion only: tiny natural subject motion (tilt, sway, micro-interaction) that keeps both primaries "
+                "distinct and readable; no replace, morph, or substitute. If motion risks distorting silhouettes, prefer "
+                "the embedded camera-motion instructions in Action. "
+            )
+        else:
+            motion_focus = (
+                "Video motion only: drive the clip with subtle camera movement—slow arc, gentle orbit, parallax, or mild "
+                "push/drift—around the fixed composition; both primaries stay fully in frame and sharp; avoid a static still "
+                "or only imperceptible flicker. Do not replace, morph, or substitute one object for the other. "
+            )
         scene = (
             f"The first frame is supplied as the start image; it already shows {a_setup} and {b_setup} side by side, "
-            f"both clearly visible and balanced. Video motion only: meaningful interaction between both primaries that "
-            f"strengthens the comparison; keep both distinct and readable; do not replace, morph, or substitute one object "
-            f"for the other. Background/secondary context consistent with sides {pbg}/{psf}. "
+            f"both clearly visible and balanced. {motion_focus}"
+            f"Background/secondary context consistent with sides {pbg}/{psf}. "
             f"Action: {core}"
         )
         if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
@@ -1280,8 +1421,8 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
 
     if _is_side_by_side_plan(plan):
         motion = (
-            f"Both {oa} and {ob} side by side with secondaries; meaningful comparison interaction; "
-            f"motion only; start frame supplied."
+            f"Both {oa} and {ob} side by side with secondaries; visible motion required—subtle camera arc/orbit/parallax or "
+            f"tiny subject move per Action; not a static frame; motion only; start frame supplied."
         )
         if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
             motion += " " + _runway_vertical_axis_hard_constraints_english()
