@@ -14,7 +14,7 @@ import logging
 import os
 import re
 import unicodedata
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 import httpx
 from openai import OpenAI
@@ -54,6 +54,8 @@ OUTPUT FORMAT (strict)
 Field notes:
 - morphologicalReason: Why A/B match in whole-object form + why viewer instantly reads “B replaced A” (iconic identity).
 - objectPairViewerClarityOk: boolean true only if both primaries are iconic standalone objects and replacement is legible; if not, pick another pair—never false to bypass.
+- objectPairIdentityDistinctOk: boolean true only if A and B are photographically similar yet clearly two different objects (not a subtype/variant/upgrade); never false to bypass.
+- identityDistinctnessNote: one short line on why the pair passes or fails identity distinctness (English OK).
 
 Required keys (all strings except where noted):
 {
@@ -72,7 +74,9 @@ Required keys (all strings except where noted):
   "headlineDecision": "include_product_name" or "product_name_only" or "no_headline",
   "headlineText": string,
   "videoPromptCore": string,
-  "objectPairViewerClarityOk": boolean
+  "objectPairViewerClarityOk": boolean,
+  "objectPairIdentityDistinctOk": boolean,
+  "identityDistinctnessNote": string
 }
 """
 
@@ -109,6 +113,13 @@ Definition of PHOTOGRAPHIC SIMILARITY (strict priority order):
 REPLACEMENT CLARITY (hard)
 - After replacement, the viewer must clearly understand: “Object B has replaced Object A” (or the chosen direction per replacementDirection). If that clarity is weak, reject the pair.
 
+IDENTITY DISTINCTNESS (hard, dual requirement)
+- A and B must satisfy BOTH: (1) strong PHOTOGRAPHIC SIMILARITY for legible replacement, AND (2) identity distinctness — the viewer must immediately read them as two different objects, not a subtype, variant, “modern/digital/premium” version, or upgrade of the same thing.
+- Reject pairs where B feels like only a different era, material grade, or form factor of the same object category when the swap would read as “basically the same object.”
+- Viewer test after replacement: (1) “These look visually similar enough to swap” AND (2) “These are definitely not the same object.” If (2) is weak, reject the pair.
+- Examples to reject: pencil↔stylus; pen↔stylus; monitor↔TV; gift box↔shoe box; generic container↔packaging variant; any pair where B reads as an upgrade/subtype of A rather than a clearly different object.
+- objectPairIdentityDistinctOk: true only when both dual requirements are met. identityDistinctnessNote: brief justification.
+
 OBJECTS
 - Iconic concrete physical primaries; no brands/logos/text-as-object/vague environments. Secondary: separate concrete prop in the same everyday scene; not part of the main (no label/packaging-line-as-secondary). A from product description (whole-object grasp, not contour trivia).
 - If objectA and objectB differ, objectA_secondary and objectB_secondary MUST differ: each primary gets its own classic contextual prop (not the same noun under underscores vs spaces). Reusing one secondary for both sides when A≠B is invalid.
@@ -132,7 +143,7 @@ VIDEO (videoPromptCore)
 - Pictorial scene/motion: cinematic commercial, smooth camera, objects/light/materials. No headline in core; no on-screen text/logos.
 
 QUALITY
-- shortReplacementScript, morphologicalReason, promiseReason in {lang_name}. morphologicalReason: whole-object iconic clarity; explain how A/B satisfy PHOTOGRAPHIC SIMILARITY (priority order above). videoPromptCore: intuitive replacement over long exposition.
+- shortReplacementScript, morphologicalReason, promiseReason in {lang_name}. morphologicalReason: whole-object iconic clarity; explain how A/B satisfy PHOTOGRAPHIC SIMILARITY (priority order above) and identity distinctness. videoPromptCore: intuitive replacement over long exposition.
 
 """
 
@@ -330,6 +341,31 @@ def _object_pair_fails_weak_identity_heuristic(oa: str, ob: str) -> bool:
     return False
 
 
+def _identity_distinctness_norm_pair_key(oa: str, ob: str) -> Tuple[str, str]:
+    a = _normalize_object_identifier_for_compare(oa)
+    b = _normalize_object_identifier_for_compare(ob)
+    return tuple(sorted((a, b)))
+
+
+# Order-independent normalized labels; server guardrail for known near-twin ambiguous swaps.
+_IDENTITY_TOO_CLOSE_NORM_PAIRS: FrozenSet[Tuple[str, str]] = frozenset(
+    {
+        _identity_distinctness_norm_pair_key("pencil", "stylus"),
+        _identity_distinctness_norm_pair_key("pen", "stylus"),
+        _identity_distinctness_norm_pair_key("ballpoint pen", "stylus"),
+        _identity_distinctness_norm_pair_key("monitor", "tv"),
+        _identity_distinctness_norm_pair_key("monitor", "television"),
+        _identity_distinctness_norm_pair_key("tv", "television"),
+        _identity_distinctness_norm_pair_key("gift box", "shoe box"),
+    }
+)
+
+
+def _object_pair_identity_too_close_heuristic(oa: str, ob: str) -> bool:
+    """True → reject: known near-twin pair where replacement tends to read as one object category."""
+    return _identity_distinctness_norm_pair_key(oa, ob) in _IDENTITY_TOO_CLOSE_NORM_PAIRS
+
+
 def _parse_viewer_clarity_ok(raw: Any) -> Optional[bool]:
     """True / False from JSON bool or common string forms; None = missing or invalid."""
     if raw is True:
@@ -404,6 +440,8 @@ _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("headline_text", "headlineText"),
     ("video_prompt_core", "videoPromptCore"),
     ("object_pair_viewer_clarity_ok", "objectPairViewerClarityOk"),
+    ("object_pair_identity_distinct_ok", "objectPairIdentityDistinctOk"),
+    ("identity_distinctness_note", "identityDistinctnessNote"),
 )
 
 
@@ -424,6 +462,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     Return (plan, None) or (None, reason_code) for logging.
     reason_code: missing_videoPromptCore | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
     | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | secondary_objects_not_distinct
+    | identity_too_close
     """
     if not data:
         return None, "missing_videoPromptCore"
@@ -490,6 +529,32 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         return None, "object_pair_viewer_clarity_not_affirmed"
 
     logger.info("VIDEO_PLAN_OBJECT_CLARITY_OK=true")
+
+    id_note_raw = (data.get("identityDistinctnessNote") or "").strip()
+    if _object_pair_identity_too_close_heuristic(oa, ob):
+        logger.info("VIDEO_PLAN_IDENTITY_DISTINCTNESS_OK=false")
+        logger.info(
+            'VIDEO_PLAN_IDENTITY_DISTINCTNESS_NOTE="%s"',
+            "server_near_twin_pair",
+        )
+        logger.info("VIDEO_PLAN_REJECT_REASON=identity_too_close")
+        return None, "identity_too_close"
+
+    id_distinct_raw = data.get("objectPairIdentityDistinctOk")
+    if _parse_viewer_clarity_ok(id_distinct_raw) is not True:
+        logger.info("VIDEO_PLAN_IDENTITY_DISTINCTNESS_OK=false")
+        logger.info(
+            'VIDEO_PLAN_IDENTITY_DISTINCTNESS_NOTE="%s"',
+            (id_note_raw or "objectPairIdentityDistinctOk_not_true")[:300],
+        )
+        logger.info("VIDEO_PLAN_REJECT_REASON=identity_too_close")
+        return None, "identity_too_close"
+
+    logger.info("VIDEO_PLAN_IDENTITY_DISTINCTNESS_OK=true")
+    logger.info(
+        'VIDEO_PLAN_IDENTITY_DISTINCTNESS_NOTE="%s"',
+        (id_note_raw or "")[:300],
+    )
 
     return {
         "productNameResolved": pn,
@@ -677,6 +742,8 @@ Locked output language for all user-facing plan fields (from description classif
         if not plan:
             if v_err == "secondary_objects_not_distinct":
                 logger.info("VIDEO_PLAN_ABORTED reason=secondary_objects_not_distinct")
+            if v_err == "identity_too_close":
+                logger.info("VIDEO_PLAN_ABORTED reason=identity_too_close")
             if v_err == "missing_object_secondary":
                 logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
             else:
