@@ -39,19 +39,24 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
         "title cards, watermarks, headline, UI, or brand names in the image — blank/generic surfaces only."
     )
 
+    opening = (plan.get("openingFrameDescription") or "").strip()
+
     if _is_side_by_side_plan(plan):
         a_line = f"{oa} with {oas}" if oas else oa
         b_line = f"{ob} with {obs}" if obs else ob
-        return (
-            f"Single photorealistic still frame, clean balanced commercial composition. "
-            f"Side-by-side comparison: {a_line} on one side and {b_line} on the other, both fully visible and equally legible; "
-            f"neither subject dominant or obscured; shared cohesive environment. "
+        brief = (
+            f"Single photorealistic still frame, tight unified composition. "
+            f"Both subjects visible: {a_line} and {b_line}, close together or slightly overlapping, same world and lighting; "
+            f"no replacement, no disappearance; A’s secondary anchors the scene. "
             f"Soft natural lighting, realistic materials. {no_text}"
         )
+        if opening:
+            return f"Creative brief: {opening} {brief}"
+        return brief
 
     if rd == "B_replaces_A":
         sec = oas or "the contextual secondary object"
-        return (
+        body = (
             f"Single photorealistic still frame, clean centered commercial composition. "
             f"The replacement is already complete: only {ob} is visible as the main subject, occupying the role, scale, and position that {oa} would hold. "
             f"{oa} must not appear. "
@@ -59,9 +64,12 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
             f"keep A's secondary/context object ({sec}) visible in natural relation to {ob} (side {psf}). "
             f"Soft natural lighting, realistic materials. {no_text}"
         )
+        if opening:
+            return f"Creative brief: {opening} {body}"
+        return body
 
     sec_b = obs or "the contextual secondary object"
-    return (
+    body = (
         f"Single photorealistic still frame, clean centered commercial composition. "
         f"The replacement is already complete: only {oa} is visible as the main subject, occupying the role, scale, and position that {ob} would hold. "
         f"{ob} must not appear. "
@@ -69,6 +77,9 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
         f"keep B's secondary/context object ({sec_b}) visible in natural relation to {oa} (side {psf}). "
         f"Soft natural lighting, realistic materials. {no_text}"
     )
+    if opening:
+        return f"Creative brief: {opening} {body}"
+    return body
 
 
 def generate_video_start_image_data_uri(plan: Dict[str, Any]) -> Optional[str]:
