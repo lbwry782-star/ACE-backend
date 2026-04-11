@@ -6,6 +6,7 @@ Used by app.py and worker_video.py only — does not touch image engine.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -60,12 +61,17 @@ def video_job_set_resolved_product_name(job_id: str, resolved: str, source: str)
     jid = (job_id or "").strip()
     if not jid:
         return
+    val = (resolved or "").strip()
     get_redis().hset(
         job_key(jid),
         mapping={
-            "resolved_product_name": (resolved or "").strip(),
+            "resolved_product_name": val,
             "product_name_source": (source or "").strip(),
         },
+    )
+    logger.info(
+        "VIDEO_PRODUCT_NAME_RESOLVED_STORED value=%s",
+        json.dumps(val, ensure_ascii=False),
     )
 
 
@@ -107,6 +113,7 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
     data = r.hgetall(job_key(job_id))
     if not data:
         return None
+    rp = (data.get("resolved_product_name") or "").strip()
     return {
         "status": (data.get("status") or "running").strip(),
         "videoUrl": data.get("video_url") or "",
@@ -115,7 +122,8 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
         "publicBaseUrl": data.get("public_base_url") or "",
         "postprocessRan": (data.get("postprocess_ran") or "").strip(),
         "error": data.get("error") or "",
-        "resolvedProductName": (data.get("resolved_product_name") or "").strip(),
+        "resolvedProductName": rp,
+        "productNameResolved": rp,
         "productNameSource": (data.get("product_name_source") or "").strip(),
         "productDescription": (data.get("product_description") or "").strip(),
     }

@@ -321,6 +321,10 @@ def generate_one_video_mvp(
         raise RunwayVideoMVPError("product_name_generation_failed")
     logger.info("VIDEO_PRODUCT_NAME_SOURCE=%s", pn_source)
     logger.info(
+        "VIDEO_PRODUCT_NAME_RESOLVED_CREATED value=%s",
+        json.dumps(canonical_name, ensure_ascii=False),
+    )
+    logger.info(
         "VIDEO_PRODUCT_NAME_RESOLVED=%s", json.dumps(canonical_name, ensure_ascii=False)
     )
     if job_id:
@@ -535,6 +539,10 @@ def generate_one_video_mvp(
                         "VIDEO_JOB_CHOSEN_URL source=processed jobId=%s",
                         job_id,
                     )
+                logger.info(
+                    "VIDEO_PRODUCT_NAME_RESOLVED_PACKAGED value=%s",
+                    json.dumps(canonical_name, ensure_ascii=False),
+                )
                 return final_url, marketing_text_for_api, headline_for_overlay
             raise RunwayVideoMVPError("generation_failed")
 

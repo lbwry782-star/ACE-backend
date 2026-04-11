@@ -1007,6 +1007,13 @@ def video_status():
         vu = job.get("videoUrl") or ""
         out["videoUrl"] = vu
         out["marketingText"] = job.get("marketingText") or ""
+        rp = (job.get("productNameResolved") or job.get("resolvedProductName") or "").strip()
+        out["productNameResolved"] = rp
+        out["product_name_resolved"] = rp
+        logger.info(
+            "VIDEO_PRODUCT_NAME_RESOLVED_RETURNED value=%s",
+            json.dumps(rp, ensure_ascii=False),
+        )
         logger.info("VIDEO_JOB_RESULT jobId=%s video_url=%s", job_id, vu)
     if status == "error":
         err = job.get("error") or "video_generation_failed"
