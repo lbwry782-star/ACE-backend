@@ -1,7 +1,7 @@
 """
 ACE Runway video — first MVP path (isolated from the image engine).
 
-Currently: one video output only, simple prompting, Runway POST /v1/image_to_video; default gen4.5 (text-to-video, promptImage omitted); gen4_turbo uses promptImage when selected via RUNWAY_VIDEO_MODEL.
+Currently: one video output only, simple prompting, Runway POST /v1/image_to_video with generated promptImage (image-to-video) for all models including gen4.5.
 Future ACE video engine may produce two outputs and richer concept prompting; keep this module minimal until then.
 """
 
@@ -174,22 +174,26 @@ def _create_text_to_video_task(
     prompt_text: str,
     prompt_image_data_uri: Optional[str] = None,
 ) -> str:
+    uri = (prompt_image_data_uri or "").strip()
+    if not uri:
+        logger.error(
+            "RUNWAY_MVP missing_prompt_image model=%s (image-to-video requires promptImage)",
+            model,
+        )
+        raise RunwayVideoMVPError("missing_prompt_image")
     url = f"{base_url}/v1/image_to_video"
     body: Dict[str, Any] = {
         "model": model,
         "promptText": prompt_text,
+        "promptImage": uri,
         "ratio": "1280:720",
         "duration": 5,
     }
-    # gen4.5: text-to-video — omit promptImage per Runway docs. gen4_turbo and others: promptImage required.
-    if model == "gen4.5":
-        logger.info("RUNWAY_MVP task_create model=%s mode=text_only promptImage=omitted", model)
-    elif prompt_image_data_uri:
-        body["promptImage"] = prompt_image_data_uri
-        logger.info("RUNWAY_MVP task_create model=%s promptImage=generated", model)
-    else:
-        body["promptImage"] = _NEUTRAL_PROMPT_IMAGE_DATA_URI
-        logger.info("RUNWAY_MVP task_create model=%s promptImage=neutral", model)
+    logger.info("RUNWAY_PROMPT_IMAGE_INCLUDED=true")
+    logger.info(
+        "RUNWAY_MVP task_create model=%s mode=image_to_video",
+        model,
+    )
     resp = session.post(url, json=body, headers=_headers(), timeout=_HTTP_TIMEOUT_SECONDS)
     if resp.status_code >= 400:
         logger.error(
@@ -374,22 +378,21 @@ def generate_one_video_mvp(
     plan["marketingLanguage"] = marketing_lang
     log_video_job_plan_integrity(plan)
 
-    prompt_image_data_uri: Optional[str] = None
-    # gen4.5 omits promptImage; skip start-image generation (not used by Runway).
-    if model != "gen4.5":
-        logger.info("VIDEO_JOB_STEP step=build_start_image start")
-        prompt_image_data_uri = generate_video_start_image_data_uri(plan)
-        logger.info(
-            "VIDEO_JOB_STEP step=build_start_image done has_uri=%s",
-            bool(prompt_image_data_uri),
-        )
-        if prompt_image_data_uri:
-            prompt = build_runway_interaction_prompt_from_plan(plan)
-        else:
-            prompt = build_runway_prompt_from_plan(plan)
-    else:
-        logger.info("VIDEO_JOB_STEP step=build_start_image skipped model=gen4.5")
-        prompt = build_runway_prompt_from_plan(plan)
+    logger.info(
+        "VIDEO_START_IMAGE_FORCED enabled=true model=%s",
+        model,
+    )
+    logger.info("VIDEO_JOB_STEP step=build_start_image start")
+    prompt_image_data_uri = generate_video_start_image_data_uri(plan)
+    logger.info(
+        "VIDEO_JOB_STEP step=build_start_image done has_uri=%s",
+        bool(prompt_image_data_uri),
+    )
+    if not (prompt_image_data_uri or "").strip():
+        logger.error("VIDEO_START_IMAGE_FAILED reason=generation_returned_empty")
+        raise RunwayVideoMVPError("start_image_failed")
+    logger.info("VIDEO_START_IMAGE source=generated_from_plan")
+    prompt = build_runway_interaction_prompt_from_plan(plan)
 
     prompt, text_policy_sanitized = sanitize_runway_prompt_for_video_text_policy(prompt)
     logger.info("VIDEO_TEXT_POLICY_SANITIZED=%s", text_policy_sanitized)
