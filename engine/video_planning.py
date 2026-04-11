@@ -86,17 +86,38 @@ LANGUAGE
 - Job: {lang_name} ({lang}), from product description only (Hebrew or English). advertisingPromise, headlineText, shortReplacementScript, morphologicalReason, promiseReason: primarily {lang_name}. Loanwords/brands (AI, SaaS, etc.) OK. objectA/objectB/objectA_secondary/objectB_secondary: short English nouns allowed for morphology.
 
 PIPELINE (fixed)
-- Frame 1 already shows replacement: B in A’s role, A’s background, A’s secondary, A’s pose; motion continues B with A’s secondary. A and B must be EXTREMELY close in overall silhouette, proportion, mass—non-negotiable; viewer must feel B belongs in A’s place before any verbal explanation.
+- Frame 1 already shows replacement: B in A’s role, A’s background, A’s secondary, A’s pose; motion continues B with A’s secondary. Choose objectA and objectB using PHOTOGRAPHIC SIMILARITY (below)—the only selection rule for visual fit; viewer must feel B belongs in A’s place before any verbal explanation.
+
+PHOTOGRAPHIC SIMILARITY (object pair selection — single rule)
+Object A and Object B must be selected based on PHOTOGRAPHIC SIMILARITY.
+
+Definition of PHOTOGRAPHIC SIMILARITY (strict priority order):
+
+1) SHAPE / OUTLINE (highest priority)
+   - Objects must have highly similar silhouettes.
+   - Replacement must remain immediately legible.
+
+2) COLOR
+   - Prefer similar dominant color families.
+
+3) MATERIAL / TEXTURE
+   - Prefer similar surface qualities (metal, plastic, matte, glossy, etc.).
+
+4) PHOTOGRAPHIC FEEL
+   - Lighting, finish, and overall visual character should feel coherent.
+
+REPLACEMENT CLARITY (hard)
+- After replacement, the viewer must clearly understand: “Object B has replaced Object A” (or the chosen direction per replacementDirection). If that clarity is weak, reject the pair.
 
 OBJECTS
 - Iconic concrete physical primaries; no brands/logos/text-as-object/vague environments. Secondary: separate concrete prop in the same everyday scene; not part of the main (no label/packaging-line-as-secondary). A from product description (whole-object grasp, not contour trivia).
 - If objectA and objectB differ, objectA_secondary and objectB_secondary MUST differ: each primary gets its own classic contextual prop (not the same noun under underscores vs spaces). Reusing one secondary for both sides when A≠B is invalid.
 
 ICONIC + VIEWER CLARITY (HARD)
-- Silhouette match alone is NOT enough. Reject weak B: packaging subtype, utilitarian generic variant, non-iconic identity, ambiguous swap (“which box?”). Examples to reject: gift box↔shoe box; generic↔shipping/cardboard/product box; generic bag↔shopping bag as weak B; mailer/logistics identity vs named object. VIEWER TEST: instant “B replaced A”; discard weak-B even if shape-close—no shoe-box/mailer shortcuts.
+- Photographic similarity alone is NOT enough. Reject weak B: packaging subtype, utilitarian generic variant, non-iconic identity, ambiguous swap (“which box?”). Examples to reject: gift box↔shoe box; generic↔shipping/cardboard/product box; generic bag↔shopping bag as weak B; mailer/logistics identity vs named object. VIEWER TEST: instant “B replaced A”; discard weak-B even if photographically close—no shoe-box/mailer shortcuts.
 
 SEARCH
-- Compare multiple serious candidates; do not stop at first OK pair. Prefer less clichéd pairs only if morphology stays equally extreme. B must satisfy (a) extreme whole-form match to A AND (b) promise fit—never trade shape for promise.
+- Compare multiple serious candidates; do not stop at first OK pair. Prefer less clichéd pairs only if photographic fit stays equally strong. B must satisfy (a) strong photographic-similarity fit to A AND (b) promise fit—never trade photographic fit for promise.
 
 REPLACEMENT + PROMISE
 - Prefer B_replaces_A (keep A bg + secondary). Else A_replaces_B. Set replacementDirection, preservedBackgroundFrom, preservedSecondaryFrom. advertisingPromise from product description.
@@ -111,7 +132,7 @@ VIDEO (videoPromptCore)
 - Pictorial scene/motion: cinematic commercial, smooth camera, objects/light/materials. No headline in core; no on-screen text/logos.
 
 QUALITY
-- shortReplacementScript, morphologicalReason, promiseReason in {lang_name}. morphologicalReason: strict whole-object shape + iconic clarity. videoPromptCore: intuitive replacement over long exposition.
+- shortReplacementScript, morphologicalReason, promiseReason in {lang_name}. morphologicalReason: whole-object iconic clarity; explain how A/B satisfy PHOTOGRAPHIC SIMILARITY (priority order above). videoPromptCore: intuitive replacement over long exposition.
 
 """
 
