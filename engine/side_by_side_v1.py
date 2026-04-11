@@ -24,7 +24,11 @@ from PIL import Image, ImageDraw, ImageFont
 from threading import Lock
 
 from . import openai_retry
-from engine.video_language import normalize_video_content_language, video_language_display_name
+from engine.video_language import (
+    detect_text_language,
+    normalize_video_content_language,
+    video_language_display_name,
+)
 from engine.video_product_name import product_name_reused_in_copy
 
 logger = logging.getLogger(__name__)
@@ -3071,9 +3075,9 @@ Product description (context only): {desc}
 Advertising goal: {goal}
 
 Requirements:
-- Write primarily in {lang_name}. The copy must read naturally in {lang_name}.
-- Short foreign loanwords are allowed when natural: AI, SaaS, CRM, abbreviations, brand/product names — keep them untranslated; do not flip the whole piece to another language because of a few such terms.
-- Avoid chaotic mixed-language paragraphs; stay coherent and {lang_name}-dominant.
+- You MUST write the entire marketing copy in {lang_name}. Do not use any other language for sentences or clauses.
+- Exception: short unavoidable loanwords (AI, SaaS, CRM, common abbreviations, or the canonical product name if Latin) may stay as-is; everything else must be {lang_name}.
+- No mixed-language paragraphs; no alternating Hebrew/English sentences unless the job language is the only prose language.
 - Exactly 45-55 words (count carefully)
 - Must include product name
 - Must be product-specific (not generic marketing language)
@@ -3129,11 +3133,19 @@ def generate_marketing_copy(
 
     max_attempts = max_retries + 1
     retry_tail = ""
-    system_msg = (
-        f"You are a marketing copywriter. Output must read primarily in {lang_name}; "
-        f"short Latin technical/brand terms (e.g. AI, SaaS) may stay as-is when natural. "
-        f"Return only the marketing copy text, no JSON, no quotes."
-    )
+    if lang == "he":
+        system_msg = (
+            "You are a marketing copywriter. You MUST write the marketing text entirely in Hebrew. "
+            "Do not produce English sentences or English marketing copy. "
+            "Short Latin loanwords (e.g. AI, SaaS) or the exact canonical product name if given in Latin may appear as-is. "
+            "Return only the marketing copy text, no JSON, no quotes."
+        )
+    else:
+        system_msg = (
+            "You are a marketing copywriter. You MUST write the marketing text entirely in English. "
+            "Do not produce Hebrew or other languages in the body of the copy. "
+            "Return only the marketing copy text, no JSON, no quotes."
+        )
     if require_verbatim_product_name:
         system_msg += (
             " When the user message includes a canonical product name as a JSON-quoted literal, "
@@ -3163,7 +3175,8 @@ def generate_marketing_copy(
             def _copy_call():
                 is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
                 if is_o_model:
-                    r = client.responses.create(model=model_name, input=prompt)
+                    full_input = f"{system_msg.strip()}\n\n{prompt}"
+                    r = client.responses.create(model=model_name, input=full_input)
                     return r.output_text.strip()
                 r = client.chat.completions.create(
                     model=model_name,
@@ -6377,10 +6390,13 @@ def generate_preview_data(
     # Text-only preview: return plan + marketing copy, no image (default unless includeImage=true)
     text_only = not payload_dict.get("includeImage", False)
     if text_only:
+        _mk_lang = detect_text_language(product_description)
+        logger.info("MARKETING_TEXT_LANGUAGE_APPLIED lang=%s", _mk_lang)
         marketing_copy = generate_marketing_copy(
             product_name=product_name,
             product_description=product_description,
-            ad_goal=ad_goal
+            ad_goal=ad_goal,
+            output_language=_mk_lang,
         )
         text_only_response = {
             "ad_goal": ad_goal,
@@ -6508,10 +6524,13 @@ def generate_preview_data(
     logger.info(f"[{request_id}] PREVIEW_IMAGE_CACHE hit={image_cache_hit} mode={ACE_IMAGE_MODE} key={final_image_cache_key[:16]}... bytes={len(image_bytes)} IMAGE_GEN_CALLED={image_gen_called}")
     
     # 50-word body text for on-screen display and ZIP (copy phase infers from image; we generate for display/store)
+    _mk_lang = detect_text_language(product_description)
+    logger.info("MARKETING_TEXT_LANGUAGE_APPLIED lang=%s", _mk_lang)
     body_text_50 = generate_marketing_copy(
         product_name=product_name,
         product_description=product_description,
-        ad_goal=ad_goal
+        ad_goal=ad_goal,
+        output_language=_mk_lang,
     )
     # Return image + headline + body for display and for artifact store (sketch only in image; headline/body separate)
     return {

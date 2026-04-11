@@ -32,6 +32,7 @@ from engine.video_bidi import (
 from engine.video_headline_postprocess import postprocess_video_headline
 from engine.video_jobs_redis import video_job_set_resolved_product_name
 from engine.video_language import (
+    detect_text_language,
     evaluate_headline_overlay_language,
     log_video_language_decision,
     normalize_video_content_language,
@@ -305,6 +306,7 @@ def generate_one_video_mvp(
 
     base = _env_base_url()
     model = _env_model()
+    marketing_lang = detect_text_language(product_description)
     video_lang, _, _ = log_video_language_decision(product_description)
     try:
         pn_source, canonical_name = resolve_video_product_name(
@@ -355,6 +357,7 @@ def generate_one_video_mvp(
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
 
     apply_canonical_product_name_to_video_plan(plan, canonical_name)
+    plan["marketingLanguage"] = marketing_lang
     log_video_job_plan_integrity(plan)
 
     prompt_image_data_uri: Optional[str] = None
@@ -436,11 +439,12 @@ def generate_one_video_mvp(
                         "VIDEO_COPY_INPUT_PRODUCT_NAME=%s",
                         json.dumps(canonical_name, ensure_ascii=False),
                     )
+                    logger.info("MARKETING_TEXT_LANGUAGE_APPLIED lang=%s", marketing_lang)
                     marketing_text_for_api = generate_marketing_copy(
                         canonical_name,
                         (product_description or "").strip(),
                         ad_goal,
-                        output_language=video_lang,
+                        output_language=marketing_lang,
                         require_verbatim_product_name=True,
                     )
                 except Exception as e:
@@ -462,7 +466,7 @@ def generate_one_video_mvp(
                 if not reuse_c:
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_marketing_copy")
                     raise RunwayVideoMVPError("product_name_copy_mismatch")
-                _enforce_marketing_copy_language(video_lang, marketing_text_for_api)
+                _enforce_marketing_copy_language(marketing_lang, marketing_text_for_api)
                 _enforce_headline_overlay_language(
                     video_lang, headline_for_overlay, canonical_name
                 )
@@ -474,7 +478,7 @@ def generate_one_video_mvp(
                 marketing_text_for_api, bidi_copy, segs_copy = (
                     finalize_hebrew_mixed_bidi_for_display(
                         marketing_text_for_api,
-                        content_language=video_lang,
+                        content_language=marketing_lang,
                         protected_phrases=_bidi_prot,
                     )
                 )
