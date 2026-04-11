@@ -56,6 +56,10 @@ Field notes:
 - objectPairViewerClarityOk: boolean true only if both primaries are iconic standalone objects and replacement is legible; if not, pick another pair—never false to bypass.
 - objectPairIdentityDistinctOk: boolean true only if A and B are photographically similar yet clearly two different objects (not a subtype/variant/upgrade); never false to bypass.
 - identityDistinctnessNote: one short line on why the pair passes or fails identity distinctness (English OK).
+- videoVisualMode: "REPLACEMENT" (preferred) or "SIDE_BY_SIDE" only when the MODE DECISION rules require it.
+- replacementClarityOk: true if the viewer would immediately understand what replaced what in a single-subject replacement shot; false if that read would be weak or ambiguous.
+- similarityStrongEnoughForReplacement: true if photographic similarity is strong enough for a clear replacement composition; false if not.
+- sideBySideReason: required non-empty string when videoVisualMode is SIDE_BY_SIDE (why coexistence beats replacement); use "" when REPLACEMENT.
 
 Required keys (all strings except where noted):
 {
@@ -76,7 +80,11 @@ Required keys (all strings except where noted):
   "videoPromptCore": string,
   "objectPairViewerClarityOk": boolean,
   "objectPairIdentityDistinctOk": boolean,
-  "identityDistinctnessNote": string
+  "identityDistinctnessNote": string,
+  "videoVisualMode": "REPLACEMENT" or "SIDE_BY_SIDE",
+  "replacementClarityOk": boolean,
+  "similarityStrongEnoughForReplacement": boolean,
+  "sideBySideReason": string
 }
 """
 
@@ -89,8 +97,24 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
 LANGUAGE
 - Job: {lang_name} ({lang}), from product description only (Hebrew or English). advertisingPromise, headlineText, shortReplacementScript, morphologicalReason, promiseReason: primarily {lang_name}. Loanwords/brands (AI, SaaS, etc.) OK. objectA/objectB/objectA_secondary/objectB_secondary: short English nouns allowed for morphology.
 
-PIPELINE (fixed)
+VISUAL MODE (REPLACEMENT preferred; SIDE_BY_SIDE only when rules below say so)
+- REPLACEMENT is always preferred. Use SIDE_BY_SIDE only when ALL are true: (1) Strong pair — A and B form a strong ACE-worthy comparison, visually and conceptually meaningful. (2) Replacement is weak — the viewer would NOT immediately understand what replaced what, or replacement would feel forced or ambiguous. (3) Coexistence is stronger — the idea is communicated better by showing both objects together than by replacing one with the other.
+
+STRICT PROHIBITION (SIDE_BY_SIDE)
+- DO NOT use SIDE_BY_SIDE if visual similarity is strong enough for clear REPLACEMENT. If the viewer can clearly and immediately understand “Object B replaces Object A” (or the chosen direction), you MUST set videoVisualMode to REPLACEMENT. SIDE_BY_SIDE is forbidden in that case.
+
+MODE DECISION
+- Choose REPLACEMENT when: visual similarity is strong, replacement is immediately legible, and the viewer instantly understands the substitution.
+- Choose SIDE_BY_SIDE when: the pair is strong, but replacement clarity is weak (or replacement would be forced), and interaction-based comparison is stronger than a single-subject replacement shot.
+
+REPLACEMENT PIPELINE (when videoVisualMode is REPLACEMENT)
 - Frame 1 already shows replacement: B in A’s role, A’s background, A’s secondary, A’s pose; motion continues B with A’s secondary. Choose objectA and objectB using PHOTOGRAPHIC SIMILARITY (below)—the only selection rule for visual fit; viewer must feel B belongs in A’s place before any verbal explanation.
+
+SIDE BY SIDE PIPELINE (when videoVisualMode is SIDE_BY_SIDE)
+- START FRAME: At the beginning of the video, object A and object B must already appear side by side; both fully visible and immediately legible.
+- INTERACTION: During the video, A and B must interact; the interaction must be meaningful and strengthen the comparison — not random or decorative motion.
+- VISUAL CLARITY: Both objects remain distinct and readable; neither may visually dominate or hide the other.
+- SECONDARIES: Preserve context logic when possible; do not create confusion between the two primaries.
 
 PHOTOGRAPHIC SIMILARITY (object pair selection — single rule)
 Object A and Object B must be selected based on PHOTOGRAPHIC SIMILARITY.
@@ -140,10 +164,10 @@ TEXT-FREE VIDEO
 - Generated frames: zero readable text (captions, UI, signs, packaging type, logos, watermarks, numbers as graphics). No readable strings in videoPromptCore or shortReplacementScript. Brands only in advertisingPromise/promiseReason/headline metadata.
 
 VIDEO (videoPromptCore)
-- Pictorial scene/motion: cinematic commercial, smooth camera, objects/light/materials. No headline in core; no on-screen text/logos.
+- REPLACEMENT mode: pictorial scene/motion for single-subject replacement continuity (cinematic commercial, smooth camera). SIDE_BY_SIDE mode: scene/motion for two-subject comparison with meaningful interaction; both subjects stay readable. No headline in core; no on-screen text/logos.
 
 QUALITY
-- shortReplacementScript, morphologicalReason, promiseReason in {lang_name}. morphologicalReason: whole-object iconic clarity; explain how A/B satisfy PHOTOGRAPHIC SIMILARITY (priority order above) and identity distinctness. videoPromptCore: intuitive replacement over long exposition.
+- shortReplacementScript, morphologicalReason, promiseReason in {lang_name}. morphologicalReason: whole-object iconic clarity; explain how A/B satisfy PHOTOGRAPHIC SIMILARITY (priority order above) and identity distinctness. videoPromptCore: match videoVisualMode — replacement continuity vs side-by-side comparison and interaction.
 
 """
 
@@ -422,6 +446,21 @@ def _fuzzy_headline_decision_raw(raw: Any) -> str:
     return str(raw or "").strip()
 
 
+def _norm_video_visual_mode(raw: Any) -> Optional[str]:
+    """REPLACEMENT | SIDE_BY_SIDE, or None if invalid."""
+    s = re.sub(r"\s+", "_", str(raw or "").strip().lower())
+    s = s.replace("-", "_")
+    if s in ("replacement", "replace"):
+        return "REPLACEMENT"
+    if s in ("side_by_side", "sidebyside", "side_by_side_mode", "sxs"):
+        return "SIDE_BY_SIDE"
+    return None
+
+
+def _is_side_by_side_plan(plan: Dict[str, Any]) -> bool:
+    return _norm_video_visual_mode(plan.get("videoVisualMode")) == "SIDE_BY_SIDE"
+
+
 # snake_case / alternate keys from some models → camelCase
 _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("product_name_resolved", "productNameResolved"),
@@ -442,6 +481,10 @@ _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("object_pair_viewer_clarity_ok", "objectPairViewerClarityOk"),
     ("object_pair_identity_distinct_ok", "objectPairIdentityDistinctOk"),
     ("identity_distinctness_note", "identityDistinctnessNote"),
+    ("video_visual_mode", "videoVisualMode"),
+    ("replacement_clarity_ok", "replacementClarityOk"),
+    ("similarity_strong_enough_for_replacement", "similarityStrongEnoughForReplacement"),
+    ("side_by_side_reason", "sideBySideReason"),
 )
 
 
@@ -463,6 +506,8 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     reason_code: missing_videoPromptCore | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
     | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | secondary_objects_not_distinct
     | identity_too_close
+    | missing_or_invalid_videoVisualMode | missing_replacementClarityOk | missing_similarityStrongEnoughForReplacement
+    | side_by_side_forbidden_when_replacement_clear | missing_sideBySideReason
     """
     if not data:
         return None, "missing_videoPromptCore"
@@ -556,6 +601,53 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         (id_note_raw or "")[:300],
     )
 
+    mode_raw = _norm_video_visual_mode(data.get("videoVisualMode"))
+    if mode_raw is None:
+        return None, "missing_or_invalid_videoVisualMode"
+
+    rc_parsed = _parse_viewer_clarity_ok(data.get("replacementClarityOk"))
+    ss_parsed = _parse_viewer_clarity_ok(data.get("similarityStrongEnoughForReplacement"))
+    if rc_parsed is None:
+        return None, "missing_replacementClarityOk"
+    if ss_parsed is None:
+        return None, "missing_similarityStrongEnoughForReplacement"
+    repl_clear = rc_parsed is True
+    sim_strong = ss_parsed is True
+
+    sbs_reason = (data.get("sideBySideReason") or "").strip()
+    if mode_raw == "SIDE_BY_SIDE":
+        if repl_clear and sim_strong:
+            logger.info("VIDEO_PLAN_MODE=SIDE_BY_SIDE")
+            logger.info(
+                "VIDEO_PLAN_REPLACEMENT_CLARITY_OK=%s",
+                "true" if repl_clear else "false",
+            )
+            logger.info(
+                "VIDEO_PLAN_SIMILARITY_STRONG_ENOUGH_FOR_REPLACEMENT=%s",
+                "true" if sim_strong else "false",
+            )
+            logger.info(
+                'VIDEO_PLAN_SIDE_BY_SIDE_REASON="%s"',
+                (sbs_reason or "")[:300],
+            )
+            return None, "side_by_side_forbidden_when_replacement_clear"
+        if not sbs_reason:
+            return None, "missing_sideBySideReason"
+
+    logger.info("VIDEO_PLAN_MODE=%s", mode_raw)
+    logger.info(
+        "VIDEO_PLAN_REPLACEMENT_CLARITY_OK=%s",
+        "true" if repl_clear else "false",
+    )
+    logger.info(
+        "VIDEO_PLAN_SIMILARITY_STRONG_ENOUGH_FOR_REPLACEMENT=%s",
+        "true" if sim_strong else "false",
+    )
+    logger.info(
+        'VIDEO_PLAN_SIDE_BY_SIDE_REASON="%s"',
+        (sbs_reason if mode_raw == "SIDE_BY_SIDE" else "")[:300],
+    )
+
     return {
         "productNameResolved": pn,
         "advertisingPromise": apromise,
@@ -572,6 +664,10 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         "headlineDecision": headline_decision,
         "headlineText": headline_text,
         "videoPromptCore": core,
+        "videoVisualMode": mode_raw,
+        "replacementClarityOk": repl_clear,
+        "similarityStrongEnoughForReplacement": sim_strong,
+        "sideBySideReason": sbs_reason if mode_raw == "SIDE_BY_SIDE" else "",
     }, None
 
 
@@ -612,6 +708,22 @@ def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tup
     if _secondaries_violate_distinct_rule(oa, ob, oa_sec, ob_sec):
         logger.info("VIDEO_PLAN_SECONDARY_DISTINCT_OK=false")
         return False, "secondary_objects_not_distinct"
+    vm = _norm_video_visual_mode(plan.get("videoVisualMode"))
+    if vm is None:
+        return False, "missing_or_invalid_videoVisualMode"
+    if plan.get("replacementClarityOk") is None:
+        return False, "missing_replacementClarityOk"
+    if plan.get("similarityStrongEnoughForReplacement") is None:
+        return False, "missing_similarityStrongEnoughForReplacement"
+    if vm == "SIDE_BY_SIDE":
+        rc = plan.get("replacementClarityOk")
+        ss = plan.get("similarityStrongEnoughForReplacement")
+        repl_clear = _parse_viewer_clarity_ok(rc) is True
+        sim_strong = _parse_viewer_clarity_ok(ss) is True
+        if repl_clear and sim_strong:
+            return False, "side_by_side_forbidden_when_replacement_clear"
+        if not (plan.get("sideBySideReason") or "").strip():
+            return False, "missing_sideBySideReason"
     logger.info("VIDEO_PLAN_SECONDARY_DISTINCT_OK=true")
     return True, ""
 
@@ -645,6 +757,19 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
         'VIDEO_PLAN_INTEGRITY headlineDecision=%s headlineText="%s"',
         plan.get("headlineDecision"),
         (plan.get("headlineText") or "")[:160],
+    )
+    logger.info("VIDEO_PLAN_MODE=%s", plan.get("videoVisualMode") or "REPLACEMENT")
+    logger.info(
+        "VIDEO_PLAN_REPLACEMENT_CLARITY_OK=%s",
+        "true" if plan.get("replacementClarityOk") is True else "false",
+    )
+    logger.info(
+        "VIDEO_PLAN_SIMILARITY_STRONG_ENOUGH_FOR_REPLACEMENT=%s",
+        "true" if plan.get("similarityStrongEnoughForReplacement") is True else "false",
+    )
+    logger.info(
+        'VIDEO_PLAN_SIDE_BY_SIDE_REASON="%s"',
+        ((plan.get("sideBySideReason") or "")[:260]),
     )
 
 
@@ -742,9 +867,11 @@ Locked output language for all user-facing plan fields (from description classif
         if not plan:
             if v_err == "secondary_objects_not_distinct":
                 logger.info("VIDEO_PLAN_ABORTED reason=secondary_objects_not_distinct")
-            if v_err == "identity_too_close":
+            elif v_err == "identity_too_close":
                 logger.info("VIDEO_PLAN_ABORTED reason=identity_too_close")
-            if v_err == "missing_object_secondary":
+            elif v_err == "side_by_side_forbidden_when_replacement_clear":
+                logger.info("VIDEO_PLAN_ABORTED reason=side_by_side_forbidden_when_replacement_clear")
+            elif v_err == "missing_object_secondary":
                 logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
             else:
                 logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
@@ -906,12 +1033,22 @@ def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bo
     """Shorter ACE→Runway bridge if the detailed builder fails; keeps prior behavior."""
     core = (plan.get("videoPromptCore") or "").strip()
     script = (plan.get("shortReplacementScript") or "").strip()
+    oa = (plan.get("objectA") or "").strip()
+    ob = (plan.get("objectB") or "").strip()
 
-    parts = [
-        "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
-        f"Scene: {core}" if core else "",
-        f"Replacement: {script}" if script else "",
-    ]
+    if _is_side_by_side_plan(plan):
+        parts = [
+            "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
+            f"Side-by-side comparison: both {oa} and {ob} fully visible; meaningful interaction; balanced.",
+            f"Scene: {core}" if core else "",
+            f"Beat: {script}" if script else "",
+        ]
+    else:
+        parts = [
+            "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
+            f"Scene: {core}" if core else "",
+            f"Replacement: {script}" if script else "",
+        ]
     return _finalize_runway_prompt("", " ".join(p for p in parts if p))
 
 
@@ -944,7 +1081,15 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     a_setup = f"{oa} + {oas}" if oas else oa
     b_setup = f"{ob} + {obs}" if obs else ob
 
-    if rd == "B_replaces_A":
+    if _is_side_by_side_plan(plan):
+        scene = (
+            f"Side-by-side comparison mode: open with {a_setup} and {b_setup} both fully visible, balanced, equally legible; "
+            f"shared cohesive environment (background cue side {pbg}, secondary context side {psf}); promise: {promise}. "
+            f"Meaningful interaction between both subjects that strengthens the comparison — not random or decorative motion. "
+            f"Neither subject may dominate or obscure the other; both stay readable throughout. "
+            f"Action: {core}"
+        )
+    elif rd == "B_replaces_A":
         scene = (
             f"Start: replacement already visible — {b_setup} in {oa}'s place, bg {pbg}, secondary {psf}, promise: {promise}. "
             f"Motion: {ob} with A's secondary; one smooth shot, no cuts. "
@@ -1026,7 +1171,18 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
     if not core:
         raise ValueError("missing videoPromptCore")
 
-    if rd == "B_replaces_A":
+    a_setup = f"{oa} + {oas}" if oas else oa
+    b_setup = f"{ob} + {obs}" if obs else ob
+
+    if _is_side_by_side_plan(plan):
+        scene = (
+            f"The first frame is supplied as the start image; it already shows {a_setup} and {b_setup} side by side, "
+            f"both clearly visible and balanced. Video motion only: meaningful interaction between both primaries that "
+            f"strengthens the comparison; keep both distinct and readable; do not replace, morph, or substitute one object "
+            f"for the other. Background/secondary context consistent with sides {pbg}/{psf}. "
+            f"Action: {core}"
+        )
+    elif rd == "B_replaces_A":
         sec = oas or "the contextual secondary object"
         scene = (
             f"The first frame is supplied as the start image; replacement is already complete. "
@@ -1067,7 +1223,12 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
     oas = (plan.get("objectA_secondary") or "").strip()
     obs = (plan.get("objectB_secondary") or "").strip()
 
-    if rd == "B_replaces_A":
+    if _is_side_by_side_plan(plan):
+        motion = (
+            f"Both {oa} and {ob} side by side with secondaries; meaningful comparison interaction; "
+            f"motion only; start frame supplied."
+        )
+    elif rd == "B_replaces_A":
         motion = f"{ob} with {oas or 'secondary'}; motion only; start frame supplied."
     elif rd == "A_replaces_B":
         motion = f"{oa} with {obs or 'secondary'}; motion only; start frame supplied."

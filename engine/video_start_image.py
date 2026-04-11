@@ -14,6 +14,7 @@ import httpx
 from openai import OpenAI
 
 from engine import openai_retry
+from engine.video_planning import _is_side_by_side_plan
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,16 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
         "No text, letters, words, numbers as graphics, captions, labels, signage, packaging typography, "
         "title cards, watermarks, headline, UI, or brand names in the image — blank/generic surfaces only."
     )
+
+    if _is_side_by_side_plan(plan):
+        a_line = f"{oa} with {oas}" if oas else oa
+        b_line = f"{ob} with {obs}" if obs else ob
+        return (
+            f"Single photorealistic still frame, clean balanced commercial composition. "
+            f"Side-by-side comparison: {a_line} on one side and {b_line} on the other, both fully visible and equally legible; "
+            f"neither subject dominant or obscured; shared cohesive environment. "
+            f"Soft natural lighting, realistic materials. {no_text}"
+        )
 
     if rd == "B_replaces_A":
         sec = oas or "the contextual secondary object"
