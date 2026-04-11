@@ -1,7 +1,7 @@
 """
 ACE Runway video — first MVP path (isolated from the image engine).
 
-Currently: one video output only, simple prompting, Runway POST /v1/image_to_video; gen4_turbo needs a minimal promptImage (neutral data URI), gen4.5 can omit for text-only.
+Currently: one video output only, simple prompting, Runway POST /v1/image_to_video; default gen4.5 (text-to-video, promptImage omitted); gen4_turbo uses promptImage when selected via RUNWAY_VIDEO_MODEL.
 Future ACE video engine may produce two outputs and richer concept prompting; keep this module minimal until then.
 """
 
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 # Official Runway API (see https://docs.dev.runwayml.com/guides/using-the-api)
 RUNWAY_API_VERSION_HEADER = "2024-11-06"
 DEFAULT_RUNWAY_BASE_URL = "https://api.dev.runwayml.com"
-DEFAULT_VIDEO_MODEL = "gen4_turbo"
+DEFAULT_VIDEO_MODEL = "gen4.5"
 
 # Polling: docs recommend ≥5s between polls for a given task
 _POLL_INTERVAL_SECONDS = 5.0
@@ -90,7 +90,14 @@ def _env_api_key() -> str:
 
 def _env_model() -> str:
     raw = (os.environ.get("RUNWAY_VIDEO_MODEL", "") or "").strip()
-    return raw or DEFAULT_VIDEO_MODEL
+    if raw:
+        model = raw
+        source = "env"
+    else:
+        model = DEFAULT_VIDEO_MODEL
+        source = "default"
+    logger.info("RUNWAY_VIDEO_MODEL_SELECTED model=%s source=%s", model, source)
+    return model
 
 
 def _env_base_url() -> str:
@@ -174,7 +181,7 @@ def _create_text_to_video_task(
         "ratio": "1280:720",
         "duration": 5,
     }
-    # gen4.5: text-to-video — omit promptImage per Runway docs. gen4_turbo (default): promptImage required.
+    # gen4.5: text-to-video — omit promptImage per Runway docs. gen4_turbo and others: promptImage required.
     if model == "gen4.5":
         logger.info("RUNWAY_MVP task_create model=%s mode=text_only promptImage=omitted", model)
     elif prompt_image_data_uri:
