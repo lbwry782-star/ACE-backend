@@ -3045,6 +3045,113 @@ def _prepend_verbatim_product_name(copy_text: str, product_name: str) -> str:
     return f"{n}. {t}".strip()
 
 
+def _normalize_stray_quote_wrapping_around_name(text: str, name: str) -> Tuple[str, bool]:
+    """Remove one redundant decorative quote pair around the exact product name (Hebrew marketing copy)."""
+    n = (name or "").strip()
+    t = text or ""
+    if not n or not t:
+        return text, False
+    for ql, qr in (('"', '"'), ("\u201c", "\u201d"), ("«", "»"), ("״", "״")):
+        needle = f"{ql}{n}{qr}"
+        if needle in t:
+            return t.replace(needle, n, 1), True
+    return text, False
+
+
+def _fix_leading_quoted_product_name_hebrew(text: str, name: str) -> Tuple[str, bool]:
+    """Deterministic fix when copy opens with quote-wrapped product name (broken RTL / punctuation)."""
+    s = (text or "").strip()
+    n = (name or "").strip()
+    if not s or not n:
+        return text, False
+    quote_like = frozenset('"\u201c\u201d״«\u05f4')
+    idx = 0
+    while idx < len(s) and s[idx].isspace():
+        idx += 1
+    if idx >= len(s) or s[idx] not in quote_like:
+        return text, False
+    j = idx
+    while j < len(s) and (s[j] in quote_like or s[j].isspace()):
+        j += 1
+    if not s[j:].startswith(n):
+        return text, False
+    end = j + len(n)
+    end2 = end
+    while end2 < len(s) and (s[end2] in quote_like or s[end2].isspace() or s[end2] in "»'"):
+        end2 += 1
+    rest = s[end2:].strip()
+    if not rest:
+        return text, False
+    return f"עם {n}, {rest}", True
+
+
+def _hebrew_marketing_product_name_postprocess(text: str, product_name: str) -> Tuple[str, bool, str]:
+    """
+    Deterministic Hebrew marketing cleanup (no model calls).
+    Returns (new_text, applied, reason) where reason is bad_prefix | stray_quotes | "".
+    """
+    n = (product_name or "").strip()
+    t = (text or "").strip()
+    if not n or not t:
+        return text, False, ""
+    t2, f1 = _fix_leading_quoted_product_name_hebrew(t, n)
+    base = t2 if f1 else t
+    t3, f2 = _normalize_stray_quote_wrapping_around_name(base, n)
+    if f1:
+        return t3, True, "bad_prefix"
+    if f2:
+        return t3, True, "stray_quotes"
+    return text, False, ""
+
+
+def _finalize_hebrew_marketing_after_name_fix(
+    copy_text: str,
+    canon: str,
+    ad_goal: str,
+    lang: str,
+    *,
+    require_verbatim_product_name: bool,
+) -> str:
+    """Re-trim/pad word count and restore verbatim name if required."""
+    out = " ".join(copy_text.split()[:55])
+    while len(out.split()) < 45:
+        out = f"{out} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
+        out = " ".join(out.split()[:55])
+    if require_verbatim_product_name and not product_name_reused_in_copy(canon, out):
+        out = _prepend_verbatim_product_name(out, canon)
+        out = " ".join(out.split()[:55])
+    return out
+
+
+def _apply_hebrew_marketing_name_postprocess_with_log(
+    text: str,
+    canon: str,
+    ad_goal: str,
+    lang: str,
+    *,
+    require_verbatim_product_name: bool,
+) -> str:
+    """Hebrew-only: deterministic name integration fix + logs (no model calls)."""
+    if lang != "he" or not (canon or "").strip():
+        return text
+    out, pfn_applied, pfn_reason = _hebrew_marketing_product_name_postprocess(text, canon)
+    if pfn_applied:
+        out = _finalize_hebrew_marketing_after_name_fix(
+            out,
+            canon,
+            ad_goal,
+            lang,
+            require_verbatim_product_name=require_verbatim_product_name,
+        )
+        logger.info(
+            "MARKETING_TEXT_PRODUCT_NAME_FIXED applied=true reason=%s",
+            pfn_reason,
+        )
+    else:
+        logger.info("MARKETING_TEXT_PRODUCT_NAME_OK=true")
+    return out
+
+
 def _build_marketing_copy_user_prompt(
     product_name: str,
     product_description: str,
@@ -3074,6 +3181,10 @@ CANONICAL PRODUCT NAME — mandatory verbatim substring (at least once), exact c
         hebrew_embedded = """
 - Write natural, fluent Hebrew sentence structure.
 - If you include an English product name, brand name, or English multi-word phrase inside a Hebrew sentence, keep normal left-to-right word order inside that English segment (e.g. "Fast Delivery" reads left-to-right as a phrase). Do not reverse English word order.
+- If you include the product name, integrate it naturally into the Hebrew sentence (as subject, object, or after a preposition).
+- Do NOT start the copy with a dangling quoted product name or a quote mark immediately wrapping the name before the rest of the sentence.
+- Avoid patterns like: '"ProductName" ...' or a line that is only the name in quotes.
+- Prefer natural phrasing such as: "<ProductName> היא ...", "עם <ProductName> ...", "בעזרת <ProductName> ..." (match gender/number to context).
 """
     return f"""Generate marketing copy for an advertisement.
 {verbatim}
@@ -3147,6 +3258,7 @@ def generate_marketing_copy(
             "Do not produce English sentences or English marketing copy as the main prose. "
             "Short Latin loanwords (e.g. AI, SaaS) or the exact canonical product name if given in Latin may appear as-is; "
             "multi-word English phrases inside Hebrew must keep normal English left-to-right word order within the phrase. "
+            "Integrate the product name naturally; do not open with a dangling quoted name. "
             "Return only the marketing copy text, no JSON, no quotes."
         )
     else:
@@ -3260,6 +3372,14 @@ def generate_marketing_copy(
                         "marketing_copy_verbatim_product_name_failed"
                     )
 
+            copy_text = _apply_hebrew_marketing_name_postprocess_with_log(
+                copy_text,
+                canon,
+                ad_goal,
+                lang,
+                require_verbatim_product_name=require_verbatim_product_name,
+            )
+
             final_word_count = len(copy_text.split())
             logger.info(
                 "MARKETING_COPY SUCCESS: word_count=%s copy='%s...'",
@@ -3293,6 +3413,13 @@ def generate_marketing_copy(
                     raise MarketingCopyVerbatimProductNameFailed(
                         "marketing_copy_verbatim_product_name_failed"
                     ) from e
+            fb = _apply_hebrew_marketing_name_postprocess_with_log(
+                fb,
+                canon,
+                ad_goal,
+                lang,
+                require_verbatim_product_name=require_verbatim_product_name,
+            )
             return fb
 
     fb = _marketing_copy_fallback(canon, ad_goal, lang)
@@ -3304,6 +3431,13 @@ def generate_marketing_copy(
             fb = " ".join(fb.split()[:55])
         if not product_name_reused_in_copy(canon, fb):
             raise MarketingCopyVerbatimProductNameFailed("marketing_copy_verbatim_product_name_failed")
+    fb = _apply_hebrew_marketing_name_postprocess_with_log(
+        fb,
+        canon,
+        ad_goal,
+        lang,
+        require_verbatim_product_name=require_verbatim_product_name,
+    )
     return fb
 
 

@@ -362,6 +362,76 @@ def _object_pair_identity_too_close_heuristic(oa: str, ob: str) -> bool:
     return _identity_distinctness_norm_pair_key(oa, ob) in _IDENTITY_TOO_CLOSE_NORM_PAIRS
 
 
+# SIDE_BY_SIDE_SHAPE_ENFORCEMENT: tall vertical-axis + top-mass silhouettes (tree, umbrella, lamppost, …)
+_VERTICAL_AXIS_OBJECT_LEXEMES: Tuple[str, ...] = (
+    "umbrella",
+    "parasol",
+    "tree",
+    "oak",
+    "pine",
+    "palm",
+    "birch",
+    "spruce",
+    "fir",
+    "cedar",
+    "willow",
+    "elm",
+    "maple",
+    "cypress",
+    "redwood",
+    "sapling",
+    "christmas tree",
+    "mushroom",
+    "toadstool",
+    "lamppost",
+    "lamp post",
+    "lamp-post",
+    "street lamp",
+    "streetlight",
+    "street light",
+    "flagpole",
+    "flag pole",
+    "obelisk",
+    "minaret",
+    "spire",
+    "lighthouse",
+    "cactus",
+    "rocket",
+    "totem",
+)
+
+
+def _object_label_vertical_axis_top_mass(label: str) -> bool:
+    """True when the object label suggests a vertical stem + upper mass (morphological vertical-axis read)."""
+    low = (label or "").lower()
+    return any(tok in low for tok in _VERTICAL_AXIS_OBJECT_LEXEMES)
+
+
+_SIDE_BY_SIDE_VERTICAL_OPENING_ENFORCEMENT = (
+    "SIDE_BY_SIDE_SHAPE_ENFORCEMENT: Both primaries are upright, vertically aligned on parallel axes, "
+    "comparable height and scale, same vertical orientation; mass reads toward the top along a shared vertical axis "
+    "(e.g. tree trunk vs umbrella handle / lamppost stem)."
+)
+
+_SIDE_BY_SIDE_VERTICAL_MOTION_ENFORCEMENT = (
+    "Preserve upright vertical alignment for both primaries; motion stays subtle and must not tip either object "
+    "off-vertical or break the shared-axis morphological comparison."
+)
+
+
+def _runway_vertical_axis_hard_constraints_english() -> str:
+    """Hard Runway text policy when shapeAlignment=vertical_axis (SIDE_BY_SIDE)."""
+    return (
+        " HARD CONSTRAINT (upright vertical subjects): Both primary objects remain fully upright and vertical, "
+        "sharing parallel vertical axes at comparable scale. "
+        "The umbrella stands upright, fully vertical, like a tree trunk; the handle is straight and vertical; "
+        "the canopy sits on top like a tree canopy. "
+        "Forbidden: no leaning umbrella; no umbrella lying on the ground; no diagonal umbrella orientation; "
+        "no tilt; do not lean; do not place either primary on the ground for support. "
+        "Do not tilt, do not lean, do not place on ground."
+    )
+
+
 def _parse_viewer_clarity_ok(raw: Any) -> Optional[bool]:
     """True / False from JSON bool or common string forms; None = missing or invalid."""
     if raw is True:
@@ -457,6 +527,7 @@ _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("object_pair_viewer_clarity_ok", "objectPairViewerClarityOk"),
     ("object_pair_identity_distinct_ok", "objectPairIdentityDistinctOk"),
     ("identity_distinctness_note", "identityDistinctnessNote"),
+    ("shape_alignment", "shapeAlignment"),
 )
 
 
@@ -603,12 +674,20 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         _VIDEO_SILHOUETTE_THRESHOLD_REPLACEMENT,
     )
     logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=image_engine_rule_adapted")
+    shape_alignment = ""
     if chosen_mode == "REPLACEMENT":
         core = rms
         opening_fd = rep_open
     else:
         core = sbs_ms
         opening_fd = sbs_open
+        if _object_label_vertical_axis_top_mass(oa) and _object_label_vertical_axis_top_mass(ob):
+            shape_alignment = "vertical_axis"
+            opening_fd = f"{opening_fd} {_SIDE_BY_SIDE_VERTICAL_OPENING_ENFORCEMENT}".strip()
+            core = f"{core} {_SIDE_BY_SIDE_VERTICAL_MOTION_ENFORCEMENT}".strip()
+            logger.info("VIDEO_SHAPE_ALIGNMENT axis=vertical applied=true")
+        else:
+            logger.info("VIDEO_SHAPE_ALIGNMENT axis=vertical applied=false")
 
     logger.info("VIDEO_PLAN_MODE=%s", chosen_mode)
 
@@ -636,6 +715,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         "videoVisualMode": chosen_mode,
         "chosenMode": chosen_mode,
         "silhouetteSimilarity": silhouette_similarity,
+        "shapeAlignment": shape_alignment,
     }, None
 
 
@@ -1003,6 +1083,9 @@ def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bo
             f"Scene: {core}" if core else "",
             f"Beat: {script}" if script else "",
         ]
+        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+            parts.append(_runway_vertical_axis_hard_constraints_english())
+            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     else:
         parts = [
             "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
@@ -1051,6 +1134,9 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
             f"promise: {promise}. Subtle comparison-only motion; no morphing, swapping, disappearance, or cuts. "
             f"Action: {core}"
         )
+        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+            scene += _runway_vertical_axis_hard_constraints_english()
+            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     elif rd == "B_replaces_A":
         scene = (
             f"Start: replacement already visible — {b_setup} in {oa}'s place, bg {pbg}, secondary {psf}, promise: {promise}. "
@@ -1148,6 +1234,9 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
             f"for the other. Background/secondary context consistent with sides {pbg}/{psf}. "
             f"Action: {core}"
         )
+        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+            scene += _runway_vertical_axis_hard_constraints_english()
+            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     elif rd == "B_replaces_A":
         sec = oas or "the contextual secondary object"
         scene = (
@@ -1194,6 +1283,9 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
             f"Both {oa} and {ob} side by side with secondaries; meaningful comparison interaction; "
             f"motion only; start frame supplied."
         )
+        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+            motion += " " + _runway_vertical_axis_hard_constraints_english()
+            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     elif rd == "B_replaces_A":
         motion = f"{ob} with {oas or 'secondary'}; motion only; start frame supplied."
     elif rd == "A_replaces_B":
