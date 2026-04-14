@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+from engine.ad_promise_memory import record_ad_promise_generation_success
 from engine.video_planning import (
     VideoPlanningTimeoutError,
     build_runway_prompt_from_plan,
@@ -46,6 +47,15 @@ from engine.video_product_name import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _maybe_log_ad_promise_skip_after_failed_generation(
+    plan: Optional[Dict[str, Any]], promise_saved: bool
+) -> None:
+    """Product-level Redis memory only; log when a plan existed but post-success save never ran."""
+    if plan is not None and not promise_saved:
+        logger.info("AD_PROMISE_MEMORY_SKIP_SAVE reason=generation_failed")
+
 
 # Official Runway API (see https://docs.dev.runwayml.com/guides/using-the-api)
 RUNWAY_API_VERSION_HEADER = "2024-11-06"
@@ -294,6 +304,9 @@ def generate_one_video_mvp(
     - overlay_headline: planner headlineText for Redis (non-empty on success; planning must pass gate).
     Raises RunwayVideoMVPError on any failure (no generic prompt fallback).
     """
+    plan: Optional[Dict[str, Any]] = None
+    promise_saved = False
+
     if not _env_api_key():
         logger.error("RUNWAY_MVP aborted missing_api_key")
         raise RunwayVideoMVPError("not_configured")
@@ -343,6 +356,7 @@ def generate_one_video_mvp(
         logger.info("VIDEO_PLAN_ABORTED reason=planning_timeout")
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=planning_timeout")
+        _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
         raise RunwayVideoMVPError("planning_timeout")
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
 
@@ -351,6 +365,7 @@ def generate_one_video_mvp(
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=no_valid_plan")
         logger.info("VIDEO_PLAN_INTEGRITY skipped reason=no_valid_plan")
+        _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
         raise RunwayVideoMVPError("planning_failed")
 
     gate_ok, gate_reason = video_plan_required_fields_for_runway(plan)
@@ -358,6 +373,7 @@ def generate_one_video_mvp(
         logger.info("VIDEO_PLAN_ABORTED reason=%s", gate_reason)
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate_reason)
+        _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
         raise RunwayVideoMVPError("plan_integrity_failed")
 
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
@@ -442,6 +458,7 @@ def generate_one_video_mvp(
                     logger.error("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
                     logger.info("VIDEO_PLAN_ABORTED reason=marketing_copy_exception")
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_failed")
+                    _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
                     raise RunwayVideoMVPError("marketing_copy_failed") from e
                 reuse_h = product_name_reused_in_headline(
                     canonical_name, headline_for_overlay, headline_decision
@@ -453,85 +470,104 @@ def generate_one_video_mvp(
                 logger.info("VIDEO_PRODUCT_NAME_MISMATCH=%s", str(name_mismatch).lower())
                 if not reuse_h:
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_headline")
+                    _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
                     raise RunwayVideoMVPError("product_name_headline_mismatch")
                 if not reuse_c:
                     logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_marketing_copy")
+                    _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
                     raise RunwayVideoMVPError("product_name_copy_mismatch")
-                _enforce_marketing_copy_language(marketing_lang, marketing_text_for_api)
-                _enforce_headline_overlay_language(
-                    video_lang, headline_for_overlay, canonical_name
-                )
-                _bidi_prot = (
-                    (canonical_name.strip(),)
-                    if (canonical_name or "").strip()
-                    else ()
-                )
-                marketing_text_for_api, bidi_copy, segs_copy = (
-                    finalize_hebrew_mixed_bidi_for_display(
-                        marketing_text_for_api,
-                        content_language=marketing_lang,
-                        protected_phrases=_bidi_prot,
+                try:
+                    _enforce_marketing_copy_language(marketing_lang, marketing_text_for_api)
+                    _enforce_headline_overlay_language(
+                        video_lang, headline_for_overlay, canonical_name
                     )
-                )
-                if marketing_lang == "he":
+                    _bidi_prot = (
+                        (canonical_name.strip(),)
+                        if (canonical_name or "").strip()
+                        else ()
+                    )
+                    marketing_text_for_api, bidi_copy, segs_copy = (
+                        finalize_hebrew_mixed_bidi_for_display(
+                            marketing_text_for_api,
+                            content_language=marketing_lang,
+                            protected_phrases=_bidi_prot,
+                        )
+                    )
+                    if marketing_lang == "he":
+                        logger.info(
+                            "MARKETING_TEXT_BIDI_NORMALIZED applied=%s lang=he",
+                            "true" if bidi_copy else "false",
+                        )
+                    else:
+                        logger.info(
+                            "MARKETING_TEXT_BIDI_NORMALIZED applied=false lang=en",
+                        )
+                    headline_for_overlay, overlay_bidi_strategy = prepare_ffmpeg_overlay_headline(
+                        headline_for_overlay,
+                        content_language=video_lang,
+                        canonical_name=canonical_name,
+                    )
                     logger.info(
-                        "MARKETING_TEXT_BIDI_NORMALIZED applied=%s lang=he",
-                        "true" if bidi_copy else "false",
+                        "VIDEO_BIDI_FIX_APPLIED_COPY=%s",
+                        str(bidi_copy).lower(),
                     )
-                else:
                     logger.info(
-                        "MARKETING_TEXT_BIDI_NORMALIZED applied=false lang=en",
+                        "VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s",
+                        format_bidi_segments_for_log(segs_copy),
                     )
-                headline_for_overlay, overlay_bidi_strategy = prepare_ffmpeg_overlay_headline(
-                    headline_for_overlay,
-                    content_language=video_lang,
-                    canonical_name=canonical_name,
-                )
-                logger.info(
-                    "VIDEO_BIDI_FIX_APPLIED_COPY=%s",
-                    str(bidi_copy).lower(),
-                )
-                logger.info(
-                    "VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s",
-                    format_bidi_segments_for_log(segs_copy),
-                )
-                logger.info(
-                    "VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s",
-                    overlay_bidi_strategy,
-                )
-                logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
-                logger.info("VIDEO_JOB_STEP step=packaging_result done")
-                final_url = postprocess_video_headline(
-                    url,
-                    public_base_url or "",
-                    headline=headline_for_overlay,
-                    job_id=job_id,
-                    overlay_language=video_lang,
-                )
-                if final_url.rstrip("/") == url.rstrip("/"):
                     logger.info(
-                        "VIDEO_JOB_CHOSEN_URL source=runway_fallback jobId=%s",
-                        job_id,
+                        "VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s",
+                        overlay_bidi_strategy,
                     )
-                elif "/api/video-headline/" in final_url and "/api/video-headline-artifact" not in final_url:
+                    logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
+                    logger.info("VIDEO_JOB_STEP step=packaging_result done")
+                    final_url = postprocess_video_headline(
+                        url,
+                        public_base_url or "",
+                        headline=headline_for_overlay,
+                        job_id=job_id,
+                        overlay_language=video_lang,
+                    )
+                    if final_url.rstrip("/") == url.rstrip("/"):
+                        logger.info(
+                            "VIDEO_JOB_CHOSEN_URL source=runway_fallback jobId=%s",
+                            job_id,
+                        )
+                    elif "/api/video-headline/" in final_url and "/api/video-headline-artifact" not in final_url:
+                        logger.info(
+                            "VIDEO_JOB_CHOSEN_URL source=processed_uploaded jobId=%s",
+                            job_id,
+                        )
+                    else:
+                        logger.info(
+                            "VIDEO_JOB_CHOSEN_URL source=processed jobId=%s",
+                            job_id,
+                        )
                     logger.info(
-                        "VIDEO_JOB_CHOSEN_URL source=processed_uploaded jobId=%s",
-                        job_id,
+                        "VIDEO_PRODUCT_NAME_RESOLVED_PACKAGED value=%s",
+                        json.dumps(canonical_name, ensure_ascii=False),
                     )
-                else:
-                    logger.info(
-                        "VIDEO_JOB_CHOSEN_URL source=processed jobId=%s",
-                        job_id,
-                    )
-                logger.info(
-                    "VIDEO_PRODUCT_NAME_RESOLVED_PACKAGED value=%s",
-                    json.dumps(canonical_name, ensure_ascii=False),
-                )
-                return final_url, marketing_text_for_api, headline_for_overlay
+                    ap_mem = (plan.get("advertisingPromise") or "").strip()
+                    if ap_mem:
+                        record_ad_promise_generation_success(
+                            canonical_name,
+                            product_description,
+                            ap_mem,
+                            job_or_trace_id=job_id or "",
+                            source_type="video",
+                        )
+                    promise_saved = True
+                    logger.info("VIDEO_PROMISE_ACCEPTED_NEW=true")
+                    return final_url, marketing_text_for_api, headline_for_overlay
+                except Exception:
+                    _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
+                    raise
+            _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
             raise RunwayVideoMVPError("generation_failed")
 
         if status in _FAILED_STATUSES:
             _extract_video_url(task)
+            _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
             raise RunwayVideoMVPError("generation_failed")
 
         logger.warning(
@@ -543,6 +579,7 @@ def generate_one_video_mvp(
 
     logger.error("RUNWAY_MVP timeout task_id=%s max_wait_s=%s", task_id, _MAX_WAIT_SECONDS)
     logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=timeout")
+    _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
     raise RunwayVideoMVPError("timeout")
 
 

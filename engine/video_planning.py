@@ -21,7 +21,7 @@ from openai import OpenAI
 
 from engine.video_language import normalize_video_content_language, video_language_display_name
 
-from engine.ad_promise_history import (
+from engine.ad_promise_memory import (
     angle_seed_for_attempt,
     build_promise_diversity_addon,
     compute_product_hash,
@@ -30,7 +30,6 @@ from engine.ad_promise_history import (
     is_promise_too_similar,
     load_ad_promise_history,
     maybe_soft_reset_promise_memory,
-    save_ad_promise_entry,
 )
 
 logger = logging.getLogger(__name__)
@@ -1482,22 +1481,6 @@ def _finalize_emergency_fallback(
     return emergency_plan
 
 
-def _persist_accepted_ad_promise(
-    plan: Optional[Dict[str, Any]],
-    product_name: str,
-    product_description: str,
-    session_id: str,
-) -> None:
-    """Append advertisingPromise to Redis history after a validated plan is accepted."""
-    if not plan:
-        return
-    ap = (plan.get("advertisingPromise") or "").strip()
-    if not ap:
-        return
-    logger.info("VIDEO_PROMISE_ACCEPTED_NEW=true")
-    save_ad_promise_entry(product_name, product_description, ap, session_id)
-
-
 def _return_plan_with_promise_persist(
     plan: Optional[Dict[str, Any]],
     *,
@@ -1515,7 +1498,7 @@ def _return_plan_with_promise_persist(
             product_name=product_name,
             product_description=product_description,
         )
-    _persist_accepted_ad_promise(plan, product_name, product_description, session_id)
+    # advertisingPromise is persisted only after a successful video generation (see runway_video).
     return plan
 
 
@@ -1571,6 +1554,7 @@ Locked output language for all user-facing plan fields (from description classif
         product_name=product_name,
         product_description=product_description,
     )
+    logger.info("AD_PROMISE_MEMORY_LOAD_BEFORE_GENERATION hash=%s", ph)
     history = load_ad_promise_history(product_name, product_description)
     rejected_promises: List[str] = []
     promise_reject_count = 0
@@ -1896,6 +1880,9 @@ def fetch_video_plan_o3(
     maybe_soft_reset_promise_memory(
         ph, product_name=product_name, product_description=product_description
     )
+    logger.info("AD_PROMISE_MEMORY_SESSION_AGNOSTIC=true")
+    logger.info("AD_PROMISE_MEMORY_SCOPE global_product_level=true")
+    logger.info("AD_PROMISE_MEMORY_PERSISTENT_STORE=true")
     try:
         plan = _fetch_video_plan_o3_sync(
             product_name,

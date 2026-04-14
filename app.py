@@ -36,9 +36,9 @@ from engine.video_jobs_redis import (
     video_job_get,
     video_job_try_finalize_stale_running,
 )
-from engine.ad_promise_history import (
+from engine.ad_promise_memory import (
     clear_ad_promise_history,
-    clear_all_ad_promise_history,
+    clear_all_ad_promise_memory,
     delete_product_memory_by_hash,
     delete_product_memory_by_text,
     get_all_products_with_memory,
@@ -1020,7 +1020,7 @@ def api_reset_all_promise_history():
         return jsonify({"ok": False, "error": "forbidden"}), 403
     if not redis_configured():
         return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
-    n = clear_all_ad_promise_history()
+    n = clear_all_ad_promise_memory()
     if n < 0:
         return jsonify({"ok": False, "error": "clear_failed"}), 500
     return jsonify({"ok": True, "total_deleted": n}), 200
@@ -1037,7 +1037,7 @@ def api_promise_memory_list():
 
 @app.route("/api/promise-memory/delete-by-hash", methods=["POST"])
 def api_promise_memory_delete_by_hash():
-    """Delete ACE:AD_PROMISE_HISTORY:<product_hash> and index row. Body: {\"product_hash\": \"...\"}. No auth."""
+    """Delete shared history + index row. Body: {\"productHash\": \"...\"} or {\"product_hash\": \"...\"}. No auth."""
     if not redis_configured():
         return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
     if not request.is_json:
@@ -1045,7 +1045,7 @@ def api_promise_memory_delete_by_hash():
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
         return jsonify({"ok": False, "error": "expected_json"}), 400
-    ph = (payload.get("product_hash") or "").strip()
+    ph = (payload.get("productHash") or payload.get("product_hash") or "").strip()
     if not ph:
         return jsonify({"ok": False, "error": "missing_product_hash"}), 400
     ok = delete_product_memory_by_hash(ph)
@@ -1070,6 +1070,17 @@ def api_promise_memory_delete_by_text():
     if not ok:
         return jsonify({"ok": False, "error": "delete_failed", "product_hash": ph}), 500
     return jsonify({"ok": True, "product_hash": ph}), 200
+
+
+@app.route("/api/promise-memory/reset-all", methods=["POST"])
+def api_promise_memory_reset_all():
+    """Delete all ACE:AD_PROMISE_HISTORY:* and ACE:AD_PROMISE_STATS:* keys; reset ACE:AD_PROMISE_INDEX. No auth."""
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
+    n = clear_all_ad_promise_memory()
+    if n < 0:
+        return jsonify({"ok": False, "error": "reset_failed"}), 500
+    return jsonify({"ok": True, "total_deleted": n}), 200
 
 
 @app.route('/api/video-status', methods=['GET'])
