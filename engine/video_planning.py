@@ -14,7 +14,7 @@ import os
 import re
 import time
 import unicodedata
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import httpx
 from openai import OpenAI
@@ -416,6 +416,32 @@ def _replacement_motion_is_meaningful(script: str, object_a: str, object_b_secon
     if any(x in s for x in decorative_only):
         return False
     return True
+
+
+def _pair_retry_key(oa: str, ob: str) -> str:
+    a = _normalize_object_identifier_for_compare(oa)
+    b = _normalize_object_identifier_for_compare(ob)
+    return "|".join(sorted((a, b)))
+
+
+def _pair_is_too_similar_to_rejected(oa: str, ob: str, rejected_pairs: Set[str]) -> Tuple[bool, str]:
+    """
+    Reject exact/near-identical conceptual pairs across retries to avoid looped weak candidates.
+    """
+    key = _pair_retry_key(oa, ob)
+    if key in rejected_pairs:
+        return True, "exact_pair_repeat"
+    cur_tokens = set(key.replace("|", " ").split())
+    if not cur_tokens:
+        return False, ""
+    for prev in rejected_pairs:
+        prev_tokens = set(prev.replace("|", " ").split())
+        if not prev_tokens:
+            continue
+        overlap = len(cur_tokens & prev_tokens) / float(max(1, len(cur_tokens | prev_tokens)))
+        if overlap >= 0.75:
+            return True, "near_identical_family_repeat"
+    return False, ""
 
 
 def _side_by_side_motion_is_meaningful(
@@ -840,7 +866,14 @@ def validate_and_normalize_plan(
             "VIDEO_REPLACEMENT_RULE_ENFORCED mode=REPLACEMENT object_presence=A_only secondary=B_secondary"
         )
     else:
-        if not _side_by_side_motion_is_meaningful(sbs_ms, oa, ob, apromise):
+        sbs_meaningful = _side_by_side_motion_is_meaningful(sbs_ms, oa, ob, apromise)
+        if silhouette_similarity < 30.0 and not sbs_meaningful:
+            logger.info(
+                "VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=low_similarity_weak_interaction similarity=%.1f",
+                silhouette_similarity,
+            )
+            return None, "side_by_side_low_similarity_weak_interaction"
+        if not sbs_meaningful:
             logger.info("VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=interaction_not_meaningful")
             return None, "side_by_side_interaction_not_meaningful"
         core = sbs_ms
@@ -1165,6 +1198,67 @@ def _build_deterministic_side_by_side_plan_from_parsed(
     return forced, template_name, True
 
 
+def _build_emergency_side_by_side_plan(
+    parsed: Optional[Dict[str, Any]],
+    *,
+    product_name: str,
+) -> Tuple[Dict[str, Any], str]:
+    """
+    Near-deadline guaranteed fallback: conservative SIDE_BY_SIDE plan without extra planner/model work.
+    """
+    c = _coerce_plan_keys(parsed or {})
+    oa = (c.get("objectA") or "").strip() or "lantern"
+    ob = (c.get("objectB") or "").strip() or "compass"
+    oa_sec = (c.get("objectA_secondary") or "").strip() or "table"
+    ob_sec = (c.get("objectB_secondary") or "").strip() or "map"
+    promise = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
+    bucket = _promise_bucket(promise)
+    template_name, template_body = _fallback_template_for_bucket(bucket)
+    sbs_motion = template_body.format(
+        A=oa,
+        B=ob,
+        A_secondary=oa_sec,
+        B_secondary=ob_sec,
+        promise=promise,
+    )
+    sbs_open = (
+        f"Opening intent: {oa} with {oa_sec} and {ob} with {ob_sec} appear together in one stable composition, "
+        "with immediate meaningful interaction between A and B."
+    )
+    pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
+    plan = {
+        "productNameResolved": pn,
+        "advertisingPromise": promise,
+        "objectA": oa,
+        "objectA_secondary": oa_sec,
+        "objectB": ob,
+        "objectB_secondary": ob_sec,
+        "morphologicalReason": (c.get("morphologicalReason") or "").strip(),
+        "promiseReason": (c.get("promiseReason") or "").strip(),
+        "replacementDirection": "A_replaces_B",
+        "preservedBackgroundFrom": "B",
+        "preservedSecondaryFrom": "B",
+        "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
+        "headlineDecision": "include_product_name",
+        "headlineText": (c.get("headlineText") or "").strip() or pn,
+        "replacementOpeningFrameDescription": (c.get("replacementOpeningFrameDescription") or "").strip()
+        or f"Replacement opening frame concept with {oa} in {ob}'s context and {ob_sec} preserved.",
+        "replacementMotionScript": (c.get("replacementMotionScript") or "").strip()
+        or f"{oa} interacts with {ob_sec}; meaningful visible effect supports the advertising promise.",
+        "sideBySideOpeningFrameDescription": sbs_open,
+        "sideBySideMotionScript": sbs_motion,
+        "videoPromptCore": f"{sbs_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip(),
+        "openingFrameDescription": sbs_open,
+        "videoVisualMode": "SIDE_BY_SIDE",
+        "chosenMode": "SIDE_BY_SIDE",
+        "silhouetteSimilarity": 50.0,
+        "shapeAlignment": "",
+        "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
+        "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
+    }
+    return plan, template_name
+
+
 def _planner_deadline_guard(
     deadline_monotonic: Optional[float], *, stage: str, has_valid_plan: bool = False
 ) -> None:
@@ -1228,13 +1322,44 @@ Locked output language for all user-facing plan fields (from description classif
     max_attempts = 1 + max(0, _VIDEO_PLAN_RETRY_INTERACTION_MAX)
     last_parsed: Optional[Dict[str, Any]] = None
     last_v_err = ""
+    rejected_pairs: Set[str] = set()
     for attempt in range(max_attempts):
+        if (
+            deadline_monotonic is not None
+            and last_parsed is not None
+            and (deadline_monotonic - time.monotonic()) <= 8.0
+        ):
+            logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=emergency_near_deadline")
+            emergency_plan, template_name = _build_emergency_side_by_side_plan(
+                last_parsed, product_name=product_name
+            )
+            logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
+            logger.info(
+                "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
+                emergency_plan.get("objectA"),
+                emergency_plan.get("objectB"),
+            )
+            logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
+            logger.info("VIDEO_PLAN_OK model=%s", model)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=true")
+            return emergency_plan
         _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_start")
         logger.info("VIDEO_PLAN_RETRY_STAGE start attempt=%s/%s", attempt + 1, max_attempts)
+        retry_tail = ""
+        if rejected_pairs:
+            rejected_preview = ", ".join(sorted(rejected_pairs)[:4])
+            retry_tail = (
+                "\n\nRetry constraints:\n"
+                "- Do NOT reuse previously rejected object pairs (same or near-identical families): "
+                + rejected_preview
+                + ".\n"
+                "- Choose clearly different object families than the rejected pairs.\n"
+            )
+        attempt_input = full_input + retry_tail
         try:
             response = client.responses.create(
                 model=model,
-                input=full_input,
+                input=attempt_input,
                 reasoning={"effort": _reasoning_effort()},
             )
             _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_post_model_call")
@@ -1264,15 +1389,45 @@ Locked output language for all user-facing plan fields (from description classif
                 logger.info("VIDEO_PLAN_RESPONSE_OK=false")
                 return None
             last_parsed = parsed
+            parsed_c = _coerce_plan_keys(parsed)
+            oa_cand = (parsed_c.get("objectA") or "").strip()
+            ob_cand = (parsed_c.get("objectB") or "").strip()
+            if oa_cand and ob_cand:
+                too_similar, sim_reason = _pair_is_too_similar_to_rejected(
+                    oa_cand, ob_cand, rejected_pairs
+                )
+                if too_similar:
+                    logger.info(
+                        "VIDEO_PLAN_REJECTED_PAIR_DEDUPE pair=%s reason=%s",
+                        _pair_retry_key(oa_cand, ob_cand),
+                        sim_reason,
+                    )
+                    logger.info(
+                        "VIDEO_PLAN_RETRY attempt=%s reason=pair_too_similar_to_rejected",
+                        attempt + 1,
+                    )
+                    logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
+                    continue
 
             plan, v_err = validate_and_normalize_plan(
                 parsed, planner_deadline_monotonic=deadline_monotonic
             )
             if not plan:
                 last_v_err = (v_err or "").strip()
+                if oa_cand and ob_cand:
+                    rejected_key = _pair_retry_key(oa_cand, ob_cand)
+                    rejected_pairs.add(rejected_key)
+                    logger.info("VIDEO_PLAN_REJECTED_PAIR_MEMORY_ADD pair=%s reason=%s", rejected_key, last_v_err)
                 if last_v_err == "side_by_side_interaction_not_meaningful" and attempt < max_attempts - 1:
                     logger.info(
                         "VIDEO_PLAN_RETRY attempt=%s reason=interaction_not_meaningful",
+                        attempt + 1,
+                    )
+                    logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
+                    continue
+                if last_v_err == "side_by_side_low_similarity_weak_interaction" and attempt < max_attempts - 1:
+                    logger.info(
+                        "VIDEO_PLAN_RETRY attempt=%s reason=low_similarity_weak_interaction",
                         attempt + 1,
                     )
                     logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
@@ -1294,6 +1449,22 @@ Locked output language for all user-facing plan fields (from description classif
             logger.info("VIDEO_PLAN_RESPONSE_OK=true")
             return plan
         except VideoPlanningTimeoutError:
+            if last_parsed is not None:
+                logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=emergency_on_timeout")
+                emergency_plan, template_name = _build_emergency_side_by_side_plan(
+                    last_parsed, product_name=product_name
+                )
+                logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
+                logger.info(
+                    "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
+                    emergency_plan.get("objectA"),
+                    emergency_plan.get("objectB"),
+                )
+                logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
+                logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
+                logger.info("VIDEO_PLAN_OK model=%s", model)
+                logger.info("VIDEO_PLAN_RESPONSE_OK=true")
+                return emergency_plan
             raise
         except Exception as e:
             logger.warning(
