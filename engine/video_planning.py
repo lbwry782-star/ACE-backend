@@ -999,6 +999,160 @@ def _reasoning_effort() -> str:
     return raw if raw in ("low", "medium") else "low"
 
 
+_VIDEO_PLAN_RETRY_INTERACTION_MAX = int(
+    (os.environ.get("VIDEO_PLAN_RETRY_INTERACTION_MAX") or "2").strip() or "2"
+)
+
+
+def _promise_bucket(promise: str) -> str:
+    p = (promise or "").lower()
+    if any(k in p for k in ("speed", "fast", "momentum", "quick", "velocity")):
+        return "speed"
+    if any(k in p for k in ("precision", "control", "accur", "align", "stable")):
+        return "precision"
+    if any(k in p for k in ("protect", "safe", "shield", "secure")):
+        return "protection"
+    if any(k in p for k in ("power", "boost", "ampl", "strong")):
+        return "amplification"
+    if any(k in p for k in ("clarity", "clear", "reveal", "discover", "uncover")):
+        return "clarity"
+    if any(k in p for k in ("growth", "uplift", "rise", "lift")):
+        return "growth"
+    return "generic"
+
+
+def _fallback_template_for_bucket(bucket: str) -> Tuple[str, str]:
+    templates = {
+        "speed": (
+            "launch_acceleration",
+            "{A} launches {B} into a visible acceleration arc, and {B} reacts immediately. "
+            "{A_secondary} and {B_secondary} remain visible as contextual anchors while this interaction expresses: {promise}.",
+        ),
+        "precision": (
+            "guidance_alignment",
+            "{A} guides {B} into precise alignment, and {B} reacts by locking into place. "
+            "{A_secondary} and {B_secondary} stay visible as anchors while this interaction expresses: {promise}.",
+        ),
+        "protection": (
+            "shielding_response",
+            "{A} protects {B} from a clear risk cue near {B_secondary}, and {B} reacts safely. "
+            "{A_secondary} and {B_secondary} stay visible as anchors while this interaction expresses: {promise}.",
+        ),
+        "amplification": (
+            "boosting_power",
+            "{A} amplifies {B} into a visibly stronger state, and {B} reacts with clear output change. "
+            "{A_secondary} and {B_secondary} remain visible while this interaction expresses: {promise}.",
+        ),
+        "clarity": (
+            "reveal_clarity",
+            "{A} triggers a reveal on {B} so hidden details become clear, and {B} reacts immediately. "
+            "{A_secondary} and {B_secondary} stay visible while this interaction expresses: {promise}.",
+        ),
+        "growth": (
+            "uplift_growth",
+            "{A} lifts {B} into a clear upward state change, and {B} responds visibly. "
+            "{A_secondary} and {B_secondary} remain present while this interaction expresses: {promise}.",
+        ),
+        "generic": (
+            "cooperative_resolution",
+            "{A} and {B} cooperate to resolve a simple visible situation, with clear cause and reaction between them. "
+            "{A_secondary} and {B_secondary} remain visible as anchors while this interaction expresses: {promise}.",
+        ),
+    }
+    return templates.get(bucket, templates["generic"])
+
+
+def _build_deterministic_side_by_side_plan_from_parsed(
+    parsed: Dict[str, Any],
+    *,
+    product_name: str,
+    product_description: str,
+    content_language: str,
+) -> Tuple[Optional[Dict[str, Any]], str, bool]:
+    """
+    Layer 3+4 deterministic salvage / guaranteed delivery for SIDE_BY_SIDE interaction quality failures.
+    Returns (plan_or_none, template_name, guaranteed_delivery_used).
+    """
+    c = _coerce_plan_keys(parsed or {})
+    oa = (c.get("objectA") or "").strip() or "object A"
+    ob = (c.get("objectB") or "").strip() or "object B"
+    oa_sec = (c.get("objectA_secondary") or "").strip() or "A contextual anchor"
+    ob_sec = (c.get("objectB_secondary") or "").strip() or "B contextual anchor"
+    promise = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
+
+    bucket = _promise_bucket(promise)
+    template_name, template_body = _fallback_template_for_bucket(bucket)
+    sbs_motion = template_body.format(
+        A=oa,
+        B=ob,
+        A_secondary=oa_sec,
+        B_secondary=ob_sec,
+        promise=promise,
+    )
+    sbs_open = (
+        f"Opening intent: {oa} + {oa_sec} and {ob} + {ob_sec} are visible together in one stable composition, "
+        "with immediate meaningful interaction between A and B."
+    )
+    c["sideBySideMotionScript"] = sbs_motion
+    c["sideBySideOpeningFrameDescription"] = sbs_open
+    c["advertisingPromise"] = promise
+    if not (c.get("productNameResolved") or "").strip():
+        c["productNameResolved"] = (product_name or "").strip() or "Product"
+    if not (c.get("replacementMotionScript") or "").strip():
+        c["replacementMotionScript"] = (
+            f"{oa} interacts with {ob_sec}; meaningful visible effect supports the advertising promise."
+        )
+    if not (c.get("replacementOpeningFrameDescription") or "").strip():
+        c["replacementOpeningFrameDescription"] = (
+            f"Replacement opening frame concept with {oa} in {ob}'s context and {ob_sec} preserved."
+        )
+    if not (c.get("headlineDecision") or "").strip():
+        c["headlineDecision"] = "include_product_name"
+    if not (c.get("headlineText") or "").strip():
+        c["headlineText"] = c["productNameResolved"]
+    if not (c.get("objectPairViewerClarityOk") or False):
+        c["objectPairViewerClarityOk"] = True
+    if not (c.get("objectPairIdentityDistinctOk") or False):
+        c["objectPairIdentityDistinctOk"] = True
+    if not (c.get("identityDistinctnessNote") or "").strip():
+        c["identityDistinctnessNote"] = "deterministic_salvage"
+
+    plan, _ = validate_and_normalize_plan(c)
+    if plan:
+        return plan, template_name, False
+
+    # Layer 4 guaranteed delivery mode: force a conservative valid SIDE_BY_SIDE plan shape.
+    forced = {
+        "productNameResolved": (product_name or "").strip() or "Product",
+        "advertisingPromise": promise,
+        "objectA": oa,
+        "objectA_secondary": oa_sec,
+        "objectB": ob,
+        "objectB_secondary": ob_sec,
+        "morphologicalReason": (c.get("morphologicalReason") or "").strip(),
+        "promiseReason": (c.get("promiseReason") or "").strip(),
+        "replacementDirection": "A_replaces_B",
+        "preservedBackgroundFrom": "B",
+        "preservedSecondaryFrom": "B",
+        "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
+        "headlineDecision": "include_product_name",
+        "headlineText": (product_name or "").strip() or "Product",
+        "replacementOpeningFrameDescription": c["replacementOpeningFrameDescription"],
+        "replacementMotionScript": c["replacementMotionScript"],
+        "sideBySideOpeningFrameDescription": sbs_open,
+        "sideBySideMotionScript": sbs_motion,
+        "videoPromptCore": sbs_motion,
+        "openingFrameDescription": sbs_open,
+        "videoVisualMode": "SIDE_BY_SIDE",
+        "chosenMode": "SIDE_BY_SIDE",
+        "silhouetteSimilarity": 50.0,
+        "shapeAlignment": "",
+        "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
+        "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
+    }
+    return forced, template_name, True
+
+
 def _fetch_video_plan_o3_sync(
     product_name: str,
     product_description: str,
@@ -1036,63 +1190,93 @@ Locked output language for all user-facing plan fields (from description classif
     logger.info("VIDEO_PLAN_REQUEST_TIMEOUT_S=%s", _VIDEO_PLAN_TIMEOUT)
     logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(full_input))
 
-    try:
-        response = client.responses.create(
-            model=model,
-            input=full_input,
-            reasoning={"effort": _reasoning_effort()},
-        )
-    except Exception as e:
-        err_type = type(e).__name__
-        logger.warning(
-            "VIDEO_PLAN_FAIL_MODEL_CALL model=%s err_type=%s err=%s",
-            model,
-            err_type,
-            e,
-        )
-        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-        return None
-
-    try:
-        raw = _extract_responses_output_text(response)
-        if not raw:
-            logger.error("VIDEO_PLAN_FAIL_EMPTY_OUTPUT model=%s", model)
+    max_attempts = 1 + max(0, _VIDEO_PLAN_RETRY_INTERACTION_MAX)
+    last_parsed: Optional[Dict[str, Any]] = None
+    last_v_err = ""
+    for attempt in range(max_attempts):
+        try:
+            response = client.responses.create(
+                model=model,
+                input=full_input,
+                reasoning={"effort": _reasoning_effort()},
+            )
+        except Exception as e:
+            err_type = type(e).__name__
+            logger.warning(
+                "VIDEO_PLAN_FAIL_MODEL_CALL model=%s err_type=%s err=%s",
+                model,
+                err_type,
+                e,
+            )
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None
 
-        _log_output_preview(raw)
+        try:
+            raw = _extract_responses_output_text(response)
+            if not raw:
+                logger.error("VIDEO_PLAN_FAIL_EMPTY_OUTPUT model=%s", model)
+                logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                return None
 
-        parsed = _parse_json_from_response(raw)
-        if not parsed:
-            logger.error("VIDEO_PLAN_FAIL_JSON_PARSE model=%s", model)
+            _log_output_preview(raw)
+
+            parsed = _parse_json_from_response(raw)
+            if not parsed:
+                logger.error("VIDEO_PLAN_FAIL_JSON_PARSE model=%s", model)
+                logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                return None
+            last_parsed = parsed
+
+            plan, v_err = validate_and_normalize_plan(parsed)
+            if not plan:
+                last_v_err = (v_err or "").strip()
+                if last_v_err == "side_by_side_interaction_not_meaningful" and attempt < max_attempts - 1:
+                    logger.info(
+                        "VIDEO_PLAN_RETRY attempt=%s reason=interaction_not_meaningful",
+                        attempt + 1,
+                    )
+                    continue
+                if v_err == "secondary_objects_not_distinct":
+                    logger.info("VIDEO_PLAN_ABORTED reason=secondary_objects_not_distinct")
+                elif v_err == "identity_too_close":
+                    logger.info("VIDEO_PLAN_ABORTED reason=identity_too_close")
+                elif v_err == "missing_object_secondary":
+                    logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
+                else:
+                    logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
+                break
+
+            log_plan_summary(plan)
+            logger.info("VIDEO_PLAN_OK model=%s", model)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=true")
+            return plan
+        except Exception as e:
+            logger.warning(
+                "VIDEO_PLAN_FAIL_EXCEPTION phase=post_create err_type=%s err=%s",
+                type(e).__name__,
+                e,
+            )
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None
 
-        plan, v_err = validate_and_normalize_plan(parsed)
-        if not plan:
-            if v_err == "secondary_objects_not_distinct":
-                logger.info("VIDEO_PLAN_ABORTED reason=secondary_objects_not_distinct")
-            elif v_err == "identity_too_close":
-                logger.info("VIDEO_PLAN_ABORTED reason=identity_too_close")
-            elif v_err == "missing_object_secondary":
-                logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
-            else:
-                logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
-            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            return None
-
-        log_plan_summary(plan)
-        logger.info("VIDEO_PLAN_OK model=%s", model)
-        logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-        return plan
-    except Exception as e:
-        logger.warning(
-            "VIDEO_PLAN_FAIL_EXCEPTION phase=post_create err_type=%s err=%s",
-            type(e).__name__,
-            e,
+    if last_v_err == "side_by_side_interaction_not_meaningful" and last_parsed:
+        logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=deterministic_salvage")
+        salvage_plan, template_name, guaranteed_mode = _build_deterministic_side_by_side_plan_from_parsed(
+            last_parsed,
+            product_name=product_name,
+            product_description=product_description,
+            content_language=content_language,
         )
-        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-        return None
+        logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
+        if salvage_plan:
+            if guaranteed_mode:
+                logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
+            logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
+            logger.info("VIDEO_PLAN_OK model=%s", model)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=true")
+            return salvage_plan
+    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+    return None
 
 
 def fetch_video_plan_o3(
