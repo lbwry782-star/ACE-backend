@@ -44,7 +44,7 @@ _VIDEO_PLAN_HARD_SECONDS = float(
     or str(_VIDEO_PLAN_TIMEOUT + 45.0)
 )
 
-# Must match engine.side_by_side_v1.SIMILARITY_THRESHOLD_REPLACEMENT (85): REPLACEMENT if silhouette >= 85 else SIDE_BY_SIDE.
+# Must match engine.side_by_side_v1.SIMILARITY_THRESHOLD_REPLACEMENT (85): REPLACEMENT if silhouette > 85 else SIDE_BY_SIDE.
 _VIDEO_SILHOUETTE_THRESHOLD_REPLACEMENT = 85
 
 
@@ -360,6 +360,96 @@ _IDENTITY_TOO_CLOSE_NORM_PAIRS: FrozenSet[Tuple[str, str]] = frozenset(
 def _object_pair_identity_too_close_heuristic(oa: str, ob: str) -> bool:
     """True → reject: known near-twin pair where replacement tends to read as one object category."""
     return _identity_distinctness_norm_pair_key(oa, ob) in _IDENTITY_TOO_CLOSE_NORM_PAIRS
+
+
+# REPLACEMENT enforcement (server-side source of truth): similarity>85 => A replaces B, only B-secondary is preserved.
+_REPLACEMENT_MOTION_REQUIRED_VERBS: Tuple[str, ...] = (
+    "use",
+    "uses",
+    "using",
+    "interact",
+    "interacts",
+    "trigger",
+    "triggers",
+    "activate",
+    "activates",
+    "resolve",
+    "resolves",
+    "change",
+    "changes",
+    "respond",
+    "responds",
+    "transform",
+    "transforms",
+    "solve",
+    "solves",
+)
+
+
+def _norm_words_for_presence(s: str) -> List[str]:
+    t = re.sub(r"[^a-z0-9\s]", " ", (s or "").lower())
+    return [w for w in t.split() if w]
+
+
+def _contains_object_tokens(text: str, label: str) -> bool:
+    words = _norm_words_for_presence(label)
+    if not words:
+        return False
+    low = (text or "").lower()
+    return any(len(w) >= 3 and re.search(r"\b" + re.escape(w) + r"\b", low) for w in words)
+
+
+def _replacement_motion_is_meaningful(script: str, object_a: str, object_b_secondary: str) -> bool:
+    """
+    REPLACEMENT motion must communicate meaning through interaction(A, B-secondary), not decorative idle motion.
+    """
+    s = (script or "").strip().lower()
+    if len(s) < 40:
+        return False
+    if not _contains_object_tokens(s, object_a):
+        return False
+    if not _contains_object_tokens(s, object_b_secondary):
+        return False
+    if not any(v in s for v in _REPLACEMENT_MOTION_REQUIRED_VERBS):
+        return False
+    decorative_only = ("idle", "floating", "ambient", "aesthetic", "beauty shot", "loop")
+    if any(x in s for x in decorative_only):
+        return False
+    return True
+
+
+def _side_by_side_motion_is_meaningful(
+    script: str, object_a: str, object_b: str, advertising_promise: str
+) -> bool:
+    """
+    SIDE_BY_SIDE requires meaningful A↔B interaction (not comparison-only or decorative movement).
+    """
+    s = (script or "").strip().lower()
+    if len(s) < 45:
+        return False
+    if not _contains_object_tokens(s, object_a):
+        return False
+    if not _contains_object_tokens(s, object_b):
+        return False
+    if not any(v in s for v in _REPLACEMENT_MOTION_REQUIRED_VERBS):
+        return False
+    forbidden = (
+        "side by side only",
+        "comparison only",
+        "no interaction",
+        "idle",
+        "ambient",
+        "aesthetic",
+        "beauty shot",
+        "independent movement",
+    )
+    if any(x in s for x in forbidden):
+        return False
+    # Motion should express the promise; require at least one promise token to appear.
+    p_words = [w for w in _norm_words_for_presence(advertising_promise) if len(w) >= 4]
+    if p_words and not any(re.search(r"\b" + re.escape(w) + r"\b", s) for w in p_words[:8]):
+        return False
+    return True
 
 
 # SIDE_BY_SIDE_SHAPE_ENFORCEMENT: tall vertical-axis + top-mass silhouettes (tree, umbrella, lamppost, …)
@@ -704,7 +794,7 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
 
     chosen_mode = (
         "REPLACEMENT"
-        if silhouette_similarity >= float(_VIDEO_SILHOUETTE_THRESHOLD_REPLACEMENT)
+        if silhouette_similarity > float(_VIDEO_SILHOUETTE_THRESHOLD_REPLACEMENT)
         else "SIDE_BY_SIDE"
     )
     logger.info(
@@ -718,9 +808,29 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     side_by_side_camera_motion = ""
     side_by_side_camera_motion_description = ""
     if chosen_mode == "REPLACEMENT":
+        # Final source-of-truth enforcement:
+        # similarity>85 => Object A fully replaces Object B; preserve B-secondary only.
+        repl = "A_replaces_B"
+        bg = "B"
+        sec = "B"
+        if _contains_object_tokens(rep_open, ob):
+            logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=object_b_visible_in_opening")
+            return None, "replacement_contains_object_b"
+        if _contains_object_tokens(rms, ob):
+            logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=object_b_visible_in_motion")
+            return None, "replacement_contains_object_b"
+        if not _replacement_motion_is_meaningful(rms, oa, ob_sec):
+            logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=motion_not_meaningful")
+            return None, "replacement_motion_not_meaningful"
         core = rms
         opening_fd = rep_open
+        logger.info(
+            "VIDEO_REPLACEMENT_RULE_ENFORCED mode=REPLACEMENT object_presence=A_only secondary=B_secondary"
+        )
     else:
+        if not _side_by_side_motion_is_meaningful(sbs_ms, oa, ob, apromise):
+            logger.info("VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=interaction_not_meaningful")
+            return None, "side_by_side_interaction_not_meaningful"
         core = sbs_ms
         opening_fd = sbs_open
         if _object_label_vertical_axis_top_mass(oa) and _object_label_vertical_axis_top_mass(ob):
@@ -736,6 +846,9 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
         core = f"{core}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
         logger.info("VIDEO_SIDE_BY_SIDE_CAMERA_RULE applied=true motion=half_orbit")
         logger.info("VIDEO_PLAN_CAMERA_MOTION mode=SIDE_BY_SIDE motion=half_orbit")
+        logger.info(
+            "VIDEO_SIDE_BY_SIDE_RULE_ENFORCED mode=SIDE_BY_SIDE primary_interaction=A_to_B anchors=A_secondary|B_secondary"
+        )
 
     logger.info("VIDEO_PLAN_MODE=%s", chosen_mode)
 
