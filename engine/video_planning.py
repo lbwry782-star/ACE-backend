@@ -7,7 +7,6 @@ Future: richer ACE video engine (e.g. two outputs); keep this module inspectable
 
 from __future__ import annotations
 
-import concurrent.futures
 import hashlib
 import json
 import logging
@@ -673,7 +672,9 @@ def _coerce_plan_keys(data: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def validate_and_normalize_plan(
+    data: Dict[str, Any], *, planner_deadline_monotonic: Optional[float] = None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Return (plan, None) or (None, reason_code) for logging.
     reason_code: missing branch fields | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
@@ -785,9 +786,19 @@ def validate_and_normalize_plan(data: Dict[str, Any]) -> Tuple[Optional[Dict[str
     )
 
     try:
+        if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
+            logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=silhouette_eval_start")
+            raise VideoPlanningTimeoutError()
         from engine.side_by_side_v1 import evaluate_silhouette_similarity
 
+        logger.info("VIDEO_SILHOUETTE_EVAL_STAGE start")
         silhouette_similarity = float(evaluate_silhouette_similarity(oa, ob))
+        logger.info("VIDEO_SILHOUETTE_EVAL_STAGE done similarity=%s", silhouette_similarity)
+        if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
+            logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=silhouette_eval_done")
+            raise VideoPlanningTimeoutError()
+    except VideoPlanningTimeoutError:
+        raise
     except Exception as e:
         logger.warning("VIDEO_SILHOUETTE_EVAL_FAIL err=%s", e)
         return None, "silhouette_similarity_eval_failed"
@@ -1153,10 +1164,28 @@ def _build_deterministic_side_by_side_plan_from_parsed(
     return forced, template_name, True
 
 
+def _planner_deadline_guard(
+    deadline_monotonic: Optional[float], *, stage: str, has_valid_plan: bool = False
+) -> None:
+    if deadline_monotonic is None:
+        return
+    now = time.monotonic()
+    if now < deadline_monotonic:
+        return
+    logger.error(
+        "VIDEO_PLAN_DEADLINE_EXCEEDED stage=%s has_valid_plan=%s",
+        stage,
+        str(has_valid_plan).lower(),
+    )
+    raise VideoPlanningTimeoutError()
+
+
 def _fetch_video_plan_o3_sync(
     product_name: str,
     product_description: str,
     content_language: str = "he",
+    *,
+    deadline_monotonic: Optional[float] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Single planning model call returning a validated plan dict, or None on any failure (no generic video fallback).
@@ -1189,17 +1218,25 @@ Locked output language for all user-facing plan fields (from description classif
     logger.info("VIDEO_PLAN_REQUEST_START model=%s", model)
     logger.info("VIDEO_PLAN_REQUEST_TIMEOUT_S=%s", _VIDEO_PLAN_TIMEOUT)
     logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(full_input))
+    if deadline_monotonic is not None:
+        logger.info(
+            "VIDEO_PLAN_OVERALL_DEADLINE_S remaining=%.3f",
+            max(0.0, deadline_monotonic - time.monotonic()),
+        )
 
     max_attempts = 1 + max(0, _VIDEO_PLAN_RETRY_INTERACTION_MAX)
     last_parsed: Optional[Dict[str, Any]] = None
     last_v_err = ""
     for attempt in range(max_attempts):
+        _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_start")
+        logger.info("VIDEO_PLAN_RETRY_STAGE start attempt=%s/%s", attempt + 1, max_attempts)
         try:
             response = client.responses.create(
                 model=model,
                 input=full_input,
                 reasoning={"effort": _reasoning_effort()},
             )
+            _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_post_model_call")
         except Exception as e:
             err_type = type(e).__name__
             logger.warning(
@@ -1227,7 +1264,9 @@ Locked output language for all user-facing plan fields (from description classif
                 return None
             last_parsed = parsed
 
-            plan, v_err = validate_and_normalize_plan(parsed)
+            plan, v_err = validate_and_normalize_plan(
+                parsed, planner_deadline_monotonic=deadline_monotonic
+            )
             if not plan:
                 last_v_err = (v_err or "").strip()
                 if last_v_err == "side_by_side_interaction_not_meaningful" and attempt < max_attempts - 1:
@@ -1235,6 +1274,7 @@ Locked output language for all user-facing plan fields (from description classif
                         "VIDEO_PLAN_RETRY attempt=%s reason=interaction_not_meaningful",
                         attempt + 1,
                     )
+                    logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
                     continue
                 if v_err == "secondary_objects_not_distinct":
                     logger.info("VIDEO_PLAN_ABORTED reason=secondary_objects_not_distinct")
@@ -1244,12 +1284,16 @@ Locked output language for all user-facing plan fields (from description classif
                     logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
                 else:
                     logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
+                logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=invalid", attempt + 1)
                 break
 
             log_plan_summary(plan)
             logger.info("VIDEO_PLAN_OK model=%s", model)
+            logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=accepted", attempt + 1)
             logger.info("VIDEO_PLAN_RESPONSE_OK=true")
             return plan
+        except VideoPlanningTimeoutError:
+            raise
         except Exception as e:
             logger.warning(
                 "VIDEO_PLAN_FAIL_EXCEPTION phase=post_create err_type=%s err=%s",
@@ -1260,6 +1304,7 @@ Locked output language for all user-facing plan fields (from description classif
             return None
 
     if last_v_err == "side_by_side_interaction_not_meaningful" and last_parsed:
+        _planner_deadline_guard(deadline_monotonic, stage="fallback_layer_enter")
         logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=deterministic_salvage")
         salvage_plan, template_name, guaranteed_mode = _build_deterministic_side_by_side_plan_from_parsed(
             last_parsed,
@@ -1269,6 +1314,11 @@ Locked output language for all user-facing plan fields (from description classif
         )
         logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
         if salvage_plan:
+            _planner_deadline_guard(
+                deadline_monotonic,
+                stage="fallback_plan_ready",
+                has_valid_plan=True,
+            )
             if guaranteed_mode:
                 logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
             logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
@@ -1285,21 +1335,26 @@ def fetch_video_plan_o3(
     content_language: str = "he",
 ) -> Optional[Dict[str, Any]]:
     """
-    Same as _fetch_video_plan_o3_sync but with a hard wall-clock deadline so the worker cannot hang here.
+    Fetch and validate plan under one authoritative hard wall-clock deadline.
     On deadline exceeded, raises VideoPlanningTimeoutError (caller must fail the job).
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        fut = ex.submit(_fetch_video_plan_o3_sync, product_name, product_description, content_language)
-        try:
-            return fut.result(timeout=_VIDEO_PLAN_HARD_SECONDS)
-        except concurrent.futures.TimeoutError:
-            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            logger.error(
-                "VIDEO_PLAN_FAIL_TIMEOUT hard_seconds=%s (VIDEO_PLANNER_HARD_TIMEOUT_SECONDS or planner+45)",
-                _VIDEO_PLAN_HARD_SECONDS,
-            )
-            logger.info("VIDEO_JOB_STEP step=plan_video timeout")
-            raise VideoPlanningTimeoutError()
+    deadline = time.monotonic() + _VIDEO_PLAN_HARD_SECONDS
+    try:
+        return _fetch_video_plan_o3_sync(
+            product_name,
+            product_description,
+            content_language,
+            deadline_monotonic=deadline,
+        )
+    except VideoPlanningTimeoutError:
+        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+        logger.error(
+            "VIDEO_PLAN_FAIL_TIMEOUT hard_seconds=%s (VIDEO_PLANNER_HARD_TIMEOUT_SECONDS or planner+45)",
+            _VIDEO_PLAN_HARD_SECONDS,
+        )
+        logger.info("VIDEO_PLAN_TIMEOUT_FINAL no_valid_plan_before_deadline=true")
+        logger.info("VIDEO_JOB_STEP step=plan_video timeout")
+        raise
 
 
 _RUNWAY_PROMPT_MAX_CHARS = 1000
