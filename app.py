@@ -7,6 +7,7 @@ import zipfile
 import json
 import base64
 import os
+import secrets
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
@@ -34,6 +35,13 @@ from engine.video_jobs_redis import (
     video_job_create,
     video_job_get,
     video_job_try_finalize_stale_running,
+)
+from engine.ad_promise_history import (
+    clear_ad_promise_history,
+    clear_all_ad_promise_history,
+    delete_product_memory_by_hash,
+    delete_product_memory_by_text,
+    get_all_products_with_memory,
 )
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 import db_session
@@ -85,7 +93,9 @@ def handle_preflight():
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Admin-Secret"
+            )
             response.headers["Access-Control-Max-Age"] = "86400"
             return response
         return Response('', status=200)
@@ -103,7 +113,9 @@ def add_cors_headers(response):
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
-            response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-ACE-Batch-State"
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Admin-Secret"
+            )
             if "X-ACE-Batch-State" in response.headers:
                 response.headers["Access-Control-Expose-Headers"] = "X-ACE-Batch-State"
     return response
@@ -970,6 +982,94 @@ def generate_video():
     except Exception as e:
         logger.error("generate_video enqueue failed: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+
+
+def _ace_admin_secret_authorized() -> bool:
+    """True when X-ACE-Admin-Secret matches ACE_ADMIN_SECRET (constant-time compare)."""
+    expected = (os.environ.get("ACE_ADMIN_SECRET") or "").strip()
+    if not expected:
+        return False
+    got = (request.headers.get("X-ACE-Admin-Secret") or "").strip()
+    return bool(got) and secrets.compare_digest(got, expected)
+
+
+@app.route("/api/reset-promise-history", methods=["POST"])
+def api_reset_promise_history():
+    """Admin: delete stored advertisingPromise history for one product fingerprint (Redis only)."""
+    if not _ace_admin_secret_authorized():
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "expected_json"}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "expected_json"}), 400
+    product_name = (payload.get("productName") or "").strip()
+    product_description = (payload.get("productDescription") or "").strip()
+    ok, ph = clear_ad_promise_history(product_name, product_description)
+    if not ok:
+        return jsonify({"ok": False, "error": "clear_failed", "product_hash": ph}), 500
+    return jsonify({"ok": True, "product_hash": ph}), 200
+
+
+@app.route("/api/reset-all-promise-history", methods=["POST"])
+def api_reset_all_promise_history():
+    """Admin: delete all ACE:AD_PROMISE_HISTORY:* keys (Redis SCAN; does not touch video job hashes)."""
+    if not _ace_admin_secret_authorized():
+        return jsonify({"ok": False, "error": "forbidden"}), 403
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
+    n = clear_all_ad_promise_history()
+    if n < 0:
+        return jsonify({"ok": False, "error": "clear_failed"}), 500
+    return jsonify({"ok": True, "total_deleted": n}), 200
+
+
+@app.route("/api/promise-memory/list", methods=["GET"])
+def api_promise_memory_list():
+    """List products with stored advertisingPromise history (from ACE:AD_PROMISE_INDEX). No auth."""
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
+    items = get_all_products_with_memory()
+    return jsonify({"ok": True, "items": items}), 200
+
+
+@app.route("/api/promise-memory/delete-by-hash", methods=["POST"])
+def api_promise_memory_delete_by_hash():
+    """Delete ACE:AD_PROMISE_HISTORY:<product_hash> and index row. Body: {\"product_hash\": \"...\"}. No auth."""
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "expected_json"}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "expected_json"}), 400
+    ph = (payload.get("product_hash") or "").strip()
+    if not ph:
+        return jsonify({"ok": False, "error": "missing_product_hash"}), 400
+    ok = delete_product_memory_by_hash(ph)
+    if not ok:
+        return jsonify({"ok": False, "error": "delete_failed", "product_hash": ph}), 500
+    return jsonify({"ok": True, "product_hash": ph}), 200
+
+
+@app.route("/api/promise-memory/delete-by-text", methods=["POST"])
+def api_promise_memory_delete_by_text():
+    """Delete by recomputed hash from productName + productDescription. No auth."""
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "redis_unconfigured"}), 503
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "expected_json"}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "expected_json"}), 400
+    product_name = (payload.get("productName") or "").strip()
+    product_description = (payload.get("productDescription") or "").strip()
+    ok, ph = delete_product_memory_by_text(product_name, product_description)
+    if not ok:
+        return jsonify({"ok": False, "error": "delete_failed", "product_hash": ph}), 500
+    return jsonify({"ok": True, "product_hash": ph}), 200
 
 
 @app.route('/api/video-status', methods=['GET'])

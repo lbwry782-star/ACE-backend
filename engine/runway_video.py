@@ -333,7 +333,12 @@ def generate_one_video_mvp(
 
     logger.info("VIDEO_JOB_STEP step=plan_video start")
     try:
-        plan = fetch_video_plan_o3(canonical_name, product_description, content_language=video_lang)
+        plan = fetch_video_plan_o3(
+            canonical_name,
+            product_description,
+            content_language=video_lang,
+            session_id=job_id or "",
+        )
     except VideoPlanningTimeoutError:
         logger.info("VIDEO_PLAN_ABORTED reason=planning_timeout")
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")

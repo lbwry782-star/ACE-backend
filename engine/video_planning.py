@@ -21,6 +21,18 @@ from openai import OpenAI
 
 from engine.video_language import normalize_video_content_language, video_language_display_name
 
+from engine.ad_promise_history import (
+    angle_seed_for_attempt,
+    build_promise_diversity_addon,
+    compute_product_hash,
+    forbidden_promises_for_prompt,
+    increment_promise_stat,
+    is_promise_too_similar,
+    load_ad_promise_history,
+    maybe_soft_reset_promise_memory,
+    save_ad_promise_entry,
+)
+
 logger = logging.getLogger(__name__)
 
 # Safe preview length for logs (no secrets; truncated model output)
@@ -44,8 +56,8 @@ _VIDEO_PLAN_HARD_SECONDS = float(
     or str(_VIDEO_PLAN_TIMEOUT + 45.0)
 )
 
-# Must match engine.side_by_side_v1.SIMILARITY_THRESHOLD_REPLACEMENT (85): REPLACEMENT if silhouette > 85 else SIDE_BY_SIDE.
-_VIDEO_SILHOUETTE_THRESHOLD_REPLACEMENT = 85
+# REPLACEMENT is chosen only when replacement-branch interaction scores >= this threshold (see validate_and_normalize_plan).
+_VIDEO_REPLACEMENT_INTERACTION_SCORE_THRESHOLD = 85
 
 
 _JSON_KEYS = """
@@ -54,17 +66,16 @@ OUTPUT FORMAT (strict)
 - Use the exact camelCase keys below. Do not omit required keys; use "" only where allowed.
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
-MODE (server-decided, do not output mode): After you choose objectA and objectB, the backend measures silhouette similarity
-(same metric as the ACE image engine). If similarity >= 85 → REPLACEMENT; if < 85 → SIDE_BY_SIDE. You cannot set the mode.
+MODE (server-decided, do not output mode): The backend scores the REPLACEMENT motion script (pantomime: only A visible; A interacts with B’s secondary; B absent). If the score is strong enough (>= 85) and the script is valid, mode = REPLACEMENT; otherwise SIDE_BY_SIDE. You cannot set the mode.
 You MUST output BOTH the REPLACEMENT branch fields AND the SIDE_BY_SIDE branch fields so the server can use the correct one.
 
 Field notes:
-- morphologicalReason: Why A/B match in whole-object form (iconic identity). Job language where noted below.
+- morphologicalReason: Why each object fits the advertising story (job language where noted). A and B need not look alike.
 - objectPairViewerClarityOk / objectPairIdentityDistinctOk / identityDistinctnessNote: as before.
-- replacementOpeningFrameDescription: English. Opening-frame intent if REPLACEMENT is selected: B already replaces A; A’s background; A’s secondary in A’s position. No side-by-side wording.
-- replacementMotionScript: English. Motion for REPLACEMENT: interaction of B with A’s secondary; subtle; no transformation narrative.
-- sideBySideOpeningFrameDescription: English. Opening-frame intent if SIDE_BY_SIDE is selected: both A and B visible from frame 1; tight unified composition; close or slightly overlapping; same world; A’s secondary nearby; NO replacement, NO B-instead-of-A.
-- sideBySideMotionScript: English. Motion for SIDE_BY_SIDE: minimal, comparison-strengthening only (subtle tilt, slight rotation, small approach, tiny A/B interaction, subtle secondary involvement). No morphing, swapping, disappearance, cuts, or multi-shot story.
+- replacementOpeningFrameDescription: English. If REPLACEMENT is selected: only object A is visible; A’s original background/world; object B must not appear; A interacts with B’s secondary as a physical stand-in (pantomime). No side-by-side wording.
+- replacementMotionScript: English. Clear physical motion: A interacts with B’s secondary only; B must not be named as visible; no transformation narrative.
+- sideBySideOpeningFrameDescription: English. If SIDE_BY_SIDE: both A and B visible from frame 1; tight unified composition; close or slightly overlapping; same world; secondaries anchor the scene; NO replacement framing.
+- sideBySideMotionScript: English. Clear, physically understandable A↔B interaction a viewer can read instantly (not abstract-only). Subtle camera-friendly motion is OK. No morphing, swapping, disappearance, cuts, or multi-shot story.
 
 Required keys (all strings except where noted):
 {
@@ -105,32 +116,34 @@ LANGUAGE
 
 CREATIVE RULES (mandatory)
 1) Derive advertisingPromise from the product description (in {lang_name} per field rules above).
-2) Choose objectA by grasping the product’s overall form intuitively (whole-object, painter-like).
-3) Choose objectB morphologically similar to A and linked to the promise; never swap a more shape-correct B for a weaker one just to make the promise louder.
-4) Classic, defined, physical objects in classic situations only.
-5) Filter text, logos, brands, written labels, vague environments, non-physical situations.
-6) Each main object has a nearby classic secondary object that is NOT part of the primary.
-7) MODE is NOT your choice: the server computes silhouette similarity on (objectA, objectB) like the ACE image engine. Threshold 85: ≥85 → REPLACEMENT; <85 → SIDE_BY_SIDE. You must still output BOTH creative branches (replacement* and sideBySide*) fully.
+2) Choose objectA and objectB independently from the advertising promise: each primary must clearly connect to the advertising goal (not necessarily similar shapes).
+3) Classic, defined, physical objects in classic situations only.
+4) Filter text, logos, brands, written labels, vague environments, non-physical situations.
+5) Each main object has a nearby classic secondary object that is NOT part of the primary.
+6) MODE is NOT your choice: the server scores replacement-branch interaction strength; strong pantomime scripts can yield REPLACEMENT. You must still output BOTH creative branches (replacement* and sideBySide*) fully.
 
 REPLACEMENT branch (English fields — used only if server selects REPLACEMENT)
-- Opening: start frame already shows B replacing A while keeping A’s background and A’s secondary in A’s position.
-- Motion: B interacts with A’s secondary; no transformation/morph language.
+- Pantomime: only A is visible; B never appears on camera; A’s background/world is preserved; A performs a clear physical interaction with B’s secondary as the stand-in for B’s role.
+- Motion: English, concrete verbs, visually obvious cause/effect; no transformation/morph language.
 
 SIDE_BY SIDE branch (English fields — used only if server selects SIDE_BY_SIDE)
-- Opening: A and B both visible from frame 1; tight unified composition; close or slightly overlapping; same angle/scale/world; A’s secondary anchors the scene; NO replacement, NO “B instead of A”.
-- Motion: minimal, comparison-only (subtle tilt, slight rotation, small approach/retreat, tiny A↔B interaction, subtle secondary cue). No morphing, swapping, disappearance, wide empty split layout, cuts, or multi-shot story.
+- Opening: A and B both visible from frame 1; tight unified composition; close or slightly overlapping; same angle/scale/world; secondaries anchor the scene; NO replacement framing.
+- Motion: clear physical A↔B interaction (viewer-instant read). Avoid abstract-only or purely symbolic motion. No morphing, swapping, disappearance, wide empty split layout, cuts, or multi-shot story.
 
-PHOTOGRAPHIC SIMILARITY (pair selection)
-Object A and Object B: priority (1) shape/outline (2) color (3) material/texture (4) photographic feel.
+OBJECT PAIRING (promise-first)
+- Object A and Object B each reflect the advertising promise; they do not need similar silhouettes or morphology.
 
 IDENTITY DISTINCTNESS
 - objectPairIdentityDistinctOk / identityDistinctnessNote: A and B must be clearly different objects, not variants of the same thing. Reject near-twin ambiguous pairs per prior rules.
+
+PROMISE DIVERSITY (persistent product memory)
+- The advertisingPromise MUST be materially different from all prior promises the server lists for this product in this request. Do not restate speed, accuracy, security, ease, savings, or growth as the main story if that angle was already used—pick a genuinely new core idea (not wording tricks).
 
 OBJECTS + SEARCH
 - Iconic primaries; distinct secondaries when A≠B. Compare multiple B candidates; never trade shape fit for promise clarity.
 
 PAIRING + PROMISE
-- Prefer B_replaces_A; else A_replaces_B. Set replacementDirection, preservedBackgroundFrom, preservedSecondaryFrom.
+- replacementDirection: prefer A_replaces_B for pantomime (A visible, B absent, A uses B’s secondary). Set preservedBackgroundFrom=A and preservedSecondaryFrom=B when unsure.
 
 HEADLINE (overlay metadata only—never pixels in video)
 - headlineDecision: include_product_name | product_name_only | no_headline. headlineText: ≤7 words {lang_name}. Never burn headline into videoPrompt fields.
@@ -401,7 +414,7 @@ def _contains_object_tokens(text: str, label: str) -> bool:
 
 def _replacement_motion_is_meaningful(script: str, object_a: str, object_b_secondary: str) -> bool:
     """
-    REPLACEMENT motion must communicate meaning through interaction(A, B-secondary), not decorative idle motion.
+    REPLACEMENT (pantomime) motion: A interacts with B’s secondary; B must not read as on-screen.
     """
     s = (script or "").strip().lower()
     if len(s) < 40:
@@ -416,6 +429,83 @@ def _replacement_motion_is_meaningful(script: str, object_a: str, object_b_secon
     if any(x in s for x in decorative_only):
         return False
     return True
+
+
+def _object_connects_to_advertising_goal(object_label: str, promise_context: str) -> bool:
+    """
+    Each primary must tie to the advertising goal using promise + promiseReason + morphologicalReason text.
+    When the context has no extractable Latin tokens (e.g. Hebrew-only), skip strict token matching.
+    """
+    o = (object_label or "").strip().lower()
+    ctx = (promise_context or "").strip().lower()
+    if not o:
+        return False
+    if not ctx:
+        return True
+    if o in ctx:
+        return True
+    ctx_ascii = set(re.findall(r"[a-z]{3,}", ctx))
+    if not ctx_ascii:
+        return True
+    for w in _norm_words_for_presence(o):
+        if len(w) >= 3 and w in ctx_ascii:
+            return True
+        if len(w) >= 4 and any(w in t or t in w for t in ctx_ascii if len(t) >= 4):
+            return True
+    return any(t in o for t in ctx_ascii if len(t) >= 5)
+
+
+def _score_replacement_interaction_strength(
+    rms: str, rep_open: str, oa: str, ob: str, ob_sec: str
+) -> int:
+    """
+    0–100 score for REPLACEMENT pantomime readiness (no silhouette). Used only after B-absence checks.
+    """
+    if _contains_object_tokens(rep_open, ob) or _contains_object_tokens(rms, ob):
+        return 0
+    if not _replacement_motion_is_meaningful(rms, oa, ob_sec):
+        return min(72, 32 + len((rms or "").strip()) // 5)
+    joined = f"{rms} {rep_open}".lower()
+    score = 80
+    if len((rms or "").strip()) >= 95:
+        score += 4
+    elif len((rms or "").strip()) < 55:
+        score -= 10
+    concrete = (
+        "push",
+        "pull",
+        "lift",
+        "lower",
+        "turn",
+        "rotate",
+        "press",
+        "slide",
+        "tilt",
+        "strike",
+        "tap",
+        "wrap",
+        "hold",
+        "grasp",
+        "guide",
+        "contact",
+        "pulls",
+        "pushes",
+    )
+    if sum(1 for w in concrete if w in joined) >= 2:
+        score += 6
+    vague = (
+        "symbolic",
+        "metaphor",
+        "abstract",
+        "suggests",
+        "implies",
+        "represents an idea",
+        "emotional resonance",
+        "ambient mood",
+    )
+    if any(v in joined for v in vague):
+        score -= 15
+    return int(max(0, min(100, score)))
 
 
 def _pair_retry_key(oa: str, ob: str) -> str:
@@ -452,11 +542,10 @@ def _pair_is_too_similar_to_rejected(
     return False, "", ""
 
 
-def _side_by_side_motion_is_meaningful(
-    script: str, object_a: str, object_b: str, advertising_promise: str
-) -> bool:
+def _side_by_side_motion_is_meaningful(script: str, object_a: str, object_b: str) -> bool:
     """
-    SIDE_BY_SIDE requires meaningful A↔B interaction (not comparison-only or decorative movement).
+    SIDE_BY_SIDE: clear physical A↔B interaction (does not need to quote the advertisingPromise).
+    Reject comparison-only, decorative-only, or abstract/symbolic-only motion.
     """
     s = (script or "").strip().lower()
     if len(s) < 45:
@@ -479,9 +568,15 @@ def _side_by_side_motion_is_meaningful(
     )
     if any(x in s for x in forbidden):
         return False
-    # Motion should express the promise; require at least one promise token to appear.
-    p_words = [w for w in _norm_words_for_presence(advertising_promise) if len(w) >= 4]
-    if p_words and not any(re.search(r"\b" + re.escape(w) + r"\b", s) for w in p_words[:8]):
+    abstract_only = (
+        "purely symbolic",
+        "symbol only",
+        "abstract metaphor",
+        "represents the idea",
+        "suggests meaning without",
+        "emotional subtext only",
+    )
+    if any(x in s for x in abstract_only):
         return False
     return True
 
@@ -714,7 +809,7 @@ def validate_and_normalize_plan(
     Return (plan, None) or (None, reason_code) for logging.
     reason_code: missing branch fields | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
     | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | secondary_objects_not_distinct
-    | identity_too_close | silhouette_similarity_eval_failed
+    | identity_too_close | object_a_not_grounded_in_promise | object_b_not_grounded_in_promise
     """
     if not data:
         return None, "missing_replacementMotionScript"
@@ -820,44 +915,63 @@ def validate_and_normalize_plan(
         (id_note_raw or "")[:300],
     )
 
-    try:
-        if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
-            logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=silhouette_eval_start")
-            raise VideoPlanningTimeoutError()
-        from engine.side_by_side_v1 import evaluate_silhouette_similarity
-
-        logger.info("VIDEO_SILHOUETTE_EVAL_STAGE start")
-        silhouette_similarity = float(evaluate_silhouette_similarity(oa, ob))
-        logger.info("VIDEO_SILHOUETTE_EVAL_STAGE done similarity=%s", silhouette_similarity)
-        if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
-            logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=silhouette_eval_done")
-            raise VideoPlanningTimeoutError()
-    except VideoPlanningTimeoutError:
-        raise
-    except Exception as e:
-        logger.warning("VIDEO_SILHOUETTE_EVAL_FAIL err=%s", e)
-        return None, "silhouette_similarity_eval_failed"
-
-    chosen_mode = (
-        "REPLACEMENT"
-        if silhouette_similarity > float(_VIDEO_SILHOUETTE_THRESHOLD_REPLACEMENT)
-        else "SIDE_BY_SIDE"
+    promise_ctx = (
+        f"{apromise} {(data.get('promiseReason') or '').strip()} {(data.get('morphologicalReason') or '').strip()} "
+        f"{pn}"
     )
+    if not _object_connects_to_advertising_goal(oa, promise_ctx):
+        logger.info("VIDEO_PLAN_REJECT_REASON=object_a_not_grounded_in_promise")
+        return None, "object_a_not_grounded_in_promise"
+    if not _object_connects_to_advertising_goal(ob, promise_ctx):
+        logger.info("VIDEO_PLAN_REJECT_REASON=object_b_not_grounded_in_promise")
+        return None, "object_b_not_grounded_in_promise"
+
     logger.info(
-        "VIDEO_MODE_DECISION similarity=%s chosen_mode=%s threshold=%s",
-        silhouette_similarity,
-        chosen_mode,
-        _VIDEO_SILHOUETTE_THRESHOLD_REPLACEMENT,
+        "VIDEO_OBJECT_SELECTION_SOURCE objectA=%s objectB=%s based_on=advertisingPromise",
+        oa,
+        ob,
     )
-    logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=image_engine_rule_adapted")
+
+    if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
+        logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=pre_mode_decision")
+        raise VideoPlanningTimeoutError()
+
+    logger.info("VIDEO_PLANNING_FAST_PATH_USED=true")
+
+    repl_ok = not _contains_object_tokens(rep_open, ob) and not _contains_object_tokens(rms, ob)
+    replacement_meaningful = _replacement_motion_is_meaningful(rms, oa, ob_sec)
+    interaction_score = _score_replacement_interaction_strength(rms, rep_open, oa, ob, ob_sec)
+    logger.info(
+        "VIDEO_INTERACTION_DEFINED type=replacement meaningful=%s",
+        str(replacement_meaningful).lower(),
+    )
+
+    sbs_meaningful = _side_by_side_motion_is_meaningful(sbs_ms, oa, ob)
+    logger.info(
+        "VIDEO_INTERACTION_DEFINED type=side_by_side meaningful=%s",
+        str(sbs_meaningful).lower(),
+    )
+
+    can_replace = (
+        repl_ok
+        and replacement_meaningful
+        and interaction_score >= int(_VIDEO_REPLACEMENT_INTERACTION_SCORE_THRESHOLD)
+    )
+    chosen_mode = "REPLACEMENT" if can_replace else "SIDE_BY_SIDE"
+    logger.info(
+        "VIDEO_MODE_DECISION_NEW mode=%s reason=interaction_score score=%s threshold=%s",
+        chosen_mode,
+        interaction_score,
+        int(_VIDEO_REPLACEMENT_INTERACTION_SCORE_THRESHOLD),
+    )
+
     shape_alignment = ""
     side_by_side_camera_motion = ""
     side_by_side_camera_motion_description = ""
+    silhouette_similarity = float(interaction_score)
     if chosen_mode == "REPLACEMENT":
-        # Final source-of-truth enforcement:
-        # similarity>85 => Object A fully replaces Object B; preserve B-secondary only.
         repl = "A_replaces_B"
-        bg = "B"
+        bg = "A"
         sec = "B"
         if _contains_object_tokens(rep_open, ob):
             logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=object_b_visible_in_opening")
@@ -871,33 +985,20 @@ def validate_and_normalize_plan(
         core = rms
         opening_fd = rep_open
         logger.info(
-            "VIDEO_REPLACEMENT_RULE_ENFORCED mode=REPLACEMENT object_presence=A_only secondary=B_secondary"
+            "VIDEO_REPLACEMENT_RULE_ENFORCED mode=REPLACEMENT object_presence=A_only secondary=B_secondary pantomime=true"
         )
     else:
-        sbs_meaningful = _side_by_side_motion_is_meaningful(sbs_ms, oa, ob, apromise)
-        if silhouette_similarity < 30.0 and not sbs_meaningful:
-            pair_k = _pair_retry_key(oa, ob)
-            logger.info(
-                "VIDEO_PLAN_EARLY_REJECT_LOW_QUALITY pair=%s similarity=%.1f reason=low_similarity_weak_interaction",
-                pair_k,
-                silhouette_similarity,
-            )
-            logger.info(
-                "VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=low_similarity_weak_interaction similarity=%.1f",
-                silhouette_similarity,
-            )
-            return None, "side_by_side_low_similarity_weak_interaction"
         if not sbs_meaningful:
             pair_k = _pair_retry_key(oa, ob)
             logger.info(
-                "VIDEO_PLAN_EARLY_REJECT_LOW_QUALITY pair=%s similarity=%.1f reason=interaction_not_meaningful",
+                "VIDEO_PLAN_EARLY_REJECT_LOW_QUALITY pair=%s similarity=n/a reason=interaction_not_meaningful",
                 pair_k,
-                silhouette_similarity,
             )
             logger.info("VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=interaction_not_meaningful")
             return None, "side_by_side_interaction_not_meaningful"
         core = sbs_ms
         opening_fd = sbs_open
+        silhouette_similarity = 0.0
         if _object_label_vertical_axis_top_mass(oa) and _object_label_vertical_axis_top_mass(ob):
             shape_alignment = "vertical_axis"
             opening_fd = f"{opening_fd} {_SIDE_BY_SIDE_VERTICAL_OPENING_ENFORCEMENT}".strip()
@@ -916,6 +1017,10 @@ def validate_and_normalize_plan(
         )
 
     logger.info("VIDEO_PLAN_MODE=%s", chosen_mode)
+    logger.info(
+        "VIDEO_REPLACEMENT_PANTOMIME_MODE=%s",
+        str(chosen_mode == "REPLACEMENT").lower(),
+    )
 
     return {
         "productNameResolved": pn,
@@ -941,6 +1046,7 @@ def validate_and_normalize_plan(
         "videoVisualMode": chosen_mode,
         "chosenMode": chosen_mode,
         "silhouetteSimilarity": silhouette_similarity,
+        "interactionScore": float(interaction_score),
         "shapeAlignment": shape_alignment,
         "sideBySideCameraMotion": side_by_side_camera_motion,
         "sideBySideCameraMotionDescription": side_by_side_camera_motion_description,
@@ -1023,11 +1129,12 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
         plan.get("headlineDecision"),
         (plan.get("headlineText") or "")[:160],
     )
-    logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=image_engine_rule_adapted")
+    logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=interaction_score_rule")
     logger.info(
-        "VIDEO_PLAN_MODE=%s silhouetteSimilarity=%s",
+        "VIDEO_PLAN_MODE=%s silhouetteSimilarity=%s interactionScore=%s",
         plan.get("videoVisualMode") or "REPLACEMENT",
         plan.get("silhouetteSimilarity"),
+        plan.get("interactionScore"),
     )
     logger.info(
         'VIDEO_PLAN_OPENING_FRAME="%s"',
@@ -1042,12 +1149,13 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
         (plan.get("productNameResolved") or "")[:120],
     )
     logger.info(
-        "VIDEO_PLAN_SUMMARY mode=%s objectA=%s objectB=%s objectA_secondary=%s silhouette=%s",
+        "VIDEO_PLAN_SUMMARY mode=%s objectA=%s objectB=%s objectA_secondary=%s silhouette=%s interactionScore=%s",
         plan.get("videoVisualMode"),
         plan.get("objectA"),
         plan.get("objectB"),
         plan.get("objectA_secondary"),
         plan.get("silhouetteSimilarity"),
+        plan.get("interactionScore"),
     )
     logger.info(
         "VIDEO_PLAN pair_digest=%s",
@@ -1189,11 +1297,12 @@ def _build_deterministic_side_by_side_plan_from_parsed(
         c["productNameResolved"] = (product_name or "").strip() or "Product"
     if not (c.get("replacementMotionScript") or "").strip():
         c["replacementMotionScript"] = (
-            f"{oa} interacts with {ob_sec}; meaningful visible effect supports the advertising promise."
+            f"{oa} interacts with {ob_sec} using clear physical contact; visible change supports the advertising promise."
         )
     if not (c.get("replacementOpeningFrameDescription") or "").strip():
         c["replacementOpeningFrameDescription"] = (
-            f"Replacement opening frame concept with {oa} in {ob}'s context and {ob_sec} preserved."
+            f"Pantomime replacement intent: only {oa} is visible with {oa_sec}; the second primary is absent on camera; "
+            f"{oa} interacts physically with {ob_sec} as stand-in for that absent primary's role."
         )
     if not (c.get("headlineDecision") or "").strip():
         c["headlineDecision"] = "include_product_name"
@@ -1221,7 +1330,7 @@ def _build_deterministic_side_by_side_plan_from_parsed(
         "morphologicalReason": (c.get("morphologicalReason") or "").strip(),
         "promiseReason": (c.get("promiseReason") or "").strip(),
         "replacementDirection": "A_replaces_B",
-        "preservedBackgroundFrom": "B",
+        "preservedBackgroundFrom": "A",
         "preservedSecondaryFrom": "B",
         "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
         "headlineDecision": "include_product_name",
@@ -1234,7 +1343,7 @@ def _build_deterministic_side_by_side_plan_from_parsed(
         "openingFrameDescription": sbs_open,
         "videoVisualMode": "SIDE_BY_SIDE",
         "chosenMode": "SIDE_BY_SIDE",
-        "silhouetteSimilarity": 50.0,
+        "silhouetteSimilarity": 0.0,
         "shapeAlignment": "",
         "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
         "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
@@ -1273,13 +1382,12 @@ def _build_emergency_side_by_side_plan(
         f"Opening intent: {oa} with {oa_sec} and {ob} with {ob_sec} appear together in one stable composition, "
         "with immediate clear physical interaction between A and B."
     )
-    # Replacement branch must not name object B in opening/motion when REPLACEMENT is selected (similarity > 85).
     rep_open = (
-        f"Replacement opening frame intent: the scene already shows {oa} with {oa_sec} in a stable composition; "
-        "background and secondary placement follow the A-side layout without depicting a second competing primary form."
+        f"Pantomime replacement intent: only {oa} is visible with {oa_sec}; the second primary is absent on camera; "
+        f"{oa} interacts physically with {ob_sec} as a stand-in for that absent primary's role."
     )
     rms = (
-        f"{oa} interacts with {oa_sec} using direct physical contact; "
+        f"{oa} interacts with {ob_sec} using direct physical contact; "
         "the motion shows a clear visible change that supports the advertising promise."
     )
     attempt: Dict[str, Any] = {
@@ -1292,7 +1400,7 @@ def _build_emergency_side_by_side_plan(
         "morphologicalReason": (c.get("morphologicalReason") or "emergency_conservative_objects").strip(),
         "promiseReason": (c.get("promiseReason") or "").strip(),
         "replacementDirection": "A_replaces_B",
-        "preservedBackgroundFrom": "B",
+        "preservedBackgroundFrom": "A",
         "preservedSecondaryFrom": "B",
         "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
         "headlineDecision": "include_product_name",
@@ -1320,7 +1428,7 @@ def _build_emergency_side_by_side_plan(
         "morphologicalReason": attempt["morphologicalReason"],
         "promiseReason": (c.get("promiseReason") or "").strip(),
         "replacementDirection": "A_replaces_B",
-        "preservedBackgroundFrom": "B",
+        "preservedBackgroundFrom": "A",
         "preservedSecondaryFrom": "B",
         "shortReplacementScript": attempt["shortReplacementScript"],
         "headlineDecision": "include_product_name",
@@ -1333,7 +1441,7 @@ def _build_emergency_side_by_side_plan(
         "openingFrameDescription": sbs_open,
         "videoVisualMode": "SIDE_BY_SIDE",
         "chosenMode": "SIDE_BY_SIDE",
-        "silhouetteSimilarity": 50.0,
+        "silhouetteSimilarity": 0.0,
         "shapeAlignment": "",
         "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
         "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
@@ -1374,6 +1482,43 @@ def _finalize_emergency_fallback(
     return emergency_plan
 
 
+def _persist_accepted_ad_promise(
+    plan: Optional[Dict[str, Any]],
+    product_name: str,
+    product_description: str,
+    session_id: str,
+) -> None:
+    """Append advertisingPromise to Redis history after a validated plan is accepted."""
+    if not plan:
+        return
+    ap = (plan.get("advertisingPromise") or "").strip()
+    if not ap:
+        return
+    logger.info("VIDEO_PROMISE_ACCEPTED_NEW=true")
+    save_ad_promise_entry(product_name, product_description, ap, session_id)
+
+
+def _return_plan_with_promise_persist(
+    plan: Optional[Dict[str, Any]],
+    *,
+    product_name: str,
+    product_description: str,
+    session_id: str,
+    fallback_used: bool = False,
+) -> Optional[Dict[str, Any]]:
+    if fallback_used:
+        ph = compute_product_hash(product_name, product_description)
+        increment_promise_stat(
+            ph,
+            "fallback_used_count",
+            1,
+            product_name=product_name,
+            product_description=product_description,
+        )
+    _persist_accepted_ad_promise(plan, product_name, product_description, session_id)
+    return plan
+
+
 def _planner_deadline_guard(
     deadline_monotonic: Optional[float], *, stage: str, has_valid_plan: bool = False
 ) -> None:
@@ -1396,6 +1541,7 @@ def _fetch_video_plan_o3_sync(
     content_language: str = "he",
     *,
     deadline_monotonic: Optional[float] = None,
+    session_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     """
     Single planning model call returning a validated plan dict, or None on any failure (no generic video fallback).
@@ -1417,7 +1563,17 @@ Locked output language for all user-facing plan fields (from description classif
 {_JSON_KEYS}
 """
     instructions = _build_video_planner_instructions(lang)
-    full_input = instructions + "\n\n" + user_block
+    ph = compute_product_hash(product_name, product_description)
+    increment_promise_stat(
+        ph,
+        "recent_generations_count",
+        1,
+        product_name=product_name,
+        product_description=product_description,
+    )
+    history = load_ad_promise_history(product_name, product_description)
+    rejected_promises: List[str] = []
+    promise_reject_count = 0
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
         api_key=api_key,
@@ -1427,14 +1583,14 @@ Locked output language for all user-facing plan fields (from description classif
 
     logger.info("VIDEO_PLAN_REQUEST_START model=%s", model)
     logger.info("VIDEO_PLAN_REQUEST_TIMEOUT_S=%s", _VIDEO_PLAN_TIMEOUT)
-    logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(full_input))
     if deadline_monotonic is not None:
         logger.info(
             "VIDEO_PLAN_OVERALL_DEADLINE_S remaining=%.3f",
             max(0.0, deadline_monotonic - time.monotonic()),
         )
 
-    max_attempts = 1 + max(0, _VIDEO_PLAN_RETRY_INTERACTION_MAX)
+    # Hard cap: two planner calls total (fast convergence).
+    max_attempts = min(2, 1 + max(0, _VIDEO_PLAN_RETRY_INTERACTION_MAX))
     last_parsed: Optional[Dict[str, Any]] = None
     last_v_err = ""
     rejected_pairs: Set[str] = set()
@@ -1444,19 +1600,31 @@ Locked output language for all user-facing plan fields (from description classif
             and last_parsed is not None
             and (deadline_monotonic - time.monotonic()) <= _VIDEO_PLAN_EMERGENCY_REMAINING_S
         ):
-            return _finalize_emergency_fallback(
-                last_parsed,
-                product_name=product_name,
-                deadline_monotonic=deadline_monotonic,
-                model=model,
-            )
-        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-            if last_parsed is not None:
-                return _finalize_emergency_fallback(
+            return _return_plan_with_promise_persist(
+                _finalize_emergency_fallback(
                     last_parsed,
                     product_name=product_name,
                     deadline_monotonic=deadline_monotonic,
                     model=model,
+                ),
+                product_name=product_name,
+                product_description=product_description,
+                session_id=session_id,
+                fallback_used=True,
+            )
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            if last_parsed is not None:
+                return _return_plan_with_promise_persist(
+                    _finalize_emergency_fallback(
+                        last_parsed,
+                        product_name=product_name,
+                        deadline_monotonic=deadline_monotonic,
+                        model=model,
+                    ),
+                    product_name=product_name,
+                    product_description=product_description,
+                    session_id=session_id,
+                    fallback_used=True,
                 )
             _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_start")
         logger.info("VIDEO_PLAN_RETRY_STAGE start attempt=%s/%s", attempt + 1, max_attempts)
@@ -1470,7 +1638,14 @@ Locked output language for all user-facing plan fields (from description classif
                 + ".\n"
                 "- Choose clearly different object families than the rejected pairs.\n"
             )
-        attempt_input = full_input + retry_tail
+        forbid_hist = forbidden_promises_for_prompt(history, 10)
+        forbid_extra = [x for x in rejected_promises if x.strip()][-6:]
+        promise_addon = build_promise_diversity_addon(
+            forbid_hist + forbid_extra,
+            angle_seed_for_attempt(attempt, promise_reject_count),
+        )
+        attempt_input = instructions + "\n\n" + user_block + promise_addon + retry_tail
+        logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(attempt_input))
         try:
             response = client.responses.create(
                 model=model,
@@ -1533,12 +1708,62 @@ Locked output language for all user-facing plan fields (from description classif
                     logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
                     continue
 
+            cand_promise = (parsed_c.get("advertisingPromise") or "").strip()
+            if cand_promise:
+                bad_p, psim, pkind, pdetail = is_promise_too_similar(
+                    cand_promise, history, rejected_promises
+                )
+                if bad_p:
+                    if pkind == "concept_match":
+                        logger.info(
+                            "VIDEO_PROMISE_REJECTED_CONCEPT_MATCH reason=%s similarity=%.3f",
+                            pdetail or "concept_buckets",
+                            psim,
+                        )
+                        increment_promise_stat(
+                            ph,
+                            "conceptual_match_rejections",
+                            1,
+                            product_name=product_name,
+                            product_description=product_description,
+                        )
+                    else:
+                        logger.info(
+                            "VIDEO_PROMISE_REJECTED_DUPLICATE similarity=%.3f kind=%s",
+                            psim,
+                            pkind,
+                        )
+                        increment_promise_stat(
+                            ph,
+                            "duplicate_rejections",
+                            1,
+                            product_name=product_name,
+                            product_description=product_description,
+                        )
+                    rejected_promises.append(cand_promise)
+                    promise_reject_count += 1
+                    logger.info(
+                        "VIDEO_PLAN_RETRY attempt=%s reason=advertising_promise_diversity",
+                        attempt + 1,
+                    )
+                    logger.info(
+                        "VIDEO_PLAN_RETRY_STAGE done attempt=%s result=promise_reject",
+                        attempt + 1,
+                    )
+                    continue
+
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-                return _finalize_emergency_fallback(
-                    last_parsed,
+                return _return_plan_with_promise_persist(
+                    _finalize_emergency_fallback(
+                        last_parsed,
+                        product_name=product_name,
+                        deadline_monotonic=deadline_monotonic,
+                        model=model,
+                    ),
                     product_name=product_name,
-                    deadline_monotonic=deadline_monotonic,
-                    model=model,
+                    product_description=product_description,
+                    session_id=session_id,
+                    fallback_used=True,
                 )
 
             plan, v_err = validate_and_normalize_plan(
@@ -1553,13 +1778,6 @@ Locked output language for all user-facing plan fields (from description classif
                 if last_v_err == "side_by_side_interaction_not_meaningful" and attempt < max_attempts - 1:
                     logger.info(
                         "VIDEO_PLAN_RETRY attempt=%s reason=interaction_not_meaningful",
-                        attempt + 1,
-                    )
-                    logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
-                    continue
-                if last_v_err == "side_by_side_low_similarity_weak_interaction" and attempt < max_attempts - 1:
-                    logger.info(
-                        "VIDEO_PLAN_RETRY attempt=%s reason=low_similarity_weak_interaction",
                         attempt + 1,
                     )
                     logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
@@ -1579,14 +1797,25 @@ Locked output language for all user-facing plan fields (from description classif
             logger.info("VIDEO_PLAN_OK model=%s", model)
             logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=accepted", attempt + 1)
             logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-            return plan
+            return _return_plan_with_promise_persist(
+                plan,
+                product_name=product_name,
+                product_description=product_description,
+                session_id=session_id,
+            )
         except VideoPlanningTimeoutError:
             if last_parsed is not None:
-                return _finalize_emergency_fallback(
-                    last_parsed,
+                return _return_plan_with_promise_persist(
+                    _finalize_emergency_fallback(
+                        last_parsed,
+                        product_name=product_name,
+                        deadline_monotonic=deadline_monotonic,
+                        model=model,
+                    ),
                     product_name=product_name,
-                    deadline_monotonic=deadline_monotonic,
-                    model=model,
+                    product_description=product_description,
+                    session_id=session_id,
+                    fallback_used=True,
                 )
             raise
         except Exception as e:
@@ -1598,16 +1827,19 @@ Locked output language for all user-facing plan fields (from description classif
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None
 
-    if last_parsed and last_v_err in (
-        "side_by_side_interaction_not_meaningful",
-        "side_by_side_low_similarity_weak_interaction",
-    ):
+    if last_parsed and last_v_err in ("side_by_side_interaction_not_meaningful",):
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-            return _finalize_emergency_fallback(
-                last_parsed,
+            return _return_plan_with_promise_persist(
+                _finalize_emergency_fallback(
+                    last_parsed,
+                    product_name=product_name,
+                    deadline_monotonic=deadline_monotonic,
+                    model=model,
+                ),
                 product_name=product_name,
-                deadline_monotonic=deadline_monotonic,
-                model=model,
+                product_description=product_description,
+                session_id=session_id,
+                fallback_used=True,
             )
         logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=deterministic_salvage")
         salvage_plan, template_name, guaranteed_mode = _build_deterministic_side_by_side_plan_from_parsed(
@@ -1623,14 +1855,26 @@ Locked output language for all user-facing plan fields (from description classif
             logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
             logger.info("VIDEO_PLAN_OK model=%s", model)
             logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-            return salvage_plan
+            return _return_plan_with_promise_persist(
+                salvage_plan,
+                product_name=product_name,
+                product_description=product_description,
+                session_id=session_id,
+                fallback_used=True,
+            )
 
     if last_parsed is not None:
-        return _finalize_emergency_fallback(
-            last_parsed,
+        return _return_plan_with_promise_persist(
+            _finalize_emergency_fallback(
+                last_parsed,
+                product_name=product_name,
+                deadline_monotonic=deadline_monotonic,
+                model=model,
+            ),
             product_name=product_name,
-            deadline_monotonic=deadline_monotonic,
-            model=model,
+            product_description=product_description,
+            session_id=session_id,
+            fallback_used=True,
         )
     logger.info("VIDEO_PLAN_RESPONSE_OK=false")
     return None
@@ -1640,20 +1884,43 @@ def fetch_video_plan_o3(
     product_name: str,
     product_description: str,
     content_language: str = "he",
+    *,
+    session_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch and validate plan under one authoritative hard wall-clock deadline.
     On deadline exceeded, raises VideoPlanningTimeoutError (caller must fail the job).
     """
     deadline = time.monotonic() + _VIDEO_PLAN_HARD_SECONDS
+    ph = compute_product_hash(product_name, product_description)
+    maybe_soft_reset_promise_memory(
+        ph, product_name=product_name, product_description=product_description
+    )
     try:
-        return _fetch_video_plan_o3_sync(
+        plan = _fetch_video_plan_o3_sync(
             product_name,
             product_description,
             content_language,
             deadline_monotonic=deadline,
+            session_id=session_id,
         )
+        if plan is None:
+            increment_promise_stat(
+                ph,
+                "planning_failed_count",
+                1,
+                product_name=product_name,
+                product_description=product_description,
+            )
+        return plan
     except VideoPlanningTimeoutError:
+        increment_promise_stat(
+            ph,
+            "planning_failed_count",
+            1,
+            product_name=product_name,
+            product_description=product_description,
+        )
         logger.info("VIDEO_PLAN_RESPONSE_OK=false")
         logger.error(
             "VIDEO_PLAN_FAIL_TIMEOUT hard_seconds=%s (VIDEO_PLANNER_HARD_TIMEOUT_SECONDS or planner+45)",
@@ -1848,17 +2115,13 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
         if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
             scene += _runway_vertical_axis_hard_constraints_english()
             logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    elif rd == "B_replaces_A":
-        scene = (
-            f"Start: replacement already visible — {b_setup} in {oa}'s place, bg {pbg}, secondary {psf}, promise: {promise}. "
-            f"Motion: {ob} with A's secondary; one smooth shot, no cuts. "
-            f"Action: {core}"
-        )
     else:
+        obs_x = obs or "B's secondary object"
         scene = (
-            f"Start: replacement already visible — {a_setup} in {ob}'s place, bg {pbg}, secondary {psf}, promise: {promise}. "
-            f"Motion: {oa} with B's secondary; one smooth shot, no cuts. "
-            f"Action: {core}"
+            f"REPLACEMENT (pantomime): only {oa} is visible; {ob} must not appear on camera. "
+            f"Background follows A's original context (preservedBackgroundFrom={pbg}). "
+            f"{oa} performs a clear physical interaction with {obs_x} as a stand-in for B's role; "
+            f"promise: {promise}. One smooth shot, no cuts. Action: {core}"
         )
     if script:
         scene += f" Beat: {script}"
@@ -1950,21 +2213,14 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
         if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
             scene += _runway_vertical_axis_hard_constraints_english()
             logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    elif rd == "B_replaces_A":
-        sec = oas or "the contextual secondary object"
-        scene = (
-            f"The first frame is supplied as the start image; replacement is already complete. "
-            f"Video motion only: {ob} interacts with {sec} in that fixed composition (background side {pbg}, secondary side {psf}); "
-            f"subtle natural movement and camera; do not depict transformation, morphing, or {oa} becoming {ob}. "
-            f"Action: {core}"
-        )
     else:
-        sec = obs or "the contextual secondary object"
+        obs_l = obs or "B's secondary object"
         scene = (
-            f"The first frame is supplied as the start image; replacement is already complete. "
-            f"Video motion only: {oa} interacts with {sec} in that fixed composition (background side {pbg}, secondary side {psf}); "
-            f"subtle natural movement and camera; do not depict transformation, morphing, or {ob} becoming {oa}. "
-            f"Action: {core}"
+            "The first frame is supplied as the start image; replacement composition is locked. "
+            f"Video motion only: only {oa} moves; {ob} must not appear in-frame. "
+            f"{oa} interacts with {obs_l} as a physical stand-in for B's role "
+            f"(background side {pbg}, secondary anchor side {psf}). "
+            f"No transformation or morph between {oa} and {ob}. Action: {core}"
         )
     if script:
         scene += f" Beat: {script}"
@@ -1999,10 +2255,11 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
         if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
             motion += " " + _runway_vertical_axis_hard_constraints_english()
             logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    elif rd == "B_replaces_A":
-        motion = f"{ob} with {oas or 'secondary'}; motion only; start frame supplied."
-    elif rd == "A_replaces_B":
-        motion = f"{oa} with {obs or 'secondary'}; motion only; start frame supplied."
+    elif rd in ("B_replaces_A", "A_replaces_B"):
+        motion = (
+            f"Pantomime replacement: only {oa} moves; {ob} absent; {oa} interacts with {obs or 'B secondary'}; "
+            f"motion only; start frame supplied."
+        )
     else:
         motion = "Motion only; start frame supplied."
 
