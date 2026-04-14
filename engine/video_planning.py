@@ -424,24 +424,32 @@ def _pair_retry_key(oa: str, ob: str) -> str:
     return "|".join(sorted((a, b)))
 
 
-def _pair_is_too_similar_to_rejected(oa: str, ob: str, rejected_pairs: Set[str]) -> Tuple[bool, str]:
+def _pair_is_too_similar_to_rejected(
+    oa: str, ob: str, rejected_pairs: Set[str]
+) -> Tuple[bool, str, str]:
     """
     Reject exact/near-identical conceptual pairs across retries to avoid looped weak candidates.
+    Returns (too_similar, reason, prior_pair) where prior_pair is the rejected key that triggered the block, else "".
     """
     key = _pair_retry_key(oa, ob)
     if key in rejected_pairs:
-        return True, "exact_pair_repeat"
+        return True, "exact_pair_repeat", key
     cur_tokens = set(key.replace("|", " ").split())
+    weak_cur = cur_tokens & _SBS_WEAK_FAMILY_RETRY_TOKENS
+    for prev in rejected_pairs:
+        prev_tokens = set(prev.replace("|", " ").split())
+        if weak_cur and (weak_cur & prev_tokens):
+            return True, "weak_sbs_family_token_overlap", prev
     if not cur_tokens:
-        return False, ""
+        return False, "", ""
     for prev in rejected_pairs:
         prev_tokens = set(prev.replace("|", " ").split())
         if not prev_tokens:
             continue
         overlap = len(cur_tokens & prev_tokens) / float(max(1, len(cur_tokens | prev_tokens)))
-        if overlap >= 0.75:
-            return True, "near_identical_family_repeat"
-    return False, ""
+        if overlap >= 0.55:
+            return True, "near_identical_family_repeat", prev
+    return False, "", ""
 
 
 def _side_by_side_motion_is_meaningful(
@@ -868,12 +876,24 @@ def validate_and_normalize_plan(
     else:
         sbs_meaningful = _side_by_side_motion_is_meaningful(sbs_ms, oa, ob, apromise)
         if silhouette_similarity < 30.0 and not sbs_meaningful:
+            pair_k = _pair_retry_key(oa, ob)
+            logger.info(
+                "VIDEO_PLAN_EARLY_REJECT_LOW_QUALITY pair=%s similarity=%.1f reason=low_similarity_weak_interaction",
+                pair_k,
+                silhouette_similarity,
+            )
             logger.info(
                 "VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=low_similarity_weak_interaction similarity=%.1f",
                 silhouette_similarity,
             )
             return None, "side_by_side_low_similarity_weak_interaction"
         if not sbs_meaningful:
+            pair_k = _pair_retry_key(oa, ob)
+            logger.info(
+                "VIDEO_PLAN_EARLY_REJECT_LOW_QUALITY pair=%s similarity=%.1f reason=interaction_not_meaningful",
+                pair_k,
+                silhouette_similarity,
+            )
             logger.info("VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=interaction_not_meaningful")
             return None, "side_by_side_interaction_not_meaningful"
         core = sbs_ms
@@ -1048,6 +1068,30 @@ _VIDEO_PLAN_RETRY_INTERACTION_MAX = int(
     (os.environ.get("VIDEO_PLAN_RETRY_INTERACTION_MAX") or "2").strip() or "2"
 )
 
+# When remaining wall-clock budget drops below this, skip further model retries and emit a conservative plan.
+_VIDEO_PLAN_EMERGENCY_REMAINING_S = float(
+    (os.environ.get("VIDEO_PLANNER_EMERGENCY_REMAINING_S") or "35").strip() or "35"
+)
+
+# Deterministic emergency primary/secondary objects (validated path): avoids reusing weak planner pairs
+# (e.g. megaphone|rocket) that already failed SIDE_BY_SIDE quality gates.
+_EMERGENCY_CONSERVATIVE_OA = "flashlight"
+_EMERGENCY_CONSERVATIVE_OB = "rope"
+_EMERGENCY_CONSERVATIVE_OA_SEC = "wooden crate"
+_EMERGENCY_CONSERVATIVE_OB_SEC = "stone step"
+
+# Tokens that often produced low-silhouette / weak-interaction SIDE_BY_SIDE loops; block reuse after rejection.
+_SBS_WEAK_FAMILY_RETRY_TOKENS: FrozenSet[str] = frozenset(
+    {
+        "megaphone",
+        "bullhorn",
+        "loudspeaker",
+        "rocket",
+        "missile",
+        "horn",
+    }
+)
+
 
 def _promise_bucket(promise: str) -> str:
     p = (promise or "").lower()
@@ -1205,13 +1249,17 @@ def _build_emergency_side_by_side_plan(
 ) -> Tuple[Dict[str, Any], str]:
     """
     Near-deadline guaranteed fallback: conservative SIDE_BY_SIDE plan without extra planner/model work.
+    Uses a fixed classic object pair (not the last rejected planner pair) so validation and Runway gates stay reliable.
     """
     c = _coerce_plan_keys(parsed or {})
-    oa = (c.get("objectA") or "").strip() or "lantern"
-    ob = (c.get("objectB") or "").strip() or "compass"
-    oa_sec = (c.get("objectA_secondary") or "").strip() or "table"
-    ob_sec = (c.get("objectB_secondary") or "").strip() or "map"
+    oa = _EMERGENCY_CONSERVATIVE_OA
+    ob = _EMERGENCY_CONSERVATIVE_OB
+    oa_sec = _EMERGENCY_CONSERVATIVE_OA_SEC
+    ob_sec = _EMERGENCY_CONSERVATIVE_OB_SEC
     promise = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
+    pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
+    raw_hl = (c.get("headlineText") or "").strip() or pn
+    headline_text = _word_limit(raw_hl, 7)
     bucket = _promise_bucket(promise)
     template_name, template_body = _fallback_template_for_bucket(bucket)
     sbs_motion = template_body.format(
@@ -1223,31 +1271,65 @@ def _build_emergency_side_by_side_plan(
     )
     sbs_open = (
         f"Opening intent: {oa} with {oa_sec} and {ob} with {ob_sec} appear together in one stable composition, "
-        "with immediate meaningful interaction between A and B."
+        "with immediate clear physical interaction between A and B."
     )
-    pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
-    plan = {
+    # Replacement branch must not name object B in opening/motion when REPLACEMENT is selected (similarity > 85).
+    rep_open = (
+        f"Replacement opening frame intent: the scene already shows {oa} with {oa_sec} in a stable composition; "
+        "background and secondary placement follow the A-side layout without depicting a second competing primary form."
+    )
+    rms = (
+        f"{oa} interacts with {oa_sec} using direct physical contact; "
+        "the motion shows a clear visible change that supports the advertising promise."
+    )
+    attempt: Dict[str, Any] = {
         "productNameResolved": pn,
         "advertisingPromise": promise,
         "objectA": oa,
         "objectA_secondary": oa_sec,
         "objectB": ob,
         "objectB_secondary": ob_sec,
-        "morphologicalReason": (c.get("morphologicalReason") or "").strip(),
+        "morphologicalReason": (c.get("morphologicalReason") or "emergency_conservative_objects").strip(),
         "promiseReason": (c.get("promiseReason") or "").strip(),
         "replacementDirection": "A_replaces_B",
         "preservedBackgroundFrom": "B",
         "preservedSecondaryFrom": "B",
         "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
         "headlineDecision": "include_product_name",
-        "headlineText": (c.get("headlineText") or "").strip() or pn,
-        "replacementOpeningFrameDescription": (c.get("replacementOpeningFrameDescription") or "").strip()
-        or f"Replacement opening frame concept with {oa} in {ob}'s context and {ob_sec} preserved.",
-        "replacementMotionScript": (c.get("replacementMotionScript") or "").strip()
-        or f"{oa} interacts with {ob_sec}; meaningful visible effect supports the advertising promise.",
+        "headlineText": headline_text,
+        "objectPairViewerClarityOk": True,
+        "objectPairIdentityDistinctOk": True,
+        "identityDistinctnessNote": "emergency_conservative_objects",
+        "replacementOpeningFrameDescription": rep_open,
+        "replacementMotionScript": rms,
         "sideBySideOpeningFrameDescription": sbs_open,
         "sideBySideMotionScript": sbs_motion,
-        "videoPromptCore": f"{sbs_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip(),
+    }
+    plan, v_err = validate_and_normalize_plan(attempt, planner_deadline_monotonic=None)
+    if plan:
+        return plan, template_name
+    logger.warning("VIDEO_PLAN_EMERGENCY_VALIDATE_FALLBACK reason=%s", v_err or "unknown")
+    motion_core = f"{sbs_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
+    forced: Dict[str, Any] = {
+        "productNameResolved": pn,
+        "advertisingPromise": promise,
+        "objectA": oa,
+        "objectA_secondary": oa_sec,
+        "objectB": ob,
+        "objectB_secondary": ob_sec,
+        "morphologicalReason": attempt["morphologicalReason"],
+        "promiseReason": (c.get("promiseReason") or "").strip(),
+        "replacementDirection": "A_replaces_B",
+        "preservedBackgroundFrom": "B",
+        "preservedSecondaryFrom": "B",
+        "shortReplacementScript": attempt["shortReplacementScript"],
+        "headlineDecision": "include_product_name",
+        "headlineText": headline_text,
+        "replacementOpeningFrameDescription": rep_open,
+        "replacementMotionScript": rms,
+        "sideBySideOpeningFrameDescription": sbs_open,
+        "sideBySideMotionScript": sbs_motion,
+        "videoPromptCore": motion_core,
         "openingFrameDescription": sbs_open,
         "videoVisualMode": "SIDE_BY_SIDE",
         "chosenMode": "SIDE_BY_SIDE",
@@ -1256,7 +1338,40 @@ def _build_emergency_side_by_side_plan(
         "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
         "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
     }
-    return plan, template_name
+    return forced, template_name
+
+
+def _finalize_emergency_fallback(
+    last_parsed: Optional[Dict[str, Any]],
+    *,
+    product_name: str,
+    deadline_monotonic: Optional[float],
+    model: str,
+) -> Dict[str, Any]:
+    """Log + build the deadline-aware emergency SIDE_BY_SIDE plan (always returns a dict)."""
+    remaining_s = (
+        max(0.0, deadline_monotonic - time.monotonic()) if deadline_monotonic is not None else -1.0
+    )
+    logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=emergency_deadline_or_timeout")
+    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_ENTERED remaining_s=%.3f", remaining_s)
+    emergency_plan, template_name = _build_emergency_side_by_side_plan(last_parsed, product_name=product_name)
+    pair_k = _pair_retry_key(
+        str(emergency_plan.get("objectA") or ""),
+        str(emergency_plan.get("objectB") or ""),
+    )
+    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_CHOSEN pair=%s mode=SIDE_BY_SIDE", pair_k)
+    logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
+    logger.info(
+        "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
+        emergency_plan.get("objectA"),
+        emergency_plan.get("objectB"),
+    )
+    logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
+    logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
+    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_OK=true")
+    logger.info("VIDEO_PLAN_OK model=%s", model)
+    logger.info("VIDEO_PLAN_RESPONSE_OK=true")
+    return emergency_plan
 
 
 def _planner_deadline_guard(
@@ -1327,23 +1442,23 @@ Locked output language for all user-facing plan fields (from description classif
         if (
             deadline_monotonic is not None
             and last_parsed is not None
-            and (deadline_monotonic - time.monotonic()) <= 8.0
+            and (deadline_monotonic - time.monotonic()) <= _VIDEO_PLAN_EMERGENCY_REMAINING_S
         ):
-            logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=emergency_near_deadline")
-            emergency_plan, template_name = _build_emergency_side_by_side_plan(
-                last_parsed, product_name=product_name
+            return _finalize_emergency_fallback(
+                last_parsed,
+                product_name=product_name,
+                deadline_monotonic=deadline_monotonic,
+                model=model,
             )
-            logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
-            logger.info(
-                "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
-                emergency_plan.get("objectA"),
-                emergency_plan.get("objectB"),
-            )
-            logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
-            logger.info("VIDEO_PLAN_OK model=%s", model)
-            logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-            return emergency_plan
-        _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_start")
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            if last_parsed is not None:
+                return _finalize_emergency_fallback(
+                    last_parsed,
+                    product_name=product_name,
+                    deadline_monotonic=deadline_monotonic,
+                    model=model,
+                )
+            _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_start")
         logger.info("VIDEO_PLAN_RETRY_STAGE start attempt=%s/%s", attempt + 1, max_attempts)
         retry_tail = ""
         if rejected_pairs:
@@ -1362,7 +1477,6 @@ Locked output language for all user-facing plan fields (from description classif
                 input=attempt_input,
                 reasoning={"effort": _reasoning_effort()},
             )
-            _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_post_model_call")
         except Exception as e:
             err_type = type(e).__name__
             logger.warning(
@@ -1393,13 +1507,23 @@ Locked output language for all user-facing plan fields (from description classif
             oa_cand = (parsed_c.get("objectA") or "").strip()
             ob_cand = (parsed_c.get("objectB") or "").strip()
             if oa_cand and ob_cand:
-                too_similar, sim_reason = _pair_is_too_similar_to_rejected(
+                too_similar, sim_reason, prior_pair = _pair_is_too_similar_to_rejected(
                     oa_cand, ob_cand, rejected_pairs
                 )
                 if too_similar:
+                    cand_k = _pair_retry_key(oa_cand, ob_cand)
+                    if sim_reason == "exact_pair_repeat":
+                        logger.info("VIDEO_PLAN_REJECTED_PAIR_MEMORY_HIT pair=%s", cand_k)
+                    else:
+                        logger.info(
+                            "VIDEO_PLAN_REJECTED_NEAR_DUPLICATE pair=%s prior_pair=%s reason=%s",
+                            cand_k,
+                            prior_pair,
+                            sim_reason,
+                        )
                     logger.info(
                         "VIDEO_PLAN_REJECTED_PAIR_DEDUPE pair=%s reason=%s",
-                        _pair_retry_key(oa_cand, ob_cand),
+                        cand_k,
                         sim_reason,
                     )
                     logger.info(
@@ -1408,6 +1532,14 @@ Locked output language for all user-facing plan fields (from description classif
                     )
                     logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
                     continue
+
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                return _finalize_emergency_fallback(
+                    last_parsed,
+                    product_name=product_name,
+                    deadline_monotonic=deadline_monotonic,
+                    model=model,
+                )
 
             plan, v_err = validate_and_normalize_plan(
                 parsed, planner_deadline_monotonic=deadline_monotonic
@@ -1450,21 +1582,12 @@ Locked output language for all user-facing plan fields (from description classif
             return plan
         except VideoPlanningTimeoutError:
             if last_parsed is not None:
-                logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=emergency_on_timeout")
-                emergency_plan, template_name = _build_emergency_side_by_side_plan(
-                    last_parsed, product_name=product_name
+                return _finalize_emergency_fallback(
+                    last_parsed,
+                    product_name=product_name,
+                    deadline_monotonic=deadline_monotonic,
+                    model=model,
                 )
-                logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
-                logger.info(
-                    "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
-                    emergency_plan.get("objectA"),
-                    emergency_plan.get("objectB"),
-                )
-                logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
-                logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
-                logger.info("VIDEO_PLAN_OK model=%s", model)
-                logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-                return emergency_plan
             raise
         except Exception as e:
             logger.warning(
@@ -1475,8 +1598,17 @@ Locked output language for all user-facing plan fields (from description classif
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None
 
-    if last_v_err == "side_by_side_interaction_not_meaningful" and last_parsed:
-        _planner_deadline_guard(deadline_monotonic, stage="fallback_layer_enter")
+    if last_parsed and last_v_err in (
+        "side_by_side_interaction_not_meaningful",
+        "side_by_side_low_similarity_weak_interaction",
+    ):
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            return _finalize_emergency_fallback(
+                last_parsed,
+                product_name=product_name,
+                deadline_monotonic=deadline_monotonic,
+                model=model,
+            )
         logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=deterministic_salvage")
         salvage_plan, template_name, guaranteed_mode = _build_deterministic_side_by_side_plan_from_parsed(
             last_parsed,
@@ -1486,17 +1618,20 @@ Locked output language for all user-facing plan fields (from description classif
         )
         logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
         if salvage_plan:
-            _planner_deadline_guard(
-                deadline_monotonic,
-                stage="fallback_plan_ready",
-                has_valid_plan=True,
-            )
             if guaranteed_mode:
                 logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
             logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
             logger.info("VIDEO_PLAN_OK model=%s", model)
             logger.info("VIDEO_PLAN_RESPONSE_OK=true")
             return salvage_plan
+
+    if last_parsed is not None:
+        return _finalize_emergency_fallback(
+            last_parsed,
+            product_name=product_name,
+            deadline_monotonic=deadline_monotonic,
+            model=model,
+        )
     logger.info("VIDEO_PLAN_RESPONSE_OK=false")
     return None
 
