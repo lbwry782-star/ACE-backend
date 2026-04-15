@@ -514,6 +514,27 @@ def _advertising_promise_from_product(
     return False
 
 
+def _repaired_advertising_promise_for_product(
+    original: str, product_name: str, product_description: str
+) -> Tuple[str, bool]:
+    """
+    Ensure advertisingPromise passes _advertising_promise_from_product.
+    Returns (promise_text, repaired) where repaired is True iff the string was changed.
+    """
+    o = (original or "").strip()
+    if _advertising_promise_from_product(o, product_name, product_description):
+        return o, False
+    pn = (product_name or "").strip()
+    pd = (product_description or "").strip()
+    if not pn and not pd:
+        return o, False
+    parts = [x for x in (pn, pd) if x]
+    candidate = " ".join(parts).strip()[:480] or o[:480] or "Product"
+    if not _advertising_promise_from_product(candidate, product_name, product_description):
+        candidate = (f"{pn} — {pd}".strip() if (pn or pd) else candidate)[:480]
+    return candidate, True
+
+
 def _parse_norm_ab_interaction_type(raw: Any) -> str:
     """Return exactly 'classic' | 'meaningful' | ''."""
     s = str(raw or "").strip().lower()
@@ -1891,6 +1912,20 @@ def _build_deterministic_side_by_side_plan_from_parsed(
         return plan, template_name, False
 
     # Layer 4 guaranteed delivery mode: force a conservative valid SIDE_BY_SIDE plan shape.
+    rep, repaired_promise = _repaired_advertising_promise_for_product(
+        promise, product_name, product_description
+    )
+    if not _advertising_promise_from_product(rep, product_name, product_description):
+        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
+        return None, template_name, True
+    logger.info(
+        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_FROM_PRODUCT=%s",
+        str(repaired_promise).lower(),
+    )
+    promise = rep
+    bucket = _promise_bucket(promise)
+    template_name, template_body = _fallback_template_for_bucket(bucket)
+    sbs_motion = template_body.format(A=oa, B=ob, promise=promise)
     motion_core = f"{sbs_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
     forced = {
         "productNameResolved": (product_name or "").strip() or "Product",
@@ -1918,8 +1953,23 @@ def _build_deterministic_side_by_side_plan_from_parsed(
         "shapeAlignment": "",
         "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
         "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
+        "objectPairViewerClarityOk": True,
+        "objectPairIdentityDistinctOk": True,
+        "identityDistinctnessNote": "guaranteed_delivery",
     }
-    return forced, template_name, True
+    plan_forced, v_err = validate_and_normalize_plan(
+        _coerce_plan_keys(forced),
+        planner_deadline_monotonic=None,
+        product_name=product_name,
+        product_description=product_description,
+    )
+    if not plan_forced:
+        logger.info(
+            "VIDEO_PLAN_FALLBACK_BLOCKED reason=%s",
+            (v_err or "validation_failed").strip(),
+        )
+        return None, template_name, True
+    return plan_forced, template_name, True
 
 
 def _build_emergency_side_by_side_plan(
@@ -1927,14 +1977,26 @@ def _build_emergency_side_by_side_plan(
     *,
     product_name: str,
     product_description: str = "",
-) -> Tuple[Dict[str, Any], str]:
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """
     Near-deadline guaranteed fallback: SIDE_BY_SIDE plan without extra planner/model work.
     Objects are derived from the advertising promise + product text (no unrelated fixed pair).
     """
     c = _coerce_plan_keys(parsed or {})
-    promise = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
-    oa, ob = _emergency_object_pair_from_advertising_text(promise, product_description, product_name)
+    promise_raw = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
+    oa, ob = _emergency_object_pair_from_advertising_text(
+        promise_raw, product_description, product_name
+    )
+    promise, repaired_promise = _repaired_advertising_promise_for_product(
+        promise_raw, product_name, product_description
+    )
+    if not _advertising_promise_from_product(promise, product_name, product_description):
+        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
+        return None, ""
+    logger.info(
+        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_FROM_PRODUCT=%s",
+        str(repaired_promise).lower(),
+    )
     pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
     raw_hl = (c.get("headlineText") or "").strip() or pn
     headline_text = _word_limit(raw_hl, 7)
@@ -2011,8 +2073,23 @@ def _build_emergency_side_by_side_plan(
         "shapeAlignment": "",
         "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
         "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
+        "objectPairViewerClarityOk": True,
+        "objectPairIdentityDistinctOk": True,
+        "identityDistinctnessNote": "emergency_guaranteed_delivery",
     }
-    return forced, template_name
+    plan_forced, v2 = validate_and_normalize_plan(
+        _coerce_plan_keys(forced),
+        planner_deadline_monotonic=None,
+        product_name=product_name,
+        product_description=product_description,
+    )
+    if not plan_forced:
+        logger.info(
+            "VIDEO_PLAN_FALLBACK_BLOCKED reason=%s",
+            (v2 or "validation_failed").strip(),
+        )
+        return None, template_name
+    return plan_forced, template_name
 
 
 def _finalize_emergency_fallback(
@@ -2022,8 +2099,8 @@ def _finalize_emergency_fallback(
     product_description: str,
     deadline_monotonic: Optional[float],
     model: str,
-) -> Dict[str, Any]:
-    """Log + build the deadline-aware emergency SIDE_BY_SIDE plan (always returns a dict)."""
+) -> Optional[Dict[str, Any]]:
+    """Log + build the deadline-aware emergency SIDE_BY_SIDE plan, or None if no valid plan."""
     remaining_s = (
         max(0.0, deadline_monotonic - time.monotonic()) if deadline_monotonic is not None else -1.0
     )
@@ -2032,6 +2109,12 @@ def _finalize_emergency_fallback(
     emergency_plan, template_name = _build_emergency_side_by_side_plan(
         last_parsed, product_name=product_name, product_description=product_description
     )
+    if not emergency_plan:
+        logger.error(
+            "VIDEO_PLAN_EMERGENCY_NO_VALID_PLAN template=%s",
+            template_name or "(none)",
+        )
+        return None
     pair_k = _pair_retry_key(
         str(emergency_plan.get("objectA") or ""),
         str(emergency_plan.get("objectB") or ""),

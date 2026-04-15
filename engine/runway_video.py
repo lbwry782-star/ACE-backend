@@ -34,6 +34,7 @@ from engine.video_jobs_redis import video_job_set_resolved_product_name
 from engine.video_language import (
     detect_text_language,
     evaluate_headline_overlay_language,
+    is_english_only_product_name_script,
     log_video_language_decision,
     normalize_video_content_language,
     text_predominantly_matches_language,
@@ -132,6 +133,16 @@ def _enforce_headline_overlay_language(
     if not h:
         return
     logger.info("VIDEO_HEADLINE_LANGUAGE_REQUIRED=%s", req)
+    cn = (canonical_name or "").strip()
+    product_name_only = (
+        req == "he"
+        and bool(cn)
+        and bool(h)
+        and h.casefold() == cn.casefold()
+        and is_english_only_product_name_script(h)
+        and is_english_only_product_name_script(cn)
+    )
+    logger.info("VIDEO_HEADLINE_PRODUCT_NAME_ONLY=%s", str(product_name_only).lower())
     ok, actual, allowed_latin_product = evaluate_headline_overlay_language(
         h, req, canonical_name
     )
@@ -140,6 +151,15 @@ def _enforce_headline_overlay_language(
         "VIDEO_HEADLINE_ALLOWED_LATIN_PRODUCT_NAME=%s",
         str(allowed_latin_product).lower(),
     )
+    latin_allowed_he = bool(allowed_latin_product) or (
+        req == "he" and actual == "hebrew_job_latin_product_name_headline_only"
+    )
+    logger.info(
+        "VIDEO_HEADLINE_LATIN_PRODUCT_NAME_ALLOWED_IN_HEBREW=%s",
+        str(latin_allowed_he).lower(),
+    )
+    if ok and actual == "hebrew_job_latin_product_name_headline_only":
+        logger.info("VIDEO_HEADLINE_LANGUAGE_OVERRIDE_REASON=product_name_only_allowed")
     if not ok:
         logger.error(
             "VIDEO_JOB_FAILED_INTEGRITY reason=headline_language_mismatch required=%s plurality_check=false",

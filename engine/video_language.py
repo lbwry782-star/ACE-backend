@@ -261,6 +261,16 @@ def evaluate_headline_overlay_language(
         return True, "plurality_hebrew_ok", False
     if hebrew_headline_allows_embedded_english_product_name(h, canonical_name):
         return True, "hebrew_with_only_canonical_english_product_name", True
+    # Hebrew job: headline may be exactly the Latin product name only (allowed loanword/brand).
+    cn = (canonical_name or "").strip()
+    hn = unicodedata.normalize("NFC", h).strip()
+    if (
+        cn
+        and is_english_only_product_name_script(cn)
+        and is_english_only_product_name_script(hn)
+        and hn.casefold() == unicodedata.normalize("NFC", cn).strip().casefold()
+    ):
+        return True, "hebrew_job_latin_product_name_headline_only", True
     return False, "headline_language_rules_failed", False
 
 
