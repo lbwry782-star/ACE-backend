@@ -535,6 +535,162 @@ def _repaired_advertising_promise_for_product(
     return candidate, True
 
 
+def _promise_augment_notebook_pen(promise: str, product_name: str) -> str:
+    """Append explicit concrete anchors so English object labels ground in the promise."""
+    pn = (product_name or "").strip()
+    base = (promise or "").strip()
+    frag = f" {pn}: notebook and pen." if pn else " Notebook and pen."
+    return (base + frag).strip()[:480]
+
+
+def _fallback_abc_grounding_ok(
+    promise: str, oa: str, ob: str, product_name: str, product_description: str
+) -> Tuple[bool, bool, bool, bool, bool]:
+    """Returns (pf, ga, gb, pa, pb) product-grounded promise + A/B promise-grounded + physical."""
+    pf = _advertising_promise_from_product(promise, product_name, product_description)
+    ga = _object_grounded_in_advertising_promise(oa, promise)
+    gb = _object_grounded_in_advertising_promise(ob, promise)
+    pa, _ = _object_label_is_physical_classic(oa)
+    pb, _ = _object_label_is_physical_classic(ob)
+    return pf, ga, gb, pa, pb
+
+
+def _log_fallback_repair_diagnostics(
+    *,
+    original_promise: str,
+    final_promise: str,
+    original_oa: str,
+    original_ob: str,
+    final_oa: str,
+    final_ob: str,
+    promise_text_changed: bool,
+    pf: bool,
+    ga: bool,
+    gb: bool,
+    pa: bool,
+    pb: bool,
+    stale_objects_after_promise_repair: bool,
+    sbs_script_ok: bool,
+) -> None:
+    """Structured logs for salvage; callers gate acceptance on coherent package."""
+    coherent = bool(pf and ga and gb and pa and pb and sbs_script_ok)
+    logger.info("VIDEO_PLAN_FALLBACK_COHERENT_PACKAGE=%s", str(coherent).lower())
+    logger.info(
+        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_ONLY=%s",
+        str(bool(promise_text_changed and stale_objects_after_promise_repair)).lower(),
+    )
+    triple = bool(pf and ga and gb)
+    logger.info(
+        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_FROM_PRODUCT=%s",
+        str(bool(triple)).lower(),
+    )
+    logger.info(
+        "VIDEO_PLAN_FALLBACK_REPAIRED_OBJECT_A=%s",
+        str(
+            _normalize_object_identifier_for_compare(final_oa)
+            != _normalize_object_identifier_for_compare(original_oa)
+        ).lower(),
+    )
+    logger.info(
+        "VIDEO_PLAN_FALLBACK_REPAIRED_OBJECT_B=%s",
+        str(
+            _normalize_object_identifier_for_compare(final_ob)
+            != _normalize_object_identifier_for_compare(original_ob)
+        ).lower(),
+    )
+    full = coherent and (
+        promise_text_changed
+        or _normalize_object_identifier_for_compare(final_oa)
+        != _normalize_object_identifier_for_compare(original_oa)
+        or _normalize_object_identifier_for_compare(final_ob)
+        != _normalize_object_identifier_for_compare(original_ob)
+    )
+    logger.info("VIDEO_PLAN_FALLBACK_FULL_REPAIR=%s", str(full).lower())
+
+
+def _build_coherent_fallback_triplet(
+    *,
+    original_promise: str,
+    original_oa: str,
+    original_ob: str,
+    product_name: str,
+    product_description: str,
+    rebuild_objects_from_promise: bool,
+) -> Optional[Tuple[str, str, str]]:
+    """
+    Repair promise (product-grounded), then derive objectA/objectB from that promise when requested,
+    optionally augmenting the promise so English physical anchors ground. Returns None if no coherent package.
+    """
+    pn = (product_name or "").strip()
+    pd = (product_description or "").strip()
+    op0 = (original_promise or "").strip()
+    oa0 = (original_oa or "").strip()
+    ob0 = (original_ob or "").strip()
+
+    rep, promise_text_changed = _repaired_advertising_promise_for_product(
+        op0, product_name, product_description
+    )
+    if not _advertising_promise_from_product(rep, product_name, product_description):
+        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
+        return None
+
+    if rebuild_objects_from_promise:
+        oa, ob = _emergency_object_pair_from_advertising_text(rep, pd, pn)
+    else:
+        oa, ob = oa0, ob0
+
+    pf, ga, gb, pa, pb = _fallback_abc_grounding_ok(rep, oa, ob, product_name, product_description)
+    stale_after_promise = bool(promise_text_changed and not (ga and gb and pa and pb))
+
+    if not (pf and ga and gb and pa and pb):
+        rep2 = _promise_augment_notebook_pen(rep, pn)
+        oa2, ob2 = "notebook", "pen"
+        pf2, ga2, gb2, pa2, pb2 = _fallback_abc_grounding_ok(
+            rep2, oa2, ob2, product_name, product_description
+        )
+        if pf2 and ga2 and gb2 and pa2 and pb2:
+            rep, oa, ob = rep2, oa2, ob2
+            pf, ga, gb, pa, pb = pf2, ga2, gb2, pa2, pb2
+            stale_after_promise = False
+
+    p_changed_final = unicodedata.normalize("NFC", rep).strip() != unicodedata.normalize("NFC", op0).strip()
+    _, tb = _fallback_template_for_bucket(_promise_bucket(rep))
+    sbs_probe = tb.format(A=oa, B=ob, promise=rep)
+    sbs_ok = _side_by_side_motion_is_meaningful(sbs_probe, oa, ob)
+    coherent = bool(pf and ga and gb and pa and pb and sbs_ok)
+    _log_fallback_repair_diagnostics(
+        original_promise=op0,
+        final_promise=rep,
+        original_oa=oa0,
+        original_ob=ob0,
+        final_oa=oa,
+        final_ob=ob,
+        promise_text_changed=p_changed_final,
+        pf=pf,
+        ga=ga,
+        gb=gb,
+        pa=pa,
+        pb=pb,
+        stale_objects_after_promise_repair=stale_after_promise,
+        sbs_script_ok=sbs_ok,
+    )
+    if not coherent:
+        base_ok = bool(pf and ga and gb and pa and pb)
+        same_obs = (
+            _normalize_object_identifier_for_compare(oa) == _normalize_object_identifier_for_compare(oa0)
+            and _normalize_object_identifier_for_compare(ob) == _normalize_object_identifier_for_compare(ob0)
+        )
+        if p_changed_final and same_obs and not base_ok:
+            block = "promise_only_repair_stale_objects"
+        elif base_ok and not sbs_ok:
+            block = "side_by_side_interaction_not_meaningful"
+        else:
+            block = "fallback_incoherent_package"
+        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=%s", block)
+        return None
+    return rep, oa, ob
+
+
 def _parse_norm_ab_interaction_type(raw: Any) -> str:
     """Return exactly 'classic' | 'meaningful' | ''."""
     s = str(raw or "").strip().lower()
@@ -1912,20 +2068,33 @@ def _build_deterministic_side_by_side_plan_from_parsed(
         return plan, template_name, False
 
     # Layer 4 guaranteed delivery mode: force a conservative valid SIDE_BY_SIDE plan shape.
-    rep, repaired_promise = _repaired_advertising_promise_for_product(
-        promise, product_name, product_description
+    triplet = _build_coherent_fallback_triplet(
+        original_promise=promise,
+        original_oa=oa,
+        original_ob=ob,
+        product_name=product_name,
+        product_description=product_description,
+        rebuild_objects_from_promise=True,
     )
-    if not _advertising_promise_from_product(rep, product_name, product_description):
-        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
+    if not triplet:
         return None, template_name, True
-    logger.info(
-        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_FROM_PRODUCT=%s",
-        str(repaired_promise).lower(),
-    )
-    promise = rep
+    promise, oa, ob = triplet
     bucket = _promise_bucket(promise)
     template_name, template_body = _fallback_template_for_bucket(bucket)
     sbs_motion = template_body.format(A=oa, B=ob, promise=promise)
+    sbs_open = (
+        f"Opening intent: {oa} and {ob} are visible together in one stable composition, "
+        "with immediate meaningful interaction between A and B."
+    )
+    c["replacementMotionScript"] = (
+        f"The {oa} uses clear physical motion and direct contact with the environment; "
+        "the partner primary stays fully off-screen; the change responds visibly using the scene, "
+        "supporting the advertising promise."
+    )
+    c["replacementOpeningFrameDescription"] = (
+        f"Replacement intent: only {oa} is visible on camera; the partner primary is absent from the frame; "
+        "background follows preservedBackgroundFrom=A."
+    )
     motion_core = f"{sbs_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
     forced = {
         "productNameResolved": (product_name or "").strip() or "Product",
@@ -1984,19 +2153,19 @@ def _build_emergency_side_by_side_plan(
     """
     c = _coerce_plan_keys(parsed or {})
     promise_raw = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
-    oa, ob = _emergency_object_pair_from_advertising_text(
-        promise_raw, product_description, product_name
+    oa0 = (c.get("objectA") or "").strip() or "object A"
+    ob0 = (c.get("objectB") or "").strip() or "object B"
+    triplet = _build_coherent_fallback_triplet(
+        original_promise=promise_raw,
+        original_oa=oa0,
+        original_ob=ob0,
+        product_name=product_name,
+        product_description=product_description,
+        rebuild_objects_from_promise=True,
     )
-    promise, repaired_promise = _repaired_advertising_promise_for_product(
-        promise_raw, product_name, product_description
-    )
-    if not _advertising_promise_from_product(promise, product_name, product_description):
-        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
+    if not triplet:
         return None, ""
-    logger.info(
-        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_FROM_PRODUCT=%s",
-        str(repaired_promise).lower(),
-    )
+    promise, oa, ob = triplet
     pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
     raw_hl = (c.get("headlineText") or "").strip() or pn
     headline_text = _word_limit(raw_hl, 7)
