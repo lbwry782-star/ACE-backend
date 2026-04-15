@@ -117,19 +117,24 @@ FOUNDATION
 - The advertising promise must be derived only from the product name and the product description.
 - Object selection must be based on (1) the advertising promise and (2) the interaction between the objects.
 
-OBJECT DISCOVERY (work strictly in this order)
-1) Derive the advertising promise from the product name + the product description.
-2) Select objectA: objectA must be a classic, defined, physical object, visually depictable, and derived from the advertising promise.
-3) Search for objectB: objectB must be a classic, defined, physical object that interacts with objectA. Continue searching until objectB (a) interacts with objectA and (b) also has an additional connection to the advertising promise.
+OBJECT DISCOVERY (work strictly in this order — matches server validation)
+1) Derive advertisingPromise only from the product name + the product description (no generic metaphors first; anchor in product text).
+2) Choose objectA: objectA must be a classic, defined, physical object, visually depictable, and grounded in advertisingPromise.
+3) Search for objectB in this priority order:
+   a) First, search for objectB that has a CLASSIC (canonical, inherent real-world) interaction with objectA while staying grounded in advertisingPromise.
+   b) If no valid classic-interaction B exists, search for objectB that has a MEANINGFUL (clear physical, non-decorative) interaction with objectA while grounded in advertisingPromise.
+4) objectB must also be grounded in advertisingPromise (same grounding rule as objectA).
+5) Only after objectB is chosen: set abInteractionType to "classic" if and only if the chosen pair is a classic interaction; otherwise set "meaningful" for the meaningful B you found. Do not invent symbolic pairs disconnected from the promise.
 
 OBJECT RULES
 - Accepted objects: physical, classic, clearly defined, visually depictable.
-- Rejected objects: abstract concepts, verbs, adjectives, sentence fragments, promise fragments, non-physical nouns.
+- Rejected objects: abstract concepts, verbs, adjectives, sentence fragments, promise fragments, benefits/outcomes as “objects”, non-physical nouns.
 
-MODE DECISION (you declare interaction type only)
+MODE DECISION (you declare interaction type only — server maps mode from this field)
 - abInteractionType must be exactly "classic" or "meaningful" (see OUTPUT FORMAT). The server sets video mode from this field and branch validity only.
-- Choose "meaningful" when the A↔B interaction is meaningful: visually clear, physically understandable, not decorative, not random, not static. In SIDE_BY_SIDE both A and B appear; no similarity or silhouette requirement.
-- Choose "classic" only when the A↔B interaction is a familiar, inherent, canonical pairing (e.g. bee and flower, straw and cup, dog and bone). REPLACEMENT is for this case only: the shot reads as one primary replacing the other’s role visually (no side-by-side comparison). Do not treat REPLACEMENT as merely another meaningful interaction.
+- "classic" → server uses REPLACEMENT when the replacement branch validates. Use only for familiar canonical pairings (e.g. bee and flower, straw and cup, dog and bone, key and lock).
+- "meaningful" → server uses SIDE_BY_SIDE when the side-by-side branch validates. Use when the interaction is physically clear but not that special canonical classic case.
+- Do not pick generic metaphor objects first and then justify them; anchor objectA in the promise, then search B classic-first, meaningful-second.
 
 MEMORY (diversity only)
 - If the server lists prior advertisingPromise lines for this product, use that list only to reduce repetition and prefer unused valid solutions.
@@ -606,89 +611,6 @@ def _log_fallback_repair_diagnostics(
         != _normalize_object_identifier_for_compare(original_ob)
     )
     logger.info("VIDEO_PLAN_FALLBACK_FULL_REPAIR=%s", str(full).lower())
-
-
-def _build_coherent_fallback_triplet(
-    *,
-    original_promise: str,
-    original_oa: str,
-    original_ob: str,
-    product_name: str,
-    product_description: str,
-    rebuild_objects_from_promise: bool,
-) -> Optional[Tuple[str, str, str]]:
-    """
-    Repair promise (product-grounded), then derive objectA/objectB from that promise when requested,
-    optionally augmenting the promise so English physical anchors ground. Returns None if no coherent package.
-    """
-    pn = (product_name or "").strip()
-    pd = (product_description or "").strip()
-    op0 = (original_promise or "").strip()
-    oa0 = (original_oa or "").strip()
-    ob0 = (original_ob or "").strip()
-
-    rep, promise_text_changed = _repaired_advertising_promise_for_product(
-        op0, product_name, product_description
-    )
-    if not _advertising_promise_from_product(rep, product_name, product_description):
-        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
-        return None
-
-    if rebuild_objects_from_promise:
-        oa, ob = _emergency_object_pair_from_advertising_text(rep, pd, pn)
-    else:
-        oa, ob = oa0, ob0
-
-    pf, ga, gb, pa, pb = _fallback_abc_grounding_ok(rep, oa, ob, product_name, product_description)
-    stale_after_promise = bool(promise_text_changed and not (ga and gb and pa and pb))
-
-    if not (pf and ga and gb and pa and pb):
-        rep2 = _promise_augment_notebook_pen(rep, pn)
-        oa2, ob2 = "notebook", "pen"
-        pf2, ga2, gb2, pa2, pb2 = _fallback_abc_grounding_ok(
-            rep2, oa2, ob2, product_name, product_description
-        )
-        if pf2 and ga2 and gb2 and pa2 and pb2:
-            rep, oa, ob = rep2, oa2, ob2
-            pf, ga, gb, pa, pb = pf2, ga2, gb2, pa2, pb2
-            stale_after_promise = False
-
-    p_changed_final = unicodedata.normalize("NFC", rep).strip() != unicodedata.normalize("NFC", op0).strip()
-    _, tb = _fallback_template_for_bucket(_promise_bucket(rep))
-    sbs_probe = tb.format(A=oa, B=ob, promise=rep)
-    sbs_ok = _side_by_side_motion_is_meaningful(sbs_probe, oa, ob)
-    coherent = bool(pf and ga and gb and pa and pb and sbs_ok)
-    _log_fallback_repair_diagnostics(
-        original_promise=op0,
-        final_promise=rep,
-        original_oa=oa0,
-        original_ob=ob0,
-        final_oa=oa,
-        final_ob=ob,
-        promise_text_changed=p_changed_final,
-        pf=pf,
-        ga=ga,
-        gb=gb,
-        pa=pa,
-        pb=pb,
-        stale_objects_after_promise_repair=stale_after_promise,
-        sbs_script_ok=sbs_ok,
-    )
-    if not coherent:
-        base_ok = bool(pf and ga and gb and pa and pb)
-        same_obs = (
-            _normalize_object_identifier_for_compare(oa) == _normalize_object_identifier_for_compare(oa0)
-            and _normalize_object_identifier_for_compare(ob) == _normalize_object_identifier_for_compare(ob0)
-        )
-        if p_changed_final and same_obs and not base_ok:
-            block = "promise_only_repair_stale_objects"
-        elif base_ok and not sbs_ok:
-            block = "side_by_side_interaction_not_meaningful"
-        else:
-            block = "fallback_incoherent_package"
-        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=%s", block)
-        return None
-    return rep, oa, ob
 
 
 def _parse_norm_ab_interaction_type(raw: Any) -> str:
@@ -1502,11 +1424,18 @@ def validate_and_normalize_plan(
     logger.info("VIDEO_PLAN_OBJECT_A_PROMISE_GROUNDED=%s", str(ga).lower())
     logger.info("VIDEO_PLAN_OBJECT_B_PROMISE_GROUNDED=%s", str(gb).lower())
     if not ga:
+        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=false")
+        logger.info("VIDEO_PLAN_OBJECT_B_FOUND=%s", str(gb).lower())
         logger.info("VIDEO_PLAN_REJECT_REASON=object_a_not_grounded_in_promise")
         return None, "object_a_not_grounded_in_promise"
     if not gb:
+        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
+        logger.info("VIDEO_PLAN_OBJECT_B_FOUND=false")
         logger.info("VIDEO_PLAN_REJECT_REASON=object_b_not_grounded_in_promise")
         return None, "object_b_not_grounded_in_promise"
+
+    logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
+    logger.info("VIDEO_PLAN_OBJECT_B_FOUND=true")
 
     logger.info(
         "VIDEO_OBJECT_SELECTION_SOURCE objectA=%s objectB=%s based_on=advertisingPromise",
@@ -1523,9 +1452,11 @@ def validate_and_normalize_plan(
     interaction_type = _parse_norm_ab_interaction_type(data.get("abInteractionType"))
     if interaction_type not in ("classic", "meaningful"):
         logger.info("VIDEO_PLAN_INTERACTION_TYPE=invalid")
+        logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=invalid")
         logger.info("VIDEO_PLAN_REJECT_REASON=invalid_ab_interaction_type")
         return None, "invalid_ab_interaction_type"
     logger.info("VIDEO_PLAN_INTERACTION_TYPE=%s", interaction_type)
+    logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=%s", interaction_type)
 
     repl_ok = not _contains_object_tokens(rep_open, ob) and not _contains_object_tokens(rms, ob)
     replacement_meaningful = _replacement_motion_is_meaningful(rms, oa, ob)
@@ -1895,6 +1826,300 @@ _EMERGENCY_TEXT_STOPWORDS: FrozenSet[str] = frozenset(
     }
 )
 
+# Undirected canonical token pairs for classic-interaction-first fallback search (head tokens).
+_CLASSIC_INTERACTION_TOKEN_PAIRS: FrozenSet[FrozenSet[str]] = frozenset(
+    {
+        frozenset({"bee", "flower"}),
+        frozenset({"dog", "bone"}),
+        frozenset({"cat", "mouse"}),
+        frozenset({"lock", "key"}),
+        frozenset({"cup", "straw"}),
+        frozenset({"bottle", "cap"}),
+        frozenset({"pen", "paper"}),
+        frozenset({"pencil", "eraser"}),
+        frozenset({"shoe", "lace"}),
+        frozenset({"needle", "thread"}),
+        frozenset({"hammer", "nail"}),
+        frozenset({"brush", "paint"}),
+        frozenset({"arrow", "target"}),
+        frozenset({"bow", "arrow"}),
+        frozenset({"fish", "hook"}),
+        frozenset({"bird", "nest"}),
+        frozenset({"guitar", "pick"}),
+        frozenset({"camera", "lens"}),
+        frozenset({"notebook", "pen"}),
+        frozenset({"plug", "socket"}),
+        frozenset({"toothbrush", "toothpaste"}),
+        frozenset({"salt", "pepper"}),
+        frozenset({"bread", "knife"}),
+        frozenset({"cup", "saucer"}),
+        frozenset({"chair", "table"}),
+        frozenset({"clock", "battery"}),
+        frozenset({"umbrella", "handle"}),
+        frozenset({"bucket", "mop"}),
+        frozenset({"soap", "sponge"}),
+        frozenset({"wine", "cork"}),
+        frozenset({"envelope", "stamp"}),
+    }
+)
+
+
+def _classic_interaction_head_token(label: str) -> str:
+    toks = _object_label_tokens_for_physical_check(label)
+    if not toks:
+        return ""
+    t0 = toks[0].lower()
+    aliases = {
+        "biro": "pen",
+        "ballpoint": "pen",
+        "ballpen": "pen",
+        "notepad": "notebook",
+        "memo": "notebook",
+        "dartboard": "target",
+        "dart": "arrow",
+    }
+    return aliases.get(t0, t0)
+
+
+def _classic_interaction_pair(oa: str, ob: str) -> bool:
+    a = _classic_interaction_head_token(oa)
+    b = _classic_interaction_head_token(ob)
+    if not a or not b or a == b:
+        return False
+    return frozenset((a, b)) in _CLASSIC_INTERACTION_TOKEN_PAIRS
+
+
+def _ranked_physical_candidates_from_promise(
+    apromise: str, product_name: str, product_description: str
+) -> List[str]:
+    """Single-token physical labels grounded in the promise, ranked by product+promise relevance."""
+    ap = (apromise or "").strip()
+    if not ap:
+        return []
+    pn = (product_name or "").strip()
+    pd = (product_description or "").strip()
+    blob = f"{ap} {pd} {pn}".strip()
+    blob_l = blob.lower()
+    ap_l = ap.lower()
+    scored: List[Tuple[int, str, str]] = []
+    seen_lower: set[str] = set()
+    for m in re.finditer(r"[\w\u0590-\u05FF]{3,}", blob, flags=re.UNICODE):
+        w = m.group(0).strip()
+        if not w:
+            continue
+        wl = w.lower()
+        if wl in _EMERGENCY_TEXT_STOPWORDS or wl in seen_lower:
+            continue
+        if not _object_grounded_in_advertising_promise(w, ap):
+            continue
+        ok, _ = _object_label_is_physical_classic(w)
+        if not ok:
+            continue
+        seen_lower.add(wl)
+        score = 0
+        if wl in ap_l:
+            score += 2
+        if pn and wl in pn.lower():
+            score += 2
+        if pd and wl in pd.lower():
+            score += 1
+        scored.append((score, len(w), w))
+    scored.sort(key=lambda t: (-t[0], t[1], t[2].lower()))
+    ordered: List[str] = []
+    seen2: set[str] = set()
+    for _, __, w in scored:
+        wl = w.lower()
+        if wl not in seen2:
+            seen2.add(wl)
+            ordered.append(w)
+    return ordered
+
+
+def _search_ordered_fallback_validated_plan(
+    parsed_ctx: Dict[str, Any],
+    *,
+    product_name: str,
+    product_description: str,
+    log_context: str,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """
+    Fallback follows the same order as the planner: promise from product → objectA from promise →
+    objectB classic-first → objectB meaningful-second → coherent package only via validate.
+    Returns (validated_plan_or_None, template_name).
+    """
+    logger.info("VIDEO_PLAN_FALLBACK_PACKAGE_VALID=false")
+    c = _coerce_plan_keys(parsed_ctx or {})
+    op0 = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
+    oa0 = (c.get("objectA") or "").strip() or "object A"
+    ob0 = (c.get("objectB") or "").strip() or "object B"
+    rep, promise_text_changed = _repaired_advertising_promise_for_product(
+        op0, product_name, product_description
+    )
+    if not _advertising_promise_from_product(rep, product_name, product_description):
+        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
+        logger.info("VIDEO_PLAN_OBJECT_B_FOUND=false")
+        return None, ""
+
+    pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
+    raw_hl = (c.get("headlineText") or "").strip() or pn
+    headline_text = _word_limit(raw_hl, 7)
+
+    def build_attempt(oa: str, ob: str, ab_type: str) -> Tuple[Dict[str, Any], str]:
+        bucket = _promise_bucket(rep)
+        template_name_i, template_body = _fallback_template_for_bucket(bucket)
+        sbs_motion = template_body.format(A=oa, B=ob, promise=rep)
+        sbs_open = (
+            f"Opening intent: {oa} and {ob} appear together in one stable composition, "
+            "with immediate clear physical interaction between A and B."
+        )
+        rep_open = (
+            f"Replacement intent: only {oa} is visible on camera; the partner primary is absent from the frame; "
+            "background follows preservedBackgroundFrom=A."
+        )
+        rms = (
+            f"The {oa} uses clear physical motion and direct contact with the environment; "
+            "the partner primary stays fully off-screen; the change responds visibly using the scene, "
+            "supporting the advertising promise."
+        )
+        attempt_i: Dict[str, Any] = {
+            "productNameResolved": pn,
+            "advertisingPromise": rep,
+            "objectA": oa,
+            "objectB": ob,
+            "morphologicalReason": (c.get("morphologicalReason") or f"{log_context}_ordered_fallback").strip(),
+            "promiseReason": (c.get("promiseReason") or "").strip(),
+            "replacementDirection": "A_replaces_B",
+            "preservedBackgroundFrom": "A",
+            "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
+            "headlineDecision": "include_product_name",
+            "headlineText": headline_text,
+            "objectPairViewerClarityOk": True,
+            "objectPairIdentityDistinctOk": True,
+            "identityDistinctnessNote": f"{log_context}_ordered_fallback",
+            "replacementOpeningFrameDescription": rep_open,
+            "replacementMotionScript": rms,
+            "sideBySideOpeningFrameDescription": sbs_open,
+            "sideBySideMotionScript": sbs_motion,
+            "abInteractionType": ab_type,
+        }
+        return attempt_i, template_name_i
+
+    def try_pair(oa: str, ob: str, ab_type: str, phase_log: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        if _object_pair_identity_too_close_heuristic(oa, ob):
+            return None, ""
+        att, tmpl = build_attempt(oa, ob, ab_type)
+        plan_i, err = validate_and_normalize_plan(
+            att,
+            planner_deadline_monotonic=None,
+            product_name=product_name,
+            product_description=product_description,
+        )
+        if plan_i:
+            logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=%s", phase_log)
+            logger.info("VIDEO_PLAN_OBJECT_B_FOUND=true")
+            logger.info("VIDEO_PLAN_FALLBACK_PACKAGE_VALID=true")
+            p_changed_final = (
+                unicodedata.normalize("NFC", rep).strip()
+                != unicodedata.normalize("NFC", op0).strip()
+            )
+            oa_f = str(plan_i.get("objectA") or "").strip()
+            ob_f = str(plan_i.get("objectB") or "").strip()
+            pf, ga, gb, pa, pb = _fallback_abc_grounding_ok(
+                str(plan_i.get("advertisingPromise") or rep),
+                oa_f,
+                ob_f,
+                product_name,
+                product_description,
+            )
+            _, tb = _fallback_template_for_bucket(_promise_bucket(rep))
+            sbs_probe = tb.format(A=oa_f, B=ob_f, promise=str(plan_i.get("advertisingPromise") or rep))
+            sbs_ok = _side_by_side_motion_is_meaningful(sbs_probe, oa_f, ob_f)
+            stale_after = bool(promise_text_changed and not (ga and gb and pa and pb))
+            _log_fallback_repair_diagnostics(
+                original_promise=op0,
+                final_promise=str(plan_i.get("advertisingPromise") or rep),
+                original_oa=oa0,
+                original_ob=ob0,
+                final_oa=oa_f,
+                final_ob=ob_f,
+                promise_text_changed=p_changed_final,
+                pf=pf,
+                ga=ga,
+                gb=gb,
+                pa=pa,
+                pb=pb,
+                stale_objects_after_promise_repair=stale_after,
+                sbs_script_ok=sbs_ok,
+            )
+            return plan_i, tmpl
+        if err:
+            logger.info("VIDEO_PLAN_FALLBACK_TRY_REJECT reason=%s", err)
+        return None, tmpl
+
+    candidates = _ranked_physical_candidates_from_promise(rep, product_name, product_description)
+    template_name = ""
+
+    def run_phases(cand: List[str]) -> Tuple[Optional[Dict[str, Any]], str]:
+        nonlocal template_name
+        if len(cand) < 2:
+            return None, ""
+        logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=classic")
+        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
+        for oa in cand:
+            for ob in cand:
+                if _normalize_object_identifier_for_compare(oa) == _normalize_object_identifier_for_compare(ob):
+                    continue
+                if not _classic_interaction_pair(oa, ob):
+                    continue
+                pln, tmpl = try_pair(oa, ob, "classic", "classic")
+                template_name = tmpl or template_name
+                if pln:
+                    return pln, tmpl
+        logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=meaningful")
+        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
+        for oa in cand:
+            for ob in cand:
+                if _normalize_object_identifier_for_compare(oa) == _normalize_object_identifier_for_compare(ob):
+                    continue
+                pln, tmpl = try_pair(oa, ob, "meaningful", "meaningful")
+                template_name = tmpl or template_name
+                if pln:
+                    return pln, tmpl
+        return None, ""
+
+    rep_initial = rep
+    plan, tmpl = run_phases(candidates)
+    if plan:
+        return plan, tmpl
+
+    rep_aug = _promise_augment_notebook_pen(rep_initial, (product_name or "").strip())
+    if rep_aug != rep_initial and _advertising_promise_from_product(
+        rep_aug, product_name, product_description
+    ):
+        rep = rep_aug
+        candidates_aug = _ranked_physical_candidates_from_promise(
+            rep_aug, product_name, product_description
+        )
+        if len(candidates_aug) < 2 and re.search(r"\bnotebook\b", rep_aug.lower()) and re.search(
+            r"\bpen\b", rep_aug.lower()
+        ):
+            ok_nb, _ = _object_label_is_physical_classic("notebook")
+            ok_pen, _ = _object_label_is_physical_classic("pen")
+            if (
+                ok_nb
+                and ok_pen
+                and _object_grounded_in_advertising_promise("notebook", rep_aug)
+                and _object_grounded_in_advertising_promise("pen", rep_aug)
+            ):
+                candidates_aug = ["notebook", "pen"]
+        plan, tmpl = run_phases(candidates_aug)
+        if plan:
+            return plan, tmpl
+
+    logger.info("VIDEO_PLAN_OBJECT_B_FOUND=false")
+    logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=ordered_fallback_no_coherent_package")
+    return None, template_name
+
 
 def _emergency_object_pair_from_advertising_text(
     apromise: str, product_description: str, product_name: str
@@ -2018,7 +2243,8 @@ def _build_deterministic_side_by_side_plan_from_parsed(
     content_language: str,
 ) -> Tuple[Optional[Dict[str, Any]], str, bool]:
     """
-    Layer 3+4 deterministic salvage / guaranteed delivery for SIDE_BY_SIDE interaction quality failures.
+    Layer 3+4 deterministic salvage: validate model-shaped plan, then ordered fallback
+    (promise from product → A from promise → B classic-first → B meaningful) with full validation.
     Returns (plan_or_none, template_name, guaranteed_delivery_used).
     """
     c = _coerce_plan_keys(parsed or {})
@@ -2067,78 +2293,16 @@ def _build_deterministic_side_by_side_plan_from_parsed(
     if plan:
         return plan, template_name, False
 
-    # Layer 4 guaranteed delivery mode: force a conservative valid SIDE_BY_SIDE plan shape.
-    triplet = _build_coherent_fallback_triplet(
-        original_promise=promise,
-        original_oa=oa,
-        original_ob=ob,
+    # Layer 4: same search order as planner; returns only a fully validated coherent package.
+    salvage, tmpl = _search_ordered_fallback_validated_plan(
+        c,
         product_name=product_name,
         product_description=product_description,
-        rebuild_objects_from_promise=True,
+        log_context="deterministic",
     )
-    if not triplet:
+    if not salvage:
         return None, template_name, True
-    promise, oa, ob = triplet
-    bucket = _promise_bucket(promise)
-    template_name, template_body = _fallback_template_for_bucket(bucket)
-    sbs_motion = template_body.format(A=oa, B=ob, promise=promise)
-    sbs_open = (
-        f"Opening intent: {oa} and {ob} are visible together in one stable composition, "
-        "with immediate meaningful interaction between A and B."
-    )
-    c["replacementMotionScript"] = (
-        f"The {oa} uses clear physical motion and direct contact with the environment; "
-        "the partner primary stays fully off-screen; the change responds visibly using the scene, "
-        "supporting the advertising promise."
-    )
-    c["replacementOpeningFrameDescription"] = (
-        f"Replacement intent: only {oa} is visible on camera; the partner primary is absent from the frame; "
-        "background follows preservedBackgroundFrom=A."
-    )
-    motion_core = f"{sbs_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
-    forced = {
-        "productNameResolved": (product_name or "").strip() or "Product",
-        "advertisingPromise": promise,
-        "objectA": oa,
-        "objectB": ob,
-        "morphologicalReason": (c.get("morphologicalReason") or "").strip(),
-        "promiseReason": (c.get("promiseReason") or "").strip(),
-        "replacementDirection": "A_replaces_B",
-        "preservedBackgroundFrom": "A",
-        "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
-        "headlineDecision": "include_product_name",
-        "headlineText": (product_name or "").strip() or "Product",
-        "replacementOpeningFrameDescription": c["replacementOpeningFrameDescription"],
-        "replacementMotionScript": c["replacementMotionScript"],
-        "sideBySideOpeningFrameDescription": sbs_open,
-        "sideBySideMotionScript": sbs_motion,
-        "videoPromptCore": motion_core,
-        "openingFrameDescription": sbs_open,
-        "videoVisualMode": "SIDE_BY_SIDE",
-        "chosenMode": "SIDE_BY_SIDE",
-        "silhouetteSimilarity": 0.0,
-        "interactionScore": 0.0,
-        "abInteractionType": "meaningful",
-        "shapeAlignment": "",
-        "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
-        "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
-        "objectPairViewerClarityOk": True,
-        "objectPairIdentityDistinctOk": True,
-        "identityDistinctnessNote": "guaranteed_delivery",
-    }
-    plan_forced, v_err = validate_and_normalize_plan(
-        _coerce_plan_keys(forced),
-        planner_deadline_monotonic=None,
-        product_name=product_name,
-        product_description=product_description,
-    )
-    if not plan_forced:
-        logger.info(
-            "VIDEO_PLAN_FALLBACK_BLOCKED reason=%s",
-            (v_err or "validation_failed").strip(),
-        )
-        return None, template_name, True
-    return plan_forced, template_name, True
+    return salvage, tmpl or template_name, True
 
 
 def _build_emergency_side_by_side_plan(
@@ -2148,117 +2312,17 @@ def _build_emergency_side_by_side_plan(
     product_description: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    Near-deadline guaranteed fallback: SIDE_BY_SIDE plan without extra planner/model work.
-    Objects are derived from the advertising promise + product text (no unrelated fixed pair).
+    Near-deadline fallback: same ordered package as the planner (promise → A → B classic → B meaningful),
+    validated in one path (no independent field repair).
     """
     c = _coerce_plan_keys(parsed or {})
-    promise_raw = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
-    oa0 = (c.get("objectA") or "").strip() or "object A"
-    ob0 = (c.get("objectB") or "").strip() or "object B"
-    triplet = _build_coherent_fallback_triplet(
-        original_promise=promise_raw,
-        original_oa=oa0,
-        original_ob=ob0,
+    plan, template_name = _search_ordered_fallback_validated_plan(
+        c,
         product_name=product_name,
         product_description=product_description,
-        rebuild_objects_from_promise=True,
+        log_context="emergency",
     )
-    if not triplet:
-        return None, ""
-    promise, oa, ob = triplet
-    pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
-    raw_hl = (c.get("headlineText") or "").strip() or pn
-    headline_text = _word_limit(raw_hl, 7)
-    bucket = _promise_bucket(promise)
-    template_name, template_body = _fallback_template_for_bucket(bucket)
-    sbs_motion = template_body.format(A=oa, B=ob, promise=promise)
-    sbs_open = (
-        f"Opening intent: {oa} and {ob} appear together in one stable composition, "
-        "with immediate clear physical interaction between A and B."
-    )
-    rep_open = (
-        f"Replacement intent: only {oa} is visible on camera; the partner primary is absent from the frame; "
-        "background follows preservedBackgroundFrom=A."
-    )
-    rms = (
-        f"The {oa} uses clear physical motion and direct contact with the environment; "
-        "the partner primary stays fully off-screen; the change responds visibly using the scene, "
-        "supporting the advertising promise."
-    )
-    attempt: Dict[str, Any] = {
-        "productNameResolved": pn,
-        "advertisingPromise": promise,
-        "objectA": oa,
-        "objectB": ob,
-        "morphologicalReason": (c.get("morphologicalReason") or "emergency_conservative_objects").strip(),
-        "promiseReason": (c.get("promiseReason") or "").strip(),
-        "replacementDirection": "A_replaces_B",
-        "preservedBackgroundFrom": "A",
-        "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
-        "headlineDecision": "include_product_name",
-        "headlineText": headline_text,
-        "objectPairViewerClarityOk": True,
-        "objectPairIdentityDistinctOk": True,
-        "identityDistinctnessNote": "emergency_conservative_objects",
-        "replacementOpeningFrameDescription": rep_open,
-        "replacementMotionScript": rms,
-        "sideBySideOpeningFrameDescription": sbs_open,
-        "sideBySideMotionScript": sbs_motion,
-        "abInteractionType": "meaningful",
-    }
-    plan, v_err = validate_and_normalize_plan(
-        attempt,
-        planner_deadline_monotonic=None,
-        product_name=product_name,
-        product_description=product_description,
-    )
-    if plan:
-        return plan, template_name
-    logger.warning("VIDEO_PLAN_EMERGENCY_VALIDATE_FALLBACK reason=%s", v_err or "unknown")
-    motion_core = f"{sbs_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
-    forced: Dict[str, Any] = {
-        "productNameResolved": pn,
-        "advertisingPromise": promise,
-        "objectA": oa,
-        "objectB": ob,
-        "morphologicalReason": attempt["morphologicalReason"],
-        "promiseReason": (c.get("promiseReason") or "").strip(),
-        "replacementDirection": "A_replaces_B",
-        "preservedBackgroundFrom": "A",
-        "shortReplacementScript": attempt["shortReplacementScript"],
-        "headlineDecision": "include_product_name",
-        "headlineText": headline_text,
-        "replacementOpeningFrameDescription": rep_open,
-        "replacementMotionScript": rms,
-        "sideBySideOpeningFrameDescription": sbs_open,
-        "sideBySideMotionScript": sbs_motion,
-        "videoPromptCore": motion_core,
-        "openingFrameDescription": sbs_open,
-        "videoVisualMode": "SIDE_BY_SIDE",
-        "chosenMode": "SIDE_BY_SIDE",
-        "silhouetteSimilarity": 0.0,
-        "interactionScore": 0.0,
-        "abInteractionType": "meaningful",
-        "shapeAlignment": "",
-        "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
-        "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
-        "objectPairViewerClarityOk": True,
-        "objectPairIdentityDistinctOk": True,
-        "identityDistinctnessNote": "emergency_guaranteed_delivery",
-    }
-    plan_forced, v2 = validate_and_normalize_plan(
-        _coerce_plan_keys(forced),
-        planner_deadline_monotonic=None,
-        product_name=product_name,
-        product_description=product_description,
-    )
-    if not plan_forced:
-        logger.info(
-            "VIDEO_PLAN_FALLBACK_BLOCKED reason=%s",
-            (v2 or "validation_failed").strip(),
-        )
-        return None, template_name
-    return plan_forced, template_name
+    return plan, template_name or ""
 
 
 def _finalize_emergency_fallback(
@@ -2288,7 +2352,8 @@ def _finalize_emergency_fallback(
         str(emergency_plan.get("objectA") or ""),
         str(emergency_plan.get("objectB") or ""),
     )
-    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_CHOSEN pair=%s mode=SIDE_BY_SIDE", pair_k)
+    vm = str(emergency_plan.get("videoVisualMode") or emergency_plan.get("chosenMode") or "").strip()
+    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_CHOSEN pair=%s mode=%s", pair_k, vm or "unknown")
     logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
     logger.info(
         "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
@@ -2351,6 +2416,7 @@ def _fetch_video_plan_o3_sync(
     """
     Single planning model call returning a validated plan dict, or None on any failure (no generic video fallback).
     """
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=A_then_B_classic_then_meaningful")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
