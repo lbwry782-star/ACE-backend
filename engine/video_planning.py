@@ -490,6 +490,331 @@ def _secondary_natural_for_primary(secondary: str, primary: str) -> bool:
     return bool(sw & set(pw))
 
 
+_OBJECT_LABEL_MAX_CHARS = 48
+_OBJECT_LABEL_MAX_TOKENS = 4
+
+_NON_PHYSICAL_EN_TOKENS: FrozenSet[str] = frozenset(
+    {
+        "optimization",
+        "optimizing",
+        "optimized",
+        "testing",
+        "tests",
+        "test",
+        "improvement",
+        "improvements",
+        "improving",
+        "improved",
+        "efficiency",
+        "efficient",
+        "performance",
+        "intelligence",
+        "automation",
+        "automated",
+        "autonomy",
+        "autonomies",
+        "results",
+        "result",
+        "outcomes",
+        "outcome",
+        "productivity",
+        "scalability",
+        "scalable",
+        "reliability",
+        "insights",
+        "insight",
+        "analytics",
+        "visibility",
+        "transparency",
+        "velocity",
+        "acceleration",
+        "growth",
+        "innovation",
+        "innovations",
+        "excellence",
+        "quality",
+        "qualities",
+        "capabilities",
+        "capability",
+        "agility",
+        "alignment",
+        "alignments",
+        "strategy",
+        "strategies",
+        "management",
+        "operations",
+        "operation",
+        "process",
+        "processes",
+        "workflow",
+        "workflows",
+        "solution",
+        "solutions",
+        "value",
+        "values",
+        "benefit",
+        "benefits",
+        "experience",
+        "experiences",
+        "success",
+        "successes",
+        "engagement",
+        "framework",
+        "platform",
+        "platforms",
+        "ecosystem",
+        "ecosystems",
+        "empowerment",
+        "software",
+        "system",
+        "systems",
+        "data",
+        "api",
+        "saas",
+        "cloud",
+        "digital",
+        "digitization",
+        "digitalization",
+        "transformation",
+        "transformations",
+        "monitoring",
+        "reporting",
+        "processing",
+        "onboarding",
+        "orchestration",
+        "integration",
+        "metrics",
+        "metric",
+        "kpi",
+        "kpis",
+        "roi",
+        "revenue",
+        "profitability",
+        "compliance",
+        "governance",
+        "security",
+        "privacy",
+        "encryption",
+        "authentication",
+        "authorization",
+        "latency",
+        "throughput",
+        "bandwidth",
+        "capacity",
+        "utilization",
+        "adoption",
+        "retention",
+        "churn",
+        "conversion",
+        "conversions",
+        "optimization",
+        "benchmark",
+        "benchmarks",
+        "scorecard",
+    }
+)
+
+_NON_PHYSICAL_HE_TOKENS: FrozenSet[str] = frozenset(
+    {
+        "בדיקות",
+        "בדיקה",
+        "אוטונומיות",
+        "אוטונומיה",
+        "תוצאות",
+        "תוצאה",
+        "שמשפרות",
+        "שיפור",
+        "שיפורים",
+        "ביצועים",
+        "ביצוע",
+        "יעילות",
+        "יעיל",
+        "חדשנות",
+        "חדשני",
+        "איכות",
+        "אסטרטגיה",
+        "אסטרטגיות",
+        "ניהול",
+        "ניהולי",
+        "אנליטיקה",
+        "שקיפות",
+        "תובנות",
+        "תובנה",
+        "מטרות",
+        "מטרה",
+        "יעדים",
+        "יעד",
+        "פתרונות",
+        "פתרון",
+        "שדרוג",
+        "שדרוגים",
+        "אינטגרציה",
+        "דיגיטלי",
+        "דיגיטלית",
+        "עסקים",
+        "עסקי",
+        "שירות",
+        "שירותים",
+        "מערכות",
+        "מערכת",
+        "תהליך",
+        "תהליכים",
+        "אוטומציה",
+        "אוטומטיות",
+        "למידה",
+        "חכמה",
+        "חכמות",
+        "יצירתיות",
+        "מקצועיות",
+        "מומחיות",
+        "עצמאות",
+        "זמינות",
+        "גמישות",
+        "אמינות",
+        "יציבות",
+        "מודיעין",
+        "יכולות",
+        "יכולת",
+        "הצלחה",
+        "הצלחות",
+        "חוויה",
+        "חוויות",
+        "ערך",
+        "ערכים",
+        "יתרון",
+        "יתרונות",
+        "חסרונות",
+        "סיכון",
+        "סיכונים",
+        "ניתוח",
+        "ניתוחים",
+        "דוחות",
+        "דוח",
+        "מדדים",
+        "מדד",
+        "יעול",
+        "יעולים",
+    }
+)
+
+_EN_ABSTRACT_SUFFIX_EXCEPTIONS: FrozenSet[str] = frozenset(
+    {
+        "document",
+        "moment",
+        "basement",
+        "segment",
+        "filament",
+        "cement",
+        "equipment",
+        "attachment",
+        "ornament",
+        "garment",
+        "pavement",
+        "apartment",
+        "shipment",
+        "implement",
+        "implements",
+        "movement",
+        "ointment",
+        "sediment",
+        "supplement",
+        "nutriment",
+        "lament",
+        "torment",
+        "element",
+        "pigment",
+        "figment",
+    }
+)
+
+
+def _object_label_tokens_for_physical_check(label: str) -> List[str]:
+    out: List[str] = []
+    for part in (label or "").split():
+        p = re.sub(r'^[^\w\u0590-\u05FF]+|[^\w\u0590-\u05FF]+$', "", part)
+        if p:
+            out.append(unicodedata.normalize("NFC", p))
+    return out
+
+
+def _english_token_abstract_by_suffix(token_lower: str) -> bool:
+    if len(token_lower) < 6 or token_lower in _EN_ABSTRACT_SUFFIX_EXCEPTIONS:
+        return False
+    for suf in ("tion", "sion", "ness", "ment", "ity", "ance", "ence", "ship", "hood"):
+        if token_lower.endswith(suf):
+            return True
+    if token_lower.endswith("ing") and len(token_lower) >= 7:
+        if token_lower in (
+            "building",
+            "ceiling",
+            "lighting",
+            "flooring",
+            "roofing",
+            "railing",
+            "fencing",
+            "string",
+            "spring",
+            "ring",
+        ):
+            return False
+        return True
+    return False
+
+
+def _object_label_is_physical_classic(label: str) -> Tuple[bool, str]:
+    """
+    Hard gate: object labels must be depictable physical things, not abstract/process/benefit words.
+    Returns (ok, failure_token_or_reason_code).
+    """
+    raw = unicodedata.normalize("NFC", (label or "").strip())
+    if not raw:
+        return False, "empty"
+    if any(ch in raw for ch in "\n\r\t,;:–—"):
+        return False, "clause_or_list_punctuation"
+    if len(raw) > _OBJECT_LABEL_MAX_CHARS:
+        return False, "too_long"
+    tokens = _object_label_tokens_for_physical_check(raw)
+    if not tokens:
+        return False, "no_tokens"
+    if len(tokens) > _OBJECT_LABEL_MAX_TOKENS:
+        return False, "too_many_tokens"
+    for tok in tokens:
+        tl = tok.lower()
+        if tl in _NON_PHYSICAL_EN_TOKENS:
+            return False, tok
+        if tok in _NON_PHYSICAL_HE_TOKENS or tl in _NON_PHYSICAL_HE_TOKENS:
+            return False, tok
+        he_only = "".join(ch for ch in tok if "\u0590" <= ch <= "\u05FF")
+        if he_only and he_only in _NON_PHYSICAL_HE_TOKENS:
+            return False, tok
+        lat = re.findall(r"[a-z]{2,}", tl)
+        for w in lat:
+            if w in _NON_PHYSICAL_EN_TOKENS:
+                return False, tok
+            if _english_token_abstract_by_suffix(w):
+                return False, tok
+        if re.fullmatch(r"[a-z]{2,}", tl) and _english_token_abstract_by_suffix(tl):
+            return False, tok
+    return True, ""
+
+
+def _validate_object_quartet_physical(
+    oa: str, ob: str, oa_sec: str, ob_sec: str
+) -> Tuple[bool, str, str]:
+    """Returns (ok, field_name, offending_value)."""
+    checks = (
+        ("objectA", oa),
+        ("objectB", ob),
+        ("objectA_secondary", oa_sec),
+        ("objectB_secondary", ob_sec),
+    )
+    for field, val in checks:
+        ok, hit = _object_label_is_physical_classic(val)
+        if not ok:
+            return False, field, val
+    return True, "", ""
+
+
 def _score_replacement_interaction_strength(
     rms: str, rep_open: str, oa: str, ob: str, ob_sec: str
 ) -> int:
@@ -846,6 +1171,7 @@ def validate_and_normalize_plan(
     | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | secondary_objects_not_distinct
     | identity_too_close | object_a_not_grounded_in_promise | object_b_not_grounded_in_promise
     | object_a_secondary_not_natural_to_primary | object_b_secondary_not_natural_to_primary
+    | non_physical_object
     """
     if not data:
         return None, "missing_replacementMotionScript"
@@ -894,6 +1220,21 @@ def validate_and_normalize_plan(
     if _secondaries_violate_distinct_rule(oa, ob, oa_sec, ob_sec):
         logger.info("VIDEO_PLAN_SECONDARY_DISTINCT_OK=false")
         return None, "secondary_objects_not_distinct"
+
+    oa_phys, _ = _object_label_is_physical_classic(oa)
+    ob_phys, _ = _object_label_is_physical_classic(ob)
+    oas_phys, _ = _object_label_is_physical_classic(oa_sec)
+    obs_phys, _ = _object_label_is_physical_classic(ob_sec)
+    logger.info("VIDEO_PLAN_OBJECT_A_PHYSICAL=%s", str(oa_phys).lower())
+    logger.info("VIDEO_PLAN_OBJECT_B_PHYSICAL=%s", str(ob_phys).lower())
+    logger.info("VIDEO_PLAN_OBJECT_A_SECONDARY_PHYSICAL=%s", str(oas_phys).lower())
+    logger.info("VIDEO_PLAN_OBJECT_B_SECONDARY_PHYSICAL=%s", str(obs_phys).lower())
+    q_ok, bad_field, bad_val = _validate_object_quartet_physical(oa, ob, oa_sec, ob_sec)
+    if not q_ok:
+        safe_val = (bad_val or "").replace('"', "'")[:200]
+        logger.info('VIDEO_PLAN_REJECT_BAD_OBJECT field=%s value="%s"', bad_field, safe_val)
+        logger.info("VIDEO_PLAN_REJECT_REASON=non_physical_object")
+        return None, "non_physical_object"
 
     pn = (data.get("productNameResolved") or "").strip() or "Product"
 
