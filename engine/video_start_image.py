@@ -23,16 +23,13 @@ _VIDEO_START_IMAGE_TIMEOUT = float((os.environ.get("VIDEO_START_IMAGE_TIMEOUT_SE
 
 def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
     """
-    One still: replacement already complete — B in A's role (or A in B's) with preserved bg/secondary/position.
+    One still: replacement composition locked — only the visible primary on camera (no secondary props).
     No text, logos, or headline in frame.
     """
     rd = (plan.get("replacementDirection") or "").strip()
     oa = (plan.get("objectA") or "").strip()
-    oas = (plan.get("objectA_secondary") or "").strip()
     ob = (plan.get("objectB") or "").strip()
-    obs = (plan.get("objectB_secondary") or "").strip()
     pbg = (plan.get("preservedBackgroundFrom") or "A").strip().upper()
-    psf = (plan.get("preservedSecondaryFrom") or "A").strip().upper()
 
     no_text = (
         "No text, letters, words, numbers as graphics, captions, labels, signage, packaging typography, "
@@ -42,12 +39,10 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
     opening = (plan.get("openingFrameDescription") or "").strip()
 
     if _is_side_by_side_plan(plan):
-        a_line = f"{oa} with {oas}" if oas else oa
-        b_line = f"{ob} with {obs}" if obs else ob
         brief = (
             f"Single photorealistic still frame, tight unified composition. "
-            f"Both subjects visible: {a_line} and {b_line}, close together or slightly overlapping, same world and lighting; "
-            f"no replacement, no disappearance; A’s secondary anchors the scene. "
+            f"Both subjects visible: {oa} and {ob}, close together or slightly overlapping, same world and lighting; "
+            f"no replacement, no disappearance. "
             f"Soft natural lighting, realistic materials. {no_text}"
         )
         if opening:
@@ -55,26 +50,15 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
         return brief
 
     if rd == "B_replaces_A":
-        sec = oas or "the contextual secondary object"
-        body = (
-            f"Single photorealistic still frame, clean centered commercial composition. "
-            f"The replacement is already complete: only {ob} is visible as the main subject, occupying the role, scale, and position that {oa} would hold. "
-            f"{oa} must not appear. "
-            f"Preserve A's background and environment (composition consistent with side {pbg}); "
-            f"keep A's secondary/context object ({sec}) visible in natural relation to {ob} (side {psf}). "
-            f"Soft natural lighting, realistic materials. {no_text}"
-        )
-        if opening:
-            return f"Creative brief: {opening} {body}"
-        return body
+        vis, absent = ob, oa
+    else:
+        vis, absent = oa, ob
 
-    sec_b = obs or "the contextual secondary object"
     body = (
         f"Single photorealistic still frame, clean centered commercial composition. "
-        f"The replacement is already complete: only {oa} is visible as the main subject, occupying the role, scale, and position that {ob} would hold. "
-        f"{ob} must not appear. "
-        f"Preserve B's background and environment (side {pbg}); "
-        f"keep B's secondary/context object ({sec_b}) visible in natural relation to {oa} (side {psf}). "
+        f"The replacement is already complete: only {vis} is visible as the main subject in the hero framing. "
+        f"{absent} must not appear. "
+        f"Background and environment read consistently with preservedBackgroundFrom={pbg}. "
         f"Soft natural lighting, realistic materials. {no_text}"
     )
     if opening:
