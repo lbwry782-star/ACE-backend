@@ -454,6 +454,42 @@ def _object_connects_to_advertising_goal(object_label: str, promise_context: str
     return any(t in o for t in ctx_ascii if len(t) >= 5)
 
 
+def _object_grounded_in_advertising_promise(object_label: str, apromise: str) -> bool:
+    """True iff object label is visually/conceptually tied to the advertising promise text only (product flow)."""
+    o = (object_label or "").strip()
+    p = (apromise or "").strip()
+    if not o or not p:
+        return False
+    lo = o.lower()
+    lp = p.lower()
+    if lo in lp or lp in lo:
+        return True
+    o_toks = set(re.findall(r"[\w\u0590-\u05FF]{3,}", lo, flags=re.UNICODE))
+    p_toks = set(re.findall(r"[\w\u0590-\u05FF]{3,}", lp, flags=re.UNICODE))
+    if o_toks & p_toks:
+        return True
+    for w in o_toks:
+        if len(w) >= 3 and w in lp:
+            return True
+    for w in p_toks:
+        if len(w) >= 3 and w in lo:
+            return True
+    return False
+
+
+def _secondary_natural_for_primary(secondary: str, primary: str) -> bool:
+    """Heuristic: secondary is a plausible anchor for the given primary (shared non-trivial token or containment)."""
+    sec = (secondary or "").strip().lower()
+    prim = (primary or "").strip().lower()
+    if not sec or not prim:
+        return False
+    if prim in sec:
+        return True
+    pw = [w for w in _norm_words_for_presence(prim) if len(w) >= 3]
+    sw = set(_norm_words_for_presence(sec))
+    return bool(sw & set(pw))
+
+
 def _score_replacement_interaction_strength(
     rms: str, rep_open: str, oa: str, ob: str, ob_sec: str
 ) -> int:
@@ -809,6 +845,7 @@ def validate_and_normalize_plan(
     reason_code: missing branch fields | missing_advertisingPromise | missing_objectA_or_B | missing_object_secondary
     | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | secondary_objects_not_distinct
     | identity_too_close | object_a_not_grounded_in_promise | object_b_not_grounded_in_promise
+    | object_a_secondary_not_natural_to_primary | object_b_secondary_not_natural_to_primary
     """
     if not data:
         return None, "missing_replacementMotionScript"
@@ -837,6 +874,8 @@ def validate_and_normalize_plan(
         apromise = (data.get("promiseReason") or "").strip()
     if not apromise:
         return None, "missing_advertisingPromise"
+
+    logger.info("VIDEO_PLAN_PROMISE_DERIVED_FROM_PRODUCT=true")
 
     oa = (data.get("objectA") or "").strip()
     ob = (data.get("objectB") or "").strip()
@@ -914,16 +953,22 @@ def validate_and_normalize_plan(
         (id_note_raw or "")[:300],
     )
 
-    promise_ctx = (
-        f"{apromise} {(data.get('promiseReason') or '').strip()} {(data.get('morphologicalReason') or '').strip()} "
-        f"{pn}"
-    )
-    if not _object_connects_to_advertising_goal(oa, promise_ctx):
+    ga = _object_grounded_in_advertising_promise(oa, apromise)
+    gb = _object_grounded_in_advertising_promise(ob, apromise)
+    logger.info("VIDEO_PLAN_OBJECT_A_PROMISE_GROUNDED=%s", str(ga).lower())
+    logger.info("VIDEO_PLAN_OBJECT_B_PROMISE_GROUNDED=%s", str(gb).lower())
+    if not ga:
         logger.info("VIDEO_PLAN_REJECT_REASON=object_a_not_grounded_in_promise")
         return None, "object_a_not_grounded_in_promise"
-    if not _object_connects_to_advertising_goal(ob, promise_ctx):
+    if not gb:
         logger.info("VIDEO_PLAN_REJECT_REASON=object_b_not_grounded_in_promise")
         return None, "object_b_not_grounded_in_promise"
+    if not _secondary_natural_for_primary(oa_sec, oa):
+        logger.info("VIDEO_PLAN_REJECT_REASON=object_a_secondary_not_natural")
+        return None, "object_a_secondary_not_natural_to_primary"
+    if not _secondary_natural_for_primary(ob_sec, ob):
+        logger.info("VIDEO_PLAN_REJECT_REASON=object_b_secondary_not_natural")
+        return None, "object_b_secondary_not_natural_to_primary"
 
     logger.info(
         "VIDEO_OBJECT_SELECTION_SOURCE objectA=%s objectB=%s based_on=advertisingPromise",
@@ -974,12 +1019,15 @@ def validate_and_normalize_plan(
         sec = "B"
         if _contains_object_tokens(rep_open, ob):
             logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=object_b_visible_in_opening")
+            logger.info("VIDEO_PLAN_REJECT_REASON=replacement_contains_object_b")
             return None, "replacement_contains_object_b"
         if _contains_object_tokens(rms, ob):
             logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=object_b_visible_in_motion")
+            logger.info("VIDEO_PLAN_REJECT_REASON=replacement_contains_object_b")
             return None, "replacement_contains_object_b"
         if not _replacement_motion_is_meaningful(rms, oa, ob_sec):
             logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=motion_not_meaningful")
+            logger.info("VIDEO_PLAN_REJECT_REASON=replacement_motion_not_meaningful")
             return None, "replacement_motion_not_meaningful"
         core = rms
         opening_fd = rep_open
@@ -994,17 +1042,12 @@ def validate_and_normalize_plan(
                 pair_k,
             )
             logger.info("VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=interaction_not_meaningful")
+            logger.info("VIDEO_PLAN_REJECT_REASON=side_by_side_interaction_not_meaningful")
             return None, "side_by_side_interaction_not_meaningful"
         core = sbs_ms
         opening_fd = sbs_open
         silhouette_similarity = 0.0
-        if _object_label_vertical_axis_top_mass(oa) and _object_label_vertical_axis_top_mass(ob):
-            shape_alignment = "vertical_axis"
-            opening_fd = f"{opening_fd} {_SIDE_BY_SIDE_VERTICAL_OPENING_ENFORCEMENT}".strip()
-            core = f"{core} {_SIDE_BY_SIDE_VERTICAL_MOTION_ENFORCEMENT}".strip()
-            logger.info("VIDEO_SHAPE_ALIGNMENT axis=vertical applied=true")
-        else:
-            logger.info("VIDEO_SHAPE_ALIGNMENT axis=vertical applied=false")
+        logger.info("VIDEO_SHAPE_ALIGNMENT axis=none applied=false reason=no_silhouette_similarity_gate")
 
         side_by_side_camera_motion = _SBS_HALF_ORBIT_CAMERA
         side_by_side_camera_motion_description = _SBS_HALF_ORBIT_PLAN_DESCRIPTION
@@ -1016,6 +1059,14 @@ def validate_and_normalize_plan(
         )
 
     logger.info("VIDEO_PLAN_MODE=%s", chosen_mode)
+    if chosen_mode == "REPLACEMENT":
+        logger.info("VIDEO_PLAN_REPLACEMENT_MODE=pantomime")
+    logger.info(
+        "VIDEO_PLAN_INTERACTION_MEANINGFUL=%s",
+        str(
+            replacement_meaningful if chosen_mode == "REPLACEMENT" else sbs_meaningful
+        ).lower(),
+    )
     logger.info(
         "VIDEO_REPLACEMENT_PANTOMIME_MODE=%s",
         str(chosen_mode == "REPLACEMENT").lower(),
@@ -1180,13 +1231,6 @@ _VIDEO_PLAN_EMERGENCY_REMAINING_S = float(
     (os.environ.get("VIDEO_PLANNER_EMERGENCY_REMAINING_S") or "35").strip() or "35"
 )
 
-# Deterministic emergency primary/secondary objects (validated path): avoids reusing weak planner pairs
-# (e.g. megaphone|rocket) that already failed SIDE_BY_SIDE quality gates.
-_EMERGENCY_CONSERVATIVE_OA = "flashlight"
-_EMERGENCY_CONSERVATIVE_OB = "rope"
-_EMERGENCY_CONSERVATIVE_OA_SEC = "wooden crate"
-_EMERGENCY_CONSERVATIVE_OB_SEC = "stone step"
-
 # Tokens that often produced low-silhouette / weak-interaction SIDE_BY_SIDE loops; block reuse after rejection.
 _SBS_WEAK_FAMILY_RETRY_TOKENS: FrozenSet[str] = frozenset(
     {
@@ -1198,6 +1242,196 @@ _SBS_WEAK_FAMILY_RETRY_TOKENS: FrozenSet[str] = frozenset(
         "horn",
     }
 )
+
+_EMERGENCY_TEXT_STOPWORDS: FrozenSet[str] = frozenset(
+    {
+        "the",
+        "and",
+        "for",
+        "are",
+        "but",
+        "not",
+        "you",
+        "all",
+        "can",
+        "our",
+        "out",
+        "get",
+        "has",
+        "how",
+        "its",
+        "may",
+        "new",
+        "now",
+        "old",
+        "see",
+        "two",
+        "way",
+        "who",
+        "did",
+        "let",
+        "put",
+        "say",
+        "she",
+        "too",
+        "use",
+        "that",
+        "this",
+        "with",
+        "from",
+        "your",
+        "will",
+        "have",
+        "been",
+        "into",
+        "more",
+        "than",
+        "what",
+        "when",
+        "which",
+        "their",
+        "there",
+        "these",
+        "those",
+        "each",
+        "also",
+        "only",
+        "very",
+        "just",
+        "even",
+        "such",
+        "same",
+        "over",
+        "most",
+        "other",
+        "some",
+        "about",
+        "after",
+        "before",
+        "under",
+        "above",
+        "between",
+        "through",
+        "during",
+        "while",
+        "where",
+        "here",
+        "idea",
+        "time",
+        "life",
+        "work",
+        "best",
+        "next",
+        "first",
+        "last",
+        "help",
+        "need",
+        "make",
+        "made",
+        "take",
+        "come",
+        "give",
+        "gives",
+        "really",
+        "true",
+        "full",
+        "high",
+        "low",
+        "wide",
+        "deep",
+        "long",
+        "short",
+        "team",
+        "user",
+        "data",
+        "flow",
+        "sales",
+        "cloud",
+        "tool",
+        "saas",
+        "product",
+        "service",
+        "digital",
+        "business",
+        "system",
+        "solution",
+        "experience",
+        "customer",
+        "value",
+        "growth",
+        "speed",
+    }
+)
+
+
+def _emergency_object_quartet_from_advertising_text(
+    apromise: str, product_description: str, product_name: str
+) -> Tuple[str, str, str, str]:
+    """
+    Emergency fallback objects: derived only from advertising promise + product text (no fixed generic pair).
+    """
+    ap = (apromise or "").strip()
+    blob = f"{ap} {(product_description or '').strip()} {(product_name or '').strip()}"
+    words: List[str] = []
+    seen: set[str] = set()
+    for m in re.finditer(r"[\w\u0590-\u05FF]{3,}", blob, flags=re.UNICODE):
+        w = m.group(0)
+        wl = w.lower()
+        if wl in _EMERGENCY_TEXT_STOPWORDS or wl in seen:
+            continue
+        if ap and _object_grounded_in_advertising_promise(w, ap):
+            words.append(w)
+            seen.add(wl)
+        if len(words) >= 4:
+            break
+    if len(words) < 2 and ap:
+        for m in re.finditer(r"[\w\u0590-\u05FF]{3,}", ap, flags=re.UNICODE):
+            w = m.group(0)
+            wl = w.lower()
+            if wl in _EMERGENCY_TEXT_STOPWORDS or wl in seen:
+                continue
+            words.append(w)
+            seen.add(wl)
+            if len(words) >= 2:
+                break
+    if len(words) < 2:
+        parts = [x.strip() for x in re.split(r"[,;]", ap) if len(x.strip()) >= 3]
+        if len(parts) >= 2:
+            words = [parts[0][:48].strip(), parts[1][:48].strip()]
+        elif len(parts) == 1 and len(parts[0]) >= 6:
+            half = len(parts[0]) // 2
+            words = [parts[0][:half].strip(), parts[0][half:].strip()]
+        else:
+            pn_words = [
+                w
+                for w in re.findall(
+                    r"[\w\u0590-\u05FF]{3,}", (product_name or "").lower(), flags=re.UNICODE
+                )
+                if w not in _EMERGENCY_TEXT_STOPWORDS
+            ]
+            pd_words = [
+                w
+                for w in re.findall(
+                    r"[\w\u0590-\u05FF]{3,}", (product_description or "").lower(), flags=re.UNICODE
+                )
+                if w not in _EMERGENCY_TEXT_STOPWORDS
+            ]
+            if len(pn_words) >= 2:
+                words = [pn_words[0], pn_words[1]]
+            elif pn_words and pd_words:
+                words = [pn_words[0], pd_words[0]]
+            elif len(pd_words) >= 2:
+                words = [pd_words[0], pd_words[1]]
+            else:
+                words = ["primary_subject", "support_subject"]
+    oa, ob = words[0], words[1]
+    if len(words) >= 4:
+        oa_sec, ob_sec = words[2], words[3]
+    elif len(words) == 3:
+        oa_sec, ob_sec = words[2], f"{ob} edge"
+    else:
+        oa_sec, ob_sec = f"{oa} surface", f"{ob} edge"
+    return oa, ob, oa_sec, ob_sec
 
 
 def _promise_bucket(promise: str) -> str:
@@ -1354,17 +1588,17 @@ def _build_emergency_side_by_side_plan(
     parsed: Optional[Dict[str, Any]],
     *,
     product_name: str,
+    product_description: str = "",
 ) -> Tuple[Dict[str, Any], str]:
     """
-    Near-deadline guaranteed fallback: conservative SIDE_BY_SIDE plan without extra planner/model work.
-    Uses a fixed classic object pair (not the last rejected planner pair) so validation and Runway gates stay reliable.
+    Near-deadline guaranteed fallback: SIDE_BY_SIDE plan without extra planner/model work.
+    Objects are derived from the advertising promise + product text (no unrelated fixed pair).
     """
     c = _coerce_plan_keys(parsed or {})
-    oa = _EMERGENCY_CONSERVATIVE_OA
-    ob = _EMERGENCY_CONSERVATIVE_OB
-    oa_sec = _EMERGENCY_CONSERVATIVE_OA_SEC
-    ob_sec = _EMERGENCY_CONSERVATIVE_OB_SEC
     promise = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
+    oa, ob, oa_sec, ob_sec = _emergency_object_quartet_from_advertising_text(
+        promise, product_description, product_name
+    )
     pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
     raw_hl = (c.get("headlineText") or "").strip() or pn
     headline_text = _word_limit(raw_hl, 7)
@@ -1452,6 +1686,7 @@ def _finalize_emergency_fallback(
     last_parsed: Optional[Dict[str, Any]],
     *,
     product_name: str,
+    product_description: str,
     deadline_monotonic: Optional[float],
     model: str,
 ) -> Dict[str, Any]:
@@ -1461,7 +1696,9 @@ def _finalize_emergency_fallback(
     )
     logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=emergency_deadline_or_timeout")
     logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_ENTERED remaining_s=%.3f", remaining_s)
-    emergency_plan, template_name = _build_emergency_side_by_side_plan(last_parsed, product_name=product_name)
+    emergency_plan, template_name = _build_emergency_side_by_side_plan(
+        last_parsed, product_name=product_name, product_description=product_description
+    )
     pair_k = _pair_retry_key(
         str(emergency_plan.get("objectA") or ""),
         str(emergency_plan.get("objectB") or ""),
@@ -1556,6 +1793,10 @@ Locked output language for all user-facing plan fields (from description classif
     )
     logger.info("AD_PROMISE_MEMORY_LOAD_BEFORE_GENERATION hash=%s", ph)
     history = load_ad_promise_history(product_name, product_description)
+    logger.info(
+        "VIDEO_PLAN_MEMORY_USED_FOR_DIVERSITY=%s",
+        str(bool(history)).lower(),
+    )
     rejected_promises: List[str] = []
     promise_reject_count = 0
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
@@ -1588,6 +1829,7 @@ Locked output language for all user-facing plan fields (from description classif
                 _finalize_emergency_fallback(
                     last_parsed,
                     product_name=product_name,
+                    product_description=product_description,
                     deadline_monotonic=deadline_monotonic,
                     model=model,
                 ),
@@ -1602,6 +1844,7 @@ Locked output language for all user-facing plan fields (from description classif
                     _finalize_emergency_fallback(
                         last_parsed,
                         product_name=product_name,
+                        product_description=product_description,
                         deadline_monotonic=deadline_monotonic,
                         model=model,
                     ),
@@ -1741,6 +1984,7 @@ Locked output language for all user-facing plan fields (from description classif
                     _finalize_emergency_fallback(
                         last_parsed,
                         product_name=product_name,
+                        product_description=product_description,
                         deadline_monotonic=deadline_monotonic,
                         model=model,
                     ),
@@ -1774,6 +2018,7 @@ Locked output language for all user-facing plan fields (from description classif
                     logger.error("VIDEO_PLAN_FAIL_STRUCTURE reason=%s", v_err)
                 else:
                     logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
+                logger.info("VIDEO_PLAN_REJECT_REASON=%s", last_v_err or "validation_failed")
                 logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=invalid", attempt + 1)
                 break
 
@@ -1793,6 +2038,7 @@ Locked output language for all user-facing plan fields (from description classif
                     _finalize_emergency_fallback(
                         last_parsed,
                         product_name=product_name,
+                        product_description=product_description,
                         deadline_monotonic=deadline_monotonic,
                         model=model,
                     ),
@@ -1817,6 +2063,7 @@ Locked output language for all user-facing plan fields (from description classif
                 _finalize_emergency_fallback(
                     last_parsed,
                     product_name=product_name,
+                    product_description=product_description,
                     deadline_monotonic=deadline_monotonic,
                     model=model,
                 ),
@@ -1852,6 +2099,7 @@ Locked output language for all user-facing plan fields (from description classif
             _finalize_emergency_fallback(
                 last_parsed,
                 product_name=product_name,
+                product_description=product_description,
                 deadline_monotonic=deadline_monotonic,
                 model=model,
             ),
