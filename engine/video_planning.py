@@ -114,27 +114,39 @@ LANGUAGE
 - replacementOpeningFrameDescription, replacementMotionScript, sideBySideOpeningFrameDescription, sideBySideMotionScript: English only (no exceptions).
 
 FOUNDATION
-- The advertising promise must be derived only from the product name and the product description.
-- Object selection must be based on (1) the advertising promise and (2) the interaction between the objects.
+- The advertisingPromise must be derived only from the product name + the product description (no generic metaphor-first search).
 
 OBJECT DISCOVERY (work strictly in this order — matches server validation)
-1) Derive advertisingPromise only from the product name + the product description (no generic metaphors first; anchor in product text).
+1) Derive advertisingPromise only from the product name + the product description.
 2) Choose objectA: objectA must be a classic, defined, physical object, visually depictable, and grounded in advertisingPromise.
-3) Search for objectB in this priority order:
-   a) First, search for objectB that has a CLASSIC (canonical, inherent real-world) interaction with objectA while staying grounded in advertisingPromise.
-   b) If no valid classic-interaction B exists, search for objectB that has a MEANINGFUL (clear physical, non-decorative) interaction with objectA while grounded in advertisingPromise.
-4) objectB must also be grounded in advertisingPromise (same grounding rule as objectA).
-5) Only after objectB is chosen: set abInteractionType to "classic" if and only if the chosen pair is a classic interaction; otherwise set "meaningful" for the meaningful B you found. Do not invent symbolic pairs disconnected from the promise.
+3) Discover objectB:
+   - objectB must be a classic, defined, physical object.
+   - objectB must be grounded in advertisingPromise.
+   - objectB must have a CLASSIC or MEANINGFUL discovery interaction with objectA (you label this using abInteractionType).
+   - objectB must ALSO enable a SECOND, ADDITIONAL physical interaction with objectA that:
+       * is not the classic discovery interaction,
+       * is not the meaningful discovery interaction,
+       * and is not directly derived from the advertisingPromise.
+   Stop as soon as you find such an objectB.
+
+VISIBLE INTERACTION (video content)
+- The video must show ONLY the additional interaction between objectA and objectB.
+- The discovery interaction (classic/meaningful) must NOT appear in the video.
+- The visible interaction must:
+  - be physically clear and visually understandable,
+  - feel unexpected relative to the two objects,
+  - not directly restate or illustrate the advertisingPromise.
+- The camera moves in a gentle half-orbit around the pair throughout the shot.
 
 OBJECT RULES
 - Accepted objects: physical, classic, clearly defined, visually depictable.
 - Rejected objects: abstract concepts, verbs, adjectives, sentence fragments, promise fragments, benefits/outcomes as “objects”, non-physical nouns.
 
-MODE DECISION (you declare interaction type only — server maps mode from this field)
-- abInteractionType must be exactly "classic" or "meaningful" (see OUTPUT FORMAT). The server sets video mode from this field and branch validity only.
-- "classic" → server uses REPLACEMENT when the replacement branch validates. Use only for familiar canonical pairings (e.g. bee and flower, straw and cup, dog and bone, key and lock).
-- "meaningful" → server uses SIDE_BY_SIDE when the side-by-side branch validates. Use when the interaction is physically clear but not that special canonical classic case.
-- Do not pick generic metaphor objects first and then justify them; anchor objectA in the promise, then search B classic-first, meaningful-second.
+DISCOVERY LABEL (no mode)
+- abInteractionType is ONLY a label for the discovery interaction between objectA and objectB:
+  - "classic": familiar, inherent, canonical real-world pairing (bee and flower, straw and cup, dog and bone, key and lock).
+  - "meaningful": clear physical interaction that is not a special canonical classic pair.
+- Do NOT use abInteractionType to change the video structure; the server uses only the additional interaction you describe in the English fields.
 
 MEMORY (diversity only)
 - If the server lists prior advertisingPromise lines for this product, use that list only to reduce repetition and prefer unused valid solutions.
@@ -1295,19 +1307,25 @@ def validate_and_normalize_plan(
     product_description: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Return (plan, None) or (None, reason_code) for logging.
-    reason_code: missing branch fields | missing_advertisingPromise | missing_objectA_or_B
-    | object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed
-    | identity_too_close | object_a_not_grounded_in_promise | object_b_not_grounded_in_promise
-    | non_physical_object | advertising_promise_not_from_product | invalid_ab_interaction_type
-    | replacement_branch_invalid_for_classic | replacement_contains_object_b
-    | replacement_motion_not_meaningful | side_by_side_interaction_not_meaningful
+    Final ACE video engine validator (no MODE / REPLACEMENT / SIDE_BY_SIDE).
+    Returns (plan, None) or (None, reason_code) for logging.
+
+    Failure reasons (non-exhaustive):
+    - missing_replacementMotionScript | missing_sideBySideMotionScript
+    - missing_replacementOpeningFrameDescription | missing_sideBySideOpeningFrameDescription
+    - missing_advertisingPromise | missing_objectA_or_B
+    - object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | identity_too_close
+    - non_physical_object | advertising_promise_not_from_product
+    - object_a_not_grounded_in_promise | object_b_not_grounded_in_promise
+    - invalid_ab_interaction_type
+    - no_additional_interaction | visible_interaction_overlaps_promise
     """
     if not data:
         return None, "missing_replacementMotionScript"
 
     data = _coerce_plan_keys(data)
 
+    # Visible interaction script (single additional interaction; REPLACEMENT branch kept only for compatibility).
     rms = (data.get("replacementMotionScript") or "").strip()
     sbs_ms = (data.get("sideBySideMotionScript") or "").strip()
     legacy_core = (data.get("videoPromptCore") or "").strip()
@@ -1378,10 +1396,11 @@ def validate_and_normalize_plan(
     else:
         headline_text = _word_limit(raw_headline, 7)
 
+    # Legacy fields kept for downstream compatibility (not used for mode decisions).
     repl_raw = data.get("replacementDirection")
     repl_fuzz = _fuzzy_replacement_direction(repl_raw)
     repl = repl_fuzz if repl_fuzz in ("B_replaces_A", "A_replaces_B") else _norm_enum(
-        repl_raw, ["B_replaces_A", "A_replaces_B"], "B_replaces_A"
+        repl_raw, ["B_replaces_A", "A_replaces_B"], "A_replaces_B"
     )
 
     bg = _norm_ab_side(data.get("preservedBackgroundFrom"), "A")
@@ -1449,105 +1468,62 @@ def validate_and_normalize_plan(
 
     logger.info("VIDEO_PLANNING_FAST_PATH_USED=true")
 
+    # Discovery interaction type (classic | meaningful) – reasoning label only, no mode.
     interaction_type = _parse_norm_ab_interaction_type(data.get("abInteractionType"))
     if interaction_type not in ("classic", "meaningful"):
         logger.info("VIDEO_PLAN_INTERACTION_TYPE=invalid")
-        logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=invalid")
         logger.info("VIDEO_PLAN_REJECT_REASON=invalid_ab_interaction_type")
         return None, "invalid_ab_interaction_type"
     logger.info("VIDEO_PLAN_INTERACTION_TYPE=%s", interaction_type)
-    logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=%s", interaction_type)
+    logger.info("VIDEO_PLAN_DISCOVERY_INTERACTION=%s", interaction_type)
 
-    repl_ok = not _contains_object_tokens(rep_open, ob) and not _contains_object_tokens(rms, ob)
-    replacement_meaningful = _replacement_motion_is_meaningful(rms, oa, ob)
-    interaction_score = _score_replacement_interaction_strength(rms, rep_open, oa, ob)
-    logger.info(
-        "VIDEO_INTERACTION_DEFINED type=replacement meaningful=%s",
-        str(replacement_meaningful).lower(),
+    # Additional visible interaction: must be clear, physical, and not directly express the promise
+    # or collapse back into the discovery interaction.
+    def _visible_additional_interaction_ok(
+        opening: str, motion: str, oa_label: str, ob_label: str, promise: str
+    ) -> Tuple[bool, str]:
+        txt = f"{opening or ''} {motion or ''}".strip()
+        if not txt:
+            return False, "no_additional_interaction"
+        low = txt.lower()
+        if not _contains_object_tokens(txt, oa_label) or not _contains_object_tokens(txt, ob_label):
+            return False, "no_additional_interaction"
+        # Basic physicality: reuse SIDE_BY_SIDE meaningfulness heuristic as a proxy for readable physical action.
+        if not _side_by_side_motion_is_meaningful(txt, oa_label, ob_label):
+            return False, "no_additional_interaction"
+        # Independence from advertising promise: disallow strong token overlap.
+        p = (promise or "").strip().lower()
+        if p:
+            ptoks = _planning_text_tokens(p)
+            vtoks = _planning_text_tokens(low)
+            if ptoks and vtoks:
+                overlap = len(ptoks & vtoks) / float(max(1, len(ptoks | vtoks)))
+                if overlap >= 0.5:
+                    return False, "visible_interaction_overlaps_promise"
+        return True, ""
+
+    visible_ok, v_reason = _visible_additional_interaction_ok(
+        sbs_open, sbs_ms, oa, ob, apromise
     )
-
-    sbs_meaningful = _side_by_side_motion_is_meaningful(sbs_ms, oa, ob)
     logger.info(
-        "VIDEO_INTERACTION_DEFINED type=side_by_side meaningful=%s",
-        str(sbs_meaningful).lower(),
+        "VIDEO_PLAN_HAS_ADDITIONAL_INTERACTION=%s",
+        str(visible_ok).lower(),
     )
-
-    if interaction_type == "classic":
-        if not (repl_ok and replacement_meaningful):
-            logger.info("VIDEO_PLAN_REJECT_REASON=replacement_branch_invalid_for_classic")
-            return None, "replacement_branch_invalid_for_classic"
-        chosen_mode = "REPLACEMENT"
-    else:
-        if not sbs_meaningful:
-            pair_k = _pair_retry_key(oa, ob)
-            logger.info(
-                "VIDEO_PLAN_EARLY_REJECT_LOW_QUALITY pair=%s similarity=n/a reason=interaction_not_meaningful",
-                pair_k,
-            )
-            logger.info("VIDEO_SIDE_BY_SIDE_RULE_INVALID reason=interaction_not_meaningful")
-            logger.info("VIDEO_PLAN_REJECT_REASON=side_by_side_interaction_not_meaningful")
-            return None, "side_by_side_interaction_not_meaningful"
-        chosen_mode = "SIDE_BY_SIDE"
-
     logger.info(
-        "VIDEO_MODE_DECISION_NEW mode=%s reason=abInteractionType=%s replacement_score=%s",
-        chosen_mode,
-        interaction_type,
-        interaction_score,
+        "VIDEO_PLAN_VISIBLE_INTERACTION_VALID=%s",
+        str(visible_ok).lower(),
     )
+    if not visible_ok:
+        logger.info("VIDEO_PLAN_REJECT_REASON=%s", v_reason or "no_additional_interaction")
+        return None, v_reason or "no_additional_interaction"
 
+    # Single canonical additional-interaction script; keep legacy fields for downstream.
+    core = f"{sbs_ms}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
+    opening_fd = sbs_open
+    silhouette_similarity = 0.0
     shape_alignment = ""
-    side_by_side_camera_motion = ""
-    side_by_side_camera_motion_description = ""
-    silhouette_similarity = float(interaction_score)
-    if chosen_mode == "REPLACEMENT":
-        repl = "A_replaces_B"
-        bg = "A"
-        if _contains_object_tokens(rep_open, ob):
-            logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=object_b_visible_in_opening")
-            logger.info("VIDEO_PLAN_REJECT_REASON=replacement_contains_object_b")
-            return None, "replacement_contains_object_b"
-        if _contains_object_tokens(rms, ob):
-            logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=object_b_visible_in_motion")
-            logger.info("VIDEO_PLAN_REJECT_REASON=replacement_contains_object_b")
-            return None, "replacement_contains_object_b"
-        if not _replacement_motion_is_meaningful(rms, oa, ob):
-            logger.info("VIDEO_REPLACEMENT_RULE_INVALID reason=motion_not_meaningful")
-            logger.info("VIDEO_PLAN_REJECT_REASON=replacement_motion_not_meaningful")
-            return None, "replacement_motion_not_meaningful"
-        core = rms
-        opening_fd = rep_open
-        logger.info(
-            "VIDEO_REPLACEMENT_RULE_ENFORCED mode=REPLACEMENT visible_primary=A absent_primary=B"
-        )
-    else:
-        core = sbs_ms
-        opening_fd = sbs_open
-        silhouette_similarity = 0.0
-        logger.info("VIDEO_SHAPE_ALIGNMENT axis=none applied=false reason=no_silhouette_similarity_gate")
-
-        side_by_side_camera_motion = _SBS_HALF_ORBIT_CAMERA
-        side_by_side_camera_motion_description = _SBS_HALF_ORBIT_PLAN_DESCRIPTION
-        core = f"{core}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
-        logger.info("VIDEO_SIDE_BY_SIDE_CAMERA_RULE applied=true motion=half_orbit")
-        logger.info("VIDEO_PLAN_CAMERA_MOTION mode=SIDE_BY_SIDE motion=half_orbit")
-        logger.info(
-            "VIDEO_SIDE_BY_SIDE_RULE_ENFORCED mode=SIDE_BY_SIDE primary_interaction=A_to_B"
-        )
-
-    logger.info("VIDEO_PLAN_MODE=%s", chosen_mode)
-    if chosen_mode == "REPLACEMENT":
-        logger.info("VIDEO_PLAN_REPLACEMENT_MODE=pantomime")
-    logger.info(
-        "VIDEO_PLAN_INTERACTION_MEANINGFUL=%s",
-        str(
-            replacement_meaningful if chosen_mode == "REPLACEMENT" else sbs_meaningful
-        ).lower(),
-    )
-    logger.info(
-        "VIDEO_REPLACEMENT_PANTOMIME_MODE=%s",
-        str(chosen_mode == "REPLACEMENT").lower(),
-    )
+    side_by_side_camera_motion = _SBS_HALF_ORBIT_CAMERA
+    side_by_side_camera_motion_description = _SBS_HALF_ORBIT_PLAN_DESCRIPTION
 
     return {
         "productNameResolved": pn,
@@ -1567,10 +1543,11 @@ def validate_and_normalize_plan(
         "sideBySideMotionScript": sbs_ms,
         "videoPromptCore": core,
         "openingFrameDescription": opening_fd,
-        "videoVisualMode": chosen_mode,
-        "chosenMode": chosen_mode,
+        # Visual mode fields kept for transport compatibility only (no mode logic).
+        "videoVisualMode": "SIDE_BY_SIDE",
+        "chosenMode": "SIDE_BY_SIDE",
         "silhouetteSimilarity": silhouette_similarity,
-        "interactionScore": float(interaction_score),
+        "interactionScore": float(silhouette_similarity),
         "shapeAlignment": shape_alignment,
         "sideBySideCameraMotion": side_by_side_camera_motion,
         "sideBySideCameraMotionDescription": side_by_side_camera_motion_description,
@@ -1632,22 +1609,9 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
         plan.get("objectB"),
     )
     logger.info(
-        "VIDEO_PLAN_INTEGRITY replacementDirection=%s preservedBackgroundFrom=%s abInteractionType=%s",
-        plan.get("replacementDirection"),
-        plan.get("preservedBackgroundFrom"),
-        plan.get("abInteractionType"),
-    )
-    logger.info(
         'VIDEO_PLAN_INTEGRITY headlineDecision=%s headlineText="%s"',
         plan.get("headlineDecision"),
         (plan.get("headlineText") or "")[:160],
-    )
-    logger.info("VIDEO_PLAN_MODE_DECISION_SOURCE=abInteractionType")
-    logger.info(
-        "VIDEO_PLAN_MODE=%s silhouetteSimilarity=%s interactionScore=%s",
-        plan.get("videoVisualMode") or "REPLACEMENT",
-        plan.get("silhouetteSimilarity"),
-        plan.get("interactionScore"),
     )
     logger.info(
         'VIDEO_PLAN_OPENING_FRAME="%s"',
@@ -1662,13 +1626,10 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
         (plan.get("productNameResolved") or "")[:120],
     )
     logger.info(
-        "VIDEO_PLAN_SUMMARY mode=%s objectA=%s objectB=%s abInteractionType=%s silhouette=%s interactionScore=%s",
-        plan.get("videoVisualMode"),
+        "VIDEO_PLAN_SUMMARY objectA=%s objectB=%s abInteractionType=%s",
         plan.get("objectA"),
         plan.get("objectB"),
         plan.get("abInteractionType"),
-        plan.get("silhouetteSimilarity"),
-        plan.get("interactionScore"),
     )
     logger.info(
         "VIDEO_PLAN pair_digest=%s",
