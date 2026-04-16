@@ -65,18 +65,12 @@ OUTPUT FORMAT (strict)
 - Use the exact camelCase keys below. Do not omit required keys; use "" only where allowed.
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
-MODE (server-decided from interaction type only): Set abInteractionType to exactly "classic" or "meaningful".
-- "classic": A and B share a familiar, inherent, canonical real-world interaction (examples: bee and flower, straw and cup, dog and bone). The server selects REPLACEMENT only for this case when the REPLACEMENT branch is valid.
-- "meaningful": A and B have a visually clear, physically understandable interaction that is not merely decorative, random, or static, but is not the special canonical classic case above. The server selects SIDE_BY_SIDE for this case when the SIDE_BY_SIDE branch is valid.
-You MUST output BOTH the REPLACEMENT branch fields AND the SIDE_BY_SIDE branch fields so the server can use the correct one.
-
 Field notes:
 - morphologicalReason: Why each object fits the advertising story (job language where noted). A and B need not look alike.
 - objectPairViewerClarityOk / objectPairIdentityDistinctOk / identityDistinctnessNote: as before.
-- replacementOpeningFrameDescription: English. If REPLACEMENT is selected: only the visible primary is on camera; the other primary must not appear; no side-by-side comparison framing. Describe background using preservedBackgroundFrom only (no extra props as stand-ins).
-- replacementMotionScript: English. Clear physical motion for the visible primary only; the absent primary must not read as on-screen; no transformation/morph language between A and B.
-- sideBySideOpeningFrameDescription: English. If SIDE_BY_SIDE: both A and B visible from frame 1; tight unified composition; close or slightly overlapping; same world; NO replacement framing.
-- sideBySideMotionScript: English. Clear, physically understandable A↔B interaction a viewer can read instantly (not abstract-only). Subtle camera-friendly motion is OK. No morphing, swapping, disappearance, cuts, or multi-shot story.
+- discoveryInteractionSummary: short English phrase describing the CLASSIC or MEANINGFUL interaction you used to find objectB.
+- visibleAdditionalInteractionSummary: short English phrase describing the additional creative interaction that will actually be shown in the video.
+- visibleMotionScript: English. Full motion description for the additional interaction only (what the camera will see).
 
 Required keys (all strings except where noted):
 {
@@ -98,7 +92,10 @@ Required keys (all strings except where noted):
   "objectPairViewerClarityOk": boolean,
   "objectPairIdentityDistinctOk": boolean,
   "identityDistinctnessNote": string,
-  "abInteractionType": "classic" or "meaningful"
+  "abInteractionType": "classic" or "meaningful",
+  "discoveryInteractionSummary": string,
+  "visibleAdditionalInteractionSummary": string,
+  "visibleMotionScript": string
 }
 """
 
@@ -1342,6 +1339,20 @@ def validate_and_normalize_plan(
     if not sbs_open:
         return None, "missing_sideBySideOpeningFrameDescription"
 
+    # Discovery vs visible interaction separation.
+    disc_summary = (data.get("discoveryInteractionSummary") or "").strip()
+    vis_summary = (data.get("visibleAdditionalInteractionSummary") or "").strip()
+    vis_motion = (data.get("visibleMotionScript") or "").strip()
+    if not vis_summary or not vis_motion:
+        logger.info('VIDEO_PLAN_DISCOVERY_INTERACTION_SUMMARY="%s"', disc_summary[:260])
+        logger.info('VIDEO_PLAN_VISIBLE_INTERACTION_SUMMARY="%s"', vis_summary[:260])
+        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_DISTINCT_FROM_DISCOVERY=false")
+        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_CLASSIC=false")
+        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_MEANINGFUL=false")
+        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_PROMISE=false")
+        logger.info("VIDEO_PLAN_REJECT_REASON=visible_interaction_missing")
+        return None, "visible_interaction_missing"
+
     # advertisingPromise from model; if omitted, allow promiseReason (same model output) as fallback
     apromise = (data.get("advertisingPromise") or "").strip()
     if not apromise:
@@ -1476,22 +1487,78 @@ def validate_and_normalize_plan(
         return None, "invalid_ab_interaction_type"
     logger.info("VIDEO_PLAN_INTERACTION_TYPE=%s", interaction_type)
     logger.info("VIDEO_PLAN_DISCOVERY_INTERACTION=%s", interaction_type)
+    logger.info('VIDEO_PLAN_DISCOVERY_INTERACTION_SUMMARY="%s"', disc_summary[:260])
 
     # Additional visible interaction: must be clear, physical, and not directly express the promise
     # or collapse back into the discovery interaction.
     def _visible_additional_interaction_ok(
-        opening: str, motion: str, oa_label: str, ob_label: str, promise: str
-    ) -> Tuple[bool, str]:
+        opening: str,
+        motion: str,
+        oa_label: str,
+        ob_label: str,
+        promise: str,
+        discovery_text: str,
+        discovery_type: str,
+    ) -> Tuple[bool, str, Dict[str, bool]]:
         txt = f"{opening or ''} {motion or ''}".strip()
         if not txt:
-            return False, "no_additional_interaction"
+            return False, "no_additional_interaction", {
+                "leaks_classic": False,
+                "leaks_meaningful": False,
+                "leaks_promise": False,
+                "distinct_from_discovery": False,
+            }
         low = txt.lower()
         if not _contains_object_tokens(txt, oa_label) or not _contains_object_tokens(txt, ob_label):
-            return False, "no_additional_interaction"
+            return False, "no_additional_interaction", {
+                "leaks_classic": False,
+                "leaks_meaningful": False,
+                "leaks_promise": False,
+                "distinct_from_discovery": False,
+            }
         # Basic physicality: reuse SIDE_BY_SIDE meaningfulness heuristic as a proxy for readable physical action.
         if not _side_by_side_motion_is_meaningful(txt, oa_label, ob_label):
-            return False, "no_additional_interaction"
+            return False, "no_additional_interaction", {
+                "leaks_classic": False,
+                "leaks_meaningful": False,
+                "leaks_promise": False,
+                "distinct_from_discovery": False,
+            }
+
+        # Independence from discovery interaction summary: disallow near-equivalence.
+        leaks_classic = False
+        leaks_meaningful = False
+        disc = (discovery_text or "").strip().lower()
+        if disc:
+            dtoks = _planning_text_tokens(disc)
+            vtoks = _planning_text_tokens(low)
+            if dtoks and vtoks:
+                overlap_d = len(dtoks & vtoks) / float(max(1, len(dtoks | vtoks)))
+                if overlap_d >= 0.5:
+                    if discovery_type == "classic":
+                        leaks_classic = True
+                    else:
+                        leaks_meaningful = True
+
+        # Canonical leakage for known classic pairs (e.g. pen+notebook writing).
+        leaks_canonical = False
+        if discovery_type == "classic":
+            a_head = _classic_interaction_head_token(oa_label)
+            b_head = _classic_interaction_head_token(ob_label)
+            pair = frozenset((a_head, b_head))
+            # Simple heuristics for a few canonical pairs; extend conservatively.
+            if pair == frozenset({"pen", "notebook"}):
+                if any(w in low for w in ("write", "writes", "writing", "note", "notes")):
+                    leaks_canonical = True
+            elif pair == frozenset({"bee", "flower"}):
+                if any(w in low for w in ("nectar", "pollen", "land", "landing", "drink", "drinks", "drinking")):
+                    leaks_canonical = True
+            elif pair == frozenset({"straw", "cup"}):
+                if any(w in low for w in ("sip", "sips", "sipping", "drink", "drinks", "drinking")):
+                    leaks_canonical = True
+
         # Independence from advertising promise: disallow strong token overlap.
+        leaks_promise = False
         p = (promise or "").strip().lower()
         if p:
             ptoks = _planning_text_tokens(p)
@@ -1499,11 +1566,38 @@ def validate_and_normalize_plan(
             if ptoks and vtoks:
                 overlap = len(ptoks & vtoks) / float(max(1, len(ptoks | vtoks)))
                 if overlap >= 0.5:
-                    return False, "visible_interaction_overlaps_promise"
-        return True, ""
+                    leaks_promise = True
 
-    visible_ok, v_reason = _visible_additional_interaction_ok(
-        sbs_open, sbs_ms, oa, ob, apromise
+        distinct = not (leaks_classic or leaks_meaningful or leaks_canonical or leaks_promise)
+        if leaks_promise:
+            return False, "visible_interaction_not_distinct", {
+                "leaks_classic": leaks_classic or leaks_canonical,
+                "leaks_meaningful": leaks_meaningful,
+                "leaks_promise": True,
+                "distinct_from_discovery": distinct,
+            }
+        if leaks_classic or leaks_meaningful or leaks_canonical:
+            return False, "visible_interaction_matches_discovery", {
+                "leaks_classic": leaks_classic or leaks_canonical,
+                "leaks_meaningful": leaks_meaningful,
+                "leaks_promise": leaks_promise,
+                "distinct_from_discovery": distinct,
+            }
+        return True, "", {
+            "leaks_classic": False,
+            "leaks_meaningful": False,
+            "leaks_promise": False,
+            "distinct_from_discovery": True,
+        }
+
+    visible_ok, v_reason, leak_flags = _visible_additional_interaction_ok(
+        vis_summary,
+        vis_motion,
+        oa,
+        ob,
+        apromise,
+        disc_summary,
+        interaction_type,
     )
     logger.info(
         "VIDEO_PLAN_HAS_ADDITIONAL_INTERACTION=%s",
@@ -1513,12 +1607,33 @@ def validate_and_normalize_plan(
         "VIDEO_PLAN_VISIBLE_INTERACTION_VALID=%s",
         str(visible_ok).lower(),
     )
+    logger.info(
+        'VIDEO_PLAN_VISIBLE_INTERACTION_SUMMARY="%s"',
+        vis_summary[:260],
+    )
+    logger.info(
+        "VIDEO_PLAN_VISIBLE_INTERACTION_DISTINCT_FROM_DISCOVERY=%s",
+        str(leak_flags.get("distinct_from_discovery", False)).lower(),
+    )
+    logger.info(
+        "VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_CLASSIC=%s",
+        str(leak_flags.get("leaks_classic", False)).lower(),
+    )
+    logger.info(
+        "VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_MEANINGFUL=%s",
+        str(leak_flags.get("leaks_meaningful", False)).lower(),
+    )
+    logger.info(
+        "VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_PROMISE=%s",
+        str(leak_flags.get("leaks_promise", False)).lower(),
+    )
     if not visible_ok:
-        logger.info("VIDEO_PLAN_REJECT_REASON=%s", v_reason or "no_additional_interaction")
-        return None, v_reason or "no_additional_interaction"
+        reason = v_reason or "visible_interaction_not_distinct"
+        logger.info("VIDEO_PLAN_REJECT_REASON=%s", reason)
+        return None, reason
 
     # Single canonical additional-interaction script; keep legacy fields for downstream.
-    core = f"{sbs_ms}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
+    core = f"{vis_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
     opening_fd = sbs_open
     silhouette_similarity = 0.0
     shape_alignment = ""
@@ -2313,8 +2428,7 @@ def _finalize_emergency_fallback(
         str(emergency_plan.get("objectA") or ""),
         str(emergency_plan.get("objectB") or ""),
     )
-    vm = str(emergency_plan.get("videoVisualMode") or emergency_plan.get("chosenMode") or "").strip()
-    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_CHOSEN pair=%s mode=%s", pair_k, vm or "unknown")
+    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_CHOSEN pair=%s", pair_k)
     logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
     logger.info(
         "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
@@ -3028,12 +3142,7 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    logger.info(
-        "VIDEO_PROMPT_MODE mode=%s",
-        (plan.get("videoVisualMode") or "").strip() or "?",
-    )
-    if _is_side_by_side_plan(plan):
-        logger.info("VIDEO_PROMPT_CAMERA_MOTION mode=SIDE_BY_SIDE motion=half_orbit")
+    logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=half_orbit")
     return out
 
 
@@ -3042,43 +3151,25 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
     Runway promptText when promptImage is a pre-generated ACE start frame: motion / interaction only
     (replacement already visible in frame 1).
     """
-    rd = (plan.get("replacementDirection") or "").strip()
-    if rd not in ("B_replaces_A", "A_replaces_B"):
-        raise ValueError("invalid replacementDirection")
-
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
     if not oa or not ob:
         raise ValueError("missing object A or B")
 
-    pbg = (plan.get("preservedBackgroundFrom") or "A").strip().upper()
-    if pbg not in ("A", "B"):
-        raise ValueError("invalid preservedBackgroundFrom")
-
     core = (plan.get("videoPromptCore") or "").strip()
-    script = (plan.get("shortReplacementScript") or "").strip()
+    script = (plan.get("visibleMotionScript") or plan.get("shortReplacementScript") or "").strip()
     if not core:
         raise ValueError("missing videoPromptCore")
 
-    if _is_side_by_side_plan(plan):
-        motion_focus = _runway_side_by_side_interaction_half_orbit_focus()
-        scene = (
-            f"The first frame is supplied as the start image; it already shows {oa} and {ob} side by side, "
-            f"both clearly visible and balanced. {motion_focus}"
-            f"Background consistent with preservedBackgroundFrom={pbg}. "
-            f"Action: {core}"
-        )
-        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
-            scene += _runway_vertical_axis_hard_constraints_english()
-            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    else:
-        vis, absent = _replacement_visible_and_absent(plan)
-        scene = (
-            "The first frame is supplied as the start image; replacement composition is locked. "
-            f"Video motion only: only {vis} moves on camera; {absent} must not appear in-frame. "
-            f"Motion uses only {vis} and the environment (preservedBackgroundFrom={pbg}); "
-            f"no extra stand-in objects. No transformation or morph between {oa} and {ob}. Action: {core}"
-        )
+    motion_focus = _runway_side_by_side_interaction_half_orbit_focus()
+    scene = (
+        f"The first frame is supplied as the start image; it already shows {oa} and {ob} together, "
+        f"both clearly visible and balanced. {motion_focus}"
+        f"Action: {core}"
+    )
+    if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+        scene += _runway_vertical_axis_hard_constraints_english()
+        logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     if script:
         scene += f" Beat: {script}"
     scene += " No logos or packaging type. Single clean commercial look."
@@ -3153,10 +3244,5 @@ def build_runway_interaction_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    logger.info(
-        "VIDEO_PROMPT_MODE mode=%s",
-        (plan.get("videoVisualMode") or "").strip() or "?",
-    )
-    if _is_side_by_side_plan(plan):
-        logger.info("VIDEO_PROMPT_CAMERA_MOTION mode=SIDE_BY_SIDE motion=half_orbit")
+    logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=half_orbit")
     return out
