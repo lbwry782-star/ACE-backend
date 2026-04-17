@@ -2,8 +2,8 @@
 Bidirectional text for video outputs.
 
 - Marketing copy (API / UI): LRI+PDI around Latin islands (finalize_hebrew_mixed_bidi_for_display).
-- ffmpeg drawtext headline: separate path — many ffmpeg builds show isolate controls as boxes;
-  use prepare_ffmpeg_overlay_headline (no LRI/PDI/LRM) for Hebrew + Latin product names.
+- ffmpeg drawtext headline: English product name + Hebrew remainder uses LRI/PDI and RLI/PDI
+  (applied only in prepare_ffmpeg_overlay_headline; planner/API strings stay plain).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from engine.video_language import (
 )
 
 _LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
+_RLI = "\u2067"  # RIGHT-TO-LEFT ISOLATE
 _PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
 
 # Strip prior invisible directional embeddings so re-stabilization is idempotent.
@@ -126,6 +127,14 @@ def format_bidi_segments_for_log(segments: List[str]) -> str:
     return json.dumps(segments, ensure_ascii=False)
 
 
+def _overlay_latin_name_hebrew_remainder_with_isolates(cn: str, remainder: str) -> str:
+    """
+    Visible text order matches ``<cn>, <remainder>``; invisible isolates steer FFmpeg/HarfBuzz:
+    LTR block for the English name and comma, then RTL block for Hebrew.
+    """
+    return f"{_LRI}{cn},{_PDI} {_RLI}{remainder}{_PDI}"
+
+
 def _strip_planner_separators_for_overlay(s: str) -> str:
     """
     Remove stray planner joiners before recomposing the overlay.
@@ -150,11 +159,10 @@ def prepare_ffmpeg_overlay_headline(
     """
     Build ffmpeg drawtext-safe headline for mixed Hebrew + Latin product names.
 
-    Never inserts LRI, PDI, LRM, or RLM. Strips any such marks from input.
-    Normalizes planner punctuation away, then composes strictly as:
-    ``<canonical>, <hebrew remainder>`` when applicable (comma only; no middle dot).
+    Strips prior bidi embedding marks from *input* so planner/API strings stay authoritative;
+    for English canonical + Hebrew remainder, inserts LRI/PDI (LTR name + comma) and RLI/PDI (RTL Hebrew).
 
-    Returns (final_headline, strategy_key).
+    Returns (final_headline_for_drawtext, strategy_key).
     """
     raw_in = headline or ""
     h = unicodedata.normalize("NFC", _strip_bidi_embedding_marks(raw_in)).strip()
@@ -230,7 +238,12 @@ def prepare_ffmpeg_overlay_headline(
         )
         return (cn, "overlay_latin_canonical_only")
 
-    final = f"{cn}, {remainder}"
+    plain = f"{cn}, {remainder}"
+    final = _overlay_latin_name_hebrew_remainder_with_isolates(cn, remainder)
+    logger.info(
+        "VIDEO_HEADLINE_OVERLAY_PLAIN_TEXT=%s",
+        json.dumps(plain, ensure_ascii=False),
+    )
     logger.info(
         "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
         json.dumps(final, ensure_ascii=False),

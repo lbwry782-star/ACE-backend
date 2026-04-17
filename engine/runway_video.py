@@ -563,7 +563,12 @@ def _generate_one_video_mvp_body(
                         "VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s",
                         overlay_bidi_strategy,
                     )
-                    logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
+                    logger.info(
+                        "VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=%s",
+                        str(
+                            overlay_bidi_strategy == "overlay_latin_comma_hebrew_remainder"
+                        ).lower(),
+                    )
                     logger.info("VIDEO_JOB_STEP step=packaging_result done")
                     final_url = postprocess_video_headline(
                         url,
