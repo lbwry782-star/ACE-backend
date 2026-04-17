@@ -235,7 +235,7 @@ def product_name_is_latin_only_for_bilingual_headline(pn: str) -> bool:
 
 
 # Punctuation / marks the planner must not put in the Hebrew tail (structural gate only).
-_HEADLINE_EN_HE_TAIL_FORBIDDEN = frozenset("•.:;-–—−\u2212")
+_HEADLINE_EN_HE_TAIL_FORBIDDEN = frozenset("•.:;-–—−\u2212\u00b7")
 # No explicit bidi / direction overrides in stored headline — frontend owns display direction.
 _HEADLINE_EN_HE_TAIL_INVISIBLE = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 

@@ -76,7 +76,7 @@ advertisingPromise, headlineText
 
 One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
 
-Headline: ≤7 words total; interpret the interaction (meaning), not a literal shot description. Exact headline rules for this request language are in the user block below.
+Headline: required non-empty headlineText. ≤7 words total; interpret the interaction (meaning), not a literal shot description. Exact headline rules for this request language are in the user block below.
 
 Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity, headline); output final JSON only — no explanations.
 
@@ -92,13 +92,12 @@ def _planner_headline_rules_user_block(lang_code: str) -> str:
             "exact resolved name at the beginning; comma immediately after the name; ≤7 words.\n\n"
         )
     return (
-        "Headline (Hebrew request): If productNameResolved is English (Latin letters only, unchanged), "
-        "headline MUST be: <productNameResolved>, <Hebrew after comma> — exact name first, one comma immediately after the name, "
-        "then Hebrew only (interpret the interaction, not a literal description). "
-        "Do not translate the product name. In the Hebrew part do not use • . : ; - or other dashes; "
-        "do not add a second comma; do not insert RTL/LTR or bidi control characters. "
-        "If productNameResolved is Hebrew, a normal Hebrew headline is fine (still prefix with name + comma when including the name). "
-        "≤7 words total.\n\n"
+        "Headline (Hebrew request): headlineText is required. It must start with productNameResolved followed immediately by a comma (no space before the comma). "
+        "If productNameResolved is English (Latin only, unchanged), use exactly: <productNameResolved>, <Hebrew> — "
+        "only that comma between name and Hebrew; no middle dot (·), bullet, colon, dash, or semicolon. "
+        "Interpret the interaction (meaning), not a shot-by-shot description. "
+        "Do not translate the product name. If productNameResolved is Hebrew script, a Hebrew headline after the comma is fine. "
+        "≤7 words total. Do not insert bidi control characters in JSON.\n\n"
     )
 
 

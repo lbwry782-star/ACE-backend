@@ -128,8 +128,9 @@ def format_bidi_segments_for_log(segments: List[str]) -> str:
 
 def _strip_planner_separators_for_overlay(s: str) -> str:
     """
-    Remove planner joiners so overlay can apply a single canonical ' · '.
+    Remove stray planner joiners before recomposing the overlay.
     Replaces -, –, —, ·, |, : with spaces, then collapses whitespace.
+    Latin product name + Hebrew text is recomposed as ``<name>, <hebrew>`` (single comma only).
     """
     if not s:
         return ""
@@ -151,7 +152,7 @@ def prepare_ffmpeg_overlay_headline(
 
     Never inserts LRI, PDI, LRM, or RLM. Strips any such marks from input.
     Normalizes planner punctuation away, then composes strictly as:
-    ``<canonical> · <hebrew remainder>`` when applicable.
+    ``<canonical>, <hebrew remainder>`` when applicable (comma only; no middle dot).
 
     Returns (final_headline, strategy_key).
     """
@@ -210,8 +211,10 @@ def prepare_ffmpeg_overlay_headline(
         )
         return (h_clean, "overlay_latin_headline_strip_only")
 
-    sep = " · "
-    remainder = re.sub(re.escape(cn), "", h_clean, flags=re.I)
+    remainder = re.sub(re.escape(cn), "", h_clean, count=1, flags=re.I)
+    remainder = remainder.strip()
+    # Strip decorative separators and duplicate commas before the Hebrew segment; emit exactly one comma in final.
+    remainder = re.sub(r"^[\s,·\u00b7\u2022•:;|–—−\-]+", "", remainder)
     remainder = _strip_planner_separators_for_overlay(remainder)
     remainder = re.sub(r"\s+", " ", remainder).strip()
 
@@ -227,9 +230,9 @@ def prepare_ffmpeg_overlay_headline(
         )
         return (cn, "overlay_latin_canonical_only")
 
-    final = f"{cn}{sep}{remainder}"
+    final = f"{cn}, {remainder}"
     logger.info(
         "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
         json.dumps(final, ensure_ascii=False),
     )
-    return (final, "overlay_latin_dot_hebrew_remainder")
+    return (final, "overlay_latin_comma_hebrew_remainder")
