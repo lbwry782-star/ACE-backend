@@ -19,9 +19,9 @@ import httpx
 from openai import OpenAI
 
 from engine.video_language import (
-    hebrew_headline_allows_embedded_english_product_name,
-    is_english_only_product_name_script,
+    bilingual_en_he_headline_tail_struct_ok,
     normalize_video_content_language,
+    product_name_is_latin_only_for_bilingual_headline,
     video_language_display_name,
 )
 
@@ -76,7 +76,7 @@ advertisingPromise, headlineText
 
 One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
 
-headlineText: interpret the interaction (not a literal scene description). Follow HEADLINE FORMAT below for the request language. Do not emit RTL/LTR controls or invisible direction characters (frontend handles direction).
+Headline: ≤7 words total; interpret the interaction (meaning), not a literal shot description. Exact headline rules for this request language are in the user block below.
 
 Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity, headline); output final JSON only — no explanations.
 
@@ -84,35 +84,41 @@ Failure only: {"planningFailure":"planning_failed_no_valid_interaction"}
 """
 
 
-def _build_video_planner_instructions(content_language: str = "he") -> str:
-    lang = normalize_video_content_language(content_language)
-    lang_name = video_language_display_name(lang)
+def _planner_headline_rules_user_block(lang_code: str) -> str:
+    """Extra headline constraints appended to the planner user block (language-specific)."""
+    if normalize_video_content_language(lang_code) != "he":
+        return (
+            "Headline (English): start with \"<productNameResolved>,\" then English; "
+            "exact resolved name at the beginning; comma immediately after the name; ≤7 words.\n\n"
+        )
     return (
-        f"ACE video: one continuous shot; camera = smooth half-orbit around the two objects (path only). "
-        f"Language {lang_name} ({lang}). "
-        "Everyday complementary objects grounded in the product; reject the first cliché default; "
-        "advertisingPromise follows locked A+B+motion (never promise-first). "
-        "Stay realistic. One A↔B interaction only (no SIDE_BY_SIDE, no REPLACEMENT). "
-        'Planner refusal: {"planningFailure":"planning_failed_no_valid_interaction"}'
+        "Headline (Hebrew request): If productNameResolved is English (Latin letters only, unchanged), "
+        "headline MUST be: <productNameResolved>, <Hebrew after comma> — exact name first, one comma immediately after the name, "
+        "then Hebrew only (interpret the interaction, not a literal description). "
+        "Do not translate the product name. In the Hebrew part do not use • . : ; - or other dashes; "
+        "do not add a second comma; do not insert RTL/LTR or bidi control characters. "
+        "If productNameResolved is Hebrew, a normal Hebrew headline is fine (still prefix with name + comma when including the name). "
+        "≤7 words total.\n\n"
     )
 
 
-def _video_planner_headline_format_block(content_language: str) -> str:
-    """Language-specific headline rules appended to the planner user block (see _JSON_KEYS)."""
+def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
-    if lang == "en":
-        return (
-            "HEADLINE FORMAT (English): headlineText = exact productNameResolved, comma, then ≤7 English words "
-            "(interpret the interaction). Use only that comma between name and tagline — not a bullet, dot, colon, dash, or semicolon as the divider."
+    he_head = ""
+    if lang == "he":
+        he_head = (
+            "Hebrew headline + English product name: enforce NAME,Hebrew tail exactly; no bidi marks in JSON. "
         )
-    # Hebrew headline (bilingual product name + Hebrew tagline when name is Latin)
-    return f"""HEADLINE FORMAT ({lang_name} headline):
-- Exact productNameResolved at the start, then comma immediately: "<productNameResolved>," then Hebrew (≤7 words in the Hebrew part; count the whole headline conservatively).
-- If productNameResolved is English (Latin letters only): keep the name untranslated; after the comma the rest must be Hebrew only. Example: SHOESHOE, ברק חדש בכל צעד
-- Do not translate the product name. Between name and Hebrew use only a comma (no bullet, dot, colon, dash, or semicolon as the divider).
-- Do not add direction marks or bidi controls in JSON.
-- If productNameResolved is Hebrew, still use "<name>," then Hebrew tagline."""
+    return (
+        f"ACE video: one continuous shot; camera = smooth half-orbit around the two objects (path only). "
+        f"Language {lang_name} ({lang}). "
+        f"{he_head}"
+        "Everyday complementary objects grounded in the product; reject the first cliché default; "
+        "advertisingPromise follows locked A+B+motion (never promise-first). "
+        "Stay realistic. One A↔B interaction only (no alternate layouts). "
+        'Planner refusal: {"planningFailure":"planning_failed_no_valid_interaction"}'
+    )
 
 
 def _log_output_preview(raw: str, prefix: str = "VIDEO_PLAN output_preview") -> None:
@@ -245,22 +251,6 @@ def _headline_word_count_ok(headline: str) -> bool:
     return len(words) <= 7
 
 
-def _headline_hebrew_tagline_starts_after_comma(headline: str, product_resolved: str) -> bool:
-    """
-    Hebrew headline + Latin-only product name: after '<name>,' the visible tagline must begin with a Hebrew letter
-    (structural — no bidi or direction fixes).
-    """
-    p = (product_resolved or "").strip()
-    h = (headline or "").strip()
-    if not p or not h.startswith(p + ","):
-        return False
-    tail = h[len(p) + 1 :].lstrip()
-    if not tail:
-        return False
-    o = ord(tail[0])
-    return 0x0590 <= o <= 0x05FF
-
-
 # Mandatory smooth half-orbit camera around the two-object composition (ACE single interaction).
 _ACE_HALF_ORBIT_RUNWAY_APPEND = (
     " MANDATORY CAMERA (NOT OPTIONAL): The two physical objects form one paired composition in frame. "
@@ -374,18 +364,17 @@ def validate_and_normalize_plan(
     if not _headline_prefix_ok(headline, pn):
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_prefix_format")
         return None, "planning_failed_incomplete_plan"
+
+    lang_norm = normalize_video_content_language(lang_raw)
+    if lang_norm == "he" and product_name_is_latin_only_for_bilingual_headline(pn):
+        tail_he = headline[len(pn) + 1 :].lstrip()
+        if not bilingual_en_he_headline_tail_struct_ok(tail_he):
+            logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_en_he_tail")
+            return None, "planning_failed_incomplete_plan"
+
     if not _headline_word_count_ok(headline):
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_word_count")
         return None, "planning_failed_incomplete_plan"
-
-    lang_n = normalize_video_content_language(lang_raw)
-    if lang_n == "he" and is_english_only_product_name_script(pn):
-        if not hebrew_headline_allows_embedded_english_product_name(headline, pn):
-            logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_en_he_embed_rules")
-            return None, "planning_failed_incomplete_plan"
-        if not _headline_hebrew_tagline_starts_after_comma(headline, pn):
-            logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_hebrew_after_comma")
-            return None, "planning_failed_incomplete_plan"
 
     _lit_raw = data.get("literalObjectCount")
     if isinstance(_lit_raw, bool):
@@ -600,8 +589,7 @@ Product description:
 
 Language: {lang_name} ({lang}).
 
-{_video_planner_headline_format_block(lang)}
-
+{_planner_headline_rules_user_block(lang)}
 {_JSON_KEYS}
 """
     instructions = _build_video_planner_instructions(lang)

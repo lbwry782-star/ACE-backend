@@ -222,6 +222,43 @@ def _has_ascii_latin_letter(s: str) -> bool:
     return bool(re.search(r"[A-Za-z]", s or ""))
 
 
+def product_name_is_latin_only_for_bilingual_headline(pn: str) -> bool:
+    """
+    True when the resolved product name is English (Latin letters only, ≥1 letter).
+    Used with Hebrew headline language: headline format <NAME>,<Hebrew>.
+    """
+    raw = (pn or "").strip()
+    if not raw:
+        return False
+    h, lat, foreign, _ = _letter_buckets_for_video(raw)
+    return foreign == 0 and h == 0 and lat >= 1
+
+
+# Punctuation / marks the planner must not put in the Hebrew tail (structural gate only).
+_HEADLINE_EN_HE_TAIL_FORBIDDEN = frozenset("•.:;-–—−\u2212")
+# No explicit bidi / direction overrides in stored headline — frontend owns display direction.
+_HEADLINE_EN_HE_TAIL_INVISIBLE = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def bilingual_en_he_headline_tail_struct_ok(tail: str) -> bool:
+    """
+    After '<productNameResolved>,' the remainder must be Hebrew-only (no Latin letters),
+    contain at least one Hebrew letter, use no forbidden punctuation, no second comma,
+    and no bidi/isolate marks.
+    """
+    t = (tail or "").strip()
+    if not t or not _hebrew_letter_in(t):
+        return False
+    if _has_ascii_latin_letter(t):
+        return False
+    if "," in t:
+        return False
+    for ch in t:
+        if ch in _HEADLINE_EN_HE_TAIL_FORBIDDEN or ch in _HEADLINE_EN_HE_TAIL_INVISIBLE:
+            return False
+    return True
+
+
 def hebrew_headline_allows_embedded_english_product_name(headline: str, canonical_name: str) -> bool:
     """
     Hebrew job: the headline may contain the resolved English product name as the only Latin segment.
