@@ -55,112 +55,37 @@ _VIDEO_PLAN_HARD_SECONDS = float(
 )
 
 _JSON_KEYS = """
-OUTPUT FORMAT (strict)
-- Return ONE JSON object only.
-- Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
+Return ONE JSON object only. No markdown fences. No prose outside JSON.
 
-SUCCESS — use exact camelCase keys below (all string values except language and counts). Do not omit required keys.
+SUCCESS (all strings, all required):
 {
   "productNameResolved": string,
   "objectA": string,
   "objectB": string,
-  "objectAReason": string,
-  "objectBReason": string,
   "interactionSummary": string,
   "interactionScript": string,
   "advertisingPromise": string,
-  "promiseDerivation": string,
-  "headlineText": string,
-  "headlineDerivation": string,
-  "language": "he" or "en",
-  "objectInferenceMode": "literals" | "domain_inference" | "functional_inference" | "commercial_world_inference" (optional),
-  "literalObjectCount": number (optional, integer 0–2; server recomputes for logs if absent)
+  "headlineText": string
 }
 
-FAILURE — if no valid plan is possible under the rules, return ONLY this object (no improvisation, no partial plan):
-{
-  "planningFailure": string,
-  "planningFailureDetail": string
-}
-- planningFailure must be one of:
-  planning_failed_invalid_objects | planning_failed_no_valid_interaction | planning_failed_banal_interaction |
-  planning_failed_message_surface_dependency | planning_failed_promise_not_emergent | planning_failed_headline_invalid
-- planningFailureDetail: one short English sentence explaining why.
+FAILURE (no other keys):
+{ "planningFailure": "planning_failed_no_valid_interaction" }
 """
 
 
 def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
-    return f"""You are the ACE video planning engine (single-interaction video; no modes).
+    return f"""ACE video planner — single shot, half-orbit camera around A+B. Job language: {lang_name} ({lang}).
+objectA/objectB/interactionSummary/interactionScript: short English. productNameResolved, advertisingPromise, headlineText: {lang_name}. If product name is empty, invent productNameResolved (English if job is English; Hebrew job may use Hebrew or English).
 
-LANGUAGE
-- Job language: {lang_name} ({lang}). Set the "language" field to "{lang}".
-- If product name input is empty, invent productNameResolved consistent with the description and language rules:
-  English job → productNameResolved must be English.
-  Hebrew job → productNameResolved may be Hebrew or English.
-- Product description may mix Hebrew and English words regardless of job language.
-- productNameResolved, objectAReason, objectBReason, advertisingPromise, promiseDerivation, headlineText, headlineDerivation: primarily {lang_name} where natural.
-- objectA, objectB, interactionSummary, interactionScript: English only (short concrete physical labels and action description).
+CORE: (1) Choose A from the product. (2) Find B from the product. (3) Accept B only when A↔B creates the advertising promise — do NOT invent the promise first; it is born from the interaction. (4) interactionSummary + interactionScript = the only on-screen interaction. (5) headlineText starts exactly "<productNameResolved>," then up to 7 words total, derived from that interaction.
 
-CORE ORDER (mandatory — do not invert)
-1) Read product name + product description.
-2) Choose objectA grounded in the product name + description as the conceptual source (classic physical object; not an abstract concept, vague situation, or pure environment). Labels need not appear verbatim in the text if inference is justified in objectAReason.
-3) Search objectB from the same conceptual source with the same object rules; justify inference in objectBReason when labels are not verbatim.
-4) Accept objectB ONLY when a concrete physical A↔B interaction would give birth to a valid advertising promise (meaning that lives in the interaction, not before it).
-5) Fix interactionSummary + interactionScript first. That single interaction is exactly what the video shows.
-6) Only then write advertisingPromise + promiseDerivation (promise born from the interaction; not invented first to “illustrate”).
-7) headlineText MUST begin with the exact characters: "<productNameResolved>," (comma immediately after the name), max 7 words total, derived from the interaction; headlineDerivation ties headline to interactionScript/summary.
+OBJECTS: Physical, clear, classic; no text/logos/UI/readable content as the idea. TV/phone/billboard OK only as objects, not message surfaces.
 
-ROLE OF THE ADVERTISING PROMISE (critical)
-- The promise is mainly a creativity mechanism: push away banal/default A+B ideas and force a surprising but still clear physical interaction.
-- It is NOT the on-screen hero, NOT something to “show literally”, and NOT invented first to drive the scene.
-- The result we care about is the interaction; the promise explains why that interaction matters commercially, after the interaction exists.
+ANTI-BANAL: No obvious default use (e.g. pen writing, brush painting). Pick a clear but non-obvious physical interaction.
 
-THERE IS ONLY ONE INTERACTION
-- No replacement mode, no side-by-side mode, no hidden interaction, no discovery vs visible split.
-- Only the one physical interaction between objectA and objectB appears in the video.
-
-OBJECT SELECTION (grounding — not literal noun extraction)
-- Object A and Object B must be chosen FROM the product name and description, but selection may be creative, inferential, and domain-based.
-- The product text is the conceptual source for grounded choices, not a literal inventory of object nouns that must already appear verbatim.
-- Attempt in order: (1) literal labels in the text if present, (2) domain inference, (3) functional inference from what the product does, (4) commercial-world inference from the product’s world.
-- Only after those attempts may you return planning_failed_invalid_objects if nothing suitable exists.
-
-VERBATIM CONSTRAINTS (must follow exactly)
-- "Do not require the product text to literally contain two concrete physical object names.
-You may infer Object A and Object B from the product's domain, function, and commercial world, as long as they remain clearly grounded in the product name and description."
-- "The product text is a source for grounded inference, not a literal inventory list."
-
-OBJECTS
-- Both must be visually clear, filmable, concrete physical things.
-- Do not cast a human person as objectA or objectB. If the product name looks like a personal name, treat it as brand/product identity, not a character in the scene.
-
-ANTI-BANAL (mandatory)
-- Reject the first obvious/default use of the pair. Do not return cliché interactions.
-- Invalid banal examples (do not output interactions like these): pen writing on paper; brush painting canvas; dog eating bone; straw in cup; bee on flower collecting nectar.
-- Prefer a second or third strong idea that is still physically possible, simple to read quickly, and unexpected for that pair.
-
-ADVERTISING MEDIA (TV, phone, billboard, outdoor sign, etc.)
-- Allowed in principle only as physical objects in the interaction.
-- Forbidden when the idea depends on readable text, printed poster message, logo/label communication, or UI on a screen.
-- If the object is mainly a “message surface”, reject that idea.
-
-CAMERA
-- interactionScript implies one continuous shot with a smooth half-orbit around the pair throughout.
-
-MEMORY (diversity only)
-- If the server lists prior advertisingPromise lines, avoid repeating them; memory must never override grounding or anti-banal logic.
-
-TEXT / UI
-- interactionScript must not depend on readable text, logos, labels, or UI; do not instruct showing captions or readable screens.
-
-QUALITY
-- objectAReason / objectBReason: explain how each object is grounded in the product (including inferential grounding when labels are not verbatim in the text).
-- promiseDerivation and headlineDerivation: substantive, tied to the chosen interaction.
-
-If you cannot satisfy every rule, return the FAILURE JSON object from the schema (never a fake partial plan).
-
+FAIL: If no valid A+B interaction, return exactly: {{"planningFailure":"planning_failed_no_valid_interaction"}}
 """
 
 
@@ -505,16 +430,7 @@ def _advertising_promise_from_product(
 
 _VIDEO_PLAN_SCHEMA_VERSION = "single_interaction_v3"
 
-_PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset(
-    {
-        "planning_failed_invalid_objects",
-        "planning_failed_no_valid_interaction",
-        "planning_failed_banal_interaction",
-        "planning_failed_message_surface_dependency",
-        "planning_failed_promise_not_emergent",
-        "planning_failed_headline_invalid",
-    }
-)
+_PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset({"planning_failed_no_valid_interaction"})
 
 
 def _object_grounded_in_product_blob(
@@ -1472,6 +1388,7 @@ def validate_and_normalize_plan(
     planner_deadline_monotonic: Optional[float] = None,
     product_name: str = "",
     product_description: str = "",
+    content_language: str = "he",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     ACE video engine v3: one physical A↔B interaction; promise and headline must follow the interaction.
@@ -1496,22 +1413,21 @@ def validate_and_normalize_plan(
     headline = (data.get("headlineText") or "").strip()
     hderiv = (data.get("headlineDerivation") or "").strip()
     lang_raw = str(data.get("language") or "").strip().lower()
+    if lang_raw not in ("he", "en"):
+        lang_raw = normalize_video_content_language(content_language)
 
-    if not pn or not oa or not ob or not oa_r or not ob_r:
+    if not pn or not oa or not ob:
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
         return None, "planning_failed_invalid_objects"
     if not int_sum or not int_script:
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
         return None, "planning_failed_no_valid_interaction"
-    if not apromise or not pderiv:
+    if not apromise:
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_promise_not_emergent")
         return None, "planning_failed_promise_not_emergent"
-    if not headline or not hderiv:
+    if not headline:
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
         return None, "planning_failed_headline_invalid"
-    if lang_raw not in ("he", "en"):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
-        return None, "planning_failed_invalid_objects"
 
     if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
         logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
@@ -1619,14 +1535,14 @@ def validate_and_normalize_plan(
         "productNameResolved": pn,
         "objectA": oa,
         "objectB": ob,
-        "objectAReason": oa_r,
-        "objectBReason": ob_r,
+        "objectAReason": oa_r or "",
+        "objectBReason": ob_r or "",
         "interactionSummary": int_sum,
         "interactionScript": int_script,
         "advertisingPromise": apromise,
-        "promiseDerivation": pderiv,
+        "promiseDerivation": pderiv or "",
         "headlineText": headline,
-        "headlineDerivation": hderiv,
+        "headlineDerivation": hderiv or "",
         "language": lang_raw,
         "objectInferenceMode": derived_mode,
         "literalObjectCount": literal_count,
@@ -1668,8 +1584,6 @@ def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tup
     if not (plan.get("videoPromptCore") or "").strip():
         return False, "planning_failed_no_valid_interaction"
     if not (plan.get("advertisingPromise") or "").strip():
-        return False, "planning_failed_promise_not_emergent"
-    if not (plan.get("promiseDerivation") or "").strip():
         return False, "planning_failed_promise_not_emergent"
     hd = (plan.get("headlineDecision") or "").strip()
     if hd not in ("include_product_name", "product_name_only", "no_headline"):
@@ -1822,7 +1736,7 @@ def _fetch_video_plan_o3_sync(
 Product description:
 {product_description}
 
-Locked output language for all user-facing plan fields (from description classification): {lang_name} ({lang})
+Language: {lang_name} ({lang}).
 
 {_JSON_KEYS}
 """
@@ -1841,11 +1755,13 @@ Locked output language for all user-facing plan fields (from description classif
         "VIDEO_PLAN_MEMORY_USED_FOR_DIVERSITY=%s",
         str(bool(history)).lower(),
     )
-    forbid_hist = forbidden_promises_for_prompt(history, 10)
+    forbid_hist = forbidden_promises_for_prompt(history, 4)
     promise_addon = build_promise_diversity_addon(
         forbid_hist,
         angle_seed_for_attempt(0, 0),
     )
+    if len(promise_addon) > 1200:
+        promise_addon = promise_addon[:1200].rstrip() + "\n…"
     attempt_input = instructions + "\n\n" + user_block + promise_addon
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
@@ -1898,8 +1814,12 @@ Locked output language for all user-facing plan fields (from description classif
         pf_raw = str(parsed.get("planningFailure") or "").strip()
         if pf_raw:
             detail = str(parsed.get("planningFailureDetail") or "").replace('"', "'")[:260]
-            code = pf_raw if pf_raw in _PLANNER_SELF_FAILURE_CODES else default_fail
-            logger.info('VIDEO_PLAN_PLANNER_SELF_REJECT code=%s detail="%s"', code, detail)
+            code = (
+                pf_raw
+                if pf_raw in _PLANNER_SELF_FAILURE_CODES
+                else "planning_failed_no_valid_interaction"
+            )
+            logger.info('VIDEO_PLAN_PLANNER_SELF_REJECT code=%s detail="%s"', code, detail or "(none)")
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None, code
 
@@ -1908,6 +1828,7 @@ Locked output language for all user-facing plan fields (from description classif
             planner_deadline_monotonic=deadline_monotonic,
             product_name=product_name,
             product_description=product_description,
+            content_language=content_language,
         )
         if not plan:
             last_v_err = (v_err or "").strip() or default_fail
