@@ -57,10 +57,9 @@ _VIDEO_PLAN_HARD_SECONDS = float(
 _JSON_KEYS = """
 OUTPUT FORMAT (strict)
 - Return ONE JSON object only.
-- Use the exact camelCase keys below. Do not omit required keys; use "" only where allowed.
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
-Required keys (all strings):
+SUCCESS — use exact camelCase keys below (all string values except language). Do not omit required keys.
 {
   "productNameResolved": string,
   "objectA": string,
@@ -75,6 +74,16 @@ Required keys (all strings):
   "headlineDerivation": string,
   "language": "he" or "en"
 }
+
+FAILURE — if no valid plan is possible under the rules, return ONLY this object (no improvisation, no partial plan):
+{
+  "planningFailure": string,
+  "planningFailureDetail": string
+}
+- planningFailure must be one of:
+  planning_failed_invalid_objects | planning_failed_no_valid_interaction | planning_failed_banal_interaction |
+  planning_failed_message_surface_dependency | planning_failed_promise_not_emergent | planning_failed_headline_invalid
+- planningFailureDetail: one short English sentence explaining why.
 """
 
 
@@ -85,36 +94,59 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
 
 LANGUAGE
 - Job language: {lang_name} ({lang}). Set the "language" field to "{lang}".
+- If product name input is empty, invent productNameResolved consistent with the description and language rules:
+  English job → productNameResolved must be English.
+  Hebrew job → productNameResolved may be Hebrew or English.
+- Product description may mix Hebrew and English words regardless of job language.
 - productNameResolved, objectAReason, objectBReason, advertisingPromise, promiseDerivation, headlineText, headlineDerivation: primarily {lang_name} where natural.
 - objectA, objectB, interactionSummary, interactionScript: English only (short concrete physical labels and action description).
 
-CORE ORDER (mandatory reasoning — server validates this order)
+CORE ORDER (mandatory — do not invert)
 1) Read product name + product description.
-2) Choose objectA from the product text only (classic, physical, clearly identifiable object; no environments as objects; no abstract nouns).
-3) Search objectB from the product text only with the same object rules.
-4) Accept objectB ONLY at the moment when a concrete physical interaction between A and B would create a real advertising promise (commercial meaning that could not exist without that interaction).
-5) Write interactionSummary (short) and interactionScript (the exact continuous action the camera will see). This is the ONLY interaction; there is no separate “discovery” or “hidden” interaction.
-6) Only after the interaction is fixed, write advertisingPromise (born from the interaction) and promiseDerivation (how the interaction creates the promise).
-7) headlineText MUST start with the exact characters: "<productNameResolved>," then up to 7 words total including the product name token(s). headlineDerivation must tie the headline to the interaction.
+2) Choose objectA from that text only (classic physical object; not an abstract concept, vague situation, or pure environment).
+3) Search objectB from that text only with the same object rules.
+4) Accept objectB ONLY when a concrete physical A↔B interaction would give birth to a valid advertising promise (meaning that lives in the interaction, not before it).
+5) Fix interactionSummary + interactionScript first. That single interaction is exactly what the video shows.
+6) Only then write advertisingPromise + promiseDerivation (promise born from the interaction; not invented first to “illustrate”).
+7) headlineText MUST begin with the exact characters: "<productNameResolved>," (comma immediately after the name), max 7 words total, derived from the interaction; headlineDerivation ties headline to interactionScript/summary.
 
-HARD RULES
-- Do NOT invent advertisingPromise first and then pick objects to illustrate it.
-- Do NOT output modes, branches, replacement/side-by-side plans, or secondary objects.
-- Interaction must be directly between objectA and objectB, filmable, visually obvious, not symbolic-only, and must not rely on readable text, UI, labels, logos, or brand marks in-frame.
-- interactionScript must describe one continuous shot; camera is a smooth half-orbit around the pair throughout.
+ROLE OF THE ADVERTISING PROMISE (critical)
+- The promise is mainly a creativity mechanism: push away banal/default A+B ideas and force a surprising but still clear physical interaction.
+- It is NOT the on-screen hero, NOT something to “show literally”, and NOT invented first to drive the scene.
+- The result we care about is the interaction; the promise explains why that interaction matters commercially, after the interaction exists.
+
+THERE IS ONLY ONE INTERACTION
+- No replacement mode, no side-by-side mode, no hidden interaction, no discovery vs visible split.
+- Only the one physical interaction between objectA and objectB appears in the video.
+
+OBJECTS
+- Both must be visually clear, filmable, concrete physical things.
+- Do not cast a human person as objectA or objectB. If the product name looks like a personal name, treat it as brand/product identity, not a character in the scene.
+
+ANTI-BANAL (mandatory)
+- Reject the first obvious/default use of the pair. Do not return cliché interactions.
+- Invalid banal examples (do not output interactions like these): pen writing on paper; brush painting canvas; dog eating bone; straw in cup; bee on flower collecting nectar.
+- Prefer a second or third strong idea that is still physically possible, simple to read quickly, and unexpected for that pair.
+
+ADVERTISING MEDIA (TV, phone, billboard, outdoor sign, etc.)
+- Allowed in principle only as physical objects in the interaction.
+- Forbidden when the idea depends on readable text, printed poster message, logo/label communication, or UI on a screen.
+- If the object is mainly a “message surface”, reject that idea.
+
+CAMERA
+- interactionScript implies one continuous shot with a smooth half-orbit around the pair throughout.
 
 MEMORY (diversity only)
-- If the server lists prior advertisingPromise lines, avoid repeating them; memory must never override object grounding or interaction logic.
+- If the server lists prior advertisingPromise lines, avoid repeating them; memory must never override grounding or anti-banal logic.
 
-PROMISE DIVERSITY (persistent product memory — diversity only)
-- advertisingPromise must still read as a fresh commercial angle vs prior lines listed for this product.
-
-TEXT-FREE VIDEO
-- interactionScript must not instruct rendering readable text, captions, UI, or logos.
+TEXT / UI
+- interactionScript must not depend on readable text, logos, labels, or UI; do not instruct showing captions or readable screens.
 
 QUALITY
-- objectAReason / objectBReason: why each object is justified from the product text.
-- promiseDerivation and headlineDerivation: substantive, not filler.
+- objectAReason / objectBReason: grounded in product text.
+- promiseDerivation and headlineDerivation: substantive, tied to the chosen interaction.
+
+If you cannot satisfy every rule, return the FAILURE JSON object from the schema (never a fake partial plan).
 
 """
 
@@ -460,6 +492,17 @@ def _advertising_promise_from_product(
 
 _VIDEO_PLAN_SCHEMA_VERSION = "single_interaction_v3"
 
+_PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset(
+    {
+        "planning_failed_invalid_objects",
+        "planning_failed_no_valid_interaction",
+        "planning_failed_banal_interaction",
+        "planning_failed_message_surface_dependency",
+        "planning_failed_promise_not_emergent",
+        "planning_failed_headline_invalid",
+    }
+)
+
 
 def _object_grounded_in_product_blob(
     object_label: str, product_name: str, product_description: str
@@ -484,9 +527,139 @@ _UI_TEXT_FORBIDDEN = re.compile(
     re.I,
 )
 
+# Idea depends on a surface meant to carry text/graphics/UI, not the object-as-prop alone.
+_MESSAGE_SURFACE_FORBIDDEN = re.compile(
+    r"\b("
+    r"poster\s+with\s+text|readable\s+poster|read(ing)?\s+the\s+(poster|billboard|sign|banner)|"
+    r"billboard\s+(text|message|copy|ad)|text\s+on\s+(the\s+)?(screen|display|phone|monitor|tv|television)|"
+    r"notification\s+text|sms\s+text|subtitle|closed\s+captions|"
+    r"swipe(s)?\s+the\s+ui|app\s+interface|home\s+screen\s+icons|"
+    r"printed\s+(headline|slogan|copy|message)|"
+    r"message\s+on\s+screen|display(s)?\s+readable|readable\s+content\s+on|"
+    r"qr\s*code\s+scanned\s+for\s+message|scan\s+the\s+ad"
+    r")\b",
+    re.I,
+)
+
+_BANAL_OBJ_TOKEN_ALIASES: Dict[str, str] = {
+    "biro": "pen",
+    "ballpen": "pen",
+    "ballpoint": "pen",
+    "notepad": "notebook",
+    "memo": "notebook",
+    "journal": "notebook",
+    "puppy": "dog",
+    "puppies": "dog",
+    "paintbrush": "brush",
+    "cup": "cup",
+    "mug": "cup",
+    "glass": "cup",
+    "blossom": "flower",
+    "bloom": "flower",
+}
+
+def _object_tokens_for_banal_check(oa: str, ob: str) -> Set[str]:
+    toks: Set[str] = set()
+    for lab in (oa, ob):
+        for w in re.findall(r"[\w\u0590-\u05FF]{3,}", (lab or "").lower(), flags=re.UNICODE):
+            toks.add(_BANAL_OBJ_TOKEN_ALIASES.get(w, w))
+    return toks
+
+
+def _interaction_is_banal_obvious(oa: str, ob: str, interaction_lower: str) -> bool:
+    """True if A/B matches a known cliché pair and interaction text matches the default/obvious use."""
+    t = _object_tokens_for_banal_check(oa, ob)
+    s = interaction_lower
+    # Pen + writing surface + write/sketch
+    if (t & frozenset({"pen"})) and (t & frozenset({"paper", "page", "sheet", "notebook", "notepad", "parchment"})):
+        if any(w in s for w in ("write", "writes", "writing", "written", "scribes", "scribbling", "sketch", "sketches", "doodle", "doodles")):
+            return True
+    # Brush + canvas/paper + paint
+    if (t & frozenset({"brush", "paintbrush"})) and (t & frozenset({"canvas", "easel", "panel", "paper"})):
+        if any(w in s for w in ("paint", "paints", "painting", "stroke", "strokes")):
+            return True
+    # Dog + bone + eat/chew
+    if (t & frozenset({"dog", "puppy"})) and ("bone" in t):
+        if any(w in s for w in ("chew", "chews", "chewing", "gnaw", "gnaws", "eat", "eats", "eating", "chomp", "lick", "licks")):
+            return True
+    # Straw + cup + sip/drink
+    if ("straw" in t) and (t & frozenset({"cup", "mug", "glass"})):
+        if any(w in s for w in ("sip", "sips", "sipping", "drink", "drinks", "drinking", "slurp", "slurps")):
+            return True
+    # Bee + flower + nectar/pollinate/land
+    if ("bee" in t) and (t & frozenset({"flower", "blossom", "bloom", "petal"})):
+        if any(
+            w in s
+            for w in (
+                "nectar",
+                "pollen",
+                "pollinate",
+                "pollinates",
+                "pollinating",
+                "landing",
+                "lands",
+                "land on",
+            )
+        ):
+            return True
+    return False
+
+
+def _interaction_message_surface_dependency(s: str) -> bool:
+    return _MESSAGE_SURFACE_FORBIDDEN.search(s or "") is not None
+
 
 def _interaction_avoids_text_dependency(s: str) -> bool:
     return _UI_TEXT_FORBIDDEN.search(s or "") is None
+
+
+_GENERIC_HEADLINE_PHRASES: FrozenSet[str] = frozenset(
+    {
+        "the best",
+        "best ever",
+        "amazing",
+        "incredible",
+        "game changer",
+        "game-changer",
+        "must have",
+        "you need",
+        "love it",
+        "next level",
+        "perfect choice",
+        "so good",
+        "truly great",
+        "world class",
+        "world-class",
+    }
+)
+
+
+def _headline_avoids_generic_praise(headline: str, product_resolved: str) -> bool:
+    """False if the part after '<name>,' is empty or mostly generic marketing praise."""
+    p = (product_resolved or "").strip()
+    h = (headline or "").strip()
+    if not p or not h.lower().startswith(p.lower() + ","):
+        return True
+    rest = h[len(p) + 1 :].strip().lower()
+    if len(rest) < 3:
+        return False
+    if any(g in rest for g in _GENERIC_HEADLINE_PHRASES):
+        return False
+    return True
+
+
+def _runway_language_visual_constraints(plan: Dict[str, Any]) -> str:
+    """Short language-consistent cue for the video model (no headline burn-in)."""
+    lang = str(plan.get("language") or "").strip().lower()
+    if lang == "he":
+        return (
+            "LANGUAGE-CONSISTENT VISUALS: If a setting appears, keep backgrounds generic; "
+            "do not foreground English-only storefront lettering or foreign-script signage as the hero element."
+        )
+    return (
+        "LANGUAGE-CONSISTENT VISUALS: If a setting appears, keep backgrounds generic; "
+        "do not foreground non-English street or storefront lettering as the hero element."
+    )
 
 
 def _promise_emergent_from_interaction(
@@ -1253,7 +1426,19 @@ def validate_and_normalize_plan(
     if not _side_by_side_motion_is_meaningful(f"{int_sum} {int_script}", oa, ob):
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
         return None, "planning_failed_no_valid_interaction"
-    if not _interaction_avoids_text_dependency(int_script):
+
+    inter_low = f"{int_sum} {int_script}".lower()
+    banal_hit = _interaction_is_banal_obvious(oa, ob, inter_low)
+    msg_surface_hit = _interaction_message_surface_dependency(inter_low)
+    logger.info("VIDEO_PLAN_BANAL_INTERACTION=%s", str(banal_hit).lower())
+    logger.info("VIDEO_PLAN_MESSAGE_SURFACE_DEPENDENCY=%s", str(msg_surface_hit).lower())
+    if msg_surface_hit:
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_message_surface_dependency")
+        return None, "planning_failed_message_surface_dependency"
+    if banal_hit:
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_banal_interaction")
+        return None, "planning_failed_banal_interaction"
+    if not _interaction_avoids_text_dependency(inter_low):
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
         return None, "planning_failed_no_valid_interaction"
 
@@ -1282,6 +1467,10 @@ def validate_and_normalize_plan(
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
         return None, "planning_failed_headline_invalid"
     if not _headline_derived_from_interaction(headline, f"{int_sum} {int_script}"):
+        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
+        return None, "planning_failed_headline_invalid"
+    if not _headline_avoids_generic_praise(headline, pn):
         logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
         return None, "planning_failed_headline_invalid"
@@ -1568,6 +1757,14 @@ Locked output language for all user-facing plan fields (from description classif
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None, default_fail
 
+        pf_raw = str(parsed.get("planningFailure") or "").strip()
+        if pf_raw:
+            detail = str(parsed.get("planningFailureDetail") or "").replace('"', "'")[:260]
+            code = pf_raw if pf_raw in _PLANNER_SELF_FAILURE_CODES else default_fail
+            logger.info('VIDEO_PLAN_PLANNER_SELF_REJECT code=%s detail="%s"', code, detail)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+            return None, code
+
         plan, v_err = validate_and_normalize_plan(
             parsed,
             planner_deadline_monotonic=deadline_monotonic,
@@ -1777,8 +1974,10 @@ def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bo
     ob = (plan.get("objectB") or "").strip()
     script = (plan.get("interactionScript") or "").strip()
     motion = _runway_side_by_side_interaction_half_orbit_focus()
+    lang_vis = _runway_language_visual_constraints(plan)
     parts = [
         "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
+        lang_vis,
         f"Single continuous shot: {oa} and {ob}. {motion}",
         f"Physical interaction: {script}" if script else "",
     ]
@@ -1800,9 +1999,11 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
         raise ValueError("missing objectA/objectB/interactionScript")
 
     motion = _runway_side_by_side_interaction_half_orbit_focus()
+    lang_vis = _runway_language_visual_constraints(plan)
     body = (
         "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
         "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
+        f"{lang_vis} "
         f"Single continuous shot. Two physical objects: {oa} and {ob}. "
         f"{motion}"
         f"Physical interaction (follow exactly): {script}. "
@@ -1858,7 +2059,9 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
         raise ValueError("missing objectA/objectB/interactionScript")
 
     motion_focus = _runway_side_by_side_interaction_half_orbit_focus()
+    lang_vis = _runway_language_visual_constraints(plan)
     scene = (
+        f"{lang_vis} "
         f"The first frame is supplied as the start image; it already shows {oa} and {ob} together, "
         f"both clearly visible and balanced. {motion_focus}"
         f"Physical interaction (follow exactly): {script}"
@@ -1884,7 +2087,9 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
     script = (plan.get("interactionScript") or "").strip()
+    lang_vis = _runway_language_visual_constraints(plan)
     motion = (
+        f"{lang_vis} "
         f"Start frame supplied; {oa} and {ob} already visible together. "
         f"{_runway_side_by_side_interaction_half_orbit_focus()}"
         f"Physical interaction: {script}."
