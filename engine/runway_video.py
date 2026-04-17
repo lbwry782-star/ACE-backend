@@ -22,7 +22,7 @@ from engine.video_planning import (
     fetch_video_plan_o3,
     log_video_job_plan_integrity,
     sanitize_runway_prompt_for_video_text_policy,
-    video_plan_required_fields_for_runway,
+    video_plan_struct_ok_for_runway,
 )
 from engine.video_bidi import (
     finalize_hebrew_mixed_bidi_for_display,
@@ -370,17 +370,31 @@ def _generate_one_video_mvp_body(
             session_id=job_id or "",
         )
     except VideoPlanningTimeoutError:
+        plan_ms = (time.monotonic() - t_plan0) * 1000.0
+        logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
+        logger.info("VIDEO_TIMING_RUNWAY_MS=0.0")
+        logger.info("VIDEO_TIMING_POSTPROCESS_MS=0.0")
+        logger.info(
+            "VIDEO_TIMING_TOTAL_MS=%.1f", (time.monotonic() - t_job0) * 1000.0
+        )
+        logger.info("VIDEO_TIMING_DOMINANT_PHASE=plan")
         logger.info("VIDEO_PLAN_ABORTED reason=planning_timeout")
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=planning_timeout")
         _maybe_log_ad_promise_skip_after_failed_generation(None, promise_saved)
         raise RunwayVideoMVPError("planning_timeout")
     plan_ms = (time.monotonic() - t_plan0) * 1000.0
+    logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
 
     if not plan:
         fail = (plan_fail_reason or "").strip() or "planning_failed"
-        logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
+        logger.info("VIDEO_TIMING_RUNWAY_MS=0.0")
+        logger.info("VIDEO_TIMING_POSTPROCESS_MS=0.0")
+        logger.info(
+            "VIDEO_TIMING_TOTAL_MS=%.1f", (time.monotonic() - t_job0) * 1000.0
+        )
+        logger.info("VIDEO_TIMING_DOMINANT_PHASE=plan")
         logger.info("VIDEO_PLAN_ABORTED reason=%s", fail)
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", fail)
@@ -390,17 +404,20 @@ def _generate_one_video_mvp_body(
 
     apply_canonical_product_name_to_video_plan(plan, canonical_name)
     plan["marketingLanguage"] = marketing_lang
-    gate_ok, gate_reason = video_plan_required_fields_for_runway(plan)
-    if not gate_ok:
-        logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
-        logger.info("VIDEO_PLAN_ABORTED reason=%s", gate_reason)
-        logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
-        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate_reason)
+
+    struct_ok, struct_reason = video_plan_struct_ok_for_runway(plan)
+    if not struct_ok:
+        logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false reason=%s", struct_reason)
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", struct_reason)
+        logger.info("VIDEO_TIMING_RUNWAY_MS=0.0")
+        logger.info("VIDEO_TIMING_POSTPROCESS_MS=0.0")
+        total_ms = (time.monotonic() - t_job0) * 1000.0
+        logger.info("VIDEO_TIMING_TOTAL_MS=%.1f", total_ms)
+        logger.info("VIDEO_TIMING_DOMINANT_PHASE=plan")
         _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-        raise RunwayVideoMVPError(gate_reason or "plan_integrity_failed")
+        raise RunwayVideoMVPError("planning_failed_incomplete_plan")
 
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
-    logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
     log_video_job_plan_integrity(plan)
 
     video_job_set_phase("runway")
