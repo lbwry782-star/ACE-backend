@@ -2,8 +2,8 @@
 Bidirectional text for video outputs.
 
 - Marketing copy (API / UI): LRI+PDI around Latin islands (finalize_hebrew_mixed_bidi_for_display).
-- ffmpeg drawtext headline: English product name + Hebrew remainder uses LRI/PDI and RLI/PDI
-  (applied only in prepare_ffmpeg_overlay_headline; planner/API strings stay plain).
+- ffmpeg drawtext headline: visible text only in headline.txt (no bidi isolate/control chars).
+  English + Hebrew uses dual drawtext positioning in video_headline_postprocess (see OverlayHeadlinePrep).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import json
 import logging
 import re
 import unicodedata
-from typing import List, Tuple
+from typing import List, NamedTuple, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,6 @@ from engine.video_language import (
 )
 
 _LRI = "\u2066"  # LEFT-TO-RIGHT ISOLATE
-_RLI = "\u2067"  # RIGHT-TO-LEFT ISOLATE
 _PDI = "\u2069"  # POP DIRECTIONAL ISOLATE
 
 # Strip prior invisible directional embeddings so re-stabilization is idempotent.
@@ -127,12 +126,14 @@ def format_bidi_segments_for_log(segments: List[str]) -> str:
     return json.dumps(segments, ensure_ascii=False)
 
 
-def _overlay_latin_name_hebrew_remainder_with_isolates(cn: str, remainder: str) -> str:
-    """
-    Visible text order matches ``<cn>, <remainder>``; invisible isolates steer FFmpeg/HarfBuzz:
-    LTR block for the English name and comma, then RTL block for Hebrew.
-    """
-    return f"{_LRI}{cn},{_PDI} {_RLI}{remainder}{_PDI}"
+class OverlayHeadlinePrep(NamedTuple):
+    """Planner/API headline stays plain; overlay path may split for dual drawtext (no bidi controls in files)."""
+
+    text_plain: str
+    strategy: str
+    render_mode: str  # plain_text | dual_drawtext
+    dual_latin: str
+    dual_hebrew: str
 
 
 def _strip_planner_separators_for_overlay(s: str) -> str:
@@ -155,14 +156,12 @@ def prepare_ffmpeg_overlay_headline(
     *,
     content_language: str,
     canonical_name: str,
-) -> Tuple[str, str]:
+) -> OverlayHeadlinePrep:
     """
-    Build ffmpeg drawtext-safe headline for mixed Hebrew + Latin product names.
+    Normalize overlay headline: visible characters only (no LRI/RLI/PDI or other bidi controls in output).
 
-    Strips prior bidi embedding marks from *input* so planner/API strings stay authoritative;
-    for English canonical + Hebrew remainder, inserts LRI/PDI (LTR name + comma) and RLI/PDI (RTL Hebrew).
-
-    Returns (final_headline_for_drawtext, strategy_key).
+    English canonical + Hebrew remainder → render_mode=dual_drawtext (two drawtext layers in postprocess).
+    Returns OverlayHeadlinePrep with text_plain equal to the full visible line for logs/API consistency.
     """
     raw_in = headline or ""
     h = unicodedata.normalize("NFC", _strip_bidi_embedding_marks(raw_in)).strip()
@@ -180,7 +179,9 @@ def prepare_ffmpeg_overlay_headline(
             "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
             json.dumps(out, ensure_ascii=False),
         )
-        return (out if out else raw_in.strip(), "overlay_non_hebrew_strip_marks")
+        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+        tp = out if out else raw_in.strip()
+        return OverlayHeadlinePrep(tp, "overlay_non_hebrew_strip_marks", "plain_text", "", "")
 
     if not h:
         logger.info("VIDEO_HEADLINE_OVERLAY_STRIPPED_INPUT=%s", json.dumps("", ensure_ascii=False))
@@ -189,7 +190,8 @@ def prepare_ffmpeg_overlay_headline(
             "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
             json.dumps(raw_in.strip(), ensure_ascii=False),
         )
-        return (raw_in.strip(), "overlay_empty")
+        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+        return OverlayHeadlinePrep(raw_in.strip(), "overlay_empty", "plain_text", "", "")
 
     h_clean = _strip_planner_separators_for_overlay(h)
     logger.info(
@@ -206,7 +208,10 @@ def prepare_ffmpeg_overlay_headline(
             "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
             json.dumps(h_clean, ensure_ascii=False),
         )
-        return (h_clean, "overlay_hebrew_or_mixed_canonical_strip_only")
+        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+        return OverlayHeadlinePrep(
+            h_clean, "overlay_hebrew_or_mixed_canonical_strip_only", "plain_text", "", ""
+        )
 
     if not _contains_hebrew_letter(h_clean):
         logger.info(
@@ -217,7 +222,8 @@ def prepare_ffmpeg_overlay_headline(
             "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
             json.dumps(h_clean, ensure_ascii=False),
         )
-        return (h_clean, "overlay_latin_headline_strip_only")
+        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+        return OverlayHeadlinePrep(h_clean, "overlay_latin_headline_strip_only", "plain_text", "", "")
 
     remainder = re.sub(re.escape(cn), "", h_clean, count=1, flags=re.I)
     remainder = remainder.strip()
@@ -236,16 +242,19 @@ def prepare_ffmpeg_overlay_headline(
             "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
             json.dumps(cn, ensure_ascii=False),
         )
-        return (cn, "overlay_latin_canonical_only")
+        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+        return OverlayHeadlinePrep(cn, "overlay_latin_canonical_only", "plain_text", "", "")
 
     plain = f"{cn}, {remainder}"
-    final = _overlay_latin_name_hebrew_remainder_with_isolates(cn, remainder)
-    logger.info(
-        "VIDEO_HEADLINE_OVERLAY_PLAIN_TEXT=%s",
-        json.dumps(plain, ensure_ascii=False),
-    )
     logger.info(
         "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
-        json.dumps(final, ensure_ascii=False),
+        json.dumps(plain, ensure_ascii=False),
     )
-    return (final, "overlay_latin_comma_hebrew_remainder")
+    logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=dual_drawtext")
+    return OverlayHeadlinePrep(
+        plain,
+        "overlay_latin_comma_hebrew_remainder",
+        "dual_drawtext",
+        f"{cn},",
+        remainder,
+    )

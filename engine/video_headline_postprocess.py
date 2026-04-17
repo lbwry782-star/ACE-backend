@@ -21,7 +21,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 import requests
 
@@ -206,6 +206,82 @@ def _ffprobe_duration_seconds(path: Path, timeout_sec: float) -> float:
     return float((r.stdout or "").strip() or 0.0)
 
 
+def _ffprobe_video_dimensions(path: Path, timeout_sec: float) -> Tuple[int, int]:
+    ffprobe = _ffprobe_bin()
+    if not ffprobe:
+        raise RuntimeError("ffprobe not found")
+    r = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=timeout_sec,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"ffprobe size failed: {r.stderr or r.stdout}")
+    line = (r.stdout or "").strip()
+    parts = [int(x) for x in line.split(",") if x.strip().isdigit()]
+    if len(parts) >= 2:
+        return parts[0], parts[1]
+    raise RuntimeError(f"ffprobe size parse failed: {line!r}")
+
+
+def _pillow_text_width_px(font_path: str, text: str, fontsize: int) -> int:
+    from PIL import ImageFont
+
+    f = ImageFont.truetype(font_path, fontsize)
+    if hasattr(f, "getlength"):
+        return max(1, int(round(f.getlength(text))))
+    bbox = f.getbbox(text)
+    return max(1, bbox[2] - bbox[0])
+
+
+def _overlay_dual_gap_px(fontsize: int) -> int:
+    return max(6, fontsize // 8)
+
+
+def _build_dual_drawtext_vf(
+    font_e: str,
+    tf_lat_e: str,
+    tf_he_e: str,
+    fs: int,
+    x1: int,
+    x2: int,
+    alpha_expr: str,
+    t0_str: str,
+    shaping: str,
+) -> str:
+    """Two textfiles, fixed LTR then RTL positions; mirrors single-headline faux-bold + shadow passes."""
+    sh = shaping
+    rows: list[Tuple[int, int, str]] = [
+        (1, 0, ""),
+        (0, 1, ""),
+        (0, 0, ":shadowcolor=black@0.5:shadowx=2:shadowy=2"),
+    ]
+    parts: list[str] = []
+    for ox, oy, shadow in rows:
+        y_expr = "(h-text_h)/2+1" if oy else "(h-text_h)/2"
+        for tf_path, xb in ((tf_lat_e, x1), (tf_he_e, x2)):
+            xe = xb + ox
+            parts.append(
+                f"drawtext=fontfile='{font_e}':textfile='{tf_path}':fontsize={fs}"
+                f":fontcolor=white{sh}:alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
+                f"{shadow}:x={xe}:y={y_expr}"
+            )
+    return ",".join(parts)
+
+
 def _input_has_audio(path: Path, timeout_sec: float) -> bool:
     ffprobe = _ffprobe_bin()
     if not ffprobe:
@@ -258,6 +334,9 @@ def postprocess_video_headline(
     headline: str = "",
     job_id: str = "",
     overlay_language: str = "he",
+    overlay_render_mode: str = "plain_text",
+    overlay_dual_latin: str = "",
+    overlay_dual_hebrew: str = "",
 ) -> str:
     """
     Download MP4, one ffmpeg pass: draw the short planner headline (headlineText, not marketing body copy)
@@ -297,6 +376,8 @@ def postprocess_video_headline(
     tmp = Path(tempfile.mkdtemp(prefix="ace_vid_headline_"))
     inp = tmp / "in.mp4"
     text_file = tmp / "headline.txt"
+    text_file_latin = tmp / "overlay_latin.txt"
+    text_file_hebrew = tmp / "overlay_hebrew.txt"
 
     token = uuid.uuid4().hex
     out_path = _path_for_token(token)
@@ -324,7 +405,6 @@ def postprocess_video_headline(
         except OSError as e:
             return _fail(f"storage_mkdir:{type(e).__name__}")
 
-        text_file.write_text(headline_clean, encoding="utf-8")
         try:
             r = requests.get(source_video_url, timeout=_HTTP_DOWNLOAD_TIMEOUT, stream=True)
             r.raise_for_status()
@@ -352,7 +432,60 @@ def postprocess_video_headline(
 
         fs = _fontsize_for_headline(headline_clean)
         font_e = _filter_path_for_ffmpeg(Path(font))
+
+        use_dual = (
+            (overlay_render_mode or "").strip() == "dual_drawtext"
+            and olang == "he"
+            and (overlay_dual_latin or "").strip()
+            and (overlay_dual_hebrew or "").strip()
+        )
+        video_w = 1920
+        if use_dual:
+            try:
+                video_w, _ = _ffprobe_video_dimensions(inp, _FFPROBE_TIMEOUT)
+            except Exception as e:
+                logger.warning(
+                    "VIDEO_HEADLINE_DUAL_SKIP reason=ffprobe_dimensions err=%s",
+                    e,
+                )
+                use_dual = False
+
+        lat_s = (overlay_dual_latin or "").strip()
+        he_s = (overlay_dual_hebrew or "").strip()
+        x1 = x2 = 0
+        if use_dual:
+            try:
+                tw_lat = _pillow_text_width_px(font, lat_s, fs)
+                tw_he = _pillow_text_width_px(font, he_s, fs)
+                gap = _overlay_dual_gap_px(fs)
+                total = tw_lat + gap + tw_he
+                x1 = max(0, (video_w - total) // 2)
+                x2 = x1 + tw_lat + gap
+                text_file_latin.write_text(lat_s, encoding="utf-8")
+                text_file_hebrew.write_text(he_s, encoding="utf-8")
+                logger.info(
+                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s tw_lat=%s gap=%s tw_he=%s x1=%s x2=%s",
+                    video_w,
+                    tw_lat,
+                    gap,
+                    tw_he,
+                    x1,
+                    x2,
+                )
+            except Exception as e:
+                logger.warning(
+                    "VIDEO_HEADLINE_DUAL_FALLBACK reason=dual_setup err=%s",
+                    e,
+                    exc_info=True,
+                )
+                use_dual = False
+
+        if not use_dual:
+            text_file.write_text(headline_clean, encoding="utf-8")
+
         tf_e = _filter_path_for_ffmpeg(text_file)
+        tf_lat_e = _filter_path_for_ffmpeg(text_file_latin)
+        tf_he_e = _filter_path_for_ffmpeg(text_file_hebrew)
 
         # Last N seconds of the source video (or full length if shorter than N)
         overlay_s = min(max(0.4, _HOLD_SECONDS), duration_sec)
@@ -365,19 +498,36 @@ def postprocess_video_headline(
         alpha_expr = (
             f"if(lt(t\\,{t0_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{t0_str})/{fade_s}\\,1))"
         )
-        # Three drawtext passes: two 1px-offset whites (faux weight, no stroke), then main white with soft shadow (no borderw).
         # text_shaping=1: HarfBuzz/fribidi for Hebrew RTL shaping (ffmpeg build-dependent).
         shaping = ":text_shaping=1" if olang == "he" else ""
-        dt = (
-            f"fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white{shaping}:"
-            f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
+        logger.info(
+            "VIDEO_HEADLINE_POSTPROCESS render=%s dual=%s",
+            "dual_drawtext" if use_dual else "plain_text",
+            str(use_dual).lower(),
         )
-        vf = (
-            f"drawtext={dt}:x=(w-text_w)/2+1:y=(h-text_h)/2,"
-            f"drawtext={dt}:x=(w-text_w)/2:y=(h-text_h)/2+1,"
-            f"drawtext={dt}:shadowcolor=black@0.5:shadowx=2:shadowy=2:"
-            f"x=(w-text_w)/2:y=(h-text_h)/2"
-        )
+        if use_dual:
+            vf = _build_dual_drawtext_vf(
+                font_e,
+                tf_lat_e,
+                tf_he_e,
+                fs,
+                x1,
+                x2,
+                alpha_expr,
+                t0_str,
+                shaping,
+            )
+        else:
+            dt = (
+                f"fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white{shaping}:"
+                f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
+            )
+            vf = (
+                f"drawtext={dt}:x=(w-text_w)/2+1:y=(h-text_h)/2,"
+                f"drawtext={dt}:x=(w-text_w)/2:y=(h-text_h)/2+1,"
+                f"drawtext={dt}:shadowcolor=black@0.5:shadowx=2:shadowy=2:"
+                f"x=(w-text_w)/2:y=(h-text_h)/2"
+            )
 
         cmd: list[str] = [
             ffmpeg,

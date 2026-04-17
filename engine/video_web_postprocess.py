@@ -42,16 +42,16 @@ def ensure_video_postprocessed_for_poll(job_id: str, job: Dict[str, Any]) -> Non
         job.get("productDescription") or ""
     )
     _rp = (job.get("resolvedProductName") or "").strip()
-    headline, overlay_strat = prepare_ffmpeg_overlay_headline(
+    overlay_prep = prepare_ffmpeg_overlay_headline(
         headline_raw,
         content_language=content_lang,
         canonical_name=_rp,
     )
+    headline = overlay_prep.text_plain
+    overlay_strat = overlay_prep.strategy
     logger.info("VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s", overlay_strat)
-    logger.info(
-        "VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=%s",
-        str(overlay_strat == "overlay_latin_comma_hebrew_remainder").lower(),
-    )
+    logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=%s", overlay_prep.render_mode)
+    logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
     logger.info("VIDEO_BIDI_FIX_APPLIED_COPY=false")
     logger.info("VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s", json.dumps([], ensure_ascii=False))
     if not source_url:
@@ -69,6 +69,9 @@ def ensure_video_postprocessed_for_poll(job_id: str, job: Dict[str, Any]) -> Non
             base,
             headline=headline,
             job_id=job_id,
+            overlay_render_mode=overlay_prep.render_mode,
+            overlay_dual_latin=overlay_prep.dual_latin,
+            overlay_dual_hebrew=overlay_prep.dual_hebrew,
         )
     except Exception as e:
         logger.warning(

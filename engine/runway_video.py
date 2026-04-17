@@ -546,11 +546,13 @@ def _generate_one_video_mvp_body(
                         logger.info(
                             "MARKETING_TEXT_BIDI_NORMALIZED applied=false lang=en",
                         )
-                    headline_for_overlay, overlay_bidi_strategy = prepare_ffmpeg_overlay_headline(
+                    overlay_prep = prepare_ffmpeg_overlay_headline(
                         headline_for_overlay,
                         content_language=video_lang,
                         canonical_name=canonical_name,
                     )
+                    headline_for_overlay = overlay_prep.text_plain
+                    overlay_bidi_strategy = overlay_prep.strategy
                     logger.info(
                         "VIDEO_BIDI_FIX_APPLIED_COPY=%s",
                         str(bidi_copy).lower(),
@@ -564,11 +566,10 @@ def _generate_one_video_mvp_body(
                         overlay_bidi_strategy,
                     )
                     logger.info(
-                        "VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=%s",
-                        str(
-                            overlay_bidi_strategy == "overlay_latin_comma_hebrew_remainder"
-                        ).lower(),
+                        "VIDEO_HEADLINE_OVERLAY_RENDER_MODE=%s",
+                        overlay_prep.render_mode,
                     )
+                    logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
                     logger.info("VIDEO_JOB_STEP step=packaging_result done")
                     final_url = postprocess_video_headline(
                         url,
@@ -576,6 +577,9 @@ def _generate_one_video_mvp_body(
                         headline=headline_for_overlay,
                         job_id=job_id,
                         overlay_language=video_lang,
+                        overlay_render_mode=overlay_prep.render_mode,
+                        overlay_dual_latin=overlay_prep.dual_latin,
+                        overlay_dual_hebrew=overlay_prep.dual_hebrew,
                     )
                     post_ms = (time.monotonic() - t_post0) * 1000.0
                     logger.info("VIDEO_TIMING_POSTPROCESS_MS=%.1f", post_ms)
