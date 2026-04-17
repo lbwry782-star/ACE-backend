@@ -27,7 +27,6 @@ from engine.ad_promise_memory import (
     compute_product_hash,
     forbidden_promises_for_prompt,
     increment_promise_stat,
-    is_promise_too_similar,
     load_ad_promise_history,
     maybe_soft_reset_promise_memory,
 )
@@ -55,47 +54,26 @@ _VIDEO_PLAN_HARD_SECONDS = float(
     or str(_VIDEO_PLAN_TIMEOUT + 45.0)
 )
 
-# Logged for diagnostics only; mode is decided from abInteractionType + branch validity (see validate_and_normalize_plan).
-_VIDEO_REPLACEMENT_INTERACTION_SCORE_THRESHOLD = 85
-
-
 _JSON_KEYS = """
 OUTPUT FORMAT (strict)
 - Return ONE JSON object only.
 - Use the exact camelCase keys below. Do not omit required keys; use "" only where allowed.
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
-Field notes:
-- morphologicalReason: Why each object fits the advertising story (job language where noted). A and B need not look alike.
-- objectPairViewerClarityOk / objectPairIdentityDistinctOk / identityDistinctnessNote: as before.
-- discoveryInteractionSummary: short English phrase describing the CLASSIC or MEANINGFUL interaction you used to find objectB.
-- visibleAdditionalInteractionSummary: short English phrase describing the additional creative interaction that will actually be shown in the video.
-- visibleMotionScript: English. Full motion description for the additional interaction only (what the camera will see).
-
-Required keys (all strings except where noted):
+Required keys (all strings):
 {
   "productNameResolved": string,
-  "advertisingPromise": string,
   "objectA": string,
   "objectB": string,
-  "morphologicalReason": string,
-  "promiseReason": string,
-  "replacementDirection": "B_replaces_A" or "A_replaces_B",
-  "preservedBackgroundFrom": "A" or "B",
-  "shortReplacementScript": string,
-  "headlineDecision": "include_product_name" or "product_name_only" or "no_headline",
+  "objectAReason": string,
+  "objectBReason": string,
+  "interactionSummary": string,
+  "interactionScript": string,
+  "advertisingPromise": string,
+  "promiseDerivation": string,
   "headlineText": string,
-  "replacementOpeningFrameDescription": string,
-  "replacementMotionScript": string,
-  "sideBySideOpeningFrameDescription": string,
-  "sideBySideMotionScript": string,
-  "objectPairViewerClarityOk": boolean,
-  "objectPairIdentityDistinctOk": boolean,
-  "identityDistinctnessNote": string,
-  "abInteractionType": "classic" or "meaningful",
-  "discoveryInteractionSummary": string,
-  "visibleAdditionalInteractionSummary": string,
-  "visibleMotionScript": string
+  "headlineDerivation": string,
+  "language": "he" or "en"
 }
 """
 
@@ -103,88 +81,40 @@ Required keys (all strings except where noted):
 def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
-    return f"""You are the ACE video planning engine.
+    return f"""You are the ACE video planning engine (single-interaction video; no modes).
 
 LANGUAGE
-- Job: {lang_name} ({lang}), grounded in product name + product description. advertisingPromise, headlineText, shortReplacementScript, morphologicalReason, promiseReason: primarily {lang_name}. Loanwords/brands (AI, SaaS, etc.) OK.
-- objectA, objectB: short English noun phrases (classic physical objects only).
-- replacementOpeningFrameDescription, replacementMotionScript, sideBySideOpeningFrameDescription, sideBySideMotionScript: English only (no exceptions).
+- Job language: {lang_name} ({lang}). Set the "language" field to "{lang}".
+- productNameResolved, objectAReason, objectBReason, advertisingPromise, promiseDerivation, headlineText, headlineDerivation: primarily {lang_name} where natural.
+- objectA, objectB, interactionSummary, interactionScript: English only (short concrete physical labels and action description).
 
-FOUNDATION
-- The advertisingPromise must be derived only from the product name + the product description (no generic metaphor-first search).
+CORE ORDER (mandatory reasoning — server validates this order)
+1) Read product name + product description.
+2) Choose objectA from the product text only (classic, physical, clearly identifiable object; no environments as objects; no abstract nouns).
+3) Search objectB from the product text only with the same object rules.
+4) Accept objectB ONLY at the moment when a concrete physical interaction between A and B would create a real advertising promise (commercial meaning that could not exist without that interaction).
+5) Write interactionSummary (short) and interactionScript (the exact continuous action the camera will see). This is the ONLY interaction; there is no separate “discovery” or “hidden” interaction.
+6) Only after the interaction is fixed, write advertisingPromise (born from the interaction) and promiseDerivation (how the interaction creates the promise).
+7) headlineText MUST start with the exact characters: "<productNameResolved>," then up to 7 words total including the product name token(s). headlineDerivation must tie the headline to the interaction.
 
-OBJECT DISCOVERY (work strictly in this order — matches server validation)
-1) Derive advertisingPromise only from the product name + the product description.
-2) Choose objectA: objectA must be a classic, defined, physical object, visually depictable, and grounded in advertisingPromise.
-3) Discover objectB:
-   - objectB must be a classic, defined, physical object.
-   - objectB must be grounded in advertisingPromise.
-   - objectB must have a CLASSIC or MEANINGFUL discovery interaction with objectA (you label this using abInteractionType).
-   - objectB must ALSO enable a SECOND, ADDITIONAL physical interaction with objectA that:
-       * is not the classic discovery interaction,
-       * is not the meaningful discovery interaction,
-       * and is not directly derived from the advertisingPromise.
-   Stop as soon as you find such an objectB.
-
-VISIBLE INTERACTION (video content)
-- The video must show ONLY the additional interaction between objectA and objectB.
-- The discovery interaction (classic/meaningful) must NOT appear in the video.
-- The visible interaction must:
-  - be physically clear and visually understandable,
-  - feel unexpected relative to the two objects,
-  - not directly restate or illustrate the advertisingPromise.
-- The camera moves in a gentle half-orbit around the pair throughout the shot.
-
-OBJECT RULES
-- Accepted objects: physical, classic, clearly defined, visually depictable.
-- Rejected objects: abstract concepts, verbs, adjectives, sentence fragments, promise fragments, benefits/outcomes as “objects”, non-physical nouns.
-
-DISCOVERY LABEL (no mode)
-- abInteractionType is ONLY a label for the discovery interaction between objectA and objectB:
-  - "classic": familiar, inherent, canonical real-world pairing (bee and flower, straw and cup, dog and bone, key and lock).
-  - "meaningful": clear physical interaction that is not a special canonical classic pair.
-- Do NOT use abInteractionType to change the video structure; the server uses only the additional interaction you describe in the English fields.
+HARD RULES
+- Do NOT invent advertisingPromise first and then pick objects to illustrate it.
+- Do NOT output modes, branches, replacement/side-by-side plans, or secondary objects.
+- Interaction must be directly between objectA and objectB, filmable, visually obvious, not symbolic-only, and must not rely on readable text, UI, labels, logos, or brand marks in-frame.
+- interactionScript must describe one continuous shot; camera is a smooth half-orbit around the pair throughout.
 
 MEMORY (diversity only)
-- If the server lists prior advertisingPromise lines for this product, use that list only to reduce repetition and prefer unused valid solutions.
-- Memory must not introduce unrelated objects, must not override advertising-promise grounding from the product, and must not override interaction logic.
-
-CREATIVE RULES (mandatory)
-1) Derive advertisingPromise from the product name and the product description (in {lang_name} per field rules above).
-2) objectA and objectB must each be clearly connected to the advertising promise; they do not need similar shapes.
-3) Classic, defined, physical objects in classic situations only.
-4) Filter text, logos, brands, written labels, vague environments, non-physical situations.
-5) There are no secondary objects in video: plan only objectA and objectB as physical subjects.
-6) Output abInteractionType exactly as required. Output BOTH creative branches (replacement* and sideBySide*) fully.
-
-REPLACEMENT branch (English fields — used only if server selects REPLACEMENT)
-- Exactly one primary is visible on camera (per replacementDirection); the other primary must never appear. Motion describes only that visible primary and the environment implied by preservedBackgroundFrom.
-- Motion: English, concrete verbs, visually obvious cause/effect; no transformation/morph language.
-
-SIDE_BY SIDE branch (English fields — used only if server selects SIDE_BY_SIDE)
-- Opening: A and B both visible from frame 1; tight unified composition; close or slightly overlapping; same angle/scale/world; NO replacement framing.
-- Motion: clear physical A↔B interaction (viewer-instant read). Avoid abstract-only or purely symbolic motion. No morphing, swapping, disappearance, wide empty split layout, cuts, or multi-shot story.
-
-IDENTITY DISTINCTNESS
-- objectPairIdentityDistinctOk / identityDistinctnessNote: A and B must be clearly different objects, not variants of the same thing. Reject near-twin ambiguous pairs per prior rules.
+- If the server lists prior advertisingPromise lines, avoid repeating them; memory must never override object grounding or interaction logic.
 
 PROMISE DIVERSITY (persistent product memory — diversity only)
-- The advertisingPromise MUST be materially different from all prior promises the server lists for this product in this request. Do not restate speed, accuracy, security, ease, savings, or growth as the main story if that angle was already used—pick a genuinely new core idea (not wording tricks). Use this only for diversity; do not let it override product grounding or object/interaction rules.
-
-OBJECTS + SEARCH
-- Iconic primaries only. Compare multiple B candidates; never trade promise clarity for weaker interaction.
-
-PAIRING + PROMISE
-- replacementDirection: set which primary is visible when REPLACEMENT is selected (B_replaces_A vs A_replaces_B). Set preservedBackgroundFrom to the side whose world/background should read in-frame.
-
-HEADLINE (overlay metadata only—never pixels in video)
-- headlineDecision: include_product_name | product_name_only | no_headline. headlineText: ≤7 words {lang_name}. Never burn headline into videoPrompt fields.
+- advertisingPromise must still read as a fresh commercial angle vs prior lines listed for this product.
 
 TEXT-FREE VIDEO
-- No readable text in motion/opening descriptions or shortReplacementScript.
+- interactionScript must not instruct rendering readable text, captions, UI, or logos.
 
 QUALITY
-- morphologicalReason in {lang_name}. Both English branch descriptions must be concrete and policy-compliant.
+- objectAReason / objectBReason: why each object is justified from the product text.
+- promiseDerivation and headlineDerivation: substantive, not filler.
 
 """
 
@@ -528,108 +458,102 @@ def _advertising_promise_from_product(
     return False
 
 
-def _repaired_advertising_promise_for_product(
-    original: str, product_name: str, product_description: str
-) -> Tuple[str, bool]:
-    """
-    Ensure advertisingPromise passes _advertising_promise_from_product.
-    Returns (promise_text, repaired) where repaired is True iff the string was changed.
-    """
-    o = (original or "").strip()
-    if _advertising_promise_from_product(o, product_name, product_description):
-        return o, False
-    pn = (product_name or "").strip()
-    pd = (product_description or "").strip()
-    if not pn and not pd:
-        return o, False
-    parts = [x for x in (pn, pd) if x]
-    candidate = " ".join(parts).strip()[:480] or o[:480] or "Product"
-    if not _advertising_promise_from_product(candidate, product_name, product_description):
-        candidate = (f"{pn} — {pd}".strip() if (pn or pd) else candidate)[:480]
-    return candidate, True
+_VIDEO_PLAN_SCHEMA_VERSION = "single_interaction_v3"
 
 
-def _promise_augment_notebook_pen(promise: str, product_name: str) -> str:
-    """Append explicit concrete anchors so English object labels ground in the promise."""
-    pn = (product_name or "").strip()
-    base = (promise or "").strip()
-    frag = f" {pn}: notebook and pen." if pn else " Notebook and pen."
-    return (base + frag).strip()[:480]
+def _object_grounded_in_product_blob(
+    object_label: str, product_name: str, product_description: str
+) -> bool:
+    blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
+    if not blob:
+        return False
+    return _object_grounded_in_advertising_promise(object_label, blob)
 
 
-def _fallback_abc_grounding_ok(
-    promise: str, oa: str, ob: str, product_name: str, product_description: str
-) -> Tuple[bool, bool, bool, bool, bool]:
-    """Returns (pf, ga, gb, pa, pb) product-grounded promise + A/B promise-grounded + physical."""
-    pf = _advertising_promise_from_product(promise, product_name, product_description)
-    ga = _object_grounded_in_advertising_promise(oa, promise)
-    gb = _object_grounded_in_advertising_promise(ob, promise)
-    pa, _ = _object_label_is_physical_classic(oa)
-    pb, _ = _object_label_is_physical_classic(ob)
-    return pf, ga, gb, pa, pb
+def _interaction_covers_both_objects(script: str, summary: str, oa: str, ob: str) -> bool:
+    blob = f"{summary or ''} {script or ''}".strip()
+    if not blob:
+        return False
+    return _contains_object_tokens(blob, oa) and _contains_object_tokens(blob, ob)
 
 
-def _log_fallback_repair_diagnostics(
-    *,
-    original_promise: str,
-    final_promise: str,
-    original_oa: str,
-    original_ob: str,
-    final_oa: str,
-    final_ob: str,
-    promise_text_changed: bool,
-    pf: bool,
-    ga: bool,
-    gb: bool,
-    pa: bool,
-    pb: bool,
-    stale_objects_after_promise_repair: bool,
-    sbs_script_ok: bool,
-) -> None:
-    """Structured logs for salvage; callers gate acceptance on coherent package."""
-    coherent = bool(pf and ga and gb and pa and pb and sbs_script_ok)
-    logger.info("VIDEO_PLAN_FALLBACK_COHERENT_PACKAGE=%s", str(coherent).lower())
-    logger.info(
-        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_ONLY=%s",
-        str(bool(promise_text_changed and stale_objects_after_promise_repair)).lower(),
-    )
-    triple = bool(pf and ga and gb)
-    logger.info(
-        "VIDEO_PLAN_FALLBACK_REPAIRED_PROMISE_FROM_PRODUCT=%s",
-        str(bool(triple)).lower(),
-    )
-    logger.info(
-        "VIDEO_PLAN_FALLBACK_REPAIRED_OBJECT_A=%s",
-        str(
-            _normalize_object_identifier_for_compare(final_oa)
-            != _normalize_object_identifier_for_compare(original_oa)
-        ).lower(),
-    )
-    logger.info(
-        "VIDEO_PLAN_FALLBACK_REPAIRED_OBJECT_B=%s",
-        str(
-            _normalize_object_identifier_for_compare(final_ob)
-            != _normalize_object_identifier_for_compare(original_ob)
-        ).lower(),
-    )
-    full = coherent and (
-        promise_text_changed
-        or _normalize_object_identifier_for_compare(final_oa)
-        != _normalize_object_identifier_for_compare(original_oa)
-        or _normalize_object_identifier_for_compare(final_ob)
-        != _normalize_object_identifier_for_compare(original_ob)
-    )
-    logger.info("VIDEO_PLAN_FALLBACK_FULL_REPAIR=%s", str(full).lower())
+_UI_TEXT_FORBIDDEN = re.compile(
+    r"\b(ui|ux|gui|interface|app\s+screen|webpage|website|caption|subtitle|"
+    r"lower third|watermark|qr\s*code|barcode|logo|brand\s+mark|packaging\s+text|"
+    r"label\s+text|readable\s+text|on-?screen\s+text)\b",
+    re.I,
+)
 
 
-def _parse_norm_ab_interaction_type(raw: Any) -> str:
-    """Return exactly 'classic' | 'meaningful' | ''."""
-    s = str(raw or "").strip().lower()
-    if s == "classic":
-        return "classic"
-    if s == "meaningful":
-        return "meaningful"
-    return ""
+def _interaction_avoids_text_dependency(s: str) -> bool:
+    return _UI_TEXT_FORBIDDEN.search(s or "") is None
+
+
+def _promise_emergent_from_interaction(
+    apromise: str,
+    interaction_blob: str,
+    product_blob: str,
+) -> Tuple[bool, str]:
+    pt = _planning_text_tokens(apromise)
+    it = _planning_text_tokens(interaction_blob)
+    bt = _planning_text_tokens(product_blob)
+    if len(pt) < 2 or len(it) < 2:
+        return False, "planning_failed_promise_not_emergent"
+    inter = pt & it
+    if not inter:
+        return False, "planning_failed_promise_not_emergent"
+    overlap_ratio = len(inter) / float(max(1, len(pt)))
+    if overlap_ratio < 0.12 and len(inter) < 2:
+        return False, "planning_failed_promise_not_emergent"
+    prod_only = len(pt & bt) / float(max(1, len(pt)))
+    if prod_only >= 0.85 and overlap_ratio < 0.2:
+        return False, "planning_failed_promise_not_emergent"
+    return True, ""
+
+
+_GENERIC_PROMISE_SNIPPETS: FrozenSet[str] = frozenset(
+    {
+        "better results",
+        "best quality",
+        "great experience",
+        "amazing product",
+        "the future",
+        "work smarter",
+        "grow faster",
+        "unlock potential",
+    }
+)
+
+
+def _advertising_promise_seems_prewritten(apromise: str) -> bool:
+    s = (apromise or "").strip().lower()
+    if len(s) < 16:
+        return True
+    for g in _GENERIC_PROMISE_SNIPPETS:
+        if g in s:
+            return True
+    return False
+
+
+def _headline_prefix_ok(headline: str, product_resolved: str) -> bool:
+    p = (product_resolved or "").strip()
+    h = (headline or "").strip()
+    if not p or not h:
+        return False
+    return h.startswith(p + ",")
+
+
+def _headline_word_count_ok(headline: str) -> bool:
+    words = [w for w in (headline or "").strip().split() if w]
+    return len(words) <= 7
+
+
+def _headline_derived_from_interaction(headline: str, interaction_blob: str) -> bool:
+    ht = _planning_text_tokens(headline)
+    it = _planning_text_tokens(interaction_blob)
+    if not ht or not it:
+        return False
+    return bool(ht & it)
 
 
 _OBJECT_LABEL_MAX_CHARS = 48
@@ -1004,40 +928,6 @@ def _score_replacement_interaction_strength(
     return int(max(0, min(100, score)))
 
 
-def _pair_retry_key(oa: str, ob: str) -> str:
-    a = _normalize_object_identifier_for_compare(oa)
-    b = _normalize_object_identifier_for_compare(ob)
-    return "|".join(sorted((a, b)))
-
-
-def _pair_is_too_similar_to_rejected(
-    oa: str, ob: str, rejected_pairs: Set[str]
-) -> Tuple[bool, str, str]:
-    """
-    Reject exact/near-identical conceptual pairs across retries to avoid looped weak candidates.
-    Returns (too_similar, reason, prior_pair) where prior_pair is the rejected key that triggered the block, else "".
-    """
-    key = _pair_retry_key(oa, ob)
-    if key in rejected_pairs:
-        return True, "exact_pair_repeat", key
-    cur_tokens = set(key.replace("|", " ").split())
-    weak_cur = cur_tokens & _SBS_WEAK_FAMILY_RETRY_TOKENS
-    for prev in rejected_pairs:
-        prev_tokens = set(prev.replace("|", " ").split())
-        if weak_cur and (weak_cur & prev_tokens):
-            return True, "weak_sbs_family_token_overlap", prev
-    if not cur_tokens:
-        return False, "", ""
-    for prev in rejected_pairs:
-        prev_tokens = set(prev.replace("|", " ").split())
-        if not prev_tokens:
-            continue
-        overlap = len(cur_tokens & prev_tokens) / float(max(1, len(cur_tokens | prev_tokens)))
-        if overlap >= 0.55:
-            return True, "near_identical_family_repeat", prev
-    return False, "", ""
-
-
 def _side_by_side_motion_is_meaningful(script: str, object_a: str, object_b: str) -> bool:
     """
     SIDE_BY_SIDE: clear physical A↔B interaction (does not need to quote the advertisingPromise).
@@ -1157,8 +1047,8 @@ _SBS_HALF_ORBIT_PLAN_DESCRIPTION = (
 )
 
 _SBS_HALF_ORBIT_RUNWAY_APPEND = (
-    " MANDATORY CAMERA (SIDE_BY_SIDE — NOT OPTIONAL): The two primaries are side by side as ONE paired composition. "
-    "The camera MUST perform a smooth half-orbit—a controlled half-circle path around that pair—so the viewer sees the pairing "
+    " MANDATORY CAMERA (NOT OPTIONAL): The two physical objects form one paired composition in frame. "
+    "The camera MUST perform a smooth half-orbit—a controlled half-circle path around that pair—so the viewer sees the interaction "
     "from continuously changing angles across the entire shot (calm advertising reveal in 3D). "
     "FORBIDDEN: static camera; nearly static camera; relying only on micro-flicker or tiny object motion without this orbit; "
     "dramatic fast moves; chaotic spin; full 360; handheld shaky cam; losing either object out of frame; cuts; scene changes. "
@@ -1167,18 +1057,10 @@ _SBS_HALF_ORBIT_RUNWAY_APPEND = (
 )
 
 
-def _runway_side_by_side_half_orbit_preamble() -> str:
-    """Opening clause for Runway SIDE_BY_SIDE scene text."""
-    return (
-        "MANDATORY: one continuous shot—the camera executes a smooth half-orbit (half-circle) around the paired side-by-side composition "
-        "so the view angle changes continuously; not a locked-off still. "
-    )
-
-
 def _runway_side_by_side_interaction_half_orbit_focus() -> str:
-    """Motion paragraph for start-frame / interaction SIDE_BY_SIDE prompts."""
+    """Mandatory half-orbit camera around the two-object composition (ACE single interaction)."""
     return (
-        "MANDATORY: video motion is a smooth half-orbit (half-circle camera path) around the two side-by-side subjects as one pair—"
+        "MANDATORY: the camera performs a smooth half-orbit (half-circle path) around the two physical objects as one composition—"
         "continuously changing viewing angle; both stay fully in frame and readable. "
         "Tiny subject motion is optional minor motion only; do not substitute it for the orbit. "
         "No static camera, no morph, no swap, no cuts. "
@@ -1242,18 +1124,24 @@ def _fuzzy_headline_decision_raw(raw: Any) -> str:
 
 
 def _norm_video_visual_mode(raw: Any) -> Optional[str]:
-    """REPLACEMENT | SIDE_BY_SIDE, or None if invalid."""
+    """Legacy REPLACEMENT | SIDE_BY_SIDE, or ACE_SINGLE_INTERACTION; None if invalid."""
     s = re.sub(r"\s+", "_", str(raw or "").strip().lower())
     s = s.replace("-", "_")
     if s in ("replacement", "replace"):
         return "REPLACEMENT"
     if s in ("side_by_side", "sidebyside", "side_by_side_mode", "sxs"):
         return "SIDE_BY_SIDE"
+    if s in ("ace_single_interaction", "ace_single"):
+        return "ACE_SINGLE_INTERACTION"
     return None
 
 
 def _is_side_by_side_plan(plan: Dict[str, Any]) -> bool:
-    return _norm_video_visual_mode(plan.get("videoVisualMode")) == "SIDE_BY_SIDE"
+    """True when both primaries are visible together (v3 single interaction or legacy SIDE_BY_SIDE)."""
+    vm = _norm_video_visual_mode(plan.get("videoVisualMode"))
+    if vm == "ACE_SINGLE_INTERACTION":
+        return True
+    return vm == "SIDE_BY_SIDE"
 
 
 # snake_case / alternate keys from some models → camelCase
@@ -1262,25 +1150,18 @@ _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("advertising_promise", "advertisingPromise"),
     ("object_a", "objectA"),
     ("object_b", "objectB"),
-    ("morphological_reason", "morphologicalReason"),
-    ("promise_reason", "promiseReason"),
-    ("replacement_direction", "replacementDirection"),
-    ("preserved_background_from", "preservedBackgroundFrom"),
-    ("short_replacement_script", "shortReplacementScript"),
-    ("headline_decision", "headlineDecision"),
+    ("object_a_reason", "objectAReason"),
+    ("object_b_reason", "objectBReason"),
+    ("interaction_summary", "interactionSummary"),
+    ("interaction_script", "interactionScript"),
+    ("promise_derivation", "promiseDerivation"),
     ("headline_text", "headlineText"),
+    ("headline_derivation", "headlineDerivation"),
     ("video_prompt_core", "videoPromptCore"),
     ("replacement_opening_frame_description", "replacementOpeningFrameDescription"),
     ("replacement_motion_script", "replacementMotionScript"),
     ("side_by_side_opening_frame_description", "sideBySideOpeningFrameDescription"),
     ("side_by_side_motion_script", "sideBySideMotionScript"),
-    ("object_pair_viewer_clarity_ok", "objectPairViewerClarityOk"),
-    ("object_pair_identity_distinct_ok", "objectPairIdentityDistinctOk"),
-    ("identity_distinctness_note", "identityDistinctnessNote"),
-    ("ab_interaction_type", "abInteractionType"),
-    ("shape_alignment", "shapeAlignment"),
-    ("side_by_side_camera_motion", "sideBySideCameraMotion"),
-    ("side_by_side_camera_motion_description", "sideBySideCameraMotionDescription"),
 )
 
 
@@ -1304,405 +1185,186 @@ def validate_and_normalize_plan(
     product_description: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Final ACE video engine validator (no MODE / REPLACEMENT / SIDE_BY_SIDE).
-    Returns (plan, None) or (None, reason_code) for logging.
-
-    Failure reasons (non-exhaustive):
-    - missing_replacementMotionScript | missing_sideBySideMotionScript
-    - missing_replacementOpeningFrameDescription | missing_sideBySideOpeningFrameDescription
-    - missing_advertisingPromise | missing_objectA_or_B
-    - object_pair_weak_identity | object_pair_viewer_clarity_not_affirmed | identity_too_close
-    - non_physical_object | advertising_promise_not_from_product
-    - object_a_not_grounded_in_promise | object_b_not_grounded_in_promise
-    - invalid_ab_interaction_type
-    - no_additional_interaction | visible_interaction_overlaps_promise
+    ACE video engine v3: one physical A↔B interaction; promise and headline must follow the interaction.
+    Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
     if not data:
-        return None, "missing_replacementMotionScript"
+        return None, "planning_failed_invalid_objects"
 
     data = _coerce_plan_keys(data)
 
-    # Visible interaction script (single additional interaction; REPLACEMENT branch kept only for compatibility).
-    rms = (data.get("replacementMotionScript") or "").strip()
-    sbs_ms = (data.get("sideBySideMotionScript") or "").strip()
-    legacy_core = (data.get("videoPromptCore") or "").strip()
-    if not rms and legacy_core:
-        rms = legacy_core
-    rep_open = (data.get("replacementOpeningFrameDescription") or "").strip()
-    sbs_open = (data.get("sideBySideOpeningFrameDescription") or "").strip()
-    if not rms:
-        return None, "missing_replacementMotionScript"
-    if not sbs_ms:
-        return None, "missing_sideBySideMotionScript"
-    if not rep_open:
-        return None, "missing_replacementOpeningFrameDescription"
-    if not sbs_open:
-        return None, "missing_sideBySideOpeningFrameDescription"
+    logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
 
-    # Discovery vs visible interaction separation.
-    disc_summary = (data.get("discoveryInteractionSummary") or "").strip()
-    vis_summary = (data.get("visibleAdditionalInteractionSummary") or "").strip()
-    vis_motion = (data.get("visibleMotionScript") or "").strip()
-    if not vis_summary or not vis_motion:
-        logger.info('VIDEO_PLAN_DISCOVERY_INTERACTION_SUMMARY="%s"', disc_summary[:260])
-        logger.info('VIDEO_PLAN_VISIBLE_INTERACTION_SUMMARY="%s"', vis_summary[:260])
-        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_DISTINCT_FROM_DISCOVERY=false")
-        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_CLASSIC=false")
-        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_MEANINGFUL=false")
-        logger.info("VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_PROMISE=false")
-        logger.info("VIDEO_PLAN_REJECT_REASON=visible_interaction_missing")
-        return None, "visible_interaction_missing"
-
-    # advertisingPromise from model; if omitted, allow promiseReason (same model output) as fallback
-    apromise = (data.get("advertisingPromise") or "").strip()
-    if not apromise:
-        apromise = (data.get("promiseReason") or "").strip()
-    if not apromise:
-        return None, "missing_advertisingPromise"
-
-    if not _advertising_promise_from_product(apromise, product_name, product_description):
-        logger.info("VIDEO_PLAN_PROMISE_FROM_PRODUCT=false")
-        logger.info("VIDEO_PLAN_REJECT_REASON=advertising_promise_not_from_product")
-        return None, "advertising_promise_not_from_product"
-    logger.info("VIDEO_PLAN_PROMISE_FROM_PRODUCT=true")
-
+    pn = (data.get("productNameResolved") or "").strip()
     oa = (data.get("objectA") or "").strip()
     ob = (data.get("objectB") or "").strip()
-    if not oa or not ob:
-        return None, "missing_objectA_or_B"
+    oa_r = (data.get("objectAReason") or "").strip()
+    ob_r = (data.get("objectBReason") or "").strip()
+    int_sum = (data.get("interactionSummary") or "").strip()
+    int_script = (data.get("interactionScript") or "").strip()
+    apromise = (data.get("advertisingPromise") or "").strip()
+    pderiv = (data.get("promiseDerivation") or "").strip()
+    headline = (data.get("headlineText") or "").strip()
+    hderiv = (data.get("headlineDerivation") or "").strip()
+    lang_raw = str(data.get("language") or "").strip().lower()
+
+    if not pn or not oa or not ob or not oa_r or not ob_r:
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
+        return None, "planning_failed_invalid_objects"
+    if not int_sum or not int_script:
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
+        return None, "planning_failed_no_valid_interaction"
+    if not apromise or not pderiv:
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_promise_not_emergent")
+        return None, "planning_failed_promise_not_emergent"
+    if not headline or not hderiv:
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
+        return None, "planning_failed_headline_invalid"
+    if lang_raw not in ("he", "en"):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
+        return None, "planning_failed_invalid_objects"
+
+    if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
+        logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
+        raise VideoPlanningTimeoutError()
 
     if _object_pair_fails_weak_identity_heuristic(oa, ob):
-        logger.info("VIDEO_PLAN_OBJECT_CLARITY_OK=false")
-        return None, "object_pair_weak_identity"
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
+        return None, "planning_failed_invalid_objects"
 
     oa_phys, _ = _object_label_is_physical_classic(oa)
     ob_phys, _ = _object_label_is_physical_classic(ob)
-    logger.info("VIDEO_PLAN_OBJECT_A_PHYSICAL=%s", str(oa_phys).lower())
-    logger.info("VIDEO_PLAN_OBJECT_B_PHYSICAL=%s", str(ob_phys).lower())
     q_ok, bad_field, bad_val = _validate_object_pair_physical(oa, ob)
-    if not q_ok:
-        safe_val = (bad_val or "").replace('"', "'")[:200]
-        logger.info('VIDEO_PLAN_REJECT_BAD_OBJECT field=%s value="%s"', bad_field, safe_val)
-        logger.info("VIDEO_PLAN_REJECT_REASON=non_physical_object")
-        return None, "non_physical_object"
+    if not (oa_phys and ob_phys and q_ok):
+        logger.info('VIDEO_PLAN_REJECT_BAD_OBJECT field=%s value="%s"', bad_field, (bad_val or "")[:120])
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
+        return None, "planning_failed_invalid_objects"
 
-    logger.info(
-        "VIDEO_PLAN_OBJECTS_PHYSICAL=%s",
-        str(oa_phys and ob_phys).lower(),
+    if not _object_grounded_in_product_blob(oa, product_name, product_description):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
+        return None, "planning_failed_invalid_objects"
+    if not _object_grounded_in_product_blob(ob, product_name, product_description):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
+        return None, "planning_failed_invalid_objects"
+
+    if not _interaction_covers_both_objects(int_script, int_sum, oa, ob):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
+        return None, "planning_failed_no_valid_interaction"
+    if not _side_by_side_motion_is_meaningful(f"{int_sum} {int_script}", oa, ob):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
+        return None, "planning_failed_no_valid_interaction"
+    if not _interaction_avoids_text_dependency(int_script):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
+        return None, "planning_failed_no_valid_interaction"
+
+    product_blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
+    if not _advertising_promise_from_product(apromise, product_name, product_description):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_promise_not_emergent")
+        return None, "planning_failed_promise_not_emergent"
+    if _advertising_promise_seems_prewritten(apromise):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_promise_not_emergent")
+        return None, "planning_failed_promise_not_emergent"
+
+    emergent_ok, emergent_reason = _promise_emergent_from_interaction(
+        apromise, f"{int_sum} {int_script}", product_blob
     )
+    logger.info("VIDEO_PLAN_PROMISE_EMERGENT=%s", str(emergent_ok).lower())
+    if not emergent_ok:
+        logger.info("VIDEO_PLAN_REJECT_REASON=%s", emergent_reason)
+        return None, emergent_reason
 
-    pn = (data.get("productNameResolved") or "").strip() or "Product"
+    if not _headline_prefix_ok(headline, pn):
+        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=false")
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
+        return None, "planning_failed_headline_invalid"
+    if not _headline_word_count_ok(headline):
+        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
+        return None, "planning_failed_headline_invalid"
+    if not _headline_derived_from_interaction(headline, f"{int_sum} {int_script}"):
+        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
+        return None, "planning_failed_headline_invalid"
+    logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
 
-    hd_cand = _fuzzy_headline_decision_raw(data.get("headlineDecision"))
-    if hd_cand not in ("include_product_name", "product_name_only", "no_headline"):
-        hd_cand = str(data.get("headlineDecision") or "").strip()
-    headline_decision = _norm_enum(
-        hd_cand,
-        ["include_product_name", "product_name_only", "no_headline"],
-        "no_headline",
+    opening_fd = (
+        f"Single continuous shot: {oa} and {ob} are both visible together in one stable composition; "
+        "the camera performs a smooth half-orbit around the pair."
     )
-    raw_headline = (data.get("headlineText") or "").strip()
-    if headline_decision == "no_headline":
-        headline_text = ""
-    else:
-        headline_text = _word_limit(raw_headline, 7)
+    core = f"{int_script}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
 
-    # Legacy fields kept for downstream compatibility (not used for mode decisions).
-    repl_raw = data.get("replacementDirection")
-    repl_fuzz = _fuzzy_replacement_direction(repl_raw)
-    repl = repl_fuzz if repl_fuzz in ("B_replaces_A", "A_replaces_B") else _norm_enum(
-        repl_raw, ["B_replaces_A", "A_replaces_B"], "A_replaces_B"
-    )
-
-    bg = _norm_ab_side(data.get("preservedBackgroundFrom"), "A")
-
-    clarity_raw = data.get("objectPairViewerClarityOk")
-    if _parse_viewer_clarity_ok(clarity_raw) is not True:
-        logger.info("VIDEO_PLAN_OBJECT_CLARITY_OK=false")
-        return None, "object_pair_viewer_clarity_not_affirmed"
-
-    logger.info("VIDEO_PLAN_OBJECT_CLARITY_OK=true")
-
-    id_note_raw = (data.get("identityDistinctnessNote") or "").strip()
-    if _object_pair_identity_too_close_heuristic(oa, ob):
-        logger.info("VIDEO_PLAN_IDENTITY_DISTINCTNESS_OK=false")
-        logger.info(
-            'VIDEO_PLAN_IDENTITY_DISTINCTNESS_NOTE="%s"',
-            "server_near_twin_pair",
-        )
-        logger.info("VIDEO_PLAN_REJECT_REASON=identity_too_close")
-        return None, "identity_too_close"
-
-    id_distinct_raw = data.get("objectPairIdentityDistinctOk")
-    if _parse_viewer_clarity_ok(id_distinct_raw) is not True:
-        logger.info("VIDEO_PLAN_IDENTITY_DISTINCTNESS_OK=false")
-        logger.info(
-            'VIDEO_PLAN_IDENTITY_DISTINCTNESS_NOTE="%s"',
-            (id_note_raw or "objectPairIdentityDistinctOk_not_true")[:300],
-        )
-        logger.info("VIDEO_PLAN_REJECT_REASON=identity_too_close")
-        return None, "identity_too_close"
-
-    logger.info("VIDEO_PLAN_IDENTITY_DISTINCTNESS_OK=true")
-    logger.info(
-        'VIDEO_PLAN_IDENTITY_DISTINCTNESS_NOTE="%s"',
-        (id_note_raw or "")[:300],
-    )
-
-    ga = _object_grounded_in_advertising_promise(oa, apromise)
-    gb = _object_grounded_in_advertising_promise(ob, apromise)
-    logger.info("VIDEO_PLAN_OBJECT_A_PROMISE_GROUNDED=%s", str(ga).lower())
-    logger.info("VIDEO_PLAN_OBJECT_B_PROMISE_GROUNDED=%s", str(gb).lower())
-    if not ga:
-        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=false")
-        logger.info("VIDEO_PLAN_OBJECT_B_FOUND=%s", str(gb).lower())
-        logger.info("VIDEO_PLAN_REJECT_REASON=object_a_not_grounded_in_promise")
-        return None, "object_a_not_grounded_in_promise"
-    if not gb:
-        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
-        logger.info("VIDEO_PLAN_OBJECT_B_FOUND=false")
-        logger.info("VIDEO_PLAN_REJECT_REASON=object_b_not_grounded_in_promise")
-        return None, "object_b_not_grounded_in_promise"
-
-    logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
-    logger.info("VIDEO_PLAN_OBJECT_B_FOUND=true")
-
-    logger.info(
-        "VIDEO_OBJECT_SELECTION_SOURCE objectA=%s objectB=%s based_on=advertisingPromise",
-        oa,
-        ob,
-    )
-
-    if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
-        logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=pre_mode_decision")
-        raise VideoPlanningTimeoutError()
-
-    logger.info("VIDEO_PLANNING_FAST_PATH_USED=true")
-
-    # Discovery interaction type (classic | meaningful) – reasoning label only, no mode.
-    interaction_type = _parse_norm_ab_interaction_type(data.get("abInteractionType"))
-    if interaction_type not in ("classic", "meaningful"):
-        logger.info("VIDEO_PLAN_INTERACTION_TYPE=invalid")
-        logger.info("VIDEO_PLAN_REJECT_REASON=invalid_ab_interaction_type")
-        return None, "invalid_ab_interaction_type"
-    logger.info("VIDEO_PLAN_INTERACTION_TYPE=%s", interaction_type)
-    logger.info("VIDEO_PLAN_DISCOVERY_INTERACTION=%s", interaction_type)
-    logger.info('VIDEO_PLAN_DISCOVERY_INTERACTION_SUMMARY="%s"', disc_summary[:260])
-
-    # Additional visible interaction: must be clear, physical, and not directly express the promise
-    # or collapse back into the discovery interaction.
-    def _visible_additional_interaction_ok(
-        opening: str,
-        motion: str,
-        oa_label: str,
-        ob_label: str,
-        promise: str,
-        discovery_text: str,
-        discovery_type: str,
-    ) -> Tuple[bool, str, Dict[str, bool]]:
-        txt = f"{opening or ''} {motion or ''}".strip()
-        if not txt:
-            return False, "no_additional_interaction", {
-                "leaks_classic": False,
-                "leaks_meaningful": False,
-                "leaks_promise": False,
-                "distinct_from_discovery": False,
-            }
-        low = txt.lower()
-        if not _contains_object_tokens(txt, oa_label) or not _contains_object_tokens(txt, ob_label):
-            return False, "no_additional_interaction", {
-                "leaks_classic": False,
-                "leaks_meaningful": False,
-                "leaks_promise": False,
-                "distinct_from_discovery": False,
-            }
-        # Basic physicality: reuse SIDE_BY_SIDE meaningfulness heuristic as a proxy for readable physical action.
-        if not _side_by_side_motion_is_meaningful(txt, oa_label, ob_label):
-            return False, "no_additional_interaction", {
-                "leaks_classic": False,
-                "leaks_meaningful": False,
-                "leaks_promise": False,
-                "distinct_from_discovery": False,
-            }
-
-        # Independence from discovery interaction summary: disallow near-equivalence.
-        leaks_classic = False
-        leaks_meaningful = False
-        disc = (discovery_text or "").strip().lower()
-        if disc:
-            dtoks = _planning_text_tokens(disc)
-            vtoks = _planning_text_tokens(low)
-            if dtoks and vtoks:
-                overlap_d = len(dtoks & vtoks) / float(max(1, len(dtoks | vtoks)))
-                if overlap_d >= 0.5:
-                    if discovery_type == "classic":
-                        leaks_classic = True
-                    else:
-                        leaks_meaningful = True
-
-        # Canonical leakage for known classic pairs (e.g. pen+notebook writing).
-        leaks_canonical = False
-        if discovery_type == "classic":
-            a_head = _classic_interaction_head_token(oa_label)
-            b_head = _classic_interaction_head_token(ob_label)
-            pair = frozenset((a_head, b_head))
-            # Simple heuristics for a few canonical pairs; extend conservatively.
-            if pair == frozenset({"pen", "notebook"}):
-                if any(w in low for w in ("write", "writes", "writing", "note", "notes")):
-                    leaks_canonical = True
-            elif pair == frozenset({"bee", "flower"}):
-                if any(w in low for w in ("nectar", "pollen", "land", "landing", "drink", "drinks", "drinking")):
-                    leaks_canonical = True
-            elif pair == frozenset({"straw", "cup"}):
-                if any(w in low for w in ("sip", "sips", "sipping", "drink", "drinks", "drinking")):
-                    leaks_canonical = True
-
-        # Independence from advertising promise: disallow strong token overlap.
-        leaks_promise = False
-        p = (promise or "").strip().lower()
-        if p:
-            ptoks = _planning_text_tokens(p)
-            vtoks = _planning_text_tokens(low)
-            if ptoks and vtoks:
-                overlap = len(ptoks & vtoks) / float(max(1, len(ptoks | vtoks)))
-                if overlap >= 0.5:
-                    leaks_promise = True
-
-        distinct = not (leaks_classic or leaks_meaningful or leaks_canonical or leaks_promise)
-        if leaks_promise:
-            return False, "visible_interaction_not_distinct", {
-                "leaks_classic": leaks_classic or leaks_canonical,
-                "leaks_meaningful": leaks_meaningful,
-                "leaks_promise": True,
-                "distinct_from_discovery": distinct,
-            }
-        if leaks_classic or leaks_meaningful or leaks_canonical:
-            return False, "visible_interaction_matches_discovery", {
-                "leaks_classic": leaks_classic or leaks_canonical,
-                "leaks_meaningful": leaks_meaningful,
-                "leaks_promise": leaks_promise,
-                "distinct_from_discovery": distinct,
-            }
-        return True, "", {
-            "leaks_classic": False,
-            "leaks_meaningful": False,
-            "leaks_promise": False,
-            "distinct_from_discovery": True,
-        }
-
-    visible_ok, v_reason, leak_flags = _visible_additional_interaction_ok(
-        vis_summary,
-        vis_motion,
-        oa,
-        ob,
-        apromise,
-        disc_summary,
-        interaction_type,
-    )
-    logger.info(
-        "VIDEO_PLAN_HAS_ADDITIONAL_INTERACTION=%s",
-        str(visible_ok).lower(),
-    )
-    logger.info(
-        "VIDEO_PLAN_VISIBLE_INTERACTION_VALID=%s",
-        str(visible_ok).lower(),
-    )
-    logger.info(
-        'VIDEO_PLAN_VISIBLE_INTERACTION_SUMMARY="%s"',
-        vis_summary[:260],
-    )
-    logger.info(
-        "VIDEO_PLAN_VISIBLE_INTERACTION_DISTINCT_FROM_DISCOVERY=%s",
-        str(leak_flags.get("distinct_from_discovery", False)).lower(),
-    )
-    logger.info(
-        "VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_CLASSIC=%s",
-        str(leak_flags.get("leaks_classic", False)).lower(),
-    )
-    logger.info(
-        "VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_MEANINGFUL=%s",
-        str(leak_flags.get("leaks_meaningful", False)).lower(),
-    )
-    logger.info(
-        "VIDEO_PLAN_VISIBLE_INTERACTION_LEAKS_PROMISE=%s",
-        str(leak_flags.get("leaks_promise", False)).lower(),
-    )
-    if not visible_ok:
-        reason = v_reason or "visible_interaction_not_distinct"
-        logger.info("VIDEO_PLAN_REJECT_REASON=%s", reason)
-        return None, reason
-
-    # Single canonical additional-interaction script; keep legacy fields for downstream.
-    core = f"{vis_motion}{_SBS_HALF_ORBIT_RUNWAY_APPEND}".strip()
-    opening_fd = sbs_open
-    silhouette_similarity = 0.0
-    shape_alignment = ""
-    side_by_side_camera_motion = _SBS_HALF_ORBIT_CAMERA
-    side_by_side_camera_motion_description = _SBS_HALF_ORBIT_PLAN_DESCRIPTION
+    logger.info('VIDEO_PLAN_INTERACTION_SUMMARY="%s"', int_sum[:260])
+    logger.info('VIDEO_PLAN_PROMISE="%s"', apromise[:260])
+    logger.info('VIDEO_PLAN_HEADLINE="%s"', headline[:200])
 
     return {
         "productNameResolved": pn,
-        "advertisingPromise": apromise,
         "objectA": oa,
         "objectB": ob,
-        "morphologicalReason": (data.get("morphologicalReason") or "").strip(),
-        "promiseReason": (data.get("promiseReason") or "").strip(),
-        "replacementDirection": repl,
-        "preservedBackgroundFrom": bg,
-        "shortReplacementScript": (data.get("shortReplacementScript") or "").strip(),
-        "headlineDecision": headline_decision,
-        "headlineText": headline_text,
-        "replacementOpeningFrameDescription": rep_open,
-        "replacementMotionScript": rms,
-        "sideBySideOpeningFrameDescription": sbs_open,
-        "sideBySideMotionScript": sbs_ms,
+        "objectAReason": oa_r,
+        "objectBReason": ob_r,
+        "interactionSummary": int_sum,
+        "interactionScript": int_script,
+        "advertisingPromise": apromise,
+        "promiseDerivation": pderiv,
+        "headlineText": headline,
+        "headlineDerivation": hderiv,
+        "language": lang_raw,
+        "headlineDecision": "include_product_name",
+        "replacementDirection": "A_replaces_B",
+        "preservedBackgroundFrom": "A",
+        "shortReplacementScript": "",
+        "replacementOpeningFrameDescription": "",
+        "replacementMotionScript": int_script,
+        "sideBySideOpeningFrameDescription": opening_fd,
+        "sideBySideMotionScript": int_script,
         "videoPromptCore": core,
         "openingFrameDescription": opening_fd,
-        # Visual mode fields kept for transport compatibility only (no mode logic).
-        "videoVisualMode": "SIDE_BY_SIDE",
-        "chosenMode": "SIDE_BY_SIDE",
-        "silhouetteSimilarity": silhouette_similarity,
-        "interactionScore": float(silhouette_similarity),
-        "shapeAlignment": shape_alignment,
-        "sideBySideCameraMotion": side_by_side_camera_motion,
-        "sideBySideCameraMotionDescription": side_by_side_camera_motion_description,
-        "abInteractionType": interaction_type,
+        "videoVisualMode": "ACE_SINGLE_INTERACTION",
+        "chosenMode": "ACE_SINGLE_INTERACTION",
+        "silhouetteSimilarity": 0.0,
+        "interactionScore": 0.0,
+        "shapeAlignment": "",
+        "sideBySideCameraMotion": _SBS_HALF_ORBIT_CAMERA,
+        "sideBySideCameraMotionDescription": _SBS_HALF_ORBIT_PLAN_DESCRIPTION,
     }, None
 
 
 def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     """
-    Hard gate before Runway: validated plan dict must include all ACE video structural fields
-    and a non-empty end headline (video jobs always use ffmpeg overlay copy).
+    Hard gate before Runway: v3 single-interaction plan + headline overlay fields.
     Returns (ok, reason_code) with reason_code for logs only when ok is False.
     """
     if not plan:
         return False, "no_plan"
+    pn = (plan.get("productNameResolved") or "").strip()
+    if not pn:
+        return False, "planning_failed_invalid_objects"
+    if not (plan.get("objectA") or "").strip() or not (plan.get("objectB") or "").strip():
+        return False, "planning_failed_invalid_objects"
+    if not (plan.get("interactionScript") or "").strip():
+        return False, "planning_failed_no_valid_interaction"
+    if not (plan.get("videoPromptCore") or "").strip():
+        return False, "planning_failed_no_valid_interaction"
     if not (plan.get("advertisingPromise") or "").strip():
-        return False, "missing_advertisingPromise"
-    if not (plan.get("objectA") or "").strip():
-        return False, "missing_objectA"
-    if not (plan.get("objectB") or "").strip():
-        return False, "missing_objectB"
-    rd = (plan.get("replacementDirection") or "").strip()
-    if rd not in ("B_replaces_A", "A_replaces_B"):
-        return False, "invalid_replacementDirection"
+        return False, "planning_failed_promise_not_emergent"
+    if not (plan.get("promiseDerivation") or "").strip():
+        return False, "planning_failed_promise_not_emergent"
     hd = (plan.get("headlineDecision") or "").strip()
     if hd not in ("include_product_name", "product_name_only", "no_headline"):
-        return False, "invalid_headlineDecision"
+        return False, "planning_failed_headline_invalid"
     if hd == "no_headline":
-        return False, "headlineDecision_no_headline_forbidden_for_video"
-    if not (plan.get("headlineText") or "").strip():
-        return False, "missing_headlineText"
-    if not (plan.get("videoPromptCore") or "").strip():
-        return False, "missing_videoPromptCore"
-    if plan.get("silhouetteSimilarity") is None:
-        return False, "missing_silhouetteSimilarity"
-    if (plan.get("abInteractionType") or "").strip() not in ("classic", "meaningful"):
-        return False, "missing_or_invalid_abInteractionType"
+        return False, "planning_failed_headline_invalid"
+    ht = (plan.get("headlineText") or "").strip()
+    if not ht:
+        return False, "planning_failed_headline_invalid"
+    if not _headline_prefix_ok(ht, pn):
+        return False, "planning_failed_headline_invalid"
+    if not _headline_word_count_ok(ht):
+        return False, "planning_failed_headline_invalid"
     vm = _norm_video_visual_mode(plan.get("videoVisualMode"))
-    if vm is None:
-        return False, "missing_or_invalid_videoVisualMode"
+    if vm != "ACE_SINGLE_INTERACTION":
+        return False, "planning_failed_invalid_objects"
     return True, ""
 
 
@@ -1713,10 +1375,15 @@ def _object_pair_digest(oa: str, ob: str) -> str:
 
 
 def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
-    """Structured A/B + promise + headline fields for every validated plan (video job trace)."""
+    """Structured A/B + interaction + promise + headline fields for every validated plan (video job trace)."""
+    logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
     logger.info(
         'VIDEO_PLAN_INTEGRITY advertisingPromise="%s"',
         (plan.get("advertisingPromise") or "")[:260],
+    )
+    logger.info(
+        'VIDEO_PLAN_INTEGRITY interactionSummary="%s"',
+        (plan.get("interactionSummary") or "")[:260],
     )
     logger.info(
         'VIDEO_PLAN_INTEGRITY objectA="%s" objectB="%s"',
@@ -1741,706 +1408,24 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
         (plan.get("productNameResolved") or "")[:120],
     )
     logger.info(
-        "VIDEO_PLAN_SUMMARY objectA=%s objectB=%s abInteractionType=%s",
+        "VIDEO_PLAN_SUMMARY objectA=%s objectB=%s language=%s",
         plan.get("objectA"),
         plan.get("objectB"),
-        plan.get("abInteractionType"),
+        plan.get("language"),
+    )
+    logger.info(
+        'VIDEO_PLAN_INTERACTION_SUMMARY="%s"',
+        (plan.get("interactionSummary") or "")[:260],
     )
     logger.info(
         "VIDEO_PLAN pair_digest=%s",
         _object_pair_digest(str(plan.get("objectA") or ""), str(plan.get("objectB") or "")),
-    )
-    logger.info(
-        'VIDEO_PLAN morphologicalReason_preview="%s"',
-        (plan.get("morphologicalReason") or "")[:200],
     )
 
 
 def _reasoning_effort() -> str:
     raw = (os.environ.get("VIDEO_PLANNER_REASONING_EFFORT") or "low").strip().lower()
     return raw if raw in ("low", "medium") else "low"
-
-
-_VIDEO_PLAN_RETRY_INTERACTION_MAX = int(
-    (os.environ.get("VIDEO_PLAN_RETRY_INTERACTION_MAX") or "2").strip() or "2"
-)
-
-# When remaining wall-clock budget drops below this, skip further model retries and emit a conservative plan.
-_VIDEO_PLAN_EMERGENCY_REMAINING_S = float(
-    (os.environ.get("VIDEO_PLANNER_EMERGENCY_REMAINING_S") or "35").strip() or "35"
-)
-
-# Tokens that often produced low-silhouette / weak-interaction SIDE_BY_SIDE loops; block reuse after rejection.
-_SBS_WEAK_FAMILY_RETRY_TOKENS: FrozenSet[str] = frozenset(
-    {
-        "megaphone",
-        "bullhorn",
-        "loudspeaker",
-        "rocket",
-        "missile",
-        "horn",
-    }
-)
-
-_EMERGENCY_TEXT_STOPWORDS: FrozenSet[str] = frozenset(
-    {
-        "the",
-        "and",
-        "for",
-        "are",
-        "but",
-        "not",
-        "you",
-        "all",
-        "can",
-        "our",
-        "out",
-        "get",
-        "has",
-        "how",
-        "its",
-        "may",
-        "new",
-        "now",
-        "old",
-        "see",
-        "two",
-        "way",
-        "who",
-        "did",
-        "let",
-        "put",
-        "say",
-        "she",
-        "too",
-        "use",
-        "that",
-        "this",
-        "with",
-        "from",
-        "your",
-        "will",
-        "have",
-        "been",
-        "into",
-        "more",
-        "than",
-        "what",
-        "when",
-        "which",
-        "their",
-        "there",
-        "these",
-        "those",
-        "each",
-        "also",
-        "only",
-        "very",
-        "just",
-        "even",
-        "such",
-        "same",
-        "over",
-        "most",
-        "other",
-        "some",
-        "about",
-        "after",
-        "before",
-        "under",
-        "above",
-        "between",
-        "through",
-        "during",
-        "while",
-        "where",
-        "here",
-        "idea",
-        "time",
-        "life",
-        "work",
-        "best",
-        "next",
-        "first",
-        "last",
-        "help",
-        "need",
-        "make",
-        "made",
-        "take",
-        "come",
-        "give",
-        "gives",
-        "really",
-        "true",
-        "full",
-        "high",
-        "low",
-        "wide",
-        "deep",
-        "long",
-        "short",
-        "team",
-        "user",
-        "data",
-        "flow",
-        "sales",
-        "cloud",
-        "tool",
-        "saas",
-        "product",
-        "service",
-        "digital",
-        "business",
-        "system",
-        "solution",
-        "experience",
-        "customer",
-        "value",
-        "growth",
-        "speed",
-    }
-)
-
-# Undirected canonical token pairs for classic-interaction-first fallback search (head tokens).
-_CLASSIC_INTERACTION_TOKEN_PAIRS: FrozenSet[FrozenSet[str]] = frozenset(
-    {
-        frozenset({"bee", "flower"}),
-        frozenset({"dog", "bone"}),
-        frozenset({"cat", "mouse"}),
-        frozenset({"lock", "key"}),
-        frozenset({"cup", "straw"}),
-        frozenset({"bottle", "cap"}),
-        frozenset({"pen", "paper"}),
-        frozenset({"pencil", "eraser"}),
-        frozenset({"shoe", "lace"}),
-        frozenset({"needle", "thread"}),
-        frozenset({"hammer", "nail"}),
-        frozenset({"brush", "paint"}),
-        frozenset({"arrow", "target"}),
-        frozenset({"bow", "arrow"}),
-        frozenset({"fish", "hook"}),
-        frozenset({"bird", "nest"}),
-        frozenset({"guitar", "pick"}),
-        frozenset({"camera", "lens"}),
-        frozenset({"notebook", "pen"}),
-        frozenset({"plug", "socket"}),
-        frozenset({"toothbrush", "toothpaste"}),
-        frozenset({"salt", "pepper"}),
-        frozenset({"bread", "knife"}),
-        frozenset({"cup", "saucer"}),
-        frozenset({"chair", "table"}),
-        frozenset({"clock", "battery"}),
-        frozenset({"umbrella", "handle"}),
-        frozenset({"bucket", "mop"}),
-        frozenset({"soap", "sponge"}),
-        frozenset({"wine", "cork"}),
-        frozenset({"envelope", "stamp"}),
-    }
-)
-
-
-def _classic_interaction_head_token(label: str) -> str:
-    toks = _object_label_tokens_for_physical_check(label)
-    if not toks:
-        return ""
-    t0 = toks[0].lower()
-    aliases = {
-        "biro": "pen",
-        "ballpoint": "pen",
-        "ballpen": "pen",
-        "notepad": "notebook",
-        "memo": "notebook",
-        "dartboard": "target",
-        "dart": "arrow",
-    }
-    return aliases.get(t0, t0)
-
-
-def _classic_interaction_pair(oa: str, ob: str) -> bool:
-    a = _classic_interaction_head_token(oa)
-    b = _classic_interaction_head_token(ob)
-    if not a or not b or a == b:
-        return False
-    return frozenset((a, b)) in _CLASSIC_INTERACTION_TOKEN_PAIRS
-
-
-def _ranked_physical_candidates_from_promise(
-    apromise: str, product_name: str, product_description: str
-) -> List[str]:
-    """Single-token physical labels grounded in the promise, ranked by product+promise relevance."""
-    ap = (apromise or "").strip()
-    if not ap:
-        return []
-    pn = (product_name or "").strip()
-    pd = (product_description or "").strip()
-    blob = f"{ap} {pd} {pn}".strip()
-    blob_l = blob.lower()
-    ap_l = ap.lower()
-    scored: List[Tuple[int, str, str]] = []
-    seen_lower: set[str] = set()
-    for m in re.finditer(r"[\w\u0590-\u05FF]{3,}", blob, flags=re.UNICODE):
-        w = m.group(0).strip()
-        if not w:
-            continue
-        wl = w.lower()
-        if wl in _EMERGENCY_TEXT_STOPWORDS or wl in seen_lower:
-            continue
-        if not _object_grounded_in_advertising_promise(w, ap):
-            continue
-        ok, _ = _object_label_is_physical_classic(w)
-        if not ok:
-            continue
-        seen_lower.add(wl)
-        score = 0
-        if wl in ap_l:
-            score += 2
-        if pn and wl in pn.lower():
-            score += 2
-        if pd and wl in pd.lower():
-            score += 1
-        scored.append((score, len(w), w))
-    scored.sort(key=lambda t: (-t[0], t[1], t[2].lower()))
-    ordered: List[str] = []
-    seen2: set[str] = set()
-    for _, __, w in scored:
-        wl = w.lower()
-        if wl not in seen2:
-            seen2.add(wl)
-            ordered.append(w)
-    return ordered
-
-
-def _search_ordered_fallback_validated_plan(
-    parsed_ctx: Dict[str, Any],
-    *,
-    product_name: str,
-    product_description: str,
-    log_context: str,
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    """
-    Fallback follows the same order as the planner: promise from product → objectA from promise →
-    objectB classic-first → objectB meaningful-second → coherent package only via validate.
-    Returns (validated_plan_or_None, template_name).
-    """
-    logger.info("VIDEO_PLAN_FALLBACK_PACKAGE_VALID=false")
-    c = _coerce_plan_keys(parsed_ctx or {})
-    op0 = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
-    oa0 = (c.get("objectA") or "").strip() or "object A"
-    ob0 = (c.get("objectB") or "").strip() or "object B"
-    rep, promise_text_changed = _repaired_advertising_promise_for_product(
-        op0, product_name, product_description
-    )
-    if not _advertising_promise_from_product(rep, product_name, product_description):
-        logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=advertising_promise_not_from_product")
-        logger.info("VIDEO_PLAN_OBJECT_B_FOUND=false")
-        return None, ""
-
-    pn = (c.get("productNameResolved") or "").strip() or (product_name or "").strip() or "Product"
-    raw_hl = (c.get("headlineText") or "").strip() or pn
-    headline_text = _word_limit(raw_hl, 7)
-
-    def build_attempt(oa: str, ob: str, ab_type: str) -> Tuple[Dict[str, Any], str]:
-        bucket = _promise_bucket(rep)
-        template_name_i, template_body = _fallback_template_for_bucket(bucket)
-        sbs_motion = template_body.format(A=oa, B=ob, promise=rep)
-        sbs_open = (
-            f"Opening intent: {oa} and {ob} appear together in one stable composition, "
-            "with immediate clear physical interaction between A and B."
-        )
-        rep_open = (
-            f"Replacement intent: only {oa} is visible on camera; the partner primary is absent from the frame; "
-            "background follows preservedBackgroundFrom=A."
-        )
-        rms = (
-            f"The {oa} uses clear physical motion and direct contact with the environment; "
-            "the partner primary stays fully off-screen; the change responds visibly using the scene, "
-            "supporting the advertising promise."
-        )
-        attempt_i: Dict[str, Any] = {
-            "productNameResolved": pn,
-            "advertisingPromise": rep,
-            "objectA": oa,
-            "objectB": ob,
-            "morphologicalReason": (c.get("morphologicalReason") or f"{log_context}_ordered_fallback").strip(),
-            "promiseReason": (c.get("promiseReason") or "").strip(),
-            "replacementDirection": "A_replaces_B",
-            "preservedBackgroundFrom": "A",
-            "shortReplacementScript": (c.get("shortReplacementScript") or "").strip(),
-            "headlineDecision": "include_product_name",
-            "headlineText": headline_text,
-            "objectPairViewerClarityOk": True,
-            "objectPairIdentityDistinctOk": True,
-            "identityDistinctnessNote": f"{log_context}_ordered_fallback",
-            "replacementOpeningFrameDescription": rep_open,
-            "replacementMotionScript": rms,
-            "sideBySideOpeningFrameDescription": sbs_open,
-            "sideBySideMotionScript": sbs_motion,
-            "abInteractionType": ab_type,
-        }
-        return attempt_i, template_name_i
-
-    def try_pair(oa: str, ob: str, ab_type: str, phase_log: str) -> Tuple[Optional[Dict[str, Any]], str]:
-        if _object_pair_identity_too_close_heuristic(oa, ob):
-            return None, ""
-        att, tmpl = build_attempt(oa, ob, ab_type)
-        plan_i, err = validate_and_normalize_plan(
-            att,
-            planner_deadline_monotonic=None,
-            product_name=product_name,
-            product_description=product_description,
-        )
-        if plan_i:
-            logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=%s", phase_log)
-            logger.info("VIDEO_PLAN_OBJECT_B_FOUND=true")
-            logger.info("VIDEO_PLAN_FALLBACK_PACKAGE_VALID=true")
-            p_changed_final = (
-                unicodedata.normalize("NFC", rep).strip()
-                != unicodedata.normalize("NFC", op0).strip()
-            )
-            oa_f = str(plan_i.get("objectA") or "").strip()
-            ob_f = str(plan_i.get("objectB") or "").strip()
-            pf, ga, gb, pa, pb = _fallback_abc_grounding_ok(
-                str(plan_i.get("advertisingPromise") or rep),
-                oa_f,
-                ob_f,
-                product_name,
-                product_description,
-            )
-            _, tb = _fallback_template_for_bucket(_promise_bucket(rep))
-            sbs_probe = tb.format(A=oa_f, B=ob_f, promise=str(plan_i.get("advertisingPromise") or rep))
-            sbs_ok = _side_by_side_motion_is_meaningful(sbs_probe, oa_f, ob_f)
-            stale_after = bool(promise_text_changed and not (ga and gb and pa and pb))
-            _log_fallback_repair_diagnostics(
-                original_promise=op0,
-                final_promise=str(plan_i.get("advertisingPromise") or rep),
-                original_oa=oa0,
-                original_ob=ob0,
-                final_oa=oa_f,
-                final_ob=ob_f,
-                promise_text_changed=p_changed_final,
-                pf=pf,
-                ga=ga,
-                gb=gb,
-                pa=pa,
-                pb=pb,
-                stale_objects_after_promise_repair=stale_after,
-                sbs_script_ok=sbs_ok,
-            )
-            return plan_i, tmpl
-        if err:
-            logger.info("VIDEO_PLAN_FALLBACK_TRY_REJECT reason=%s", err)
-        return None, tmpl
-
-    candidates = _ranked_physical_candidates_from_promise(rep, product_name, product_description)
-    template_name = ""
-
-    def run_phases(cand: List[str]) -> Tuple[Optional[Dict[str, Any]], str]:
-        nonlocal template_name
-        if len(cand) < 2:
-            return None, ""
-        logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=classic")
-        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
-        for oa in cand:
-            for ob in cand:
-                if _normalize_object_identifier_for_compare(oa) == _normalize_object_identifier_for_compare(ob):
-                    continue
-                if not _classic_interaction_pair(oa, ob):
-                    continue
-                pln, tmpl = try_pair(oa, ob, "classic", "classic")
-                template_name = tmpl or template_name
-                if pln:
-                    return pln, tmpl
-        logger.info("VIDEO_PLAN_OBJECT_B_SEARCH_PHASE=meaningful")
-        logger.info("VIDEO_PLAN_OBJECT_A_SELECTED_FROM_PROMISE=true")
-        for oa in cand:
-            for ob in cand:
-                if _normalize_object_identifier_for_compare(oa) == _normalize_object_identifier_for_compare(ob):
-                    continue
-                pln, tmpl = try_pair(oa, ob, "meaningful", "meaningful")
-                template_name = tmpl or template_name
-                if pln:
-                    return pln, tmpl
-        return None, ""
-
-    rep_initial = rep
-    plan, tmpl = run_phases(candidates)
-    if plan:
-        return plan, tmpl
-
-    rep_aug = _promise_augment_notebook_pen(rep_initial, (product_name or "").strip())
-    if rep_aug != rep_initial and _advertising_promise_from_product(
-        rep_aug, product_name, product_description
-    ):
-        rep = rep_aug
-        candidates_aug = _ranked_physical_candidates_from_promise(
-            rep_aug, product_name, product_description
-        )
-        if len(candidates_aug) < 2 and re.search(r"\bnotebook\b", rep_aug.lower()) and re.search(
-            r"\bpen\b", rep_aug.lower()
-        ):
-            ok_nb, _ = _object_label_is_physical_classic("notebook")
-            ok_pen, _ = _object_label_is_physical_classic("pen")
-            if (
-                ok_nb
-                and ok_pen
-                and _object_grounded_in_advertising_promise("notebook", rep_aug)
-                and _object_grounded_in_advertising_promise("pen", rep_aug)
-            ):
-                candidates_aug = ["notebook", "pen"]
-        plan, tmpl = run_phases(candidates_aug)
-        if plan:
-            return plan, tmpl
-
-    logger.info("VIDEO_PLAN_OBJECT_B_FOUND=false")
-    logger.info("VIDEO_PLAN_FALLBACK_BLOCKED reason=ordered_fallback_no_coherent_package")
-    return None, template_name
-
-
-def _emergency_object_pair_from_advertising_text(
-    apromise: str, product_description: str, product_name: str
-) -> Tuple[str, str]:
-    """
-    Emergency fallback objects: derived only from advertising promise + product text (no fixed generic pair).
-    """
-    ap = (apromise or "").strip()
-    blob = f"{ap} {(product_description or '').strip()} {(product_name or '').strip()}"
-    words: List[str] = []
-    seen: set[str] = set()
-    for m in re.finditer(r"[\w\u0590-\u05FF]{3,}", blob, flags=re.UNICODE):
-        w = m.group(0)
-        wl = w.lower()
-        if wl in _EMERGENCY_TEXT_STOPWORDS or wl in seen:
-            continue
-        if ap and _object_grounded_in_advertising_promise(w, ap):
-            words.append(w)
-            seen.add(wl)
-        if len(words) >= 2:
-            break
-    if len(words) < 2 and ap:
-        for m in re.finditer(r"[\w\u0590-\u05FF]{3,}", ap, flags=re.UNICODE):
-            w = m.group(0)
-            wl = w.lower()
-            if wl in _EMERGENCY_TEXT_STOPWORDS or wl in seen:
-                continue
-            words.append(w)
-            seen.add(wl)
-            if len(words) >= 2:
-                break
-    if len(words) < 2:
-        parts = [x.strip() for x in re.split(r"[,;]", ap) if len(x.strip()) >= 3]
-        if len(parts) >= 2:
-            words = [parts[0][:48].strip(), parts[1][:48].strip()]
-        elif len(parts) == 1 and len(parts[0]) >= 6:
-            half = len(parts[0]) // 2
-            words = [parts[0][:half].strip(), parts[0][half:].strip()]
-        else:
-            pn_words = [
-                w
-                for w in re.findall(
-                    r"[\w\u0590-\u05FF]{3,}", (product_name or "").lower(), flags=re.UNICODE
-                )
-                if w not in _EMERGENCY_TEXT_STOPWORDS
-            ]
-            pd_words = [
-                w
-                for w in re.findall(
-                    r"[\w\u0590-\u05FF]{3,}", (product_description or "").lower(), flags=re.UNICODE
-                )
-                if w not in _EMERGENCY_TEXT_STOPWORDS
-            ]
-            if len(pn_words) >= 2:
-                words = [pn_words[0], pn_words[1]]
-            elif pn_words and pd_words:
-                words = [pn_words[0], pd_words[0]]
-            elif len(pd_words) >= 2:
-                words = [pd_words[0], pd_words[1]]
-            else:
-                words = ["primary_subject", "support_subject"]
-    return words[0], words[1]
-
-
-def _promise_bucket(promise: str) -> str:
-    p = (promise or "").lower()
-    if any(k in p for k in ("speed", "fast", "momentum", "quick", "velocity")):
-        return "speed"
-    if any(k in p for k in ("precision", "control", "accur", "align", "stable")):
-        return "precision"
-    if any(k in p for k in ("protect", "safe", "shield", "secure")):
-        return "protection"
-    if any(k in p for k in ("power", "boost", "ampl", "strong")):
-        return "amplification"
-    if any(k in p for k in ("clarity", "clear", "reveal", "discover", "uncover")):
-        return "clarity"
-    if any(k in p for k in ("growth", "uplift", "rise", "lift")):
-        return "growth"
-    return "generic"
-
-
-def _fallback_template_for_bucket(bucket: str) -> Tuple[str, str]:
-    templates = {
-        "speed": (
-            "launch_acceleration",
-            "{A} launches {B} into a visible acceleration arc, and {B} reacts immediately, expressing: {promise}.",
-        ),
-        "precision": (
-            "guidance_alignment",
-            "{A} guides {B} into precise alignment, and {B} reacts by locking into place, expressing: {promise}.",
-        ),
-        "protection": (
-            "shielding_response",
-            "{A} protects {B} from a clear visible risk cue, and {B} reacts safely, expressing: {promise}.",
-        ),
-        "amplification": (
-            "boosting_power",
-            "{A} amplifies {B} into a visibly stronger state, and {B} reacts with clear output change, expressing: {promise}.",
-        ),
-        "clarity": (
-            "reveal_clarity",
-            "{A} triggers a reveal on {B} so hidden details become clear, and {B} reacts immediately, expressing: {promise}.",
-        ),
-        "growth": (
-            "uplift_growth",
-            "{A} lifts {B} into a clear upward state change, and {B} responds visibly, expressing: {promise}.",
-        ),
-        "generic": (
-            "cooperative_resolution",
-            "{A} and {B} cooperate to resolve a simple visible situation, with clear cause and reaction between them, expressing: {promise}.",
-        ),
-    }
-    return templates.get(bucket, templates["generic"])
-
-
-def _build_deterministic_side_by_side_plan_from_parsed(
-    parsed: Dict[str, Any],
-    *,
-    product_name: str,
-    product_description: str,
-    content_language: str,
-) -> Tuple[Optional[Dict[str, Any]], str, bool]:
-    """
-    Layer 3+4 deterministic salvage: validate model-shaped plan, then ordered fallback
-    (promise from product → A from promise → B classic-first → B meaningful) with full validation.
-    Returns (plan_or_none, template_name, guaranteed_delivery_used).
-    """
-    c = _coerce_plan_keys(parsed or {})
-    oa = (c.get("objectA") or "").strip() or "object A"
-    ob = (c.get("objectB") or "").strip() or "object B"
-    promise = (c.get("advertisingPromise") or c.get("promiseReason") or "").strip() or "the advertising promise"
-
-    bucket = _promise_bucket(promise)
-    template_name, template_body = _fallback_template_for_bucket(bucket)
-    sbs_motion = template_body.format(A=oa, B=ob, promise=promise)
-    sbs_open = (
-        f"Opening intent: {oa} and {ob} are visible together in one stable composition, "
-        "with immediate meaningful interaction between A and B."
-    )
-    c["sideBySideMotionScript"] = sbs_motion
-    c["sideBySideOpeningFrameDescription"] = sbs_open
-    c["advertisingPromise"] = promise
-    if not (c.get("productNameResolved") or "").strip():
-        c["productNameResolved"] = (product_name or "").strip() or "Product"
-    if not (c.get("replacementMotionScript") or "").strip():
-        c["replacementMotionScript"] = (
-            f"The {oa} uses clear physical motion and direct contact with the environment; "
-            "the partner primary stays fully off-screen; the change responds visibly using the scene, "
-            "supporting the advertising promise."
-        )
-    if not (c.get("replacementOpeningFrameDescription") or "").strip():
-        c["replacementOpeningFrameDescription"] = (
-            f"Replacement intent: only {oa} is visible on camera; the partner primary is absent from the frame; "
-            "background follows preservedBackgroundFrom=A."
-        )
-    if not (c.get("headlineDecision") or "").strip():
-        c["headlineDecision"] = "include_product_name"
-    if not (c.get("headlineText") or "").strip():
-        c["headlineText"] = c["productNameResolved"]
-    if not (c.get("objectPairViewerClarityOk") or False):
-        c["objectPairViewerClarityOk"] = True
-    if not (c.get("objectPairIdentityDistinctOk") or False):
-        c["objectPairIdentityDistinctOk"] = True
-    if not (c.get("identityDistinctnessNote") or "").strip():
-        c["identityDistinctnessNote"] = "deterministic_salvage"
-
-    c["abInteractionType"] = "meaningful"
-    plan, _ = validate_and_normalize_plan(
-        c, product_name=product_name, product_description=product_description
-    )
-    if plan:
-        return plan, template_name, False
-
-    # Layer 4: same search order as planner; returns only a fully validated coherent package.
-    salvage, tmpl = _search_ordered_fallback_validated_plan(
-        c,
-        product_name=product_name,
-        product_description=product_description,
-        log_context="deterministic",
-    )
-    if not salvage:
-        return None, template_name, True
-    return salvage, tmpl or template_name, True
-
-
-def _build_emergency_side_by_side_plan(
-    parsed: Optional[Dict[str, Any]],
-    *,
-    product_name: str,
-    product_description: str = "",
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    """
-    Near-deadline fallback: same ordered package as the planner (promise → A → B classic → B meaningful),
-    validated in one path (no independent field repair).
-    """
-    c = _coerce_plan_keys(parsed or {})
-    plan, template_name = _search_ordered_fallback_validated_plan(
-        c,
-        product_name=product_name,
-        product_description=product_description,
-        log_context="emergency",
-    )
-    return plan, template_name or ""
-
-
-def _finalize_emergency_fallback(
-    last_parsed: Optional[Dict[str, Any]],
-    *,
-    product_name: str,
-    product_description: str,
-    deadline_monotonic: Optional[float],
-    model: str,
-) -> Optional[Dict[str, Any]]:
-    """Log + build the deadline-aware emergency SIDE_BY_SIDE plan, or None if no valid plan."""
-    remaining_s = (
-        max(0.0, deadline_monotonic - time.monotonic()) if deadline_monotonic is not None else -1.0
-    )
-    logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=emergency_deadline_or_timeout")
-    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_ENTERED remaining_s=%.3f", remaining_s)
-    emergency_plan, template_name = _build_emergency_side_by_side_plan(
-        last_parsed, product_name=product_name, product_description=product_description
-    )
-    if not emergency_plan:
-        logger.error(
-            "VIDEO_PLAN_EMERGENCY_NO_VALID_PLAN template=%s",
-            template_name or "(none)",
-        )
-        return None
-    pair_k = _pair_retry_key(
-        str(emergency_plan.get("objectA") or ""),
-        str(emergency_plan.get("objectB") or ""),
-    )
-    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_CHOSEN pair=%s", pair_k)
-    logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
-    logger.info(
-        "VIDEO_PLAN_EMERGENCY_FALLBACK_PAIR_SELECTED objectA=%s objectB=%s",
-        emergency_plan.get("objectA"),
-        emergency_plan.get("objectB"),
-    )
-    logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
-    logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
-    logger.info("VIDEO_PLAN_EMERGENCY_FALLBACK_OK=true")
-    logger.info("VIDEO_PLAN_OK model=%s", model)
-    logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-    return emergency_plan
 
 
 def _return_plan_with_promise_persist(
@@ -2487,15 +1472,21 @@ def _fetch_video_plan_o3_sync(
     *,
     deadline_monotonic: Optional[float] = None,
     session_id: str = "",
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    Single planning model call returning a validated plan dict, or None on any failure (no generic video fallback).
+    One strong planner call + strict validation. No salvage, no emergency merge, no deterministic repair.
+    Returns (plan, "") on success, or (None, reason_code).
     """
-    logger.info("VIDEO_PLAN_SEARCH_ORDER=A_then_B_classic_then_meaningful")
+    logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=single_interaction_v3")
+    default_fail = "planning_failed_invalid_objects"
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
-        return None
+        return None, default_fail
+
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise VideoPlanningTimeoutError()
 
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
@@ -2523,8 +1514,12 @@ Locked output language for all user-facing plan fields (from description classif
         "VIDEO_PLAN_MEMORY_USED_FOR_DIVERSITY=%s",
         str(bool(history)).lower(),
     )
-    rejected_promises: List[str] = []
-    promise_reject_count = 0
+    forbid_hist = forbidden_promises_for_prompt(history, 10)
+    promise_addon = build_promise_diversity_addon(
+        forbid_hist,
+        angle_seed_for_attempt(0, 0),
+    )
+    attempt_input = instructions + "\n\n" + user_block + promise_addon
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
         api_key=api_key,
@@ -2540,315 +1535,71 @@ Locked output language for all user-facing plan fields (from description classif
             max(0.0, deadline_monotonic - time.monotonic()),
         )
 
-    # Hard cap: two planner calls total (fast convergence).
-    max_attempts = min(2, 1 + max(0, _VIDEO_PLAN_RETRY_INTERACTION_MAX))
-    last_parsed: Optional[Dict[str, Any]] = None
-    last_v_err = ""
-    rejected_pairs: Set[str] = set()
-    for attempt in range(max_attempts):
-        if (
-            deadline_monotonic is not None
-            and last_parsed is not None
-            and (deadline_monotonic - time.monotonic()) <= _VIDEO_PLAN_EMERGENCY_REMAINING_S
-        ):
-            return _return_plan_with_promise_persist(
-                _finalize_emergency_fallback(
-                    last_parsed,
-                    product_name=product_name,
-                    product_description=product_description,
-                    deadline_monotonic=deadline_monotonic,
-                    model=model,
-                ),
-                product_name=product_name,
-                product_description=product_description,
-                session_id=session_id,
-                fallback_used=True,
-            )
-        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-            if last_parsed is not None:
-                return _return_plan_with_promise_persist(
-                    _finalize_emergency_fallback(
-                        last_parsed,
-                        product_name=product_name,
-                        product_description=product_description,
-                        deadline_monotonic=deadline_monotonic,
-                        model=model,
-                    ),
-                    product_name=product_name,
-                    product_description=product_description,
-                    session_id=session_id,
-                    fallback_used=True,
-                )
-            _planner_deadline_guard(deadline_monotonic, stage=f"retry_{attempt+1}_start")
-        logger.info("VIDEO_PLAN_RETRY_STAGE start attempt=%s/%s", attempt + 1, max_attempts)
-        retry_tail = ""
-        if rejected_pairs:
-            rejected_preview = ", ".join(sorted(rejected_pairs)[:4])
-            retry_tail = (
-                "\n\nRetry constraints:\n"
-                "- Do NOT reuse previously rejected object pairs (same or near-identical families): "
-                + rejected_preview
-                + ".\n"
-                "- Choose clearly different object families than the rejected pairs.\n"
-            )
-        forbid_hist = forbidden_promises_for_prompt(history, 10)
-        forbid_extra = [x for x in rejected_promises if x.strip()][-6:]
-        promise_addon = build_promise_diversity_addon(
-            forbid_hist + forbid_extra,
-            angle_seed_for_attempt(attempt, promise_reject_count),
+    logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(attempt_input))
+    try:
+        response = client.responses.create(
+            model=model,
+            input=attempt_input,
+            reasoning={"effort": _reasoning_effort()},
         )
-        attempt_input = instructions + "\n\n" + user_block + promise_addon + retry_tail
-        logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(attempt_input))
-        try:
-            response = client.responses.create(
-                model=model,
-                input=attempt_input,
-                reasoning={"effort": _reasoning_effort()},
-            )
-        except Exception as e:
-            err_type = type(e).__name__
-            logger.warning(
-                "VIDEO_PLAN_FAIL_MODEL_CALL model=%s err_type=%s err=%s",
-                model,
-                err_type,
-                e,
-            )
+    except Exception as e:
+        err_type = type(e).__name__
+        logger.warning(
+            "VIDEO_PLAN_FAIL_MODEL_CALL model=%s err_type=%s err=%s",
+            model,
+            err_type,
+            e,
+        )
+        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+        return None, default_fail
+
+    try:
+        raw = _extract_responses_output_text(response)
+        if not raw:
+            logger.error("VIDEO_PLAN_FAIL_EMPTY_OUTPUT model=%s", model)
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            return None
+            return None, default_fail
 
-        try:
-            raw = _extract_responses_output_text(response)
-            if not raw:
-                logger.error("VIDEO_PLAN_FAIL_EMPTY_OUTPUT model=%s", model)
-                logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                return None
+        _log_output_preview(raw)
 
-            _log_output_preview(raw)
-
-            parsed = _parse_json_from_response(raw)
-            if not parsed:
-                logger.error("VIDEO_PLAN_FAIL_JSON_PARSE model=%s", model)
-                logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                return None
-            last_parsed = parsed
-            parsed_c = _coerce_plan_keys(parsed)
-            oa_cand = (parsed_c.get("objectA") or "").strip()
-            ob_cand = (parsed_c.get("objectB") or "").strip()
-            if oa_cand and ob_cand:
-                too_similar, sim_reason, prior_pair = _pair_is_too_similar_to_rejected(
-                    oa_cand, ob_cand, rejected_pairs
-                )
-                if too_similar:
-                    cand_k = _pair_retry_key(oa_cand, ob_cand)
-                    if sim_reason == "exact_pair_repeat":
-                        logger.info("VIDEO_PLAN_REJECTED_PAIR_MEMORY_HIT pair=%s", cand_k)
-                    else:
-                        logger.info(
-                            "VIDEO_PLAN_REJECTED_NEAR_DUPLICATE pair=%s prior_pair=%s reason=%s",
-                            cand_k,
-                            prior_pair,
-                            sim_reason,
-                        )
-                    logger.info(
-                        "VIDEO_PLAN_REJECTED_PAIR_DEDUPE pair=%s reason=%s",
-                        cand_k,
-                        sim_reason,
-                    )
-                    logger.info(
-                        "VIDEO_PLAN_RETRY attempt=%s reason=pair_too_similar_to_rejected",
-                        attempt + 1,
-                    )
-                    logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
-                    continue
-
-            cand_promise = (parsed_c.get("advertisingPromise") or "").strip()
-            if cand_promise:
-                bad_p, psim, pkind, pdetail = is_promise_too_similar(
-                    cand_promise, history, rejected_promises
-                )
-                if bad_p:
-                    if pkind == "concept_match":
-                        logger.info(
-                            "VIDEO_PROMISE_REJECTED_CONCEPT_MATCH reason=%s similarity=%.3f",
-                            pdetail or "concept_buckets",
-                            psim,
-                        )
-                        increment_promise_stat(
-                            ph,
-                            "conceptual_match_rejections",
-                            1,
-                            product_name=product_name,
-                            product_description=product_description,
-                        )
-                    else:
-                        logger.info(
-                            "VIDEO_PROMISE_REJECTED_DUPLICATE similarity=%.3f kind=%s",
-                            psim,
-                            pkind,
-                        )
-                        increment_promise_stat(
-                            ph,
-                            "duplicate_rejections",
-                            1,
-                            product_name=product_name,
-                            product_description=product_description,
-                        )
-                    rejected_promises.append(cand_promise)
-                    promise_reject_count += 1
-                    logger.info(
-                        "VIDEO_PLAN_RETRY attempt=%s reason=advertising_promise_diversity",
-                        attempt + 1,
-                    )
-                    logger.info(
-                        "VIDEO_PLAN_RETRY_STAGE done attempt=%s result=promise_reject",
-                        attempt + 1,
-                    )
-                    continue
-
-            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-                return _return_plan_with_promise_persist(
-                    _finalize_emergency_fallback(
-                        last_parsed,
-                        product_name=product_name,
-                        product_description=product_description,
-                        deadline_monotonic=deadline_monotonic,
-                        model=model,
-                    ),
-                    product_name=product_name,
-                    product_description=product_description,
-                    session_id=session_id,
-                    fallback_used=True,
-                )
-
-            plan, v_err = validate_and_normalize_plan(
-                parsed,
-                planner_deadline_monotonic=deadline_monotonic,
-                product_name=product_name,
-                product_description=product_description,
-            )
-            if not plan:
-                last_v_err = (v_err or "").strip()
-                if oa_cand and ob_cand:
-                    rejected_key = _pair_retry_key(oa_cand, ob_cand)
-                    rejected_pairs.add(rejected_key)
-                    logger.info("VIDEO_PLAN_REJECTED_PAIR_MEMORY_ADD pair=%s reason=%s", rejected_key, last_v_err)
-                if (
-                    last_v_err
-                    in (
-                        "side_by_side_interaction_not_meaningful",
-                        "replacement_branch_invalid_for_classic",
-                        "invalid_ab_interaction_type",
-                        "advertising_promise_not_from_product",
-                    )
-                    and attempt < max_attempts - 1
-                ):
-                    logger.info(
-                        "VIDEO_PLAN_RETRY attempt=%s reason=interaction_not_meaningful",
-                        attempt + 1,
-                    )
-                    logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=retry", attempt + 1)
-                    continue
-                if v_err == "identity_too_close":
-                    logger.info("VIDEO_PLAN_ABORTED reason=identity_too_close")
-                else:
-                    logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", v_err or "unknown")
-                logger.info("VIDEO_PLAN_REJECT_REASON=%s", last_v_err or "validation_failed")
-                logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=invalid", attempt + 1)
-                break
-
-            log_plan_summary(plan)
-            logger.info("VIDEO_PLAN_OK model=%s", model)
-            logger.info("VIDEO_PLAN_RETRY_STAGE done attempt=%s result=accepted", attempt + 1)
-            logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-            return _return_plan_with_promise_persist(
-                plan,
-                product_name=product_name,
-                product_description=product_description,
-                session_id=session_id,
-            )
-        except VideoPlanningTimeoutError:
-            if last_parsed is not None:
-                return _return_plan_with_promise_persist(
-                    _finalize_emergency_fallback(
-                        last_parsed,
-                        product_name=product_name,
-                        product_description=product_description,
-                        deadline_monotonic=deadline_monotonic,
-                        model=model,
-                    ),
-                    product_name=product_name,
-                    product_description=product_description,
-                    session_id=session_id,
-                    fallback_used=True,
-                )
-            raise
-        except Exception as e:
-            logger.warning(
-                "VIDEO_PLAN_FAIL_EXCEPTION phase=post_create err_type=%s err=%s",
-                type(e).__name__,
-                e,
-            )
+        parsed = _parse_json_from_response(raw)
+        if not parsed:
+            logger.error("VIDEO_PLAN_FAIL_JSON_PARSE model=%s", model)
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            return None
+            return None, default_fail
 
-    if last_parsed and last_v_err in (
-        "side_by_side_interaction_not_meaningful",
-        "replacement_branch_invalid_for_classic",
-        "invalid_ab_interaction_type",
-        "advertising_promise_not_from_product",
-    ):
-        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
-            return _return_plan_with_promise_persist(
-                _finalize_emergency_fallback(
-                    last_parsed,
-                    product_name=product_name,
-                    product_description=product_description,
-                    deadline_monotonic=deadline_monotonic,
-                    model=model,
-                ),
-                product_name=product_name,
-                product_description=product_description,
-                session_id=session_id,
-                fallback_used=True,
-            )
-        logger.info("VIDEO_PLAN_FALLBACK_LAYER_ENTERED layer=deterministic_salvage")
-        salvage_plan, template_name, guaranteed_mode = _build_deterministic_side_by_side_plan_from_parsed(
-            last_parsed,
+        plan, v_err = validate_and_normalize_plan(
+            parsed,
+            planner_deadline_monotonic=deadline_monotonic,
             product_name=product_name,
             product_description=product_description,
-            content_language=content_language,
         )
-        logger.info("VIDEO_PLAN_FALLBACK_TEMPLATE_SELECTED template=%s", template_name)
-        if salvage_plan:
-            if guaranteed_mode:
-                logger.info("VIDEO_PLAN_GUARANTEED_DELIVERY_MODE entered=true")
-            logger.info("VIDEO_PLAN_RECOVERED_FROM_VALIDATION_FAILURE=true")
-            logger.info("VIDEO_PLAN_OK model=%s", model)
-            logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-            return _return_plan_with_promise_persist(
-                salvage_plan,
-                product_name=product_name,
-                product_description=product_description,
-                session_id=session_id,
-                fallback_used=True,
-            )
+        if not plan:
+            last_v_err = (v_err or "").strip() or default_fail
+            logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", last_v_err)
+            logger.info("VIDEO_PLAN_REJECT_REASON=%s", last_v_err)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+            return None, last_v_err
 
-    if last_parsed is not None:
+        log_plan_summary(plan)
+        logger.info("VIDEO_PLAN_OK model=%s", model)
+        logger.info("VIDEO_PLAN_RESPONSE_OK=true")
         return _return_plan_with_promise_persist(
-            _finalize_emergency_fallback(
-                last_parsed,
-                product_name=product_name,
-                product_description=product_description,
-                deadline_monotonic=deadline_monotonic,
-                model=model,
-            ),
+            plan,
             product_name=product_name,
             product_description=product_description,
             session_id=session_id,
-            fallback_used=True,
+        ), ""
+    except VideoPlanningTimeoutError:
+        raise
+    except Exception as e:
+        logger.warning(
+            "VIDEO_PLAN_FAIL_EXCEPTION phase=post_create err_type=%s err=%s",
+            type(e).__name__,
+            e,
         )
-    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-    return None
+        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+        return None, default_fail
 
 
 def fetch_video_plan_o3(
@@ -2857,10 +1608,11 @@ def fetch_video_plan_o3(
     content_language: str = "he",
     *,
     session_id: str = "",
-) -> Optional[Dict[str, Any]]:
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """
     Fetch and validate plan under one authoritative hard wall-clock deadline.
     On deadline exceeded, raises VideoPlanningTimeoutError (caller must fail the job).
+    Returns (plan, failure_reason); failure_reason is empty on success.
     """
     deadline = time.monotonic() + _VIDEO_PLAN_HARD_SECONDS
     ph = compute_product_hash(product_name, product_description)
@@ -2871,7 +1623,7 @@ def fetch_video_plan_o3(
     logger.info("AD_PROMISE_MEMORY_SCOPE global_product_level=true")
     logger.info("AD_PROMISE_MEMORY_PERSISTENT_STORE=true")
     try:
-        plan = _fetch_video_plan_o3_sync(
+        plan, fail_reason = _fetch_video_plan_o3_sync(
             product_name,
             product_description,
             content_language,
@@ -2886,7 +1638,7 @@ def fetch_video_plan_o3(
                 product_name=product_name,
                 product_description=product_description,
             )
-        return plan
+        return plan, fail_reason
     except VideoPlanningTimeoutError:
         increment_promise_stat(
             ph,
@@ -3020,96 +1772,45 @@ def sanitize_runway_prompt_for_video_text_policy(prompt: str) -> Tuple[str, bool
 
 
 def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
-    """Shorter ACE→Runway bridge if the detailed builder fails; keeps prior behavior."""
-    core = (plan.get("videoPromptCore") or "").strip()
-    script = (plan.get("shortReplacementScript") or "").strip()
+    """Shorter ACE→Runway bridge if the detailed builder fails."""
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
-
-    if _is_side_by_side_plan(plan):
-        parts = [
-            "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
-            f"Side-by-side: both {oa} and {ob} as one pair; MANDATORY smooth half-orbit camera around the pair per Action—not static.",
-            f"Scene: {core}" if core else "",
-            f"Beat: {script}" if script else "",
-        ]
-        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
-            parts.append(_runway_vertical_axis_hard_constraints_english())
-            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    else:
-        parts = [
-            "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
-            f"Scene: {core}" if core else "",
-            f"Replacement: {script}" if script else "",
-        ]
+    script = (plan.get("interactionScript") or "").strip()
+    motion = _runway_side_by_side_interaction_half_orbit_focus()
+    parts = [
+        "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
+        f"Single continuous shot: {oa} and {ob}. {motion}",
+        f"Physical interaction: {script}" if script else "",
+    ]
+    if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+        parts.append(_runway_vertical_axis_hard_constraints_english())
+        logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     return _finalize_runway_prompt("", " ".join(p for p in parts if p))
-
-
-def _replacement_visible_and_absent(plan: Dict[str, Any]) -> Tuple[str, str]:
-    """Which primary is on camera vs absent for REPLACEMENT framing (from replacementDirection)."""
-    rd = (plan.get("replacementDirection") or "").strip()
-    oa = (plan.get("objectA") or "").strip()
-    ob = (plan.get("objectB") or "").strip()
-    if rd == "B_replaces_A":
-        return ob, oa
-    return oa, ob
 
 
 def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Compact ACE→Runway prompt. Headline rule is first when present so truncation never drops it.
+    Runway prompt from the validated v3 plan only: objectA, objectB, interactionScript, half-orbit camera.
+    No planning prose, promise text, or alternate interaction modes in the model prompt.
     """
-    rd = (plan.get("replacementDirection") or "").strip()
-    if rd not in ("B_replaces_A", "A_replaces_B"):
-        raise ValueError("invalid replacementDirection")
-
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
-    if not oa or not ob:
-        raise ValueError("missing object A or B")
+    script = (plan.get("interactionScript") or "").strip()
+    if not oa or not ob or not script:
+        raise ValueError("missing objectA/objectB/interactionScript")
 
-    pbg = (plan.get("preservedBackgroundFrom") or "A").strip().upper()
-    if pbg not in ("A", "B"):
-        raise ValueError("invalid preservedBackgroundFrom")
-
-    promise = (plan.get("advertisingPromise") or "").strip()
-    core = (plan.get("videoPromptCore") or "").strip()
-    script = (plan.get("shortReplacementScript") or "").strip()
-    if not core:
-        raise ValueError("missing videoPromptCore")
-
-    if _is_side_by_side_plan(plan):
-        ofd = (plan.get("openingFrameDescription") or "").strip()
-        open_block = f"Opening intent: {ofd} " if ofd else ""
-        motion_pre = _runway_side_by_side_half_orbit_preamble()
-        scene = (
-            f"{open_block}"
-            f"SIDE_BY_SIDE (no replacement): single continuous shot; {motion_pre}"
-            f"tight unified composition; {oa} and {ob} "
-            f"both visible from the first frame, close together or slightly overlapping, same world and scale; "
-            f"promise: {promise}. No morphing, swapping, disappearance, or cuts. "
-            f"Action: {core}"
-        )
-        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
-            scene += _runway_vertical_axis_hard_constraints_english()
-            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    else:
-        vis, absent = _replacement_visible_and_absent(plan)
-        scene = (
-            f"REPLACEMENT: only {vis} is visible on camera; {absent} must never appear in-frame. "
-            f"Background follows preservedBackgroundFrom={pbg}. "
-            f"Motion uses only {vis} plus environment to express the replacement relationship between the two primaries; "
-            f"no extra stand-in objects. promise: {promise}. One smooth shot, no cuts. Action: {core}"
-        )
-    if script:
-        scene += f" Beat: {script}"
-    scene += " No logos or packaging type. Single clean commercial look."
-
+    motion = _runway_side_by_side_interaction_half_orbit_focus()
     body = (
         "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
         "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
-        f"{scene}"
+        f"Single continuous shot. Two physical objects: {oa} and {ob}. "
+        f"{motion}"
+        f"Physical interaction (follow exactly): {script}. "
+        "No logos, no packaging typography, no on-screen words. Single clean commercial look."
     )
+    if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+        body += _runway_vertical_axis_hard_constraints_english()
+        logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     out, trunc = _finalize_runway_prompt("", body)
     if not out.strip():
         raise ValueError("empty prompt")
@@ -3148,30 +1849,23 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
 
 def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Runway promptText when promptImage is a pre-generated ACE start frame: motion / interaction only
-    (replacement already visible in frame 1).
+    Runway promptText when promptImage is a pre-generated ACE start frame: motion / interaction only.
     """
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
-    if not oa or not ob:
-        raise ValueError("missing object A or B")
-
-    core = (plan.get("videoPromptCore") or "").strip()
-    script = (plan.get("visibleMotionScript") or plan.get("shortReplacementScript") or "").strip()
-    if not core:
-        raise ValueError("missing videoPromptCore")
+    script = (plan.get("interactionScript") or "").strip()
+    if not oa or not ob or not script:
+        raise ValueError("missing objectA/objectB/interactionScript")
 
     motion_focus = _runway_side_by_side_interaction_half_orbit_focus()
     scene = (
         f"The first frame is supplied as the start image; it already shows {oa} and {ob} together, "
         f"both clearly visible and balanced. {motion_focus}"
-        f"Action: {core}"
+        f"Physical interaction (follow exactly): {script}"
     )
     if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
         scene += _runway_vertical_axis_hard_constraints_english()
         logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    if script:
-        scene += f" Beat: {script}"
     scene += " No logos or packaging type. Single clean commercial look."
 
     body = (
@@ -3187,34 +1881,20 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
 
 def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """Shorter interaction-only bridge if the detailed interaction builder fails."""
-    core = (plan.get("videoPromptCore") or "").strip()
-    script = (plan.get("shortReplacementScript") or "").strip()
-    rd = (plan.get("replacementDirection") or "").strip()
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
-
-    if _is_side_by_side_plan(plan):
-        motion = (
-            f"Both {oa} and {ob} side by side; MANDATORY smooth half-orbit camera around the pair per Action; "
-            f"motion only; start frame supplied."
-        )
-        if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
-            motion += " " + _runway_vertical_axis_hard_constraints_english()
-            logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
-    elif rd in ("B_replaces_A", "A_replaces_B"):
-        vis, absent = _replacement_visible_and_absent(plan)
-        motion = (
-            f"Replacement motion: only {vis} moves on camera; {absent} absent; "
-            f"no stand-in objects beyond environment; motion only; start frame supplied."
-        )
-    else:
-        motion = "Motion only; start frame supplied."
-
+    script = (plan.get("interactionScript") or "").strip()
+    motion = (
+        f"Start frame supplied; {oa} and {ob} already visible together. "
+        f"{_runway_side_by_side_interaction_half_orbit_focus()}"
+        f"Physical interaction: {script}."
+    )
+    if (plan.get("shapeAlignment") or "").strip() == "vertical_axis":
+        motion += " " + _runway_vertical_axis_hard_constraints_english()
+        logger.info("VIDEO_PROMPT_CONSTRAINT umbrella_upright_enforced=true")
     parts = [
         "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
         motion,
-        f"Action: {core}" if core else "",
-        f"Beat: {script}" if script else "",
     ]
     return _finalize_runway_prompt("", " ".join(p for p in parts if p))
 

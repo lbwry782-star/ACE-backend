@@ -365,8 +365,10 @@ def generate_one_video_mvp(
             )
 
     logger.info("VIDEO_JOB_STEP step=plan_video start")
+    plan = None
+    plan_fail_reason = ""
     try:
-        plan = fetch_video_plan_o3(
+        plan, plan_fail_reason = fetch_video_plan_o3(
             canonical_name,
             product_description,
             content_language=video_lang,
@@ -376,17 +378,18 @@ def generate_one_video_mvp(
         logger.info("VIDEO_PLAN_ABORTED reason=planning_timeout")
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=planning_timeout")
-        _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
+        _maybe_log_ad_promise_skip_after_failed_generation(None, promise_saved)
         raise RunwayVideoMVPError("planning_timeout")
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
 
     if not plan:
-        logger.info("VIDEO_PLAN_ABORTED reason=no_valid_plan")
+        fail = (plan_fail_reason or "").strip() or "planning_failed"
+        logger.info("VIDEO_PLAN_ABORTED reason=%s", fail)
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
-        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=no_valid_plan")
-        logger.info("VIDEO_PLAN_INTEGRITY skipped reason=no_valid_plan")
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", fail)
+        logger.info("VIDEO_PLAN_INTEGRITY skipped reason=%s", fail)
         _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-        raise RunwayVideoMVPError("planning_failed")
+        raise RunwayVideoMVPError(fail)
 
     gate_ok, gate_reason = video_plan_required_fields_for_runway(plan)
     if not gate_ok:
@@ -394,12 +397,19 @@ def generate_one_video_mvp(
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate_reason)
         _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-        raise RunwayVideoMVPError("plan_integrity_failed")
+        raise RunwayVideoMVPError(gate_reason or "plan_integrity_failed")
 
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
 
     apply_canonical_product_name_to_video_plan(plan, canonical_name)
     plan["marketingLanguage"] = marketing_lang
+    gate2_ok, gate2_reason = video_plan_required_fields_for_runway(plan)
+    if not gate2_ok:
+        logger.info("VIDEO_PLAN_ABORTED reason=%s", gate2_reason)
+        logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
+        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate2_reason)
+        _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
+        raise RunwayVideoMVPError(gate2_reason or "planning_failed_headline_invalid")
     log_video_job_plan_integrity(plan)
 
     prompt = build_runway_prompt_from_plan(plan)
@@ -583,12 +593,12 @@ def generate_one_video_mvp(
                     _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
                     raise
             _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-            raise RunwayVideoMVPError("generation_failed")
+            raise RunwayVideoMVPError("runway_failed")
 
         if status in _FAILED_STATUSES:
             _extract_video_url(task)
             _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-            raise RunwayVideoMVPError("generation_failed")
+            raise RunwayVideoMVPError("runway_failed")
 
         logger.warning(
             "RUNWAY_MVP poll_unknown_status status=%s task_id=%s (will_retry_until_deadline)",
@@ -600,7 +610,7 @@ def generate_one_video_mvp(
     logger.error("RUNWAY_MVP timeout task_id=%s max_wait_s=%s", task_id, _MAX_WAIT_SECONDS)
     logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=timeout")
     _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-    raise RunwayVideoMVPError("timeout")
+    raise RunwayVideoMVPError("runway_failed")
 
 
 log_config_warning_if_missing_key()

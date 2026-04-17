@@ -14,7 +14,6 @@ import httpx
 from openai import OpenAI
 
 from engine import openai_retry
-from engine.video_planning import _is_side_by_side_plan
 
 logger = logging.getLogger(__name__)
 
@@ -23,13 +22,11 @@ _VIDEO_START_IMAGE_TIMEOUT = float((os.environ.get("VIDEO_START_IMAGE_TIMEOUT_SE
 
 def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
     """
-    One still: replacement composition locked — only the visible primary on camera (no secondary props).
+    One still: both object A and object B visible together (ACE single interaction).
     No text, logos, or headline in frame.
     """
-    rd = (plan.get("replacementDirection") or "").strip()
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
-    pbg = (plan.get("preservedBackgroundFrom") or "A").strip().upper()
 
     no_text = (
         "No text, letters, words, numbers as graphics, captions, labels, signage, packaging typography, "
@@ -38,32 +35,14 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
 
     opening = (plan.get("openingFrameDescription") or "").strip()
 
-    if _is_side_by_side_plan(plan):
-        brief = (
-            f"Single photorealistic still frame, tight unified composition. "
-            f"Both subjects visible: {oa} and {ob}, close together or slightly overlapping, same world and lighting; "
-            f"no replacement, no disappearance. "
-            f"Soft natural lighting, realistic materials. {no_text}"
-        )
-        if opening:
-            return f"Creative brief: {opening} {brief}"
-        return brief
-
-    if rd == "B_replaces_A":
-        vis, absent = ob, oa
-    else:
-        vis, absent = oa, ob
-
-    body = (
-        f"Single photorealistic still frame, clean centered commercial composition. "
-        f"The replacement is already complete: only {vis} is visible as the main subject in the hero framing. "
-        f"{absent} must not appear. "
-        f"Background and environment read consistently with preservedBackgroundFrom={pbg}. "
+    brief = (
+        f"Single photorealistic still frame, tight unified composition. "
+        f"Both subjects visible: {oa} and {ob}, close together or slightly overlapping, same world and lighting. "
         f"Soft natural lighting, realistic materials. {no_text}"
     )
     if opening:
-        return f"Creative brief: {opening} {body}"
-    return body
+        return f"Creative brief: {opening} {brief}"
+    return brief
 
 
 def generate_video_start_image_data_uri(plan: Dict[str, Any]) -> Optional[str]:
