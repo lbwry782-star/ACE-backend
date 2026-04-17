@@ -316,6 +316,7 @@ def _object_pair_identity_too_close_heuristic(oa: str, ob: str) -> bool:
 
 
 # REPLACEMENT enforcement: validated replacement branch must not name the absent primary as on-screen.
+# Also used by SIDE_BY_SIDE / ACE single-interaction: require at least one concrete physical-motion cue.
 _REPLACEMENT_MOTION_REQUIRED_VERBS: Tuple[str, ...] = (
     "use",
     "uses",
@@ -336,6 +337,42 @@ _REPLACEMENT_MOTION_REQUIRED_VERBS: Tuple[str, ...] = (
     "transforms",
     "solve",
     "solves",
+    "pull",
+    "pulls",
+    "push",
+    "pushes",
+    "lift",
+    "lifts",
+    "lower",
+    "lowers",
+    "slide",
+    "slides",
+    "rotate",
+    "rotates",
+    "spin",
+    "spins",
+    "pour",
+    "pours",
+    "flow",
+    "flows",
+    "drift",
+    "drifts",
+    "attract",
+    "attracts",
+    "repel",
+    "repels",
+    "tilt",
+    "tilts",
+    "tip",
+    "tips",
+    "roll",
+    "rolls",
+    "drop",
+    "drops",
+    "catch",
+    "catches",
+    "bounce",
+    "bounces",
 )
 
 
@@ -462,6 +499,15 @@ def _object_grounded_in_product_blob(
 _INFERENCE_MODES_LOG: FrozenSet[str] = frozenset(
     {
         "literals",
+        "domain_inference",
+        "functional_inference",
+        "commercial_world_inference",
+    }
+)
+
+# Inference labels where strict per-object lexical grounding is optional if strong conceptual checks pass.
+_STRONG_INFERENCE_GROUNDING_MODES: FrozenSet[str] = frozenset(
+    {
         "domain_inference",
         "functional_inference",
         "commercial_world_inference",
@@ -753,6 +799,84 @@ def _advertising_promise_seems_prewritten(apromise: str) -> bool:
         if g in s:
             return True
     return False
+
+
+def _infer_pair_seems_random_detached(
+    oa: str,
+    ob: str,
+    int_sum: str,
+    int_script: str,
+    apromise: str,
+    product_name: str,
+    product_description: str,
+) -> bool:
+    """
+    True only when the full narrative still looks arbitrarily disconnected from the product text.
+    Conservative: cross-script products, short blobs, or any token/name overlap → not random.
+    """
+    narrative = f"{oa} {ob} {int_sum} {int_script} {apromise}".strip()
+    blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
+    if len(blob) < 12:
+        return False
+    narr_l = narrative.lower()
+    blob_l = blob.lower()
+    nt = _planning_text_tokens(narr_l)
+    bt = _planning_text_tokens(blob_l)
+    if nt & bt:
+        return False
+    pn = (product_name or "").strip().lower()
+    if len(pn) >= 3 and pn in narr_l:
+        return False
+    # Hebrew / non-Latin product vs Latin interaction: do not treat as random.
+    if not re.search(r"[a-z]{3,}", blob_l) or not re.search(r"[a-z]{3,}", narr_l):
+        return False
+    # Long English-only product text with zero shared tokens with the whole plan narrative.
+    if len(blob_l) >= 120:
+        return True
+    return False
+
+
+def _strong_inferred_grounding_pass(
+    oa: str,
+    ob: str,
+    int_sum: str,
+    int_script: str,
+    apromise: str,
+    product_name: str,
+    product_description: str,
+) -> Tuple[bool, str, bool]:
+    """
+    Relaxed grounding for domain/functional/commercial-world inference:
+    physical objects already validated; require concrete filmable interaction, product-tied promise,
+    emergent promise from interaction, no message-surface dependency, and not an arbitrary pair.
+    """
+    inter = f"{int_sum} {int_script}".strip()
+    product_blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
+    inter_low = inter.lower()
+
+    if not _interaction_covers_both_objects(int_script, int_sum, oa, ob):
+        return False, "interaction_does_not_cover_both_objects", False
+    if not _side_by_side_motion_is_meaningful(inter, oa, ob):
+        return False, "interaction_motion_not_meaningful", False
+    if _interaction_message_surface_dependency(inter_low):
+        return False, "message_surface_dependency", False
+    if not _interaction_avoids_text_dependency(inter_low):
+        return False, "text_ui_dependency", False
+    if not _advertising_promise_from_product(apromise, product_name, product_description):
+        return False, "promise_not_from_product_world", False
+    if _advertising_promise_seems_prewritten(apromise):
+        return False, "promise_prewritten_or_too_short", False
+    emergent_ok, emergent_reason = _promise_emergent_from_interaction(
+        apromise, inter, product_blob
+    )
+    if not emergent_ok:
+        return False, f"promise_not_emergent:{emergent_reason}", False
+    pair_random = _infer_pair_seems_random_detached(
+        oa, ob, int_sum, int_script, apromise, product_name, product_description
+    )
+    if pair_random:
+        return False, "inferred_pair_detached_or_random", True
+    return True, "strong_conceptual_grounding_ok", False
 
 
 def _headline_prefix_ok(headline: str, product_resolved: str) -> bool:
@@ -1477,8 +1601,43 @@ def validate_and_normalize_plan(
 
     ga = _object_grounded_inferential(oa, oa_r, inter_blob_ground, product_name, product_description)
     gb = _object_grounded_inferential(ob, ob_r, inter_blob_ground, product_name, product_description)
-    logger.info("VIDEO_PLAN_OBJECT_GROUNDEDNESS_OK=%s", str(ga and gb).lower())
-    if not ga or not gb:
+    inferential_ok = ga and gb
+    groundedness_mode = "failed"
+    groundedness_reason = "inferential_object_anchor_failed"
+    pair_random = False
+    overall_grounded = False
+
+    if inferential_ok:
+        overall_grounded = True
+        groundedness_mode = "literal"
+        groundedness_reason = "literal_or_lexical_inferential_anchor"
+        pair_random = False
+    elif derived_mode in _STRONG_INFERENCE_GROUNDING_MODES:
+        s_ok, groundedness_reason, pair_random = _strong_inferred_grounding_pass(
+            oa, ob, int_sum, int_script, apromise, product_name, product_description
+        )
+        if s_ok:
+            overall_grounded = True
+            groundedness_mode = "strong_inference"
+        else:
+            groundedness_mode = "failed"
+            overall_grounded = False
+    else:
+        overall_grounded = False
+        groundedness_mode = "failed"
+        groundedness_reason = "inferential_object_anchor_failed"
+        pair_random = _infer_pair_seems_random_detached(
+            oa, ob, int_sum, int_script, apromise, product_name, product_description
+        )
+
+    logger.info("VIDEO_PLAN_OBJECT_GROUNDEDNESS_OK=%s", str(overall_grounded).lower())
+    logger.info("VIDEO_PLAN_GROUNDEDNESS_MODE=%s", groundedness_mode)
+    logger.info(
+        'VIDEO_PLAN_GROUNDEDNESS_REASON="%s"',
+        groundedness_reason.replace('"', "'")[:220],
+    )
+    logger.info("VIDEO_PLAN_INFERENCE_PAIR_RANDOM=%s", str(pair_random).lower())
+    if not overall_grounded:
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
         return None, "planning_failed_invalid_objects"
 
