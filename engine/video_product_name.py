@@ -178,30 +178,22 @@ def resolve_video_product_name(
 
 def apply_canonical_product_name_to_video_plan(plan: Dict[str, Any], canonical: str) -> None:
     """
-    Single source of truth for productNameResolved and headlineText vs headlineDecision.
-    Mutates plan in place.
+    Align bookkeeping with the worker-resolved canonical name only when the planner
+    omitted productNameResolved. Never rewrite headlineText — the planner owns headline form.
     """
     c = (canonical or "").strip()
     if not c:
         return
-    plan["productNameResolved"] = c
-    hd = (plan.get("headlineDecision") or "").strip()
-    ht = (plan.get("headlineText") or "").strip()
-    if hd == "no_headline":
+    pm = (plan.get("productNameResolved") or "").strip()
+    if not pm:
+        plan["productNameResolved"] = c
         return
-    if hd == "product_name_only":
-        plan["headlineText"] = _word_limit(c, 7)
-        return
-    if hd == "include_product_name":
-        if c in ht:
-            limited = _word_limit(ht, 7)
-            if c in limited:
-                plan["headlineText"] = limited
-            else:
-                plan["headlineText"] = _word_limit(f"{c} {ht}".strip(), 7)
-        else:
-            plan["headlineText"] = _word_limit(f"{c} {ht}".strip(), 7)
-        return
+    if pm != c:
+        logger.info(
+            "VIDEO_PLAN_SERVER_SKIPPED_CANONICAL_NAME_OVERRIDE planner_resolved=%r worker_canonical=%r",
+            pm,
+            c,
+        )
 
 
 def _nfc(s: str) -> str:

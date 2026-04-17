@@ -1446,12 +1446,16 @@ def validate_and_normalize_plan(
     content_language: str = "he",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    ACE video engine v3 — server role: structure, hard technical bans, headline format only.
-    o3-pro is authoritative for objects, interaction, promise, and headline wording.
+    ACE video engine v3 — server role: transport + structural completeness only.
+    o3-pro is the sole creative authority; the server does not judge planner content.
     Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
+    logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
+    logger.info("VIDEO_PLAN_SERVER_VALIDATION_SCOPE=structural_only")
+
     if not data:
-        return None, "planning_failed_invalid_objects"
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=no_payload")
+        return None, "planning_failed_incomplete_plan"
 
     data = _coerce_plan_keys(data)
 
@@ -1468,63 +1472,38 @@ def validate_and_normalize_plan(
     pderiv = (data.get("promiseDerivation") or "").strip()
     headline = (data.get("headlineText") or "").strip()
     hderiv = (data.get("headlineDerivation") or "").strip()
-    lang_raw = str(data.get("language") or "").strip().lower()
-    if lang_raw not in ("he", "en"):
+    lang_raw = str(data.get("language") or "").strip()
+    if not lang_raw:
         lang_raw = normalize_video_content_language(content_language)
 
     if not pn or not oa or not ob:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
-        return None, "planning_failed_invalid_objects"
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_objects_or_product_name")
+        return None, "planning_failed_incomplete_plan"
     if not int_sum or not int_script:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
-        return None, "planning_failed_no_valid_interaction"
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_interaction_fields")
+        return None, "planning_failed_incomplete_plan"
     if not apromise:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_promise_not_emergent")
-        return None, "planning_failed_promise_not_emergent"
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_advertising_promise")
+        return None, "planning_failed_incomplete_plan"
     if not headline:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
-        return None, "planning_failed_headline_invalid"
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_headline_text")
+        return None, "planning_failed_incomplete_plan"
 
     if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
         logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
         raise VideoPlanningTimeoutError()
 
-    inter_low = f"{int_sum} {int_script}".lower()
-    msg_surface_hit = _interaction_message_surface_dependency(inter_low)
-    logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
-    logger.info("VIDEO_PLAN_MESSAGE_SURFACE_DEPENDENCY=%s", str(msg_surface_hit).lower())
-    if msg_surface_hit:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_message_surface_dependency")
-        return None, "planning_failed_message_surface_dependency"
-    if not _interaction_avoids_text_dependency(inter_low):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_text_ui_hard_ban")
-        return None, "planning_failed_text_ui_hard_ban"
-
-    if not _headline_prefix_ok(headline, pn):
-        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=false")
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
-        return None, "planning_failed_headline_invalid"
-    if not _headline_word_count_ok(headline):
-        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
-        return None, "planning_failed_headline_invalid"
-    logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
-
-    strict_a = _object_grounded_in_product_blob(oa, product_name, product_description)
-    strict_b = _object_grounded_in_product_blob(ob, product_name, product_description)
-    literal_count = int(bool(strict_a)) + int(bool(strict_b))
-    inter_blob_ground = f"{int_sum} {int_script}"
-    derived_mode = _derive_object_inference_mode(
-        strict_a, strict_b, oa_r, ob_r, product_name, product_description
-    )
-    planner_mode = str(data.get("objectInferenceMode") or "").strip()
-    logger.info("VIDEO_PLAN_OBJECT_INFERENCE_MODE=%s", derived_mode)
-    if planner_mode in _INFERENCE_MODES_LOG and planner_mode != derived_mode:
-        logger.info("VIDEO_PLAN_OBJECT_INFERENCE_MODE_PLANNER_INPUT=%s", planner_mode)
-    logger.info("VIDEO_PLAN_LITERAL_OBJECT_COUNT=%s", literal_count)
-    ga = _object_grounded_inferential(oa, oa_r, inter_blob_ground, product_name, product_description)
-    gb = _object_grounded_inferential(ob, ob_r, inter_blob_ground, product_name, product_description)
-    logger.info("VIDEO_PLAN_OBJECT_GROUNDEDNESS_ADVISORY=%s", str(ga and gb).lower())
+    _lit_raw = data.get("literalObjectCount")
+    if isinstance(_lit_raw, bool):
+        literal_pass = int(_lit_raw)
+    elif isinstance(_lit_raw, int):
+        literal_pass = _lit_raw
+    elif isinstance(_lit_raw, float):
+        literal_pass = int(_lit_raw)
+    elif isinstance(_lit_raw, str) and _lit_raw.strip().lstrip("-").isdigit():
+        literal_pass = int(_lit_raw.strip())
+    else:
+        literal_pass = 0
 
     opening_fd = (
         f"Single continuous shot: {oa} and {ob} are both visible together in one stable composition; "
@@ -1549,10 +1528,12 @@ def validate_and_normalize_plan(
         "headlineText": headline,
         "headlineDerivation": hderiv or "",
         "language": lang_raw,
-        "objectInferenceMode": derived_mode,
-        "literalObjectCount": literal_count,
+        "objectInferenceMode": str(data.get("objectInferenceMode") or "").strip(),
+        "literalObjectCount": literal_pass,
         "objectGroundednessOk": True,
-        "headlineDecision": "include_product_name",
+        "headlineDecision": (
+            str(data.get("headlineDecision") or "").strip() or "include_product_name"
+        ),
         "replacementDirection": "A_replaces_B",
         "preservedBackgroundFrom": "A",
         "shortReplacementScript": "",
@@ -1574,40 +1555,26 @@ def validate_and_normalize_plan(
 
 def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     """
-    Pre-Runway structural gate: required strings, headline format, pipeline fields.
-    Creative quality is not evaluated here (planner output is authoritative).
-    Returns (ok, reason_code) with reason_code for logs only when ok is False.
+    Pre-Runway structural gate: non-empty fields required for the single-interaction pipeline.
+    No creative, headline-format, or legacy layout (SIDE_BY_SIDE / REPLACEMENT) checks.
     """
     if not plan:
         return False, "no_plan"
     pn = (plan.get("productNameResolved") or "").strip()
     if not pn:
-        return False, "planning_failed_invalid_objects"
+        return False, "planning_failed_incomplete_plan"
     if not (plan.get("objectA") or "").strip() or not (plan.get("objectB") or "").strip():
-        return False, "planning_failed_invalid_objects"
+        return False, "planning_failed_incomplete_plan"
     if not (plan.get("interactionSummary") or "").strip():
-        return False, "planning_failed_no_valid_interaction"
+        return False, "planning_failed_incomplete_plan"
     if not (plan.get("interactionScript") or "").strip():
-        return False, "planning_failed_no_valid_interaction"
+        return False, "planning_failed_incomplete_plan"
     if not (plan.get("videoPromptCore") or "").strip():
-        return False, "planning_failed_no_valid_interaction"
+        return False, "planning_failed_incomplete_plan"
     if not (plan.get("advertisingPromise") or "").strip():
-        return False, "planning_failed_promise_not_emergent"
-    hd = (plan.get("headlineDecision") or "").strip()
-    if hd not in ("include_product_name", "product_name_only", "no_headline"):
-        return False, "planning_failed_headline_invalid"
-    if hd == "no_headline":
-        return False, "planning_failed_headline_invalid"
-    ht = (plan.get("headlineText") or "").strip()
-    if not ht:
-        return False, "planning_failed_headline_invalid"
-    if not _headline_prefix_ok(ht, pn):
-        return False, "planning_failed_headline_invalid"
-    if not _headline_word_count_ok(ht):
-        return False, "planning_failed_headline_invalid"
-    vm = _norm_video_visual_mode(plan.get("videoVisualMode"))
-    if vm != "ACE_SINGLE_INTERACTION":
-        return False, "planning_failed_invalid_objects"
+        return False, "planning_failed_incomplete_plan"
+    if not (plan.get("headlineText") or "").strip():
+        return False, "planning_failed_incomplete_plan"
     return True, ""
 
 
@@ -1723,16 +1690,15 @@ def _fetch_video_plan_o3_sync(
     session_id: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    One strong planner call + strict validation. No salvage, no emergency merge, no deterministic repair.
+    One planner call + structural normalization only (no server-side creative rejection).
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
     logger.info("VIDEO_PLAN_SEARCH_ORDER=single_interaction_v3")
-    default_fail = "planning_failed_invalid_objects"
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
-        return None, default_fail
+        return None, "planning_failed_model_call"
 
     if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
         raise VideoPlanningTimeoutError()
@@ -1825,14 +1791,14 @@ Language: {lang_name} ({lang}).
             e,
         )
         logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-        return None, default_fail
+        return None, "planning_failed_model_call"
 
     try:
         raw = _extract_responses_output_text(response)
         if not raw:
             logger.error("VIDEO_PLAN_FAIL_EMPTY_OUTPUT model=%s", model)
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            return None, default_fail
+            return None, "planning_failed_malformed_response"
 
         _log_output_preview(raw)
 
@@ -1840,7 +1806,7 @@ Language: {lang_name} ({lang}).
         if not parsed:
             logger.error("VIDEO_PLAN_FAIL_JSON_PARSE model=%s", model)
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            return None, default_fail
+            return None, "planning_failed_malformed_response"
 
         pf_raw = str(parsed.get("planningFailure") or "").strip()
         if pf_raw:
@@ -1862,9 +1828,8 @@ Language: {lang_name} ({lang}).
             content_language=content_language,
         )
         if not plan:
-            last_v_err = (v_err or "").strip() or default_fail
-            logger.error("VIDEO_PLAN_FAIL_VALIDATION reason=%s", last_v_err)
-            logger.info("VIDEO_PLAN_REJECT_REASON=%s", last_v_err)
+            last_v_err = (v_err or "").strip() or "planning_failed_incomplete_plan"
+            logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
             return None, last_v_err
 
@@ -1886,7 +1851,7 @@ Language: {lang_name} ({lang}).
             e,
         )
         logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-        return None, default_fail
+        return None, "planning_failed_malformed_response"
 
 
 def fetch_video_plan_o3(
@@ -1897,7 +1862,7 @@ def fetch_video_plan_o3(
     session_id: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    Fetch and validate plan under one authoritative hard wall-clock deadline.
+    Fetch plan from o3 under a hard wall-clock deadline; structural normalization only.
     On deadline exceeded, raises VideoPlanningTimeoutError (caller must fail the job).
     Returns (plan, failure_reason); failure_reason is empty on success.
     """

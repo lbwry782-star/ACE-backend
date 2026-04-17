@@ -162,11 +162,10 @@ def _enforce_headline_overlay_language(
     if ok and actual == "hebrew_job_latin_product_name_headline_only":
         logger.info("VIDEO_HEADLINE_LANGUAGE_OVERRIDE_REASON=product_name_only_allowed")
     if not ok:
-        logger.error(
-            "VIDEO_JOB_FAILED_INTEGRITY reason=headline_language_mismatch required=%s plurality_check=false",
+        logger.warning(
+            "VIDEO_HEADLINE_LANGUAGE_ADVISORY_MISMATCH required=%s (planner headline retained)",
             req,
         )
-        raise RunwayVideoMVPError("headline_language_mismatch")
 
 
 def _enforce_marketing_copy_language(required_lang: str, marketing_text: str) -> None:
@@ -176,11 +175,10 @@ def _enforce_marketing_copy_language(required_lang: str, marketing_text: str) ->
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_empty")
         raise RunwayVideoMVPError("marketing_copy_empty")
     if not text_predominantly_matches_language(marketing_text, req):
-        logger.error(
-            "VIDEO_JOB_FAILED_INTEGRITY reason=marketing_copy_language_mismatch required=%s plurality_check=false",
+        logger.warning(
+            "VIDEO_MARKETING_LANGUAGE_ADVISORY_MISMATCH required=%s (copy retained)",
             req,
         )
-        raise RunwayVideoMVPError("marketing_language_mismatch")
 
 
 def _create_text_to_video_task(
@@ -403,7 +401,7 @@ def _generate_one_video_mvp_body(
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate2_reason)
         _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-        raise RunwayVideoMVPError(gate2_reason or "planning_failed_headline_invalid")
+        raise RunwayVideoMVPError(gate2_reason or "planning_failed_incomplete_plan")
     log_video_job_plan_integrity(plan)
 
     video_job_set_phase("runway")
@@ -495,13 +493,13 @@ def _generate_one_video_mvp_body(
                 name_mismatch = not reuse_h or not reuse_c
                 logger.info("VIDEO_PRODUCT_NAME_MISMATCH=%s", str(name_mismatch).lower())
                 if not reuse_h:
-                    logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_headline")
-                    _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-                    raise RunwayVideoMVPError("product_name_headline_mismatch")
+                    logger.warning(
+                        "VIDEO_PLAN_SERVER_CREATIVE_CHECK_SKIPPED field=headline product_name_overlap=false advisory_only=1"
+                    )
                 if not reuse_c:
-                    logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=product_name_not_in_marketing_copy")
-                    _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-                    raise RunwayVideoMVPError("product_name_copy_mismatch")
+                    logger.warning(
+                        "VIDEO_PLAN_SERVER_CREATIVE_CHECK_SKIPPED field=marketing_copy product_name_overlap=false advisory_only=1"
+                    )
                 try:
                     _enforce_marketing_copy_language(marketing_lang, marketing_text_for_api)
                     _enforce_headline_overlay_language(
