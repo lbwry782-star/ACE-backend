@@ -317,6 +317,8 @@ def _generate_one_video_mvp_body(
 ) -> Tuple[str, str, str]:
     plan: Optional[Dict[str, Any]] = None
     promise_saved = False
+    t_job0 = time.monotonic()
+    plan_ms = runway_ms = post_ms = 0.0
 
     if not _env_api_key():
         logger.error("RUNWAY_MVP aborted missing_api_key")
@@ -359,6 +361,7 @@ def _generate_one_video_mvp_body(
     video_job_set_phase("planning")
     plan = None
     plan_fail_reason = ""
+    t_plan0 = time.monotonic()
     try:
         plan, plan_fail_reason = fetch_video_plan_o3(
             canonical_name,
@@ -372,10 +375,12 @@ def _generate_one_video_mvp_body(
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=planning_timeout")
         _maybe_log_ad_promise_skip_after_failed_generation(None, promise_saved)
         raise RunwayVideoMVPError("planning_timeout")
+    plan_ms = (time.monotonic() - t_plan0) * 1000.0
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
 
     if not plan:
         fail = (plan_fail_reason or "").strip() or "planning_failed"
+        logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
         logger.info("VIDEO_PLAN_ABORTED reason=%s", fail)
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", fail)
@@ -383,8 +388,11 @@ def _generate_one_video_mvp_body(
         _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
         raise RunwayVideoMVPError(fail)
 
+    apply_canonical_product_name_to_video_plan(plan, canonical_name)
+    plan["marketingLanguage"] = marketing_lang
     gate_ok, gate_reason = video_plan_required_fields_for_runway(plan)
     if not gate_ok:
+        logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
         logger.info("VIDEO_PLAN_ABORTED reason=%s", gate_reason)
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate_reason)
@@ -392,16 +400,7 @@ def _generate_one_video_mvp_body(
         raise RunwayVideoMVPError(gate_reason or "plan_integrity_failed")
 
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
-
-    apply_canonical_product_name_to_video_plan(plan, canonical_name)
-    plan["marketingLanguage"] = marketing_lang
-    gate2_ok, gate2_reason = video_plan_required_fields_for_runway(plan)
-    if not gate2_ok:
-        logger.info("VIDEO_PLAN_ABORTED reason=%s", gate2_reason)
-        logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false")
-        logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", gate2_reason)
-        _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
-        raise RunwayVideoMVPError(gate2_reason or "planning_failed_incomplete_plan")
+    logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
     log_video_job_plan_integrity(plan)
 
     video_job_set_phase("runway")
@@ -411,6 +410,7 @@ def _generate_one_video_mvp_body(
     logger.info("VIDEO_TEXT_POLICY_SANITIZED=%s", text_policy_sanitized)
 
     session = requests.Session()
+    t_runway0 = time.monotonic()
     logger.info("VIDEO_JOB_STEP step=runway_create_task start")
     task_id = _create_text_to_video_task(
         session, base, model, prompt, prompt_image_data_uri=None
@@ -456,9 +456,12 @@ def _generate_one_video_mvp_body(
         if status in _SUCCESS_STATUSES:
             url = _extract_video_url(task)
             if url:
+                runway_ms = (time.monotonic() - t_runway0) * 1000.0
+                logger.info("VIDEO_TIMING_RUNWAY_MS=%.1f", runway_ms)
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
                 video_job_set_phase("postprocess")
+                t_post0 = time.monotonic()
                 logger.info("VIDEO_JOB_STEP step=packaging_result start")
                 headline_for_overlay = (plan.get("headlineText") or "").strip()
                 headline_decision = (plan.get("headlineDecision") or "").strip()
@@ -552,6 +555,8 @@ def _generate_one_video_mvp_body(
                         job_id=job_id,
                         overlay_language=video_lang,
                     )
+                    post_ms = (time.monotonic() - t_post0) * 1000.0
+                    logger.info("VIDEO_TIMING_POSTPROCESS_MS=%.1f", post_ms)
                     if final_url.rstrip("/") == url.rstrip("/"):
                         logger.info(
                             "VIDEO_JOB_CHOSEN_URL source=runway_fallback jobId=%s",
@@ -582,6 +587,15 @@ def _generate_one_video_mvp_body(
                         )
                     promise_saved = True
                     logger.info("VIDEO_PROMISE_ACCEPTED_NEW=true")
+                    total_ms = (time.monotonic() - t_job0) * 1000.0
+                    logger.info("VIDEO_TIMING_TOTAL_MS=%.1f", total_ms)
+                    phases = (("plan", plan_ms), ("runway", runway_ms), ("postprocess", post_ms))
+                    dom = (
+                        max(phases, key=lambda x: x[1])[0]
+                        if max(p[1] for p in phases) > 0.5
+                        else "unknown"
+                    )
+                    logger.info("VIDEO_TIMING_DOMINANT_PHASE=%s", dom)
                     return final_url, marketing_text_for_api, headline_for_overlay
                 except Exception:
                     _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)

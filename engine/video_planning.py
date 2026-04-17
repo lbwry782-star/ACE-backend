@@ -55,13 +55,6 @@ _VIDEO_PLAN_HARD_SECONDS = float(
 )
 
 
-def _video_plan_prompt_profile() -> str:
-    raw = (os.environ.get("VIDEO_PLANNER_PROMPT_PROFILE") or "").strip().lower()
-    if raw == "legacy":
-        return "legacy"
-    return "short"
-
-
 def _video_plan_planner_description_limit() -> int:
     raw = (os.environ.get("VIDEO_PLANNER_MAX_DESCRIPTION_CHARS") or "2200").strip() or "2200"
     try:
@@ -85,6 +78,12 @@ SUCCESS (all strings, all required):
   "headlineText": string
 }
 
+Rules reflected in your output:
+- objectA/objectB: real physical objects, filmable, realistic; media or lights OK only as physical props, never as text/UI/message surfaces.
+- interactionSummary + interactionScript: one physically plausible interaction only (what happens on screen).
+- advertisingPromise: born only after A and B are chosen and the realistic interaction is fixed — never invent the promise first.
+- headlineText: human insight / meaning of the interaction (interpretation), not a caption that merely restates the motion. Must start exactly with "<productNameResolved>," then at most 7 words total including the name.
+
 FAILURE (no other keys):
 { "planningFailure": "planning_failed_no_valid_interaction" }
 """
@@ -93,16 +92,30 @@ FAILURE (no other keys):
 def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
-    return f"""ACE video planner — single shot, half-orbit camera around A+B. Job language: {lang_name} ({lang}).
+    return f"""ACE video planner — one continuous commercial shot: a smooth half-orbit camera around Object A and Object B together (camera path only; not a layout or “mode”). Job language: {lang_name} ({lang}).
 objectA/objectB/interactionSummary/interactionScript: short English. productNameResolved, advertisingPromise, headlineText: {lang_name}. If product name is empty, invent productNameResolved (English if job is English; Hebrew job may use Hebrew or English).
 
-CORE: (1) Choose A from the product. (2) Find B from the product. (3) Accept B only when A↔B creates the advertising promise — do NOT invent the promise first; it is born from the interaction. (4) interactionSummary + interactionScript = the only on-screen interaction. (5) headlineText starts exactly "<productNameResolved>," then up to 7 words total, derived from that interaction.
+There is exactly one on-screen story: a single real-world physical interaction between Object A and Object B. Do not think in replacement or side-by-side layout terms.
 
-OBJECTS: Physical, clear, classic; no text/logos/UI/readable content as the idea. TV/phone/billboard OK only as objects, not message surfaces.
+ORDER: (1) choose A from the product world. (2) search for B. (3) accept B only when a realistic, non-banal physical interaction between A and B gives birth to the advertising promise — the promise is born from that interaction, never pre-written first. (4) interactionSummary + interactionScript are the only description of what happens visually. (5) headlineText is the interpretation (meaning), not a literal description of the motion.
 
-ANTI-BANAL: No obvious default use (e.g. pen writing, brush painting). Pick a clear but non-obvious physical interaction.
+OBJECTS: Each of A and B must be a clear, filmable, realistic physical object. No dream logic, surreal causality, or impossible physics in how they behave.
 
-FAIL: If no valid A+B interaction, return exactly: {{"planningFailure":"planning_failed_no_valid_interaction"}}
+ANTI-BANAL: The interaction must not be a default cliché (e.g. pen writing on paper, brush painting canvas, straw in cup). Stay realistic — do not fix banality by becoming surreal.
+
+HEADLINE: Must always exist; must begin with "<productNameResolved>," then up to 7 words total; must read as insight into what the interaction means, not as a caption of what we see.
+
+"The interaction must be completely realistic and physically plausible.
+Do not use dream logic, surrealism, magical causality, or impossible behavior."
+
+"The headline must interpret the interaction, not describe it.
+Do not write a caption.
+Write the meaning of the interaction."
+
+"There is no SIDE_BY_SIDE mode and no REPLACEMENT mode in video.
+There is only one real interaction between Object A and Object B."
+
+FAIL: If you cannot satisfy the above, return exactly: {{"planningFailure":"planning_failed_no_valid_interaction"}}
 """
 
 
@@ -642,6 +655,45 @@ _BANAL_OBJ_TOKEN_ALIASES: Dict[str, str] = {
     "blossom": "flower",
     "bloom": "flower",
 }
+
+def _interaction_violates_physical_realism_blob(blob: str) -> bool:
+    """
+    Engine contract: interaction text must not describe impossible / magical / surreal causality.
+    Narrow patterns only (planner is still primary; this catches obvious violations).
+    """
+    s = (blob or "").strip().lower()
+    if not s:
+        return False
+    regex_hits = (
+        r"time\s+flow(?:s|ing)?\s+backward",
+        r"time\s+go(?:es|ing)?\s+backward",
+        r"time\s+run(?:s|ning)?\s+backward",
+        r"flow(?:s|ing)?\s+in\s+reverse",
+        r"reverse(?:s|d|ing)?\s+time",
+        r"backward(?:s)?\s+through\s+time",
+        r"\bteleport(?:s|ed|ing)?\b",
+        r"\bmagic(?:al|ally)?\b",
+        r"\bdef(?:y|ies|ying)\s+physics\b",
+        r"\bdef(?:y|ies|ying)\s+gravity\b",
+        r"\bbreak(?:s|ing)?\s+the\s+laws?\s+of\s+physics\b",
+        r"\bimpossible\s+(?:spontaneous\s+)?transformation\b",
+        r"\binstant(?:ly)?\s+morph(?:ed|s|ing)?\s+into\b",
+    )
+    for pat in regex_hits:
+        if re.search(pat, s):
+            return True
+    phrase_hits = (
+        "dream logic",
+        "surreal",
+        "sorcery",
+        "alchemy",
+        "wizard casts",
+        "spell makes",
+        "magically ",
+        " impossible physics",
+    )
+    return any(p in s for p in phrase_hits)
+
 
 def _object_tokens_for_banal_check(oa: str, ob: str) -> Set[str]:
     toks: Set[str] = set()
@@ -1381,27 +1433,6 @@ def _fuzzy_headline_decision_raw(raw: Any) -> str:
     return str(raw or "").strip()
 
 
-def _norm_video_visual_mode(raw: Any) -> Optional[str]:
-    """Legacy REPLACEMENT | SIDE_BY_SIDE, or ACE_SINGLE_INTERACTION; None if invalid."""
-    s = re.sub(r"\s+", "_", str(raw or "").strip().lower())
-    s = s.replace("-", "_")
-    if s in ("replacement", "replace"):
-        return "REPLACEMENT"
-    if s in ("side_by_side", "sidebyside", "side_by_side_mode", "sxs"):
-        return "SIDE_BY_SIDE"
-    if s in ("ace_single_interaction", "ace_single"):
-        return "ACE_SINGLE_INTERACTION"
-    return None
-
-
-def _is_side_by_side_plan(plan: Dict[str, Any]) -> bool:
-    """True when both primaries are visible together (v3 single interaction or legacy SIDE_BY_SIDE)."""
-    vm = _norm_video_visual_mode(plan.get("videoVisualMode"))
-    if vm == "ACE_SINGLE_INTERACTION":
-        return True
-    return vm == "SIDE_BY_SIDE"
-
-
 # snake_case / alternate keys from some models → camelCase
 _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("product_name_resolved", "productNameResolved"),
@@ -1446,12 +1477,13 @@ def validate_and_normalize_plan(
     content_language: str = "he",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    ACE video engine v3 — server role: transport + structural completeness only.
-    o3-pro is the sole creative authority; the server does not judge planner content.
+    ACE video engine v3 — server: structural checks plus fixed engine contracts
+    (headline format, physical-realism and anti-banal interaction). o3-pro remains
+    the creative authority for what A, B, interaction, promise, and headline say.
     Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
     logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
-    logger.info("VIDEO_PLAN_SERVER_VALIDATION_SCOPE=structural_only")
+    logger.info("VIDEO_PLAN_SERVER_VALIDATION_SCOPE=structural_engine_contracts")
 
     if not data:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=no_payload")
@@ -1492,6 +1524,22 @@ def validate_and_normalize_plan(
     if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
         logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
         raise VideoPlanningTimeoutError()
+
+    if not _headline_prefix_ok(headline, pn):
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_prefix_format")
+        return None, "planning_failed_incomplete_plan"
+    if not _headline_word_count_ok(headline):
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_word_count")
+        return None, "planning_failed_incomplete_plan"
+
+    inter_contract = f"{int_sum} {int_script}".strip()
+    inter_low = inter_contract.lower()
+    if _interaction_violates_physical_realism_blob(inter_low):
+        logger.info("VIDEO_PLAN_ENGINE_CONTRACT_FAIL reason=interaction_not_physically_realistic")
+        return None, "planning_failed_no_valid_interaction"
+    if _interaction_is_banal_obvious(oa, ob, inter_low):
+        logger.info("VIDEO_PLAN_ENGINE_CONTRACT_FAIL reason=interaction_banal_default")
+        return None, "planning_failed_no_valid_interaction"
 
     _lit_raw = data.get("literalObjectCount")
     if isinstance(_lit_raw, bool):
@@ -1555,8 +1603,7 @@ def validate_and_normalize_plan(
 
 def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     """
-    Pre-Runway structural gate: non-empty fields required for the single-interaction pipeline.
-    No creative, headline-format, or legacy layout (SIDE_BY_SIDE / REPLACEMENT) checks.
+    Pre-Runway structural gate: non-empty fields required for the single A↔B interaction pipeline.
     """
     if not plan:
         return False, "no_plan"
@@ -1690,7 +1737,7 @@ def _fetch_video_plan_o3_sync(
     session_id: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """
-    One planner call + structural normalization only (no server-side creative rejection).
+    One o3 planner call; structural normalization + engine contracts in validate_and_normalize_plan.
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
@@ -1706,22 +1753,17 @@ def _fetch_video_plan_o3_sync(
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
     model = _text_model()
-    prompt_profile = _video_plan_prompt_profile()
     desc_src = (product_description or "").strip()
     desc_limit = _video_plan_planner_description_limit()
-    if prompt_profile == "legacy":
+    if len(desc_src) > desc_limit:
+        desc_for_model = (
+            desc_src[:desc_limit].rstrip()
+            + "\n…[planner excerpt; full description is unchanged for Runway downstream]"
+        )
+        desc_truncated = True
+    else:
         desc_for_model = desc_src
         desc_truncated = False
-    else:
-        if len(desc_src) > desc_limit:
-            desc_for_model = (
-                desc_src[:desc_limit].rstrip()
-                + "\n…[planner excerpt; full description is unchanged for Runway downstream]"
-            )
-            desc_truncated = True
-        else:
-            desc_for_model = desc_src
-            desc_truncated = False
     user_block = f"""Product name (may be empty): {product_name or "(empty)"}
 Product description:
 {desc_for_model}
@@ -1768,7 +1810,7 @@ Language: {lang_name} ({lang}).
             max(0.0, deadline_monotonic - time.monotonic()),
         )
 
-    logger.info("VIDEO_PLAN_PROMPT_PROFILE=%s", prompt_profile)
+    logger.info("VIDEO_PLAN_PROMPT_PROFILE=short")
     logger.info(
         "VIDEO_PLAN_PLANNER_DESC_CHARS original=%s planner_body=%s truncated=%s",
         len(desc_src),
