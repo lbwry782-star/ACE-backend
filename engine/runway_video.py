@@ -30,6 +30,7 @@ from engine.video_bidi import (
     prepare_ffmpeg_overlay_headline,
 )
 from engine.video_headline_postprocess import postprocess_video_headline
+from engine.video_job_context import video_job_set_phase
 from engine.video_jobs_redis import video_job_set_resolved_product_name
 from engine.video_language import (
     detect_text_language,
@@ -310,20 +311,12 @@ def _sleep_poll_interval(deadline: float) -> None:
     time.sleep(sleep_s)
 
 
-def generate_one_video_mvp(
+def _generate_one_video_mvp_body(
     product_name: str,
     product_description: str,
     public_base_url: Optional[str] = None,
     job_id: str = "",
 ) -> Tuple[str, str, str]:
-    """
-    Create one Runway video task, poll until done or timeout.
-    Returns (final_video_url, marketing_text_api, overlay_headline):
-    - final_video_url: postprocess_video_headline output when overlay succeeds; else Runway URL on failure/skip.
-    - marketing_text_api: 45–55 word copy for Redis/API when a plan exists (unchanged; not overlaid on video).
-    - overlay_headline: planner headlineText for Redis (non-empty on success; planning must pass gate).
-    Raises RunwayVideoMVPError on any failure (no generic prompt fallback).
-    """
     plan: Optional[Dict[str, Any]] = None
     promise_saved = False
 
@@ -365,6 +358,7 @@ def generate_one_video_mvp(
             )
 
     logger.info("VIDEO_JOB_STEP step=plan_video start")
+    video_job_set_phase("planning")
     plan = None
     plan_fail_reason = ""
     try:
@@ -412,6 +406,7 @@ def generate_one_video_mvp(
         raise RunwayVideoMVPError(gate2_reason or "planning_failed_headline_invalid")
     log_video_job_plan_integrity(plan)
 
+    video_job_set_phase("runway")
     prompt = build_runway_prompt_from_plan(plan)
 
     prompt, text_policy_sanitized = sanitize_runway_prompt_for_video_text_policy(prompt)
@@ -465,6 +460,7 @@ def generate_one_video_mvp(
             if url:
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
+                video_job_set_phase("postprocess")
                 logger.info("VIDEO_JOB_STEP step=packaging_result start")
                 headline_for_overlay = (plan.get("headlineText") or "").strip()
                 headline_decision = (plan.get("headlineDecision") or "").strip()
@@ -611,6 +607,33 @@ def generate_one_video_mvp(
     logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=timeout")
     _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
     raise RunwayVideoMVPError("runway_failed")
+
+
+def generate_one_video_mvp(
+    product_name: str,
+    product_description: str,
+    public_base_url: Optional[str] = None,
+    job_id: str = "",
+) -> Tuple[str, str, str]:
+    """
+    Create one Runway video task, poll until done or timeout.
+    Returns (final_video_url, marketing_text_api, overlay_headline):
+    - final_video_url: postprocess_video_headline output when overlay succeeds; else Runway URL on failure/skip.
+    - marketing_text_api: 45–55 word copy for Redis/API when a plan exists (unchanged; not overlaid on video).
+    - overlay_headline: planner headlineText for Redis (non-empty on success; planning must pass gate).
+    Raises RunwayVideoMVPError on any failure (no generic prompt fallback).
+    """
+    from engine.video_job_context import video_job_clear_phase
+
+    try:
+        return _generate_one_video_mvp_body(
+            product_name,
+            product_description,
+            public_base_url=public_base_url,
+            job_id=job_id,
+        )
+    finally:
+        video_job_clear_phase()
 
 
 log_config_warning_if_missing_key()

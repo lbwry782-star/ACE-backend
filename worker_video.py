@@ -60,10 +60,17 @@ def _install_shutdown_signals() -> None:
         )
         if jid:
             try:
-                from engine.video_jobs_redis import video_job_mark_error
+                from engine.video_job_context import video_job_get_phase
+                from engine.video_jobs_redis import video_job_mark_interrupted
 
-                video_job_mark_error(jid, "worker_shutdown_during_job")
-                logger.info("VIDEO_JOB_ERROR_FINALIZED jobId=%s reason=worker_shutdown_during_job", jid)
+                phase = video_job_get_phase()
+                logger.info("VIDEO_JOB_PHASE_AT_INTERRUPT=%s", phase)
+                logger.info("VIDEO_JOB_INFRA_FAILURE=true")
+                video_job_mark_interrupted(jid)
+                logger.info(
+                    "VIDEO_JOB_INTERRUPT_FINALIZED jobId=%s interrupt_code=interrupted_worker_shutdown error=worker_shutdown_during_job",
+                    jid,
+                )
             except Exception as e:
                 logger.error(
                     "VIDEO_JOB_ERROR_FINALIZE_FAILED jobId=%s err=%s",
@@ -169,7 +176,7 @@ def main() -> None:
             logger.warning("VIDEO_JOB_FAILED jobId=%s reason=%s", job_id, _reason)
             logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)
             try:
-                video_job_mark_error(job_id, "video_generation_failed")
+                video_job_mark_error(job_id, (_reason or "").strip() or "video_generation_failed")
             except Exception as mark_err:
                 logger.error(
                     "VIDEO_JOB_ERROR mark_failed jobId=%s err=%s",

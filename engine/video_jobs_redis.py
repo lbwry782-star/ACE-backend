@@ -114,14 +114,19 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
     if not data:
         return None
     rp = (data.get("resolved_product_name") or "").strip()
+    st = (data.get("status") or "running").strip()
+    infra = (data.get("infrastructure_failure") or "").strip() == "1"
+    icode = (data.get("interrupt_code") or "").strip()
     return {
-        "status": (data.get("status") or "running").strip(),
+        "status": st,
         "videoUrl": data.get("video_url") or "",
         "marketingText": data.get("marketing_text") or "",
         "overlayHeadline": data.get("overlay_headline") or "",
         "publicBaseUrl": data.get("public_base_url") or "",
         "postprocessRan": (data.get("postprocess_ran") or "").strip(),
         "error": data.get("error") or "",
+        "interruptCode": icode,
+        "infrastructureFailure": infra,
         "resolvedProductName": rp,
         "productNameResolved": rp,
         "productNameSource": (data.get("product_name_source") or "").strip(),
@@ -221,6 +226,29 @@ def video_job_mark_error(job_id: str, error_code: str = "video_generation_failed
         mapping={
             "status": "error",
             "error": error_code or "video_generation_failed",
+            "last_progress_ts": str(int(time.time())),
+        },
+    )
+
+
+def video_job_mark_interrupted(
+    job_id: str,
+    *,
+    error_truth: str = "worker_shutdown_during_job",
+    interrupt_code: str = "interrupted_worker_shutdown",
+) -> None:
+    """
+    Worker infra shutdown (SIGTERM/SIGINT) while a job is active.
+    Preserves Redis hash fields (product_name, product_description, etc.) for inspection or manual retry.
+    """
+    r = get_redis()
+    r.hset(
+        job_key(job_id),
+        mapping={
+            "status": "interrupted",
+            "error": error_truth or "worker_shutdown_during_job",
+            "interrupt_code": interrupt_code or "interrupted_worker_shutdown",
+            "infrastructure_failure": "1",
             "last_progress_ts": str(int(time.time())),
         },
     )

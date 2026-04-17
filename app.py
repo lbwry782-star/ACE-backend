@@ -1085,7 +1085,7 @@ def api_promise_memory_reset_all():
 
 @app.route('/api/video-status', methods=['GET'])
 def video_status():
-    """Poll async /api/generate-video job from Redis: running | done | error."""
+    """Poll async /api/generate-video job from Redis: running | done | error | interrupted."""
     if not redis_configured():
         return jsonify({"ok": False, "error": "video_jobs_unconfigured"}), 503
     job_id = request.args.get("jobId", "").strip()
@@ -1110,6 +1110,20 @@ def video_status():
             logger.error("VIDEO_JOB_STALE_CHECK_ERR jobId=%s err=%s", job_id, e, exc_info=True)
     logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
     out = {"ok": True, "status": status}
+    if status == "interrupted":
+        err = (job.get("error") or "").strip() or "worker_shutdown_during_job"
+        icode = (job.get("interruptCode") or "").strip() or "interrupted_worker_shutdown"
+        logger.info(
+            "VIDEO_JOB_POLL infrastructure_interruption jobId=%s interrupt_code=%s error=%s",
+            job_id,
+            icode,
+            err,
+        )
+        out["error"] = err
+        out["interruptCode"] = icode
+        out["infrastructureInterrupted"] = bool(job.get("infrastructureFailure"))
+        out["retryable"] = True
+        return jsonify(out), 200
     if status == "done":
         ensure_video_postprocessed_for_poll(job_id, job)
         job = video_job_get(job_id)

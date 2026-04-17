@@ -54,6 +54,23 @@ _VIDEO_PLAN_HARD_SECONDS = float(
     or str(_VIDEO_PLAN_TIMEOUT + 45.0)
 )
 
+
+def _video_plan_prompt_profile() -> str:
+    raw = (os.environ.get("VIDEO_PLANNER_PROMPT_PROFILE") or "").strip().lower()
+    if raw == "legacy":
+        return "legacy"
+    return "short"
+
+
+def _video_plan_planner_description_limit() -> int:
+    raw = (os.environ.get("VIDEO_PLANNER_MAX_DESCRIPTION_CHARS") or "2200").strip() or "2200"
+    try:
+        n = int(raw)
+    except ValueError:
+        n = 2200
+    return max(400, min(n, 48000))
+
+
 _JSON_KEYS = """
 Return ONE JSON object only. No markdown fences. No prose outside JSON.
 
@@ -1732,9 +1749,25 @@ def _fetch_video_plan_o3_sync(
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
     model = _text_model()
+    prompt_profile = _video_plan_prompt_profile()
+    desc_src = (product_description or "").strip()
+    desc_limit = _video_plan_planner_description_limit()
+    if prompt_profile == "legacy":
+        desc_for_model = desc_src
+        desc_truncated = False
+    else:
+        if len(desc_src) > desc_limit:
+            desc_for_model = (
+                desc_src[:desc_limit].rstrip()
+                + "\n…[planner excerpt; full description is unchanged for Runway downstream]"
+            )
+            desc_truncated = True
+        else:
+            desc_for_model = desc_src
+            desc_truncated = False
     user_block = f"""Product name (may be empty): {product_name or "(empty)"}
 Product description:
-{product_description}
+{desc_for_model}
 
 Language: {lang_name} ({lang}).
 
@@ -1778,6 +1811,13 @@ Language: {lang_name} ({lang}).
             max(0.0, deadline_monotonic - time.monotonic()),
         )
 
+    logger.info("VIDEO_PLAN_PROMPT_PROFILE=%s", prompt_profile)
+    logger.info(
+        "VIDEO_PLAN_PLANNER_DESC_CHARS original=%s planner_body=%s truncated=%s",
+        len(desc_src),
+        len(desc_for_model),
+        str(desc_truncated).lower(),
+    )
     logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(attempt_input))
     try:
         response = client.responses.create(
