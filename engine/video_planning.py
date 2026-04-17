@@ -59,7 +59,7 @@ OUTPUT FORMAT (strict)
 - Return ONE JSON object only.
 - Do NOT wrap in markdown code fences. Do NOT add prose before or after the JSON.
 
-SUCCESS — use exact camelCase keys below (all string values except language). Do not omit required keys.
+SUCCESS — use exact camelCase keys below (all string values except language and counts). Do not omit required keys.
 {
   "productNameResolved": string,
   "objectA": string,
@@ -72,7 +72,9 @@ SUCCESS — use exact camelCase keys below (all string values except language). 
   "promiseDerivation": string,
   "headlineText": string,
   "headlineDerivation": string,
-  "language": "he" or "en"
+  "language": "he" or "en",
+  "objectInferenceMode": "literals" | "domain_inference" | "functional_inference" | "commercial_world_inference" (optional),
+  "literalObjectCount": number (optional, integer 0–2; server recomputes for logs if absent)
 }
 
 FAILURE — if no valid plan is possible under the rules, return ONLY this object (no improvisation, no partial plan):
@@ -103,8 +105,8 @@ LANGUAGE
 
 CORE ORDER (mandatory — do not invert)
 1) Read product name + product description.
-2) Choose objectA from that text only (classic physical object; not an abstract concept, vague situation, or pure environment).
-3) Search objectB from that text only with the same object rules.
+2) Choose objectA grounded in the product name + description as the conceptual source (classic physical object; not an abstract concept, vague situation, or pure environment). Labels need not appear verbatim in the text if inference is justified in objectAReason.
+3) Search objectB from the same conceptual source with the same object rules; justify inference in objectBReason when labels are not verbatim.
 4) Accept objectB ONLY when a concrete physical A↔B interaction would give birth to a valid advertising promise (meaning that lives in the interaction, not before it).
 5) Fix interactionSummary + interactionScript first. That single interaction is exactly what the video shows.
 6) Only then write advertisingPromise + promiseDerivation (promise born from the interaction; not invented first to “illustrate”).
@@ -118,6 +120,17 @@ ROLE OF THE ADVERTISING PROMISE (critical)
 THERE IS ONLY ONE INTERACTION
 - No replacement mode, no side-by-side mode, no hidden interaction, no discovery vs visible split.
 - Only the one physical interaction between objectA and objectB appears in the video.
+
+OBJECT SELECTION (grounding — not literal noun extraction)
+- Object A and Object B must be chosen FROM the product name and description, but selection may be creative, inferential, and domain-based.
+- The product text is the conceptual source for grounded choices, not a literal inventory of object nouns that must already appear verbatim.
+- Attempt in order: (1) literal labels in the text if present, (2) domain inference, (3) functional inference from what the product does, (4) commercial-world inference from the product’s world.
+- Only after those attempts may you return planning_failed_invalid_objects if nothing suitable exists.
+
+VERBATIM CONSTRAINTS (must follow exactly)
+- "Do not require the product text to literally contain two concrete physical object names.
+You may infer Object A and Object B from the product's domain, function, and commercial world, as long as they remain clearly grounded in the product name and description."
+- "The product text is a source for grounded inference, not a literal inventory list."
 
 OBJECTS
 - Both must be visually clear, filmable, concrete physical things.
@@ -143,7 +156,7 @@ TEXT / UI
 - interactionScript must not depend on readable text, logos, labels, or UI; do not instruct showing captions or readable screens.
 
 QUALITY
-- objectAReason / objectBReason: grounded in product text.
+- objectAReason / objectBReason: explain how each object is grounded in the product (including inferential grounding when labels are not verbatim in the text).
 - promiseDerivation and headlineDerivation: substantive, tied to the chosen interaction.
 
 If you cannot satisfy every rule, return the FAILURE JSON object from the schema (never a fake partial plan).
@@ -511,6 +524,107 @@ def _object_grounded_in_product_blob(
     if not blob:
         return False
     return _object_grounded_in_advertising_promise(object_label, blob)
+
+
+_INFERENCE_MODES_LOG: FrozenSet[str] = frozenset(
+    {
+        "literals",
+        "domain_inference",
+        "functional_inference",
+        "commercial_world_inference",
+    }
+)
+
+_MIN_REASON_CHARS_FOR_INFERENCE = 20
+
+
+def _token_overlap_product(reason_or_interaction: str, product_name: str, product_description: str) -> int:
+    blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
+    if not blob or not (reason_or_interaction or "").strip():
+        return 0
+    a = _planning_text_tokens(reason_or_interaction)
+    b = _planning_text_tokens(blob)
+    return len(a & b)
+
+
+def _reason_grounds_object_in_product(
+    reason: str, product_name: str, product_description: str
+) -> bool:
+    """Reason text ties the object to the product without requiring the object noun in the product text."""
+    r = (reason or "").strip()
+    if len(r) < _MIN_REASON_CHARS_FOR_INFERENCE:
+        return False
+    blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
+    if not blob:
+        return False
+    rt = _planning_text_tokens(r)
+    shared = rt & _planning_text_tokens(blob)
+    if not shared:
+        return False
+    if any(len(w) >= 4 for w in shared):
+        return True
+    return len(shared) >= 2
+
+
+def _interaction_grounds_scene_in_product(
+    interaction_blob: str, product_name: str, product_description: str
+) -> bool:
+    """Interaction/summary text is anchored in the product (so inferred objects are not random)."""
+    if not (interaction_blob or "").strip():
+        return False
+    blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
+    if not blob:
+        return False
+    it = _planning_text_tokens(interaction_blob)
+    bt = _planning_text_tokens(blob)
+    shared = it & bt
+    if not shared:
+        return False
+    if any(len(w) >= 4 for w in shared):
+        return True
+    return len(shared) >= 2
+
+
+def _object_grounded_inferential(
+    object_label: str,
+    reason: str,
+    interaction_blob: str,
+    product_name: str,
+    product_description: str,
+) -> bool:
+    """
+    Object is grounded in the product via: literal mention, inferential reason, or interaction bridge.
+    """
+    if _object_grounded_in_product_blob(object_label, product_name, product_description):
+        return True
+    if _reason_grounds_object_in_product(reason, product_name, product_description):
+        return True
+    if _contains_object_tokens(interaction_blob, object_label) and _interaction_grounds_scene_in_product(
+        interaction_blob, product_name, product_description
+    ):
+        return True
+    return False
+
+
+def _derive_object_inference_mode(
+    strict_a: bool,
+    strict_b: bool,
+    oa_r: str,
+    ob_r: str,
+    product_name: str,
+    product_description: str,
+) -> str:
+    """Server-side label for how object labels relate to literal product wording (logging)."""
+    literal_count = int(bool(strict_a)) + int(bool(strict_b))
+    if literal_count >= 2:
+        return "literals"
+    if literal_count == 1:
+        return "functional_inference"
+    ra = _token_overlap_product(oa_r, product_name, product_description)
+    rb = _token_overlap_product(ob_r, product_name, product_description)
+    if ra >= 2 and rb >= 2:
+        return "domain_inference"
+    return "commercial_world_inference"
 
 
 def _interaction_covers_both_objects(script: str, summary: str, oa: str, ob: str) -> bool:
@@ -1327,6 +1441,8 @@ _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("object_b_reason", "objectBReason"),
     ("interaction_summary", "interactionSummary"),
     ("interaction_script", "interactionScript"),
+    ("object_inference_mode", "objectInferenceMode"),
+    ("literal_object_count", "literalObjectCount"),
     ("promise_derivation", "promiseDerivation"),
     ("headline_text", "headlineText"),
     ("headline_derivation", "headlineDerivation"),
@@ -1413,10 +1529,23 @@ def validate_and_normalize_plan(
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
         return None, "planning_failed_invalid_objects"
 
-    if not _object_grounded_in_product_blob(oa, product_name, product_description):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
-        return None, "planning_failed_invalid_objects"
-    if not _object_grounded_in_product_blob(ob, product_name, product_description):
+    strict_a = _object_grounded_in_product_blob(oa, product_name, product_description)
+    strict_b = _object_grounded_in_product_blob(ob, product_name, product_description)
+    literal_count = int(bool(strict_a)) + int(bool(strict_b))
+    inter_blob_ground = f"{int_sum} {int_script}"
+    derived_mode = _derive_object_inference_mode(
+        strict_a, strict_b, oa_r, ob_r, product_name, product_description
+    )
+    planner_mode = str(data.get("objectInferenceMode") or "").strip()
+    logger.info("VIDEO_PLAN_OBJECT_INFERENCE_MODE=%s", derived_mode)
+    if planner_mode in _INFERENCE_MODES_LOG and planner_mode != derived_mode:
+        logger.info("VIDEO_PLAN_OBJECT_INFERENCE_MODE_PLANNER_INPUT=%s", planner_mode)
+    logger.info("VIDEO_PLAN_LITERAL_OBJECT_COUNT=%s", literal_count)
+
+    ga = _object_grounded_inferential(oa, oa_r, inter_blob_ground, product_name, product_description)
+    gb = _object_grounded_inferential(ob, ob_r, inter_blob_ground, product_name, product_description)
+    logger.info("VIDEO_PLAN_OBJECT_GROUNDEDNESS_OK=%s", str(ga and gb).lower())
+    if not ga or not gb:
         logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
         return None, "planning_failed_invalid_objects"
 
@@ -1499,6 +1628,9 @@ def validate_and_normalize_plan(
         "headlineText": headline,
         "headlineDerivation": hderiv,
         "language": lang_raw,
+        "objectInferenceMode": derived_mode,
+        "literalObjectCount": literal_count,
+        "objectGroundednessOk": True,
         "headlineDecision": "include_product_name",
         "replacementDirection": "A_replaces_B",
         "preservedBackgroundFrom": "A",
@@ -1578,6 +1710,12 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
         'VIDEO_PLAN_INTEGRITY objectA="%s" objectB="%s"',
         plan.get("objectA"),
         plan.get("objectB"),
+    )
+    logger.info(
+        "VIDEO_PLAN_INTEGRITY objectInferenceMode=%s literalObjectCount=%s objectGroundednessOk=%s",
+        plan.get("objectInferenceMode"),
+        plan.get("literalObjectCount"),
+        plan.get("objectGroundednessOk"),
     )
     logger.info(
         'VIDEO_PLAN_INTEGRITY headlineDecision=%s headlineText="%s"',
