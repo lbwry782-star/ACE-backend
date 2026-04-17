@@ -506,14 +506,6 @@ _INFERENCE_MODES_LOG: FrozenSet[str] = frozenset(
 )
 
 # Inference labels where strict per-object lexical grounding is optional if strong conceptual checks pass.
-_STRONG_INFERENCE_GROUNDING_MODES: FrozenSet[str] = frozenset(
-    {
-        "domain_inference",
-        "functional_inference",
-        "commercial_world_inference",
-    }
-)
-
 _MIN_REASON_CHARS_FOR_INFERENCE = 20
 
 
@@ -799,84 +791,6 @@ def _advertising_promise_seems_prewritten(apromise: str) -> bool:
         if g in s:
             return True
     return False
-
-
-def _infer_pair_seems_random_detached(
-    oa: str,
-    ob: str,
-    int_sum: str,
-    int_script: str,
-    apromise: str,
-    product_name: str,
-    product_description: str,
-) -> bool:
-    """
-    True only when the full narrative still looks arbitrarily disconnected from the product text.
-    Conservative: cross-script products, short blobs, or any token/name overlap → not random.
-    """
-    narrative = f"{oa} {ob} {int_sum} {int_script} {apromise}".strip()
-    blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
-    if len(blob) < 12:
-        return False
-    narr_l = narrative.lower()
-    blob_l = blob.lower()
-    nt = _planning_text_tokens(narr_l)
-    bt = _planning_text_tokens(blob_l)
-    if nt & bt:
-        return False
-    pn = (product_name or "").strip().lower()
-    if len(pn) >= 3 and pn in narr_l:
-        return False
-    # Hebrew / non-Latin product vs Latin interaction: do not treat as random.
-    if not re.search(r"[a-z]{3,}", blob_l) or not re.search(r"[a-z]{3,}", narr_l):
-        return False
-    # Long English-only product text with zero shared tokens with the whole plan narrative.
-    if len(blob_l) >= 120:
-        return True
-    return False
-
-
-def _strong_inferred_grounding_pass(
-    oa: str,
-    ob: str,
-    int_sum: str,
-    int_script: str,
-    apromise: str,
-    product_name: str,
-    product_description: str,
-) -> Tuple[bool, str, bool]:
-    """
-    Relaxed grounding for domain/functional/commercial-world inference:
-    physical objects already validated; require concrete filmable interaction, product-tied promise,
-    emergent promise from interaction, no message-surface dependency, and not an arbitrary pair.
-    """
-    inter = f"{int_sum} {int_script}".strip()
-    product_blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
-    inter_low = inter.lower()
-
-    if not _interaction_covers_both_objects(int_script, int_sum, oa, ob):
-        return False, "interaction_does_not_cover_both_objects", False
-    if not _side_by_side_motion_is_meaningful(inter, oa, ob):
-        return False, "interaction_motion_not_meaningful", False
-    if _interaction_message_surface_dependency(inter_low):
-        return False, "message_surface_dependency", False
-    if not _interaction_avoids_text_dependency(inter_low):
-        return False, "text_ui_dependency", False
-    if not _advertising_promise_from_product(apromise, product_name, product_description):
-        return False, "promise_not_from_product_world", False
-    if _advertising_promise_seems_prewritten(apromise):
-        return False, "promise_prewritten_or_too_short", False
-    emergent_ok, emergent_reason = _promise_emergent_from_interaction(
-        apromise, inter, product_blob
-    )
-    if not emergent_ok:
-        return False, f"promise_not_emergent:{emergent_reason}", False
-    pair_random = _infer_pair_seems_random_detached(
-        oa, ob, int_sum, int_script, apromise, product_name, product_description
-    )
-    if pair_random:
-        return False, "inferred_pair_detached_or_random", True
-    return True, "strong_conceptual_grounding_ok", False
 
 
 def _headline_prefix_ok(headline: str, product_resolved: str) -> bool:
@@ -1532,7 +1446,8 @@ def validate_and_normalize_plan(
     content_language: str = "he",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    ACE video engine v3: one physical A↔B interaction; promise and headline must follow the interaction.
+    ACE video engine v3 — server role: structure, hard technical bans, headline format only.
+    o3-pro is authoritative for objects, interaction, promise, and headline wording.
     Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
     if not data:
@@ -1574,17 +1489,26 @@ def validate_and_normalize_plan(
         logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
         raise VideoPlanningTimeoutError()
 
-    if _object_pair_fails_weak_identity_heuristic(oa, ob):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
-        return None, "planning_failed_invalid_objects"
+    inter_low = f"{int_sum} {int_script}".lower()
+    msg_surface_hit = _interaction_message_surface_dependency(inter_low)
+    logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
+    logger.info("VIDEO_PLAN_MESSAGE_SURFACE_DEPENDENCY=%s", str(msg_surface_hit).lower())
+    if msg_surface_hit:
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_message_surface_dependency")
+        return None, "planning_failed_message_surface_dependency"
+    if not _interaction_avoids_text_dependency(inter_low):
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_text_ui_hard_ban")
+        return None, "planning_failed_text_ui_hard_ban"
 
-    oa_phys, _ = _object_label_is_physical_classic(oa)
-    ob_phys, _ = _object_label_is_physical_classic(ob)
-    q_ok, bad_field, bad_val = _validate_object_pair_physical(oa, ob)
-    if not (oa_phys and ob_phys and q_ok):
-        logger.info('VIDEO_PLAN_REJECT_BAD_OBJECT field=%s value="%s"', bad_field, (bad_val or "")[:120])
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
-        return None, "planning_failed_invalid_objects"
+    if not _headline_prefix_ok(headline, pn):
+        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=false")
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
+        return None, "planning_failed_headline_invalid"
+    if not _headline_word_count_ok(headline):
+        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
+        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
+        return None, "planning_failed_headline_invalid"
+    logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
 
     strict_a = _object_grounded_in_product_blob(oa, product_name, product_description)
     strict_b = _object_grounded_in_product_blob(ob, product_name, product_description)
@@ -1598,104 +1522,9 @@ def validate_and_normalize_plan(
     if planner_mode in _INFERENCE_MODES_LOG and planner_mode != derived_mode:
         logger.info("VIDEO_PLAN_OBJECT_INFERENCE_MODE_PLANNER_INPUT=%s", planner_mode)
     logger.info("VIDEO_PLAN_LITERAL_OBJECT_COUNT=%s", literal_count)
-
     ga = _object_grounded_inferential(oa, oa_r, inter_blob_ground, product_name, product_description)
     gb = _object_grounded_inferential(ob, ob_r, inter_blob_ground, product_name, product_description)
-    inferential_ok = ga and gb
-    groundedness_mode = "failed"
-    groundedness_reason = "inferential_object_anchor_failed"
-    pair_random = False
-    overall_grounded = False
-
-    if inferential_ok:
-        overall_grounded = True
-        groundedness_mode = "literal"
-        groundedness_reason = "literal_or_lexical_inferential_anchor"
-        pair_random = False
-    elif derived_mode in _STRONG_INFERENCE_GROUNDING_MODES:
-        s_ok, groundedness_reason, pair_random = _strong_inferred_grounding_pass(
-            oa, ob, int_sum, int_script, apromise, product_name, product_description
-        )
-        if s_ok:
-            overall_grounded = True
-            groundedness_mode = "strong_inference"
-        else:
-            groundedness_mode = "failed"
-            overall_grounded = False
-    else:
-        overall_grounded = False
-        groundedness_mode = "failed"
-        groundedness_reason = "inferential_object_anchor_failed"
-        pair_random = _infer_pair_seems_random_detached(
-            oa, ob, int_sum, int_script, apromise, product_name, product_description
-        )
-
-    logger.info("VIDEO_PLAN_OBJECT_GROUNDEDNESS_OK=%s", str(overall_grounded).lower())
-    logger.info("VIDEO_PLAN_GROUNDEDNESS_MODE=%s", groundedness_mode)
-    logger.info(
-        'VIDEO_PLAN_GROUNDEDNESS_REASON="%s"',
-        groundedness_reason.replace('"', "'")[:220],
-    )
-    logger.info("VIDEO_PLAN_INFERENCE_PAIR_RANDOM=%s", str(pair_random).lower())
-    if not overall_grounded:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_invalid_objects")
-        return None, "planning_failed_invalid_objects"
-
-    if not _interaction_covers_both_objects(int_script, int_sum, oa, ob):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
-        return None, "planning_failed_no_valid_interaction"
-    if not _side_by_side_motion_is_meaningful(f"{int_sum} {int_script}", oa, ob):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
-        return None, "planning_failed_no_valid_interaction"
-
-    inter_low = f"{int_sum} {int_script}".lower()
-    banal_hit = _interaction_is_banal_obvious(oa, ob, inter_low)
-    msg_surface_hit = _interaction_message_surface_dependency(inter_low)
-    logger.info("VIDEO_PLAN_BANAL_INTERACTION=%s", str(banal_hit).lower())
-    logger.info("VIDEO_PLAN_MESSAGE_SURFACE_DEPENDENCY=%s", str(msg_surface_hit).lower())
-    if msg_surface_hit:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_message_surface_dependency")
-        return None, "planning_failed_message_surface_dependency"
-    if banal_hit:
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_banal_interaction")
-        return None, "planning_failed_banal_interaction"
-    if not _interaction_avoids_text_dependency(inter_low):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_no_valid_interaction")
-        return None, "planning_failed_no_valid_interaction"
-
-    product_blob = f"{(product_name or '').strip()}\n{(product_description or '').strip()}".strip()
-    if not _advertising_promise_from_product(apromise, product_name, product_description):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_promise_not_emergent")
-        return None, "planning_failed_promise_not_emergent"
-    if _advertising_promise_seems_prewritten(apromise):
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_promise_not_emergent")
-        return None, "planning_failed_promise_not_emergent"
-
-    emergent_ok, emergent_reason = _promise_emergent_from_interaction(
-        apromise, f"{int_sum} {int_script}", product_blob
-    )
-    logger.info("VIDEO_PLAN_PROMISE_EMERGENT=%s", str(emergent_ok).lower())
-    if not emergent_ok:
-        logger.info("VIDEO_PLAN_REJECT_REASON=%s", emergent_reason)
-        return None, emergent_reason
-
-    if not _headline_prefix_ok(headline, pn):
-        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=false")
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
-        return None, "planning_failed_headline_invalid"
-    if not _headline_word_count_ok(headline):
-        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
-        return None, "planning_failed_headline_invalid"
-    if not _headline_derived_from_interaction(headline, f"{int_sum} {int_script}"):
-        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
-        return None, "planning_failed_headline_invalid"
-    if not _headline_avoids_generic_praise(headline, pn):
-        logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
-        logger.info("VIDEO_PLAN_REJECT_REASON=planning_failed_headline_invalid")
-        return None, "planning_failed_headline_invalid"
-    logger.info("VIDEO_PLAN_HEADLINE_PREFIX_OK=true")
+    logger.info("VIDEO_PLAN_OBJECT_GROUNDEDNESS_ADVISORY=%s", str(ga and gb).lower())
 
     opening_fd = (
         f"Single continuous shot: {oa} and {ob} are both visible together in one stable composition; "
@@ -1745,7 +1574,8 @@ def validate_and_normalize_plan(
 
 def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tuple[bool, str]:
     """
-    Hard gate before Runway: v3 single-interaction plan + headline overlay fields.
+    Pre-Runway structural gate: required strings, headline format, pipeline fields.
+    Creative quality is not evaluated here (planner output is authoritative).
     Returns (ok, reason_code) with reason_code for logs only when ok is False.
     """
     if not plan:
@@ -1755,6 +1585,8 @@ def video_plan_required_fields_for_runway(plan: Optional[Dict[str, Any]]) -> Tup
         return False, "planning_failed_invalid_objects"
     if not (plan.get("objectA") or "").strip() or not (plan.get("objectB") or "").strip():
         return False, "planning_failed_invalid_objects"
+    if not (plan.get("interactionSummary") or "").strip():
+        return False, "planning_failed_no_valid_interaction"
     if not (plan.get("interactionScript") or "").strip():
         return False, "planning_failed_no_valid_interaction"
     if not (plan.get("videoPromptCore") or "").strip():
