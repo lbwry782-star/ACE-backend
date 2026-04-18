@@ -71,6 +71,10 @@ _POLL_INTERVAL_SECONDS = 5.0
 _MAX_WAIT_SECONDS = 600
 # Task create + non-poll calls
 _HTTP_TIMEOUT_SECONDS = 60
+# Log full Runway error response body up to this length (Render / log line safety).
+_RUNWAY_TASK_CREATE_ERROR_BODY_LOG_CHARS = int(
+    (os.environ.get("RUNWAY_TASK_CREATE_ERROR_BODY_LOG_CHARS") or "1000").strip() or "1000"
+)
 # Per poll GET — must never block indefinitely (network stalls)
 _POLL_HTTP_TIMEOUT_SECONDS = float((os.environ.get("RUNWAY_POLL_HTTP_TIMEOUT_SECONDS") or "25").strip() or "25")
 
@@ -188,6 +192,9 @@ def _create_text_to_video_task(
     model: str,
     prompt_text: str,
     prompt_image_data_uri: Optional[str] = None,
+    *,
+    sanitize_text_policy_modified: bool = False,
+    physics_suffix_appended: bool = False,
 ) -> str:
     if (prompt_image_data_uri or "").strip():
         raise RunwayVideoMVPError("promptImage is not supported in gen4.5 pipeline")
@@ -201,18 +208,61 @@ def _create_text_to_video_task(
         "ratio": "1280:720",
         "duration": 5,
     }
+    pt = prompt_text or ""
+    prompt_len = len(pt)
+    mode = "text_to_video"
+    payload_summary = json.dumps(
+        {
+            "endpoint": "POST /v1/text_to_video",
+            "model": body["model"],
+            "ratio": body["ratio"],
+            "duration": body["duration"],
+            "promptText_len": prompt_len,
+            "promptText_head": pt[:160],
+        },
+        ensure_ascii=False,
+    )
     logger.info("RUNWAY_MODE=gen4.5_text_only")
     logger.info("PROMPT_IMAGE_DISABLED=true")
+    logger.info("RUNWAY_MVP task_create_model=%s", model)
+    logger.info("RUNWAY_MVP task_create_mode=%s", mode)
+    logger.info("RUNWAY_MVP task_create_prompt_len=%s", prompt_len)
+    logger.info("RUNWAY_MVP task_create_payload_summary=%s", payload_summary)
     logger.info(
-        "RUNWAY_MVP task_create model=%s mode=text_to_video",
-        model,
+        "RUNWAY_MVP task_create_sanitize_text_policy_modified=%s",
+        str(sanitize_text_policy_modified).lower(),
+    )
+    logger.info(
+        "RUNWAY_MVP task_create_physics_suffix_appended=%s",
+        str(physics_suffix_appended).lower(),
     )
     resp = session.post(url, json=body, headers=_headers(), timeout=_HTTP_TIMEOUT_SECONDS)
     if resp.status_code >= 400:
+        max_c = max(200, _RUNWAY_TASK_CREATE_ERROR_BODY_LOG_CHARS)
+        try:
+            body_txt = (resp.text or "")[:max_c]
+        except Exception:
+            body_txt = ""
+        if not body_txt and resp.content:
+            body_txt = (resp.content or b"")[:max_c].decode("utf-8", errors="replace")
+        body_for_log = json.dumps(body_txt, ensure_ascii=False)
         logger.error(
             "RUNWAY_MVP task_create_http_failed status=%s body_len=%s",
             resp.status_code,
             len(resp.content or b""),
+        )
+        logger.error("RUNWAY_MVP task_create_http_failed_body=%s", body_for_log)
+        logger.error("RUNWAY_MVP task_create_payload_summary=%s", payload_summary)
+        logger.error("RUNWAY_MVP task_create_prompt_len=%s", prompt_len)
+        logger.error("RUNWAY_MVP task_create_mode=%s", mode)
+        logger.error("RUNWAY_MVP task_create_model=%s", model)
+        logger.error(
+            "RUNWAY_MVP task_create_sanitize_text_policy_modified=%s",
+            str(sanitize_text_policy_modified).lower(),
+        )
+        logger.error(
+            "RUNWAY_MVP task_create_physics_suffix_appended=%s",
+            str(physics_suffix_appended).lower(),
         )
         raise RunwayVideoMVPError("create_failed")
     try:
@@ -433,7 +483,13 @@ def _generate_one_video_mvp_body(
     t_runway0 = time.monotonic()
     logger.info("VIDEO_JOB_STEP step=runway_create_task start")
     task_id = _create_text_to_video_task(
-        session, base, model, prompt, prompt_image_data_uri=None
+        session,
+        base,
+        model,
+        prompt,
+        prompt_image_data_uri=None,
+        sanitize_text_policy_modified=bool(text_policy_sanitized),
+        physics_suffix_appended=True,
     )
     logger.info("VIDEO_JOB_STEP step=runway_create_task done task_id=%s", task_id)
 
