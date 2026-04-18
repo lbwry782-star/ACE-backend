@@ -17,6 +17,7 @@ import requests
 
 from engine.ad_promise_memory import record_ad_promise_generation_success
 from engine.video_planning import (
+    RUNWAY_PHYSICS_REALISM_CONSTRAINT,
     VideoPlanningTimeoutError,
     build_runway_prompt_from_plan,
     fetch_video_plan_o3,
@@ -424,6 +425,8 @@ def _generate_one_video_mvp_body(
     prompt = build_runway_prompt_from_plan(plan)
 
     prompt, text_policy_sanitized = sanitize_runway_prompt_for_video_text_policy(prompt)
+    # Hard constraint for Runway: grounded physics (also encoded in planner; this enforces on final promptText).
+    prompt = f"{prompt.rstrip()} {RUNWAY_PHYSICS_REALISM_CONSTRAINT}".strip()
     logger.info("VIDEO_TEXT_POLICY_SANITIZED=%s", text_policy_sanitized)
 
     session = requests.Session()

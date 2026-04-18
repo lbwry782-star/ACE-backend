@@ -29,6 +29,43 @@ from engine.video_language import (
 )
 from engine.video_plan_objects import video_plan_object_blob_implies_graphic_text_content
 
+# Semantic (regex) gate: interaction prose must not imply frictionless / floaty motion between objects.
+# Word-boundary + stem patterns — not a single substring match.
+_PHYSICAL_INTERACTION_MOTION_FORBIDDEN: List[Tuple[str, re.Pattern]] = [
+    ("slide", re.compile(r"\b(slides?|sliding|slid)\b", re.I)),
+    ("glide", re.compile(r"\b(glides?|gliding|glided)\b", re.I)),
+    ("drift", re.compile(r"\b(drifts?|drifting|drifted)\b", re.I)),
+    ("frictionless", re.compile(r"\bfrictionless\w*\b", re.I)),
+    ("zero_no_friction", re.compile(r"\b(zero|no)\s+friction\b", re.I)),
+    ("weightless", re.compile(r"\bweightless\w*\b", re.I)),
+    ("effortless_motion", re.compile(r"\beffortless(ly)?\s+(motion|movement|contact|touch|sliding|gliding|push|pull|drag)\b", re.I)),
+    ("float_motion", re.compile(r"\b(floats?|floating)\b.*\b(motion|movement|together|apart|contact)\b", re.I)),
+    ("hover", re.compile(r"\b(hover|hovers|hovering)\b", re.I)),
+    ("levitate", re.compile(r"\blevitat\w*\b", re.I)),
+    ("glide_slide_across", re.compile(r"\b(glides?|slides?)\s+(across|along)\b", re.I)),
+    ("silky_smooth", re.compile(r"\b(silky|buttery)\s+smooth\b", re.I)),
+    ("ice_smooth", re.compile(r"\b(like\s+)?ice\b.*\b(smooth|slide|glide)\b", re.I)),
+]
+
+# Appended to Runway promptText in runway_video after text-policy sanitize (hard constraint).
+RUNWAY_PHYSICS_REALISM_CONSTRAINT = (
+    "PHYSICAL REALISM: All motion must obey real-world resistance, weight, and contact between surfaces. "
+    "No frictionless sliding, gliding, drifting, or floating movement. Show grip, pressure, and resisted motion only."
+)
+
+
+def interaction_fields_imply_frictionless_or_floaty_motion(blob: str) -> Optional[str]:
+    """
+    Return a rule label if interaction-related prose matches forbidden motion semantics; else None.
+    Scans interactionSummary, interactionScript, objectAReason, objectBReason only (not headline, not promise).
+    """
+    if not (blob or "").strip():
+        return None
+    for label, rx in _PHYSICAL_INTERACTION_MOTION_FORBIDDEN:
+        if rx.search(blob):
+            return label
+    return None
+
 from engine.ad_promise_memory import (
     angle_seed_for_attempt,
     build_promise_diversity_addon,
@@ -87,7 +124,7 @@ Before the JSON: one silent internal revision pass only (pair, realism, cliché 
 
 Failure only: {"planningFailure":"planning_failed_no_valid_interaction"}
 
-Emit a complete plan only if: (i) object A is grounded in the product; (ii) object B was accepted only after a physically plausible, non-surreal A↔B interaction was identified; (iii) advertisingPromise emerged together with that interaction (not pre-decided, not reverse-engineered from a preset slogan); (iv) headline interprets the interaction per the headline rules; (v) object rules below are satisfied.
+Emit a complete plan only if: (i) object A is grounded in the product; (ii) object B was accepted only after a physically plausible, non-surreal A↔B interaction was identified; (iii) advertisingPromise emerged together with that interaction (not pre-decided, not reverse-engineered from a preset slogan); (iv) headline interprets the interaction per the headline rules; (v) object rules below are satisfied; (vi) interactionSummary + interactionScript (+ object reasons) describe grounded contact with resistance — no frictionless sliding/gliding/floating-style motion (see PHYSICAL REALISM block).
 """
 
 
@@ -108,7 +145,24 @@ def _planner_causal_reasoning_block() -> str:
         "4. Accept B ONLY if such a goal emerges. If no valid interaction or no emerging goal, reject that B and continue searching. "
         "Do NOT pick a goal first and then force objects to fit. Do NOT invent conceptual matches without a real physical interaction.\n"
         "5. interactionSummary and interactionScript must describe only that single plausible interaction. advertisingPromise must align with it.\n"
-        "6. Interactions may be unusual but must remain physically plausible — not impossible, not surreal.\n\n"
+        "6. Interactions may be unusual but must remain physically plausible — not impossible, not surreal.\n"
+        "7. Motion between A and B must show contact, weight, and resistance — never frictionless sliding, gliding, drifting, "
+        "floating/hovering movement, or zero-friction motion.\n\n"
+    )
+
+
+def _planner_physical_realism_block() -> str:
+    """Planner: forbid floaty / frictionless interaction language (server also validates interaction fields)."""
+    return (
+        "PHYSICAL REALISM (interactionScript, interactionSummary, objectAReason, objectBReason):\n"
+        "The shot must look physically grounded. The A↔B interaction must involve clear contact, grip, pressure, or resisted motion — "
+        "weight and surface resistance visible.\n"
+        "FORBIDDEN interaction language: frictionless motion; smooth sliding or gliding between objects; drifting; "
+        "floating or hovering movement; zero friction; weightless contact; effortless physical motion between A and B; "
+        "ice-like glide.\n"
+        "PREFER verbs like: pressing, pushing, pulling, gripping, placing, bracing, tightening, turning, steady sliding only when "
+        "resistance is obvious (e.g. dragged with friction), not frictionless.\n"
+        "Do not describe motion that would read as floating, gliding on air, or sliding with no drag.\n\n"
     )
 
 
@@ -163,6 +217,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         "objectA/objectB must never be graphic-communication items (posters, prints, readable media, signage with copy, etc.). "
         "Creative rule: advertisingPromise emerges together with the chosen A↔B interaction — never choose the promise before "
         "a valid physical interaction exists; never reverse-reason from a preset goal to objects. "
+        "Physical realism: interaction motion must show contact, weight, and resistance — no frictionless sliding or floaty movement. "
         "Stay realistic. One A↔B interaction only (no alternate layouts). "
         'Planner refusal: {"planningFailure":"planning_failed_no_valid_interaction"}'
     )
@@ -468,6 +523,15 @@ def validate_and_normalize_plan(
         )
         return None, "planning_failed_invalid_objects"
 
+    _physics_blob = "\n".join([int_sum, int_script, oa_r, ob_r])
+    _bad_physics = interaction_fields_imply_frictionless_or_floaty_motion(_physics_blob)
+    if _bad_physics:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=unrealistic_interaction_motion rule=%s",
+            _bad_physics,
+        )
+        return None, "planning_failed_unrealistic_physics"
+
     _lit_raw = data.get("literalObjectCount")
     if isinstance(_lit_raw, bool):
         literal_pass = int(_lit_raw)
@@ -683,6 +747,7 @@ Language: {lang_name} ({lang}).
 
 {_planner_object_selection_rules_block()}
 {_planner_causal_reasoning_block()}
+{_planner_physical_realism_block()}
 {_planner_headline_rules_user_block(lang)}
 {_JSON_KEYS}
 """
@@ -1129,4 +1194,5 @@ def build_runway_interaction_prompt_from_plan(plan: Dict[str, Any]) -> str:
         path,
     )
     logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=half_orbit")
+    out = f"{out.rstrip()} {RUNWAY_PHYSICS_REALISM_CONSTRAINT}".strip()
     return out
