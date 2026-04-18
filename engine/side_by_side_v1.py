@@ -24,12 +24,12 @@ from PIL import Image, ImageDraw, ImageFont
 from threading import Lock
 
 from . import openai_retry
-from engine.video_language import (
+from engine.image_language import (
+    content_language_display_name,
     detect_text_language,
-    normalize_video_content_language,
-    video_language_display_name,
+    normalize_content_language,
 )
-from engine.video_product_name import product_name_reused_in_copy
+from engine.image_product_name import product_name_reused_in_copy
 
 logger = logging.getLogger(__name__)
 
@@ -3048,7 +3048,7 @@ def _repair_verbatim_marketing_product_name(copy_text: str, product_name: str, l
         return t or n
     if product_name_reused_in_copy(n, t):
         return t
-    lc = normalize_video_content_language(lang)
+    lc = normalize_content_language(lang)
     if lc == "he":
         return f"עם {n}, {t}".strip()
     return f"{n}. {t}".strip()
@@ -3217,8 +3217,8 @@ Marketing copy:"""
 
 
 def _marketing_copy_fallback(product_name: str, ad_goal: str, lang: str) -> str:
-    """Short deterministic fallback in the requested language (video path)."""
-    lang = normalize_video_content_language(lang)
+    """Short deterministic fallback in the requested language (image / marketing copy path)."""
+    lang = normalize_content_language(lang)
     ag = (ad_goal or "").strip()
     pn = (product_name or "").strip() or "Product"
     if lang == "he":
@@ -3249,12 +3249,12 @@ def generate_marketing_copy(
     """
     Generate marketing copy: 45-55 words, product-specific, with CTA, in output_language.
 
-    output_language: he | en (video path uses description-based detection; unknown codes normalize to he).
+    output_language: he | en (unknown codes normalize to he).
     When require_verbatim_product_name is True, the copy must contain the exact product_name substring
     (repair via prefix or fail); the model must not substitute the description as the name.
     """
-    lang = normalize_video_content_language(output_language)
-    lang_name = video_language_display_name(lang)
+    lang = normalize_content_language(output_language)
+    lang_name = content_language_display_name(lang)
     canon = (product_name or "").strip() or "Product"
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     model_name = _get_text_model()
