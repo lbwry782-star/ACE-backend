@@ -20,13 +20,18 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
 import requests
 
-from engine.video_language import normalize_video_content_language, normalize_video_overlay_text
+from engine.video_language import (
+    is_english_only_product_name_script,
+    normalize_video_content_language,
+    normalize_video_overlay_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -253,16 +258,16 @@ def _build_dual_drawtext_vf(
     tf_lat_e: str,
     tf_he_e: str,
     fs: int,
-    x_latin: int,
     x_hebrew: int,
+    x_latin: int,
     alpha_expr: str,
     t0_str: str,
     *,
     hebrew_text_shaping: bool,
 ) -> str:
     """
-    Two drawtext chains: English product + comma on the left, Hebrew remainder on the right.
-    Horizontal gap between them is enforced only via x positions (width of overlay 1 + one space).
+    Two drawtext chains: Hebrew remainder on the left, English product + comma on the right.
+    Same baseline; gap = one space width between the two blocks (via x positions only).
     """
     sh_he = ":text_shaping=1" if hebrew_text_shaping else ""
     sh_lat = ""
@@ -274,10 +279,10 @@ def _build_dual_drawtext_vf(
     parts: list[str] = []
     for ox, oy, shadow in rows:
         y_expr = "(h-text_h)/2+1" if oy else "(h-text_h)/2"
-        # Latin prefix (incl. comma) then Hebrew; left-to-right on screen.
+        # Hebrew (left) then Latin+comma (right); each textfile is single-direction only.
         for tf_path, xb, sh in (
-            (tf_lat_e, x_latin, sh_lat),
             (tf_he_e, x_hebrew, sh_he),
+            (tf_lat_e, x_latin, sh_lat),
         ):
             xe = xb + ox
             parts.append(
@@ -333,6 +338,47 @@ def _sanitize_headline_line(text: str) -> str:
     return t
 
 
+def _has_hebrew_letter(s: str) -> bool:
+    for ch in s or "":
+        if 0x0590 <= ord(ch) <= 0x05FF:
+            return True
+    return False
+
+
+def _has_ascii_latin_letter(s: str) -> bool:
+    return bool(re.search(r"[A-Za-z]", s or ""))
+
+
+def _mixed_hebrew_latin_headline(s: str) -> bool:
+    """Hebrew + Latin in one line — must never be sent as a single drawtext when overlay is Hebrew."""
+    return _has_hebrew_letter(s) and _has_ascii_latin_letter(s)
+
+
+def _split_overlay_en_prefix_hebrew(
+    headline: str, canonical_name: str
+) -> Optional[Tuple[str, str]]:
+    """
+    English product name first, then Hebrew remainder — same composition as prepare_ffmpeg_overlay_headline.
+    Returns (pure LTR prefix including comma, pure RTL remainder). No bidi control characters.
+    """
+    cn = unicodedata.normalize("NFC", (canonical_name or "").strip())
+    if not cn or not is_english_only_product_name_script(cn):
+        return None
+    h = unicodedata.normalize("NFC", (headline or "").strip())
+    if not h:
+        return None
+    hs = h.strip()
+    if not hs.lower().startswith(cn.lower()):
+        return None
+    tail = hs[len(cn) :]
+    tail = tail.strip()
+    tail = re.sub(r"^[\s,·\u00b7\u2022•:;|–—−\-]+", "", tail)
+    tail = re.sub(r"\s+", " ", tail).strip()
+    if not tail or not _has_hebrew_letter(tail):
+        return None
+    return (f"{cn},", tail)
+
+
 def postprocess_video_headline(
     source_video_url: str,
     public_base_url: str,
@@ -343,6 +389,7 @@ def postprocess_video_headline(
     overlay_render_mode: str = "plain_text",
     overlay_dual_latin: str = "",
     overlay_dual_hebrew: str = "",
+    overlay_canonical_name: str = "",
 ) -> str:
     """
     Download MP4, one ffmpeg pass: draw the short planner headline (headlineText, not marketing body copy)
@@ -439,65 +486,77 @@ def postprocess_video_headline(
         fs = _fontsize_for_headline(headline_clean)
         font_e = _filter_path_for_ffmpeg(Path(font))
 
-        use_dual = (
-            (overlay_render_mode or "").strip() == "dual_drawtext"
-            and olang == "he"
-            and (overlay_dual_latin or "").strip()
-            and (overlay_dual_hebrew or "").strip()
-        )
+        cn = (overlay_canonical_name or "").strip()
+        lat_s = (overlay_dual_latin or "").strip()
+        he_s = (overlay_dual_hebrew or "").strip()
+        if olang == "he" and (not lat_s or not he_s):
+            sp = _split_overlay_en_prefix_hebrew(headline_clean, cn)
+            if sp:
+                lat_s, he_s = sp
+
+        use_dual = olang == "he" and bool(lat_s and he_s)
+
+        if olang == "he" and _mixed_hebrew_latin_headline(headline_clean) and not use_dual:
+            logger.error(
+                "VIDEO_HEADLINE_INVALID_MODE_SINGLE_STRING reason=mixed_he_latin_without_dual_parts "
+                "headline=%s canonical=%s render_mode=%s",
+                json.dumps(headline_clean, ensure_ascii=False),
+                json.dumps(cn, ensure_ascii=False),
+                json.dumps((overlay_render_mode or "").strip(), ensure_ascii=False),
+            )
+            return _fail("mixed_headline_requires_dual_drawtext")
+
         video_w = 1920
+        x_latin = x_hebrew = 0
         if use_dual:
             try:
                 video_w, _ = _ffprobe_video_dimensions(inp, _FFPROBE_TIMEOUT)
             except Exception as e:
                 logger.warning(
-                    "VIDEO_HEADLINE_DUAL_SKIP reason=ffprobe_dimensions err=%s",
+                    "VIDEO_HEADLINE_FFPROBE_DIMS_FALLBACK use_w=1920 err=%s",
                     e,
                 )
-                use_dual = False
-
-        lat_s = (overlay_dual_latin or "").strip()
-        he_s = (overlay_dual_hebrew or "").strip()
-        x_latin = x_hebrew = 0
-        if use_dual:
+                video_w = 1920
             try:
                 tw_lat = _pillow_text_width_px(font, lat_s, fs)
                 tw_he = _pillow_text_width_px(font, he_s, fs)
                 tw_space = _pillow_text_width_px(font, " ", fs)
-                # Visual: <English+comma> <one space> <Hebrew> — gap = measured space width only.
-                total = tw_lat + tw_space + tw_he
-                x_latin = max(0, (video_w - total) // 2)
-                x_hebrew = x_latin + tw_lat + tw_space
+                # Visual: <Hebrew> <one space> <English+comma> — English block on the right.
+                total = tw_he + tw_space + tw_lat
+                x_hebrew = max(0, (video_w - total) // 2)
+                x_latin = x_hebrew + tw_he + tw_space
                 text_file_latin.write_text(lat_s, encoding="utf-8")
                 text_file_hebrew.write_text(he_s, encoding="utf-8")
-                logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=dual_drawtext")
+                logger.info("VIDEO_HEADLINE_OVERLAY_MODE=dual_only")
+                logger.info("VIDEO_HEADLINE_SINGLE_STRING_DISABLED=true")
                 logger.info(
-                    "VIDEO_HEADLINE_OVERLAY_PREFIX=%s",
+                    "VIDEO_HEADLINE_PREFIX=%s",
                     json.dumps(lat_s, ensure_ascii=False),
                 )
                 logger.info(
-                    "VIDEO_HEADLINE_OVERLAY_REMAINDER=%s",
+                    "VIDEO_HEADLINE_REMAINDER=%s",
                     json.dumps(he_s, ensure_ascii=False),
                 )
-                logger.info("VIDEO_HEADLINE_OVERLAY_MIXED_STRING_DISABLED=true")
                 logger.info(
-                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s tw_lat=%s tw_space=%s tw_he=%s x_latin=%s x_hebrew=%s",
+                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s tw_he=%s tw_space=%s tw_lat=%s x_hebrew=%s x_latin=%s",
                     video_w,
-                    tw_lat,
-                    tw_space,
                     tw_he,
-                    x_latin,
+                    tw_space,
+                    tw_lat,
                     x_hebrew,
+                    x_latin,
                 )
             except Exception as e:
-                logger.warning(
-                    "VIDEO_HEADLINE_DUAL_FALLBACK reason=dual_setup err=%s",
+                logger.error(
+                    "VIDEO_HEADLINE_DUAL_SETUP_FAILED err=%s",
                     e,
                     exc_info=True,
                 )
-                use_dual = False
+                return _fail("dual_drawtext_setup_failed")
 
         if not use_dual:
+            logger.info("VIDEO_HEADLINE_OVERLAY_MODE=plain_centered")
+            logger.info("VIDEO_HEADLINE_SINGLE_STRING_DISABLED=false")
             text_file.write_text(headline_clean, encoding="utf-8")
 
         tf_e = _filter_path_for_ffmpeg(text_file)
@@ -528,8 +587,8 @@ def postprocess_video_headline(
                 tf_lat_e,
                 tf_he_e,
                 fs,
-                x_latin,
                 x_hebrew,
+                x_latin,
                 alpha_expr,
                 t0_str,
                 hebrew_text_shaping=(olang == "he"),

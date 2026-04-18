@@ -69,9 +69,11 @@ def ensure_video_postprocessed_for_poll(job_id: str, job: Dict[str, Any]) -> Non
             base,
             headline=headline,
             job_id=job_id,
+            overlay_language=content_lang,
             overlay_render_mode=overlay_prep.render_mode,
             overlay_dual_latin=overlay_prep.dual_latin,
             overlay_dual_hebrew=overlay_prep.dual_hebrew,
+            overlay_canonical_name=_rp,
         )
     except Exception as e:
         logger.warning(

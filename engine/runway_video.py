@@ -580,6 +580,7 @@ def _generate_one_video_mvp_body(
                         overlay_render_mode=overlay_prep.render_mode,
                         overlay_dual_latin=overlay_prep.dual_latin,
                         overlay_dual_hebrew=overlay_prep.dual_hebrew,
+                        overlay_canonical_name=canonical_name,
                     )
                     post_ms = (time.monotonic() - t_post0) * 1000.0
                     logger.info("VIDEO_TIMING_POSTPROCESS_MS=%.1f", post_ms)
