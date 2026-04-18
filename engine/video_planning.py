@@ -20,6 +20,9 @@ from openai import OpenAI
 
 from engine.video_language import (
     bilingual_en_he_headline_tail_struct_ok,
+    english_headline_tail_after_product_no_separator_punct,
+    headline_product_includes_hebrew_letters,
+    hebrew_script_product_headline_tail_struct_ok,
     normalize_video_content_language,
     product_name_is_latin_only_for_bilingual_headline,
     video_language_display_name,
@@ -76,7 +79,7 @@ advertisingPromise, headlineText
 
 One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
 
-Headline: required non-empty headlineText. ≤7 words total; interpret the interaction (meaning), not a literal shot description. Exact headline rules for this request language are in the user block below.
+Headline: required non-empty headlineText. ≤7 words total; interpret the interaction (meaning), not a literal shot description. headlineText must be exactly: productNameResolved, then one normal space, then the remainder — no comma, bullet, dot, colon, dash, or semicolon between them. Exact headline rules for this request language are in the user block below.
 
 Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity, headline); output final JSON only — no explanations.
 
@@ -379,6 +382,31 @@ def validate_and_normalize_plan(
         if not bilingual_en_he_headline_tail_struct_ok(tail_he):
             logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_en_he_tail")
             return None, "planning_failed_incomplete_plan"
+
+    if (
+        lang_norm == "he"
+        and headline_product_includes_hebrew_letters(pn)
+        and not product_name_is_latin_only_for_bilingual_headline(pn)
+    ):
+        h_norm = headline.strip()
+        if h_norm == pn:
+            tail_hs = ""
+        else:
+            if not h_norm.startswith(pn + " "):
+                logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_hebrew_product_tail")
+                return None, "planning_failed_incomplete_plan"
+            tail_hs = h_norm[len(pn) :].lstrip()
+        if not hebrew_script_product_headline_tail_struct_ok(tail_hs):
+            logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_hebrew_product_tail")
+            return None, "planning_failed_incomplete_plan"
+
+    if lang_norm == "en":
+        h_norm = headline.strip()
+        if h_norm != pn and h_norm.startswith(pn + " "):
+            tail_en = h_norm[len(pn) :].lstrip()
+            if not english_headline_tail_after_product_no_separator_punct(tail_en):
+                logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_en_tail_separator_punct")
+                return None, "planning_failed_incomplete_plan"
 
     if not _headline_word_count_ok(headline):
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_word_count")

@@ -3495,6 +3495,7 @@ Objects (already selected, do not change): {object_a} and {object_b}
 Requirements:
 - English only
 - ALL CAPS
+- Start with the exact product name, then one normal space, then any additional words — no comma, colon, dash, dot, or semicolon between the name and the rest
 - Include the product name in the headline (mandatory)
 - Do NOT mention the objects ({object_a} or {object_b}) in the headline
 - Do NOT change or re-select the objects
@@ -5770,7 +5771,7 @@ Objects in image: A primary={a_primary}, A sub={a_sub}; B primary={b_primary}, B
 Look at the ad image. Return valid JSON with exactly two keys: "headline" and "body".
 
 Rules:
-- headline: 3–6 words. Must include the product name ({product_name}) naturally; must NOT be only the product name. Persuasive marketing headline (not descriptive).
+- headline: 3–6 words. Must begin with the product name ({product_name}), then one normal space, then the rest — no comma or other punctuation between name and tail. Must NOT be only the product name. Persuasive marketing headline (not descriptive).
 - body: about 50 words. Marketing copy grounded in what is visible; interpretive (not a literal caption). Do not invent action or causality between the objects A and B. Focus on meaning, positioning, impact.
 
 Output format only: {{ "headline": "...", "body": "..." }}"""

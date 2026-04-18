@@ -259,6 +259,50 @@ def bilingual_en_he_headline_tail_struct_ok(tail: str) -> bool:
     return True
 
 
+def headline_product_includes_hebrew_letters(product_resolved: str) -> bool:
+    """True when productNameResolved contains at least one Hebrew letter (Hebrew-script product name)."""
+    return _hebrew_letter_in((product_resolved or "").strip())
+
+
+def hebrew_script_product_headline_tail_struct_ok(tail: str) -> bool:
+    """
+    After '<productNameResolved> ' when the product name is Hebrew script: remainder must be Hebrew-only,
+    no comma or forbidden structural punctuation, no bidi marks. Empty remainder allows a product-only headline.
+    """
+    t = (tail or "").strip()
+    if not t:
+        return True
+    if not _hebrew_letter_in(t):
+        return False
+    if _has_ascii_latin_letter(t):
+        return False
+    if "," in t:
+        return False
+    for ch in t:
+        if ch in _HEADLINE_EN_HE_TAIL_FORBIDDEN or ch in _HEADLINE_EN_HE_TAIL_INVISIBLE:
+            return False
+    return True
+
+
+_EN_HEADLINE_TAIL_LEADING_FORBIDDEN = frozenset(",.;:•·-–—−")
+
+
+def english_headline_tail_after_product_no_separator_punct(tail: str) -> bool:
+    """
+    English request language: after '<productNameResolved> ' the tail must not begin with punctuation
+    used as a separator (comma, dot, colon, dash, etc.).
+    """
+    t = (tail or "").strip()
+    if not t:
+        return True
+    c0 = t[0]
+    if c0 in _EN_HEADLINE_TAIL_LEADING_FORBIDDEN:
+        return False
+    if c0 in _HEADLINE_EN_HE_TAIL_INVISIBLE:
+        return False
+    return True
+
+
 def hebrew_headline_allows_embedded_english_product_name(headline: str, canonical_name: str) -> bool:
     """
     Hebrew job: the headline may contain the resolved English product name as the only Latin segment.
