@@ -88,15 +88,15 @@ def _planner_headline_rules_user_block(lang_code: str) -> str:
     """Extra headline constraints appended to the planner user block (language-specific)."""
     if normalize_video_content_language(lang_code) != "he":
         return (
-            "Headline (English): start with \"<productNameResolved>,\" then English; "
-            "exact resolved name at the beginning; comma immediately after the name; ≤7 words.\n\n"
+            "Headline (English): start with \"<productNameResolved>\" then one normal ASCII space, then the rest in English; "
+            "exact resolved name at the beginning; no comma, colon, dash, dot, or semicolon between name and tail; ≤7 words.\n\n"
         )
     return (
-        "Headline (Hebrew request): headlineText is required. It must start with productNameResolved followed immediately by a comma (no space before the comma). "
-        "If productNameResolved is English (Latin only, unchanged), use exactly: <productNameResolved>, <Hebrew> — "
-        "only that comma between name and Hebrew; no middle dot (·), bullet, colon, dash, or semicolon. "
+        "Headline (Hebrew request): headlineText is required. It must start with productNameResolved, "
+        "then exactly one normal space, then the rest of the headline. "
+        "No comma, middle dot (·), bullet, colon, dash, or semicolon between the name and the tail — only that single space. "
         "Interpret the interaction (meaning), not a shot-by-shot description. "
-        "Do not translate the product name. If productNameResolved is Hebrew script, a Hebrew headline after the comma is fine. "
+        "Do not translate the product name. Works the same whether productNameResolved is English (Latin) or Hebrew script. "
         "≤7 words total. Do not insert bidi control characters in JSON.\n\n"
     )
 
@@ -107,7 +107,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     he_head = ""
     if lang == "he":
         he_head = (
-            "Hebrew headline + English product name: enforce NAME,Hebrew tail exactly; no bidi marks in JSON. "
+            "Hebrew headline: productNameResolved then one space then Hebrew tail (no punctuation separator); no bidi marks in JSON. "
         )
     return (
         f"ACE video: one continuous shot; camera = smooth half-orbit around the two objects (path only). "
@@ -242,7 +242,9 @@ def _headline_prefix_ok(headline: str, product_resolved: str) -> bool:
     h = (headline or "").strip()
     if not p or not h:
         return False
-    return h.startswith(p + ",")
+    if h == p:
+        return True
+    return h.startswith(p + " ")
 
 
 def _headline_word_count_ok(headline: str) -> bool:
@@ -366,7 +368,14 @@ def validate_and_normalize_plan(
 
     lang_norm = normalize_video_content_language(lang_raw)
     if lang_norm == "he" and product_name_is_latin_only_for_bilingual_headline(pn):
-        tail_he = headline[len(pn) + 1 :].lstrip()
+        h_norm = headline.strip()
+        if h_norm == pn:
+            tail_he = ""
+        else:
+            if not h_norm.startswith(pn + " "):
+                logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_en_he_tail")
+                return None, "planning_failed_incomplete_plan"
+            tail_he = h_norm[len(pn) :].lstrip()
         if not bilingual_en_he_headline_tail_struct_ok(tail_he):
             logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_en_he_tail")
             return None, "planning_failed_incomplete_plan"

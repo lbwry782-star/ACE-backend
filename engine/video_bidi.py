@@ -140,7 +140,7 @@ def _strip_planner_separators_for_overlay(s: str) -> str:
     """
     Remove stray planner joiners before recomposing the overlay.
     Replaces -, –, —, ·, |, : with spaces, then collapses whitespace.
-    Latin product name + Hebrew text is recomposed as ``<name>, <hebrew>`` (single comma only).
+    Product + remainder use a single normal space in the visible line (no comma or other separator).
     """
     if not s:
         return ""
@@ -160,7 +160,8 @@ def prepare_ffmpeg_overlay_headline(
     """
     Normalize overlay headline: visible characters only (no LRI/RLI/PDI or other bidi controls in output).
 
-    English canonical + Hebrew remainder → render_mode=dual_drawtext (two drawtext layers in postprocess).
+    Product name + remainder → dual_drawtext when two parts are needed (English or Hebrew product name);
+    postprocess draws product larger. No comma or punctuation between parts in stored text.
     Returns OverlayHeadlinePrep with text_plain equal to the full visible line for logs/API consistency.
     """
     raw_in = headline or ""
@@ -199,7 +200,7 @@ def prepare_ffmpeg_overlay_headline(
         json.dumps(h_clean, ensure_ascii=False),
     )
 
-    if not cn or not is_english_only_product_name_script(cn):
+    if not cn:
         logger.info(
             "VIDEO_HEADLINE_OVERLAY_REMAINDER=%s",
             json.dumps(h_clean, ensure_ascii=False),
@@ -210,51 +211,113 @@ def prepare_ffmpeg_overlay_headline(
         )
         logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
         return OverlayHeadlinePrep(
-            h_clean, "overlay_hebrew_or_mixed_canonical_strip_only", "plain_text", "", ""
+            h_clean, "overlay_no_canonical_name", "plain_text", "", ""
         )
 
-    if not _contains_hebrew_letter(h_clean):
+    def _tail_after_prefix(full: str, prefix: str) -> str:
+        hs = full.strip()
+        pr = prefix.strip()
+        if len(hs) < len(pr) or hs[: len(pr)].lower() != pr.lower():
+            return ""
+        return hs[len(pr) :].lstrip()
+
+    # Latin-only product name: remainder is Hebrew (dual overlay: product right, larger).
+    if is_english_only_product_name_script(cn):
+        if not _contains_hebrew_letter(h_clean):
+            logger.info(
+                "VIDEO_HEADLINE_OVERLAY_REMAINDER=%s",
+                json.dumps("", ensure_ascii=False),
+            )
+            logger.info(
+                "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
+                json.dumps(h_clean, ensure_ascii=False),
+            )
+            logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+            return OverlayHeadlinePrep(
+                h_clean, "overlay_latin_headline_strip_only", "plain_text", "", ""
+            )
+
+        remainder = _tail_after_prefix(h_clean, cn)
+        remainder = re.sub(r"^[\s,·\u00b7\u2022•:;|–—−\-]+", "", remainder)
+        remainder = _strip_planner_separators_for_overlay(remainder)
+        remainder = re.sub(r"\s+", " ", remainder).strip()
+
         logger.info(
             "VIDEO_HEADLINE_OVERLAY_REMAINDER=%s",
-            json.dumps("", ensure_ascii=False),
+            json.dumps(remainder, ensure_ascii=False),
         )
+
+        if not remainder:
+            logger.info(
+                "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
+                json.dumps(cn, ensure_ascii=False),
+            )
+            logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+            return OverlayHeadlinePrep(cn, "overlay_latin_canonical_only", "plain_text", "", "")
+
+        plain = f"{cn} {remainder}"
         logger.info(
             "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
-            json.dumps(h_clean, ensure_ascii=False),
+            json.dumps(plain, ensure_ascii=False),
         )
-        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
-        return OverlayHeadlinePrep(h_clean, "overlay_latin_headline_strip_only", "plain_text", "", "")
+        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=dual_drawtext")
+        return OverlayHeadlinePrep(
+            plain,
+            "overlay_latin_space_hebrew_remainder",
+            "dual_drawtext",
+            cn,
+            remainder,
+        )
 
-    remainder = re.sub(re.escape(cn), "", h_clean, count=1, flags=re.I)
-    remainder = remainder.strip()
-    # Strip decorative separators and duplicate commas before the Hebrew segment; emit exactly one comma in final.
-    remainder = re.sub(r"^[\s,·\u00b7\u2022•:;|–—−\-]+", "", remainder)
-    remainder = _strip_planner_separators_for_overlay(remainder)
-    remainder = re.sub(r"\s+", " ", remainder).strip()
+    # Hebrew script product name: remainder is Hebrew (dual overlay).
+    if _contains_hebrew_letter(cn):
+        tail = _tail_after_prefix(h_clean, cn)
+        tail = re.sub(r"^[\s,·\u00b7\u2022•:;|–—−\-]+", "", tail)
+        tail = _strip_planner_separators_for_overlay(tail)
+        tail = re.sub(r"\s+", " ", tail).strip()
+
+        logger.info(
+            "VIDEO_HEADLINE_OVERLAY_REMAINDER=%s",
+            json.dumps(tail, ensure_ascii=False),
+        )
+
+        if not tail or not _contains_hebrew_letter(tail):
+            logger.info(
+                "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
+                json.dumps(h_clean, ensure_ascii=False),
+            )
+            logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
+            return OverlayHeadlinePrep(
+                h_clean,
+                "overlay_hebrew_product_plain_or_tail_mismatch",
+                "plain_text",
+                "",
+                "",
+            )
+
+        plain = f"{cn} {tail}"
+        logger.info(
+            "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
+            json.dumps(plain, ensure_ascii=False),
+        )
+        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=dual_drawtext")
+        return OverlayHeadlinePrep(
+            plain,
+            "overlay_hebrew_product_space_remainder",
+            "dual_drawtext",
+            cn,
+            tail,
+        )
 
     logger.info(
         "VIDEO_HEADLINE_OVERLAY_REMAINDER=%s",
-        json.dumps(remainder, ensure_ascii=False),
+        json.dumps(h_clean, ensure_ascii=False),
     )
-
-    if not remainder:
-        logger.info(
-            "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
-            json.dumps(cn, ensure_ascii=False),
-        )
-        logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
-        return OverlayHeadlinePrep(cn, "overlay_latin_canonical_only", "plain_text", "", "")
-
-    plain = f"{cn}, {remainder}"
     logger.info(
         "VIDEO_HEADLINE_OVERLAY_FINAL_TEXT=%s",
-        json.dumps(plain, ensure_ascii=False),
+        json.dumps(h_clean, ensure_ascii=False),
     )
-    logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=dual_drawtext")
+    logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=plain_text")
     return OverlayHeadlinePrep(
-        plain,
-        "overlay_latin_comma_hebrew_remainder",
-        "dual_drawtext",
-        f"{cn},",
-        remainder,
+        h_clean, "overlay_hebrew_or_mixed_canonical_strip_only", "plain_text", "", ""
     )

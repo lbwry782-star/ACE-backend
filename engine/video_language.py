@@ -225,7 +225,7 @@ def _has_ascii_latin_letter(s: str) -> bool:
 def product_name_is_latin_only_for_bilingual_headline(pn: str) -> bool:
     """
     True when the resolved product name is English (Latin letters only, ≥1 letter).
-    Used with Hebrew headline language: headline format <NAME>,<Hebrew>.
+    Used with Hebrew headline language: headline format ``<NAME> <Hebrew tail>`` (one ASCII space, no comma).
     """
     raw = (pn or "").strip()
     if not raw:
@@ -242,8 +242,8 @@ _HEADLINE_EN_HE_TAIL_INVISIBLE = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d
 
 def bilingual_en_he_headline_tail_struct_ok(tail: str) -> bool:
     """
-    After '<productNameResolved>,' the remainder must be Hebrew-only (no Latin letters),
-    contain at least one Hebrew letter, use no forbidden punctuation, no second comma,
+    After '<productNameResolved> ' (one space; no comma), the remainder must be Hebrew-only (no Latin letters),
+    contain at least one Hebrew letter, use no forbidden punctuation, no comma,
     and no bidi/isolate marks.
     """
     t = (tail or "").strip()

@@ -253,24 +253,33 @@ def _pillow_text_width_px(font_path: str, text: str, fontsize: int) -> int:
     return max(1, bbox[2] - bbox[0])
 
 
+def _overlay_product_remainder_fontsizes(base_fs: int) -> Tuple[int, int]:
+    """Headline remainder (smaller) and product name (larger), for burn-in emphasis without punctuation."""
+    fs_r = max(22, base_fs)
+    fs_p = min(fs_r + max(8, fs_r // 5), 78)
+    return fs_r, fs_p
+
+
 def _build_dual_drawtext_vf(
     font_e: str,
-    tf_lat_e: str,
-    tf_he_e: str,
-    fs: int,
-    x_hebrew: int,
-    x_latin: int,
+    tf_remainder_e: str,
+    tf_product_e: str,
+    fs_remainder: int,
+    fs_product: int,
+    x_remainder: int,
+    x_product: int,
     alpha_expr: str,
     t0_str: str,
     *,
-    hebrew_text_shaping: bool,
+    remainder_text_shaping: bool,
+    product_text_shaping: bool,
 ) -> str:
     """
-    Two drawtext chains: Hebrew remainder on the left, English product + comma on the right.
-    Same baseline; gap = one space width between the two blocks (via x positions only).
+    Two drawtext chains: remainder on the left (smaller), product name on the right (larger).
+    Same vertical centering; gap = one space width between blocks (via x positions only).
     """
-    sh_he = ":text_shaping=1" if hebrew_text_shaping else ""
-    sh_lat = ""
+    sh_r = ":text_shaping=1" if remainder_text_shaping else ""
+    sh_p = ":text_shaping=1" if product_text_shaping else ""
     rows: list[Tuple[int, int, str]] = [
         (1, 0, ""),
         (0, 1, ""),
@@ -279,10 +288,9 @@ def _build_dual_drawtext_vf(
     parts: list[str] = []
     for ox, oy, shadow in rows:
         y_expr = "(h-text_h)/2+1" if oy else "(h-text_h)/2"
-        # Hebrew (left) then Latin+comma (right); each textfile is single-direction only.
-        for tf_path, xb, sh in (
-            (tf_he_e, x_hebrew, sh_he),
-            (tf_lat_e, x_latin, sh_lat),
+        for tf_path, xb, fs, sh in (
+            (tf_remainder_e, x_remainder, fs_remainder, sh_r),
+            (tf_product_e, x_product, fs_product, sh_p),
         ):
             xe = xb + ox
             parts.append(
@@ -354,29 +362,36 @@ def _mixed_hebrew_latin_headline(s: str) -> bool:
     return _has_hebrew_letter(s) and _has_ascii_latin_letter(s)
 
 
-def _split_overlay_en_prefix_hebrew(
+def _split_overlay_product_remainder(
     headline: str, canonical_name: str
 ) -> Optional[Tuple[str, str]]:
     """
-    English product name first, then Hebrew remainder — same composition as prepare_ffmpeg_overlay_headline.
-    Returns (pure LTR prefix including comma, pure RTL remainder). No bidi control characters.
+    Same composition as prepare_ffmpeg_overlay_headline: ``<product> <remainder>`` (one space; no comma).
+    Returns (product, remainder). No bidi control characters.
     """
     cn = unicodedata.normalize("NFC", (canonical_name or "").strip())
-    if not cn or not is_english_only_product_name_script(cn):
+    if not cn:
         return None
     h = unicodedata.normalize("NFC", (headline or "").strip())
     if not h:
         return None
     hs = h.strip()
-    if not hs.lower().startswith(cn.lower()):
+    if len(hs) < len(cn) or hs[: len(cn)].lower() != cn.lower():
         return None
-    tail = hs[len(cn) :]
-    tail = tail.strip()
+    tail = hs[len(cn) :].lstrip()
     tail = re.sub(r"^[\s,·\u00b7\u2022•:;|–—−\-]+", "", tail)
     tail = re.sub(r"\s+", " ", tail).strip()
-    if not tail or not _has_hebrew_letter(tail):
+    if not tail:
         return None
-    return (f"{cn},", tail)
+    if is_english_only_product_name_script(cn):
+        if not _has_hebrew_letter(tail):
+            return None
+        return (cn, tail)
+    if _has_hebrew_letter(cn):
+        if not _has_hebrew_letter(tail):
+            return None
+        return (cn, tail)
+    return None
 
 
 def postprocess_video_headline(
@@ -490,7 +505,7 @@ def postprocess_video_headline(
         lat_s = (overlay_dual_latin or "").strip()
         he_s = (overlay_dual_hebrew or "").strip()
         if olang == "he" and (not lat_s or not he_s):
-            sp = _split_overlay_en_prefix_hebrew(headline_clean, cn)
+            sp = _split_overlay_product_remainder(headline_clean, cn)
             if sp:
                 lat_s, he_s = sp
 
@@ -518,10 +533,11 @@ def postprocess_video_headline(
                 )
                 video_w = 1920
             try:
-                tw_lat = _pillow_text_width_px(font, lat_s, fs)
-                tw_he = _pillow_text_width_px(font, he_s, fs)
-                tw_space = _pillow_text_width_px(font, " ", fs)
-                # Visual: <Hebrew> <one space> <English+comma> — English block on the right.
+                fs_rem, fs_prod = _overlay_product_remainder_fontsizes(fs)
+                tw_he = _pillow_text_width_px(font, he_s, fs_rem)
+                tw_lat = _pillow_text_width_px(font, lat_s, fs_prod)
+                tw_space = _pillow_text_width_px(font, " ", fs_rem)
+                # Visual: remainder (left) <space> product (right, larger).
                 total = tw_he + tw_space + tw_lat
                 x_hebrew = max(0, (video_w - total) // 2)
                 x_latin = x_hebrew + tw_he + tw_space
@@ -538,8 +554,10 @@ def postprocess_video_headline(
                     json.dumps(he_s, ensure_ascii=False),
                 )
                 logger.info(
-                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s tw_he=%s tw_space=%s tw_lat=%s x_hebrew=%s x_latin=%s",
+                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s fs_rem=%s fs_prod=%s tw_rem=%s tw_space=%s tw_prod=%s x_rem=%s x_prod=%s",
                     video_w,
+                    fs_rem,
+                    fs_prod,
                     tw_he,
                     tw_space,
                     tw_lat,
@@ -582,16 +600,19 @@ def postprocess_video_headline(
             str(use_dual).lower(),
         )
         if use_dual:
+            fs_rem, fs_prod = _overlay_product_remainder_fontsizes(fs)
             vf = _build_dual_drawtext_vf(
                 font_e,
-                tf_lat_e,
                 tf_he_e,
-                fs,
+                tf_lat_e,
+                fs_rem,
+                fs_prod,
                 x_hebrew,
                 x_latin,
                 alpha_expr,
                 t0_str,
-                hebrew_text_shaping=(olang == "he"),
+                remainder_text_shaping=_has_hebrew_letter(he_s),
+                product_text_shaping=_has_hebrew_letter(lat_s),
             )
         else:
             dt = (
