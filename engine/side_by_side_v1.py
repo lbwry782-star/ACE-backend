@@ -1762,311 +1762,309 @@ Do not write any extra text. Return JSON array only."""
         return []
 
 
+
+def _ab_main_lower(item: Dict) -> str:
+    return str((item or {}).get("object") or "").strip().lower()
+
+
+def _ab_reserved_mains_from_history(
+    object_list: List[Dict],
+    used_objects: Optional[set],
+) -> set:
+    """Map session history ids (chosen_objects) to main-object names for exclusion."""
+    out = set()
+    if not used_objects or not object_list:
+        return out
+    id_set = {str(x) for x in used_objects if x is not None}
+    for it in object_list:
+        if str(it.get("id")) in id_set:
+            m = _ab_main_lower(it)
+            if m:
+                out.add(m)
+    return out
+
+
+def _ab_llm_text(model_name: str, system_msg: str, user_msg: str) -> str:
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+    def _call():
+        is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
+        if is_o_model:
+            r = client.responses.create(model=model_name, input=f"{system_msg.strip()}\n\n{user_msg}")
+            return (r.output_text or "").strip()
+        r = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.25,
+            max_tokens=1400,
+        )
+        return (r.choices[0].message.content or "").strip() if r.choices else ""
+
+    return openai_retry.openai_call_with_retry(_call, endpoint="responses")
+
+
+def _ab_parse_json_object(raw: str) -> Dict:
+    t = (raw or "").strip()
+    if not t:
+        return {}
+    if t.startswith("```"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1]) if len(lines) > 2 else t
+    if t.startswith("```json"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1]) if len(lines) > 2 else t
+    t = t.strip()
+    if "{" in t and "}" in t:
+        t = t[t.find("{") : t.rfind("}") + 1]
+    try:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _ab_parse_json_array(raw: str) -> list:
+    t = (raw or "").strip()
+    if not t:
+        return []
+    if t.startswith("```"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1]) if len(lines) > 2 else t
+    if t.startswith("```json"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1]) if len(lines) > 2 else t
+    t = t.strip()
+    if "[" in t and "]" in t:
+        t = t[t.find("[") : t.rfind("]") + 1]
+    try:
+        arr = json.loads(t)
+        return arr if isinstance(arr, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
+def _ab_catalog_lines(object_list: List[Dict]) -> str:
+    lines = []
+    for item in object_list:
+        iid = str(item.get("id") if item.get("id") is not None else "")
+        main = str(item.get("object") if item.get("object") is not None else "")
+        sh = str(item.get("shape_hint") if item.get("shape_hint") is not None else "")
+        cc = str(item.get("classic_context") or "")[:100]
+        lines.append(f"- id: {iid}, object: {main}, shape_hint: {sh}, classic_context: {cc}")
+    return "\n".join(lines)
+
+
+def _ab_fallback_a_id(object_list: List[Dict], exclude_mains: set) -> str:
+    for it in object_list:
+        m = _ab_main_lower(it)
+        if m and m not in exclude_mains:
+            return str(it.get("id"))
+    return str(object_list[0].get("id"))
+
+
+def _select_object_a_from_description_llm(
+    object_list: List[Dict],
+    product_description: str,
+    ad_goal: str,
+    model_name: str,
+    exclude_mains: set,
+) -> str:
+    catalog = _ab_catalog_lines(object_list)
+    desc = (product_description or "").strip()[:1400]
+    goal = (ad_goal or "").strip()[:800]
+    banned = ", ".join(sorted(exclude_mains))[:600] if exclude_mains else "(none)"
+    user = f"""PRODUCT DESCRIPTION (sole primary signal for choosing Object A — read it like a painter: overall mass, gesture, flow, curvature, proportion, visual weight; not keyword matching and not contour-only):
+{desc}
+
+Advertising goal (secondary context only; must not override the description-led read of form):
+{goal}
+
+Catalog (pick exactly ONE id from this list):
+{catalog}
+
+Already-used main object names in this session (case-insensitive; do NOT choose any row whose \"object\" equals one of these):
+{banned}
+
+Return ONLY JSON: {{"a_id":"<exact id from catalog>"}}"""
+    system = "You are an art-director assistant. JSON only, English."
+    raw = _ab_llm_text(model_name, system, user)
+    obj = _ab_parse_json_object(raw)
+    aid = str((obj or {}).get("a_id") or "").strip()
+    id_ok = any(str(it.get("id")) == aid for it in object_list)
+    item = next((it for it in object_list if str(it.get("id")) == aid), None)
+    m = _ab_main_lower(item) if item else ""
+    if id_ok and m and m not in exclude_mains:
+        logger.info("BUILDER1_AB_SELECT A_from=description_llm a_id=%s main=%s", aid, m)
+        return aid
+    fb = _ab_fallback_a_id(object_list, exclude_mains)
+    logger.warning("BUILDER1_AB_SELECT A_from=fallback a_id=%s (llm_parse_or_rule_fail)", fb)
+    return fb
+
+
+def _batch_promise_support_flags(
+    item_a: Dict,
+    b_items: List[Dict],
+    ad_goal: str,
+    model_name: str,
+) -> List[bool]:
+    if not b_items:
+        return []
+    rows = []
+    for i, b in enumerate(b_items):
+        rows.append(
+            {
+                "i": i,
+                "B_object": str(b.get("object") or ""),
+                "B_sub": str(b.get("sub_object") or "")[:50],
+                "B_tag": str(b.get("theme_tag") or "")[:60],
+                "B_link": str(b.get("theme_link") or "")[:80],
+            }
+        )
+    a_main = str(item_a.get("object") or "")
+    a_ctx = str(item_a.get("classic_context") or "")[:140]
+    user = f"""Advertising goal (the promise the ad must land):
+{(ad_goal or '').strip()[:900]}
+
+Fixed Object A:
+- object: {a_main}
+- classic_context: {a_ctx}
+
+Candidate B rows (evaluate each i independently; order is fixed):
+{json.dumps(rows, ensure_ascii=False)}
+
+For each i, answer whether pairing A with this B could plausibly support the advertising goal in ONE print-style visual metaphor (yes only if B actively helps the promise; unrelated decoration = no).
+Return ONLY a JSON array: [{{\"i\":0,\"supports\":true}},...] with exactly one object per candidate index; include every i from 0 to {len(b_items)-1}."""
+    system = "You are a strict advertising-metaphor judge. JSON only, English."
+    raw = _ab_llm_text(model_name, system, user)
+    arr = _ab_parse_json_array(raw)
+    flags = [False] * len(b_items)
+    for ent in arr:
+        if not isinstance(ent, dict):
+            continue
+        try:
+            idx = int(ent.get("i", -1))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= idx < len(b_items):
+            flags[idx] = bool(ent.get("supports") or ent.get("creates_promise") or ent.get("ok"))
+    return flags
+
+
+def _select_b_for_a_morph_then_promise(
+    item_a: Dict,
+    object_list: List[Dict],
+    ad_goal: str,
+    model_name: str,
+    exclude_mains: set,
+    sid: str,
+) -> Tuple[str, int]:
+    a_id = str(item_a.get("id"))
+    a_main = _ab_main_lower(item_a)
+    candidates: List[Dict] = []
+    for it in object_list:
+        if str(it.get("id")) == a_id:
+            continue
+        bm = _ab_main_lower(it)
+        if not bm or bm == a_main or bm in exclude_mains:
+            continue
+        candidates.append(it)
+    if not candidates:
+        raise ValueError("PAIRSET_INVALID: no_B_candidates_for_A")
+
+    seed = int(hashlib.md5(f"{sid}|{a_id}|{a_main}".encode()).hexdigest(), 16) % (2**31)
+    rng = random.Random(seed)
+    rng.shuffle(candidates)
+    candidates = candidates[:36]
+
+    scored: List[Tuple[Dict, int]] = []
+    chunk = 12
+    for off in range(0, len(candidates), chunk):
+        sub = candidates[off : off + chunk]
+        pairs = [(item_a, b) for b in sub]
+        batch = score_pairs_batch_o3_pro(pairs, model_name)
+        by_i = {int(r.get("i", -1)): int(r.get("score", 0)) for r in batch if isinstance(r, dict)}
+        for i, b in enumerate(sub):
+            sc = by_i.get(i, 0)
+            scored.append((b, max(0, min(100, sc))))
+    scored.sort(key=lambda x: -x[1])
+
+    top_scored = scored[:18]
+    top_b_only = [b for b, _ in top_scored]
+    flags = _batch_promise_support_flags(item_a, top_b_only, ad_goal, model_name)
+    ok_pairs = [(b, sc) for (b, sc), ok in zip(top_scored, flags) if ok]
+    if ok_pairs:
+        ok_pairs.sort(key=lambda x: -x[1])
+        best_b, best_sc = ok_pairs[0]
+        logger.info(
+            "BUILDER1_AB_SELECT B_from=morph_then_promise a_main=%s b_main=%s morph=%s promise_ok=true",
+            a_main,
+            _ab_main_lower(best_b),
+            best_sc,
+        )
+        return str(best_b.get("id")), int(best_sc)
+    best_b, best_sc = scored[0]
+    logger.warning(
+        "BUILDER1_AB_SELECT B_promise_relaxed=true a_main=%s b_main=%s morph=%s",
+        a_main,
+        _ab_main_lower(best_b),
+        best_sc,
+    )
+    return str(best_b.get("id")), int(best_sc)
+
+
 def select_three_pairs_single_call(
     object_list: List[Dict],
     sid: str,
     ad_goal: str,
-    model_name: Optional[str] = None
+    model_name: Optional[str] = None,
+    *,
+    product_description: str = "",
+    reserved_main_objects: Optional[set] = None,
 ) -> List[Dict]:
     """
-    Select exactly 3 pairs from object_list using a single model call.
-    
-    Critical rule: Silhouette similarity is judged ONLY by the MAIN OBJECT (field "object").
-    The sub_object and classic_context are ignored for similarity scoring.
-    
-    Args:
-        object_list: List of dicts with keys: id, object, sub_object, classic_context, shape_hint
-        sid: Session ID (for logging)
-        ad_goal: Advertising goal (for context, not used in similarity)
-        model_name: Model name (optional, defaults to OPENAI_SHAPE_MODEL)
-    
-    Returns:
-        List of 3 dicts, each with keys: {"a_id": "...", "b_id": "..."}
+    Builder1: three (A,B) pairs for ads 1–3. Per pair:
+    1) Object A from product description (painter-like whole-form read).
+    2) Object B by strongest morphological (outline-batch) similarity to A.
+    3) Keep B only if it supports the advertising promise; if none qualify, relax with warning.
+    4) Among promise-qualified B, higher shape score wins (shape over clearer promise).
     """
-    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     if model_name is None:
         model_name = _get_shape_model()
-    
-    # Format object list for prompt (only id, object, shape_hint - ignore sub_object for similarity)
-    # Normalize all values to string for safe formatting
-    object_list_lines = []
-    for item in object_list:
-        raw_id = item.get("id")
-        raw_object = item.get("object")
-        raw_shape_hint = item.get("shape_hint")
-        item_id = str(raw_id) if raw_id is not None else ""
-        main_object = str(raw_object) if raw_object is not None else ""
-        shape_hint = str(raw_shape_hint) if raw_shape_hint is not None else ""
-        object_list_lines.append(f"- id: {item_id}, object: {main_object}, shape_hint: {shape_hint}")
-    
-    object_list_formatted = "\n".join(object_list_lines)
-    
-    prompt = f"""Return JSON ONLY. Do not include any commentary, markdown, code fences, or extra text.
-
-TASK:
-Select exactly 3 pairs of items with the highest silhouette similarity of the MAIN OBJECTS ONLY.
-
-DEFINITION - MAIN OBJECT:
-MAIN OBJECT is the value of the 'object' field (not id). Two items share the same main object if their 'object' strings are equal after lowercasing and trimming.
-
-CRITICAL RULES:
-1) Within each pair: a.object != b.object (the two main objects must be different)
-2) Across all 3 pairs: no 'object' value may repeat (each main object appears at most once across all pairs)
-3) Output exactly 3 pairs
-4) Use only ids that exist in the provided list
-5) Prefer high silhouette similarity of MAIN OBJECT only (ignore sub_object, classic_context, theme_link, theme_tag)
-
-SIMILARITY CRITERION:
-Compare ONLY the outer contour / silhouette of the "object" field (MAIN object).
-Ignore sub_object, classic_context, theme_link, theme_tag for similarity scoring.
-
-OUTPUT FORMAT (EXACT):
-[
-  {{"a_id":"id1", "b_id":"id2"}},
-  {{"a_id":"id3", "b_id":"id4"}},
-  {{"a_id":"id5", "b_id":"id6"}}
-]
-
-EXAMPLE OUTPUT:
-[
-  {{"a_id":"leaf_1", "b_id":"petal_2"}},
-  {{"a_id":"coin_3", "b_id":"button_4"}},
-  {{"a_id":"wheel_5", "b_id":"ring_6"}}
-]
-
-INPUT LIST ({len(object_list)} items):
-Each item has: id, object (MAIN), sub_object, classic_context, shape_hint
-
-LIST:
-{object_list_formatted}
-
-Return ONLY a JSON array as specified. No other text."""
-    
-    # Build ID to item mapping for validation
-    # Normalize all ids to string for consistent comparison
-    id_to_item = {}
-    id_to_main_object = {}
-    for item in object_list:
-        raw_id = item.get("id")
-        normalized_id = str(raw_id) if raw_id is not None else ""
-        id_to_item[normalized_id] = item
-        raw_object = item.get("object", "")
-        id_to_main_object[normalized_id] = str(raw_object).lower().strip() if raw_object else ""
-    
-    max_retries = 3  # Increased from 2 to 3
-    last_raw_response = None
-    last_parse_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"SELECT_THREE_PAIRS attempt={attempt+1} model={model_name} object_list_size={len(object_list)}")
-            
-            # Use Responses API for o* models
-            def _select_three_call():
-                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-                if is_o_model:
-                    r = client.responses.create(model=model_name, input=prompt)
-                    return r.output_text or ""
-                r = client.chat.completions.create(
-                    model=model_name,
-                    messages=[
-                        {"role": "system", "content": "You are a shape similarity analyzer. Output must be in English only. Return JSON only without additional text."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.3,
-                    max_tokens=2000
-                )
-                return (r.choices[0].message.content or "") if r.choices else ""
-            response_text = openai_retry.openai_call_with_retry(_select_three_call, endpoint="responses")
-            # Log raw response length
-            raw_len = len(response_text) if response_text else 0
-            logger.info(f"SELECT_THREE_PAIRS_RAW_LEN={raw_len}")
-            last_raw_response = response_text
-            
-            # Robust JSON extraction
-            response_text = response_text.strip() if response_text else ""
-            
-            # If empty, treat as parse failure
-            if not response_text:
-                raise json.JSONDecodeError("Empty response", response_text, 0)
-            
-            # Remove markdown code fences if present
-            if response_text.startswith("```"):
-                lines = response_text.split('\n')
-                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-            if response_text.startswith("```json"):
-                lines = response_text.split('\n')
-                response_text = '\n'.join(lines[1:-1]) if len(lines) > 2 else response_text
-            response_text = response_text.strip()
-            
-            # Attempt to extract JSON array if there's leading/trailing text
-            extracted_json = response_text
-            if '[' in response_text and ']' in response_text:
-                first_bracket = response_text.find('[')
-                last_bracket = response_text.rfind(']')
-                if first_bracket >= 0 and last_bracket > first_bracket:
-                    extracted_json = response_text[first_bracket:last_bracket+1]
-                    if len(extracted_json) != len(response_text):
-                        extracted_len = len(extracted_json)
-                        logger.info(f"SELECT_THREE_PAIRS_EXTRACTED_JSON_LEN={extracted_len} (extracted from {raw_len} chars)")
-            
-            # Parse JSON
-            pairs_data = json.loads(extracted_json)
-            
-            if not isinstance(pairs_data, list):
-                raise ValueError(f"Expected list, got {type(pairs_data)}")
-            
-            if len(pairs_data) != 3:
-                raise ValueError(f"Expected exactly 3 pairs, got {len(pairs_data)}")
-            
-            # Validate pairs
-            validated_pairs = []
-            used_main_objects = set()
-            
-            for pair in pairs_data:
-                if not isinstance(pair, dict):
-                    raise ValueError(f"Pair must be dict, got {type(pair)}")
-                
-                raw_a_id = pair.get("a_id", "")
-                raw_b_id = pair.get("b_id", "")
-                
-                # Normalize ids to string for comparison
-                a_id = str(raw_a_id) if raw_a_id is not None else ""
-                b_id = str(raw_b_id) if raw_b_id is not None else ""
-                
-                # Check IDs exist
-                if a_id not in id_to_item:
-                    raise ValueError(f"a_id '{a_id}' (raw: {raw_a_id}, type: {type(raw_a_id).__name__}) not found in object_list")
-                if b_id not in id_to_item:
-                    raise ValueError(f"b_id '{b_id}' (raw: {raw_b_id}, type: {type(raw_b_id).__name__}) not found in object_list")
-                
-                # Get main objects (normalized for comparison)
-                a_main = id_to_main_object.get(a_id, "").lower().strip()
-                b_main = id_to_main_object.get(b_id, "").lower().strip()
-                
-                # Check different main objects within pair
-                if a_main == b_main:
-                    raise ValueError(f"Pair has same main object: '{a_main}' (a_id={a_id}, b_id={b_id})")
-                
-                # Check no reuse across pairs
-                if a_main in used_main_objects:
-                    raise ValueError(f"Main object '{a_main}' (a_id={a_id}) already used in another pair")
-                if b_main in used_main_objects:
-                    raise ValueError(f"Main object '{b_main}' (b_id={b_id}) already used in another pair")
-                
-                used_main_objects.add(a_main)
-                used_main_objects.add(b_main)
-                
-                validated_pairs.append({"a_id": a_id, "b_id": b_id})
-            
-            # Final validation: ensure exactly 3 pairs, all ids exist, no repeated main objects
-            if len(validated_pairs) != 3:
-                raise ValueError(f"PAIRSET_INVALID: Expected 3 pairs, got {len(validated_pairs)}")
-            
-            # Validate all ids exist
-            for pair in validated_pairs:
-                if pair.get("a_id") not in id_to_item or pair.get("b_id") not in id_to_item:
-                    raise ValueError(f"PAIRSET_INVALID: Invalid id in pair {pair}")
-            
-            # Validate no repeated main objects across all pairs (normalized comparison)
-            all_main_objects = []
-            for pair in validated_pairs:
-                a_id = pair.get("a_id")
-                b_id = pair.get("b_id")
-                a_main = id_to_main_object.get(a_id, "").lower().strip()
-                b_main = id_to_main_object.get(b_id, "").lower().strip()
-                all_main_objects.extend([a_main, b_main])
-            
-            if len(all_main_objects) != len(set(all_main_objects)):
-                raise ValueError(f"PAIRSET_INVALID: Repeated main objects found: {all_main_objects}")
-            
-            logger.info(f"SELECT_THREE_PAIRS SUCCESS: pairs={validated_pairs}")
-            logger.info(f"PAIRSET_PICKED ids={[(p.get('a_id'), p.get('b_id')) for p in validated_pairs]}")
-            return validated_pairs
-            
-        except json.JSONDecodeError as e:
-            last_parse_error = str(e)
-            logger.error(f"SELECT_THREE_PAIRS JSON parse error (attempt {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                # Retry with fix prompt including error details
-                raw_response_snippet = (last_raw_response[:200] + "...") if last_raw_response and len(last_raw_response) > 200 else (last_raw_response or "empty")
-                prompt = f"""Return JSON ONLY. Do not include any commentary, markdown, code fences, or extra text.
-
-PREVIOUS ATTEMPT FAILED:
-Error: {last_parse_error}
-Raw response (truncated): {raw_response_snippet}
-
-TASK:
-Select exactly 3 pairs of items with the highest silhouette similarity of the MAIN OBJECTS ONLY.
-
-DEFINITION - MAIN OBJECT:
-MAIN OBJECT is the value of the 'object' field (not id). Two items share the same main object if their 'object' strings are equal after lowercasing and trimming.
-
-CRITICAL RULES:
-1) Within each pair: a.object != b.object (the two main objects must be different)
-2) Across all 3 pairs: no 'object' value may repeat (each main object appears at most once across all pairs)
-3) Output exactly 3 pairs
-4) Use only ids that exist in the provided list
-5) Prefer high silhouette similarity of MAIN OBJECT only (ignore sub_object, classic_context, theme_link, theme_tag)
-
-OUTPUT FORMAT (EXACT):
-[
-  {{"a_id":"id1", "b_id":"id2"}},
-  {{"a_id":"id3", "b_id":"id4"}},
-  {{"a_id":"id5", "b_id":"id6"}}
-]
-
-LIST:
-{object_list_formatted}
-
-Return ONLY a JSON array as specified. No other text."""
-                continue
-            raise ValueError(f"PAIRSET_INVALID: Failed to parse JSON after {max_retries} attempts: {last_parse_error}")
-        except ValueError as e:
-            error_msg = str(e)
-            if "PAIRSET_INVALID" in error_msg:
-                raise
-            logger.warning(f"SELECT_THREE_PAIRS validation error (attempt {attempt+1}/{max_retries}): {error_msg}")
-            if attempt < max_retries - 1:
-                # Retry with stricter prompt
-                prompt = f"""Return JSON ONLY. Do not include any commentary, markdown, code fences, or extra text.
-
-PREVIOUS ATTEMPT FAILED:
-Validation error: {error_msg}
-
-TASK:
-Select exactly 3 pairs of items with the highest silhouette similarity of the MAIN OBJECTS ONLY.
-
-DEFINITION - MAIN OBJECT:
-MAIN OBJECT is the value of the 'object' field (not id). Two items share the same main object if their 'object' strings are equal after lowercasing and trimming.
-
-CRITICAL RULES:
-1) Within each pair: a.object != b.object (the two main objects must be different)
-2) Across all 3 pairs: no 'object' value may repeat (each main object appears at most once across all pairs)
-3) Output exactly 3 pairs
-4) Use only ids that exist in the provided list
-5) Prefer high silhouette similarity of MAIN OBJECT only (ignore sub_object, classic_context, theme_link, theme_tag)
-
-OUTPUT FORMAT (EXACT):
-[
-  {{"a_id":"id1", "b_id":"id2"}},
-  {{"a_id":"id3", "b_id":"id4"}},
-  {{"a_id":"id5", "b_id":"id6"}}
-]
-
-LIST:
-{object_list_formatted}
-
-Return ONLY a JSON array as specified. No other text."""
-                continue
-            raise ValueError(f"PAIRSET_INVALID: Validation failed after {max_retries} attempts: {error_msg}")
-        except Exception as e:
-            logger.error(f"SELECT_THREE_PAIRS failed (attempt {attempt+1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                continue
-            raise ValueError(f"PAIRSET_INVALID: Failed after all retries: {e}")
-    
-    raise ValueError("PAIRSET_INVALID: Failed to select 3 pairs after all retries")
+    reserved = set(reserved_main_objects or [])
+    local_excluded = set(reserved)
+    triple: List[Dict] = []
+    for slot in range(3):
+        a_id = _select_object_a_from_description_llm(
+            object_list, product_description, ad_goal, model_name, local_excluded
+        )
+        item_a = next((it for it in object_list if str(it.get("id")) == str(a_id)), None)
+        if not item_a:
+            raise ValueError("PAIRSET_INVALID: A_id_not_in_list")
+        b_id, sc = _select_b_for_a_morph_then_promise(
+            item_a, object_list, ad_goal, model_name, local_excluded, sid
+        )
+        item_b = next((it for it in object_list if str(it.get("id")) == str(b_id)), None)
+        if not item_b:
+            raise ValueError("PAIRSET_INVALID: B_id_not_in_list")
+        triple.append({"a_id": str(a_id), "b_id": str(b_id), "shape_similarity_score": int(sc)})
+        ma = _ab_main_lower(item_a)
+        mb = _ab_main_lower(item_b)
+        if ma:
+            local_excluded.add(ma)
+        if mb:
+            local_excluded.add(mb)
+        logger.info(
+            "BUILDER1_AB_TRIPLE slot=%s a_id=%s b_id=%s morph_score=%s",
+            slot + 1,
+            a_id,
+            b_id,
+            sc,
+        )
+    logger.info("SELECT_THREE_PAIRS_AB_SUCCESS pairs=%s", triple)
+    return triple
 
 
 def select_pair_from_three_pairs(
@@ -2077,7 +2075,8 @@ def select_pair_from_three_pairs(
     image_size: str,
     used_objects: Optional[set] = None,
     model_name: Optional[str] = None,
-    allowed_theme_tags: Optional[List[str]] = None
+    allowed_theme_tags: Optional[List[str]] = None,
+    product_description: str = "",
 ) -> Dict:
     """
     Select a single pair for the given ad_index from 3 pre-selected pairs.
@@ -2091,9 +2090,10 @@ def select_pair_from_three_pairs(
         ad_index: Ad index (1-3)
         ad_goal: Advertising goal (for context)
         image_size: Image size (for cache key)
-        used_objects: Set of already used object IDs (optional, ignored - pairs are pre-selected)
+        used_objects: Set of already used object IDs from history (optional; excludes their mains from new triples)
         model_name: Model name (optional, defaults to OPENAI_SHAPE_MODEL)
         allowed_theme_tags: Optional list of theme tags (ignored - full list is used)
+        product_description: Product text for description-first Object A selection (optional)
     
     Returns:
         Dict with keys: object_a, object_b, object_a_id, object_b_id, shape_similarity_score, shape_hint
@@ -2105,7 +2105,11 @@ def select_pair_from_three_pairs(
     # Use object_list hash for cache key stability
     # Normalize ids to string for hash calculation
     object_list_hash = hashlib.md5(json.dumps([str(item.get("id")) if item.get("id") is not None else "" for item in object_list], sort_keys=True).encode()).hexdigest()[:16]
-    cache_key = f"THREE_PAIRS|{sid}|{ad_goal}|{image_size}|{object_list_hash}"
+    pd_h = hashlib.md5((product_description or "").encode()).hexdigest()[:12]
+    used_h = hashlib.md5(
+        "|".join(sorted(str(x) for x in (used_objects or set()))).encode()
+    ).hexdigest()[:12]
+    cache_key = f"THREE_PAIRS_AB|{sid}|{ad_goal}|{image_size}|{object_list_hash}|{pd_h}|{used_h}"
     
     # Check cache
     cached_pairs = None
@@ -2119,12 +2123,14 @@ def select_pair_from_three_pairs(
         logger.info(f"THREE_PAIRS_CACHE hit=true key={cache_key[:16]}...")
         three_pairs = cached_pairs
     else:
-        # Select 3 pairs using single model call
+        reserved_mains = _ab_reserved_mains_from_history(object_list, used_objects)
         three_pairs = select_three_pairs_single_call(
             object_list=object_list,
             sid=sid,
             ad_goal=ad_goal,
-            model_name=model_name
+            model_name=model_name,
+            product_description=product_description or "",
+            reserved_main_objects=reserved_mains,
         )
         
         # Cache the 3 pairs
@@ -2168,7 +2174,7 @@ def select_pair_from_three_pairs(
         "object_b": object_b_name,
         "object_a_id": a_id,
         "object_b_id": b_id,
-        "shape_similarity_score": 85,  # Default score (model selected based on similarity)
+        "shape_similarity_score": int(selected_pair.get("shape_similarity_score", 85)),
         "shape_hint": shape_hint,
         "shape_reason": f"Selected from 3 pre-computed pairs (pair {pair_index + 1}/3)"
     }
@@ -6437,7 +6443,8 @@ def generate_preview_data(
                     object_list=object_list,
                     used_objects=used_objects,
                     model_name=planner_model or _get_shape_model(),
-                    allowed_theme_tags=theme_tags
+                    allowed_theme_tags=theme_tags,
+                    product_description=product_description or "",
                 )
                 t_shape_ms = int((time.time() - t_shape_start) * 1000)
                 # Save to cache (individual pair result)
@@ -6455,7 +6462,8 @@ def generate_preview_data(
                 object_list=object_list,
                 used_objects=used_objects,
                 model_name=planner_model or _get_shape_model(),
-                allowed_theme_tags=theme_tags
+                allowed_theme_tags=theme_tags,
+                product_description=product_description or "",
             )
             t_shape_ms = int((time.time() - t_shape_start) * 1000)
         
@@ -6879,9 +6887,10 @@ def generate_zip(payload_dict: Dict, is_preview: bool = False) -> bytes:
                 ad_index=ad_index,
                 ad_goal=ad_goal,
                 image_size=image_size_str,
-                used_objects=None,  # Anti-repeat handled by pre-selection
+                used_objects=used_objects,
                 model_name=planner_model,
-                allowed_theme_tags=theme_tags
+                allowed_theme_tags=theme_tags,
+                product_description=product_description or "",
             )
             t_shape_ms = int((time.time() - t_shape_start) * 1000)
             
