@@ -3034,14 +3034,23 @@ Requirements:
     raise Exception("Failed to select shape pair after retries")
 
 
-def _prepend_verbatim_product_name(copy_text: str, product_name: str) -> str:
-    """Ensure canonical name appears at least once by prefixing when missing."""
+def _repair_verbatim_marketing_product_name(copy_text: str, product_name: str, lang: str) -> str:
+    """
+    Ensure the canonical product name appears at least once when the model omitted it.
+
+    For Hebrew copy with a Latin product name, avoid bare English-first paragraphs (e.g. \"NAME. …\"),
+    which read unnaturally in RTL and confuse bidi. Prefer a short Hebrew function word before the name.
+    English copy keeps a simple prefix.
+    """
     n = (product_name or "").strip()
     t = (copy_text or "").strip()
     if not n or not t:
         return t or n
     if product_name_reused_in_copy(n, t):
         return t
+    lc = normalize_video_content_language(lang)
+    if lc == "he":
+        return f"עם {n}, {t}".strip()
     return f"{n}. {t}".strip()
 
 
@@ -3118,7 +3127,7 @@ def _finalize_hebrew_marketing_after_name_fix(
         out = f"{out} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
         out = " ".join(out.split()[:55])
     if require_verbatim_product_name and not product_name_reused_in_copy(canon, out):
-        out = _prepend_verbatim_product_name(out, canon)
+        out = _repair_verbatim_marketing_product_name(out, canon, lang)
         out = " ".join(out.split()[:55])
     return out
 
@@ -3181,7 +3190,8 @@ CANONICAL PRODUCT NAME — mandatory verbatim substring (at least once), exact c
         hebrew_embedded = """
 - Write natural, fluent Hebrew sentence structure.
 - If you include an English product name, brand name, or English multi-word phrase inside a Hebrew sentence, keep normal left-to-right word order inside that English segment (e.g. "Fast Delivery" reads left-to-right as a phrase). Do not reverse English word order.
-- If you include the product name, integrate it naturally into the Hebrew sentence (as subject, object, or after a preposition).
+- If you include the product name, integrate it naturally into the Hebrew sentence (as subject, object, or after a preposition — not stuck at the very start unless grammar truly requires it).
+- Do NOT open the paragraph with the bare English product name as the first token (e.g. "SHOESHOE. …"); lead with Hebrew and tuck the Latin name inside the sentence.
 - Do NOT start the copy with a dangling quoted product name or a quote mark immediately wrapping the name before the rest of the sentence.
 - Avoid patterns like: '"ProductName" ...' or a line that is only the name in quotes.
 - Prefer natural phrasing such as: "<ProductName> היא ...", "עם <ProductName> ...", "בעזרת <ProductName> ..." (match gender/number to context).
@@ -3213,7 +3223,7 @@ def _marketing_copy_fallback(product_name: str, ad_goal: str, lang: str) -> str:
     pn = (product_name or "").strip() or "Product"
     if lang == "he":
         return (
-            f"{pn} נבנה כדי לענות בדיוק על הצורך הזה: {ag}. "
+            f"עם {pn} אפשר לענות בדיוק על הצורך הזה: {ag}. "
             f"הציעו חוויה ברורה, אמינה וממוקדת תוצאה למשתמשים שמחפשים פתרון אמיתי. "
             f"אל תפספסו את ההזדמנות לבחור במוצר שמקדם אתכם קדימה בביטחון. "
             f"גלו עוד, השוו והחליטו — והתחילו עוד היום."
@@ -3337,7 +3347,7 @@ def generate_marketing_copy(
                     continue
                 logger.warning("MARKETING_COPY: word_count=%s > 55, truncating...", word_count)
                 if require_verbatim_product_name:
-                    copy_text = _prepend_verbatim_product_name(copy_text, canon)
+                    copy_text = _repair_verbatim_marketing_product_name(copy_text, canon, lang)
                 copy_text = " ".join(copy_text.split()[:55])
 
             while len(copy_text.split()) < 45:
@@ -3346,7 +3356,7 @@ def generate_marketing_copy(
 
             if len(copy_text.split()) > 55:
                 if require_verbatim_product_name:
-                    copy_text = _prepend_verbatim_product_name(copy_text, canon)
+                    copy_text = _repair_verbatim_marketing_product_name(copy_text, canon, lang)
                 copy_text = " ".join(copy_text.split()[:55])
 
             if require_verbatim_product_name and not product_name_reused_in_copy(canon, copy_text):
@@ -3362,7 +3372,7 @@ def generate_marketing_copy(
                         + ". Include it verbatim at least once. Do not use the description as the name."
                     )
                     continue
-                copy_text = _prepend_verbatim_product_name(copy_text, canon)
+                copy_text = _repair_verbatim_marketing_product_name(copy_text, canon, lang)
                 copy_text = " ".join(copy_text.split()[:55])
                 while len(copy_text.split()) < 45:
                     copy_text = f"{copy_text} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
@@ -3404,7 +3414,7 @@ def generate_marketing_copy(
             logger.warning("MARKETING_COPY: Using fallback copy")
             fb = _marketing_copy_fallback(canon, ad_goal, lang)
             if require_verbatim_product_name:
-                fb = _prepend_verbatim_product_name(fb, canon)
+                fb = _repair_verbatim_marketing_product_name(fb, canon, lang)
                 fb = " ".join(fb.split()[:55])
                 while len(fb.split()) < 45:
                     fb = f"{fb} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()
@@ -3424,7 +3434,7 @@ def generate_marketing_copy(
 
     fb = _marketing_copy_fallback(canon, ad_goal, lang)
     if require_verbatim_product_name:
-        fb = _prepend_verbatim_product_name(fb, canon)
+        fb = _repair_verbatim_marketing_product_name(fb, canon, lang)
         fb = " ".join(fb.split()[:55])
         while len(fb.split()) < 45:
             fb = f"{fb} {_marketing_copy_fallback(canon, ad_goal, lang)}".strip()

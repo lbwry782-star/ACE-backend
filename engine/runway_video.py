@@ -535,6 +535,7 @@ def _generate_one_video_mvp_body(
                             marketing_text_for_api,
                             content_language=marketing_lang,
                             protected_phrases=_bidi_prot,
+                            wrap_general_latin_islands=False,
                         )
                     )
                     if marketing_lang == "he":

@@ -60,12 +60,15 @@ def finalize_hebrew_mixed_bidi_for_display(
     *,
     content_language: str,
     protected_phrases: Tuple[str, ...] = (),
+    wrap_general_latin_islands: bool = True,
 ) -> Tuple[str, bool, List[str]]:
     """
     On Hebrew jobs, wrap embedded Latin in LRI...PDI so word order stays stable (incl. multi-word names).
 
     - Skips pure Latin strings (no Hebrew letters).
     - Protected phrases (e.g. resolved product name) use word-boundary-safe matches, longest first.
+    - When wrap_general_latin_islands is True, other Latin runs (loanwords, etc.) are also wrapped.
+      When False, only protected_phrases are wrapped (e.g. marketing copy after logical name placement).
     - Strips existing LRM/LRI/PDI/RLM/FSI so applying twice does not nest isolates.
 
     Returns (new_text, whether wrapping was applied, list of raw Latin segments wrapped, for logs).
@@ -100,8 +103,9 @@ def finalize_hebrew_mixed_bidi_for_display(
         for m in pat.finditer(raw):
             add_span(m.start(), m.end())
 
-    for m in _LATIN_ISLAND_RE.finditer(raw):
-        add_span(m.start(), m.end())
+    if wrap_general_latin_islands:
+        for m in _LATIN_ISLAND_RE.finditer(raw):
+            add_span(m.start(), m.end())
 
     if not spans:
         return raw, False, []
