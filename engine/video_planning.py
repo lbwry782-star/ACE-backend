@@ -81,12 +81,35 @@ advertisingPromise, headlineText
 One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
 Objects must be simple physical items — never posters, printed graphics, readable books, signage, labels, or other text/graphic carriers (see OBJECTS block below).
 
-Headline: required non-empty headlineText. ≤7 words total; interpret the interaction (meaning), not a literal shot description. headlineText must be exactly: productNameResolved, then one normal space, then the remainder — no comma, bullet, dot, colon, dash, or semicolon between them. Exact headline rules for this request language are in the user block below.
+Headline: required non-empty headlineText. ≤7 words; interpret the interaction (meaning), not a literal description of the shot. headlineText format: productNameResolved + one normal space + remainder — no comma or other separator punctuation. Video overlay may render name and remainder as separate visuals; keep this field as plain text with no bidi control characters. Language-specific headline rules are in the user block below.
 
 Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity, headline); output final JSON only — no explanations.
 
 Failure only: {"planningFailure":"planning_failed_no_valid_interaction"}
+
+Emit a complete plan only if: (i) object A is grounded in the product; (ii) object B was accepted only after a physically plausible, non-surreal A↔B interaction was identified; (iii) advertisingPromise emerged together with that interaction (not pre-decided, not reverse-engineered from a preset slogan); (iv) headline interprets the interaction per the headline rules; (v) object rules below are satisfied.
 """
+
+
+def _planner_causal_reasoning_block() -> str:
+    """
+    Planner-only: causal order with simultaneous discovery — goal emerges when a valid interaction is found.
+    Server does not score or rewrite creative content; this steers the model.
+    """
+    return (
+        "CAUSAL CREATIVE FLOW (mandatory internal reasoning; do not narrate it in the JSON):\n"
+        "1. Read product name and description. Select object A from them (grounded, simple, physical).\n"
+        "2. Explore candidate objects B. For each candidate, check whether a REALISTIC, PHYSICAL, NON-SURREAL "
+        "interaction between A and B is possible in the real world (theoretically possible; not fantasy, not dream-logic).\n"
+        "3. The advertising goal is NOT known in advance. At the exact moment you recognize a valid A↔B interaction, "
+        "an advertisingPromise MUST emerge from that interaction — it justifies and belongs to that pair. "
+        "Causality is preserved (the promise is why B is the right second object), but discovery is simultaneous: "
+        "interaction recognition and goal emergence happen together.\n"
+        "4. Accept B ONLY if such a goal emerges. If no valid interaction or no emerging goal, reject that B and continue searching. "
+        "Do NOT pick a goal first and then force objects to fit. Do NOT invent conceptual matches without a real physical interaction.\n"
+        "5. interactionSummary and interactionScript must describe only that single plausible interaction. advertisingPromise must align with it.\n"
+        "6. Interactions may be unusual but must remain physically plausible — not impossible, not surreal.\n\n"
+    )
 
 
 def _planner_object_selection_rules_block() -> str:
@@ -137,8 +160,9 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"Language {lang_name} ({lang}). "
         f"{he_head}"
         "Everyday complementary objects grounded in the product; reject the first cliché default; "
-        "objectA/objectB must never be graphic-communication items (posters, prints, readable media, signage with copy, etc.); "
-        "advertisingPromise follows locked A+B+motion (never promise-first). "
+        "objectA/objectB must never be graphic-communication items (posters, prints, readable media, signage with copy, etc.). "
+        "Creative rule: advertisingPromise emerges together with the chosen A↔B interaction — never choose the promise before "
+        "a valid physical interaction exists; never reverse-reason from a preset goal to objects. "
         "Stay realistic. One A↔B interaction only (no alternate layouts). "
         'Planner refusal: {"planningFailure":"planning_failed_no_valid_interaction"}'
     )
@@ -340,7 +364,9 @@ def validate_and_normalize_plan(
     """
     ACE video engine v3 — server: structural validation (required fields, JSON shape via coerce,
     headline prefix + word-count, no graphic/text-display objects in A/B/interaction fields).
-    o3-pro is the sole creative authority for object choice, interaction, promise, and headline wording.
+    Causal ordering and goal emergence are specified in planner prompts only; the server does not
+    score or rewrite creative choices. o3-pro is the sole creative authority for object choice,
+    interaction, promise, and headline wording.
     Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
     logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
@@ -656,6 +682,7 @@ Product description:
 Language: {lang_name} ({lang}).
 
 {_planner_object_selection_rules_block()}
+{_planner_causal_reasoning_block()}
 {_planner_headline_rules_user_block(lang)}
 {_JSON_KEYS}
 """
