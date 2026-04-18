@@ -248,25 +248,21 @@ def _pillow_text_width_px(font_path: str, text: str, fontsize: int) -> int:
     return max(1, bbox[2] - bbox[0])
 
 
-def _overlay_dual_gap_px(fontsize: int) -> int:
-    return max(6, fontsize // 8)
-
-
 def _build_dual_drawtext_vf(
     font_e: str,
     tf_lat_e: str,
     tf_he_e: str,
     fs: int,
-    x_hebrew: int,
     x_latin: int,
+    x_hebrew: int,
     alpha_expr: str,
     t0_str: str,
     *,
     hebrew_text_shaping: bool,
 ) -> str:
     """
-    Two drawtext chains: Hebrew remainder on the left, English product + comma on the right
-    (RTL headline layout). No mixed-direction string; Latin uses default LTR shaping only.
+    Two drawtext chains: English product + comma on the left, Hebrew remainder on the right.
+    Horizontal gap between them is enforced only via x positions (width of overlay 1 + one space).
     """
     sh_he = ":text_shaping=1" if hebrew_text_shaping else ""
     sh_lat = ""
@@ -278,10 +274,10 @@ def _build_dual_drawtext_vf(
     parts: list[str] = []
     for ox, oy, shadow in rows:
         y_expr = "(h-text_h)/2+1" if oy else "(h-text_h)/2"
-        # Draw Hebrew (left) then Latin prefix (right); order matches visual RTL headline.
+        # Latin prefix (incl. comma) then Hebrew; left-to-right on screen.
         for tf_path, xb, sh in (
-            (tf_he_e, x_hebrew, sh_he),
             (tf_lat_e, x_latin, sh_lat),
+            (tf_he_e, x_hebrew, sh_he),
         ):
             xe = xb + ox
             parts.append(
@@ -462,16 +458,16 @@ def postprocess_video_headline(
 
         lat_s = (overlay_dual_latin or "").strip()
         he_s = (overlay_dual_hebrew or "").strip()
-        x_hebrew = x_latin = 0
+        x_latin = x_hebrew = 0
         if use_dual:
             try:
                 tw_lat = _pillow_text_width_px(font, lat_s, fs)
                 tw_he = _pillow_text_width_px(font, he_s, fs)
-                gap = _overlay_dual_gap_px(fs)
-                # Hebrew left, English+comma right (natural order for RTL UI with Latin product prefix).
-                total = tw_he + gap + tw_lat
-                x_hebrew = max(0, (video_w - total) // 2)
-                x_latin = x_hebrew + tw_he + gap
+                tw_space = _pillow_text_width_px(font, " ", fs)
+                # Visual: <English+comma> <one space> <Hebrew> — gap = measured space width only.
+                total = tw_lat + tw_space + tw_he
+                x_latin = max(0, (video_w - total) // 2)
+                x_hebrew = x_latin + tw_lat + tw_space
                 text_file_latin.write_text(lat_s, encoding="utf-8")
                 text_file_hebrew.write_text(he_s, encoding="utf-8")
                 logger.info("VIDEO_HEADLINE_OVERLAY_RENDER_MODE=dual_drawtext")
@@ -485,13 +481,13 @@ def postprocess_video_headline(
                 )
                 logger.info("VIDEO_HEADLINE_OVERLAY_MIXED_STRING_DISABLED=true")
                 logger.info(
-                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s tw_he=%s gap=%s tw_lat=%s x_hebrew=%s x_latin=%s",
+                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s tw_lat=%s tw_space=%s tw_he=%s x_latin=%s x_hebrew=%s",
                     video_w,
-                    tw_he,
-                    gap,
                     tw_lat,
-                    x_hebrew,
+                    tw_space,
+                    tw_he,
                     x_latin,
+                    x_hebrew,
                 )
             except Exception as e:
                 logger.warning(
@@ -532,8 +528,8 @@ def postprocess_video_headline(
                 tf_lat_e,
                 tf_he_e,
                 fs,
-                x_hebrew,
                 x_latin,
+                x_hebrew,
                 alpha_expr,
                 t0_str,
                 hebrew_text_shaping=(olang == "he"),
