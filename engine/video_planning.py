@@ -27,6 +27,7 @@ from engine.video_language import (
     product_name_is_latin_only_for_bilingual_headline,
     video_language_display_name,
 )
+from engine.video_plan_objects import video_plan_object_blob_implies_graphic_text_content
 
 from engine.ad_promise_memory import (
     angle_seed_for_attempt,
@@ -78,6 +79,7 @@ Keys (all strings): productNameResolved, objectA, objectB, interactionSummary, i
 advertisingPromise, headlineText
 
 One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
+Objects must be simple physical items — never posters, printed graphics, readable books, signage, labels, or other text/graphic carriers (see OBJECTS block below).
 
 Headline: required non-empty headlineText. ≤7 words total; interpret the interaction (meaning), not a literal shot description. headlineText must be exactly: productNameResolved, then one normal space, then the remainder — no comma, bullet, dot, colon, dash, or semicolon between them. Exact headline rules for this request language are in the user block below.
 
@@ -85,6 +87,24 @@ Before the JSON: one silent internal revision pass only (pair, realism, cliché 
 
 Failure only: {"planningFailure":"planning_failed_no_valid_interaction"}
 """
+
+
+def _planner_object_selection_rules_block() -> str:
+    """Hard rules for objectA/objectB: no graphic-communication objects (planner + server validation)."""
+    return (
+        "OBJECTS (strict): Choose two simple, physical, everyday items. They must not be communicative media.\n"
+        "HARD FORBIDDEN — any object whose primary purpose is to hold or show graphics or text, including: "
+        "posters; printed images/graphics; photographs with visible imagery; paintings with visible imagery; "
+        "magazines; newspapers; books that are open, readable, or text-bearing; screens or monitors if visible content is described; "
+        "signs; labels; packaging described with visible design/text/logos; flyers; brochures; infographics; charts/diagrams as displays; "
+        "scoreboards; LED message boards; greeting cards; certificates; barcodes; branded packaging.\n"
+        "ALLOWED examples (physical only, no described on-surface content): empty picture/photo frame; blank paper; "
+        "screen/monitor/TV/phone as a device only with NO visible content described; empty billboard structure; billboard with no ad/copy described; "
+        "closed book with no readable text described.\n"
+        "Critical: a poster is always forbidden; an empty frame is allowed. A screen is allowed only if you do NOT describe what is on the screen.\n"
+        "Do not pick objects that imply readable text or illustrative content anywhere in objectA, objectB, objectAReason, objectBReason, "
+        "interactionSummary, or interactionScript.\n\n"
+    )
 
 
 def _planner_headline_rules_user_block(lang_code: str) -> str:
@@ -117,6 +137,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"Language {lang_name} ({lang}). "
         f"{he_head}"
         "Everyday complementary objects grounded in the product; reject the first cliché default; "
+        "objectA/objectB must never be graphic-communication items (posters, prints, readable media, signage with copy, etc.); "
         "advertisingPromise follows locked A+B+motion (never promise-first). "
         "Stay realistic. One A↔B interaction only (no alternate layouts). "
         'Planner refusal: {"planningFailure":"planning_failed_no_valid_interaction"}'
@@ -317,13 +338,13 @@ def validate_and_normalize_plan(
     content_language: str = "he",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    ACE video engine v3 — server: structural validation only (required fields, JSON shape
-    via coerce, headline prefix + word-count format). o3-pro is the sole creative authority
-    for object choice, interaction, promise, and headline wording.
+    ACE video engine v3 — server: structural validation (required fields, JSON shape via coerce,
+    headline prefix + word-count, no graphic/text-display objects in A/B/interaction fields).
+    o3-pro is the sole creative authority for object choice, interaction, promise, and headline wording.
     Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
     logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
-    logger.info("VIDEO_PLAN_SERVER_VALIDATION_SCOPE=structural_only")
+    logger.info("VIDEO_PLAN_SERVER_VALIDATION_SCOPE=structural_plus_no_graphic_media_objects")
 
     if not data:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=no_payload")
@@ -411,6 +432,15 @@ def validate_and_normalize_plan(
     if not _headline_word_count_ok(headline):
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_word_count")
         return None, "planning_failed_incomplete_plan"
+
+    _object_blob = "\n".join([oa, ob, oa_r, ob_r, int_sum, int_script])
+    _bad_obj = video_plan_object_blob_implies_graphic_text_content(_object_blob)
+    if _bad_obj:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=invalid_graphic_content_objects rule=%s",
+            _bad_obj,
+        )
+        return None, "planning_failed_invalid_objects"
 
     _lit_raw = data.get("literalObjectCount")
     if isinstance(_lit_raw, bool):
@@ -625,6 +655,7 @@ Product description:
 
 Language: {lang_name} ({lang}).
 
+{_planner_object_selection_rules_block()}
 {_planner_headline_rules_user_block(lang)}
 {_JSON_KEYS}
 """
