@@ -4463,7 +4463,7 @@ REPLACEMENT (main subject):
 
 - Object B replaces Object A in A's original setting: same situational role, placement, scale, and orientation that A would have had in this frame.
 
-- Keep "{locked_sub_object}" beside or adjacent to Object B as it would logically sit with the main object in this scene (clearly visible, not cropped out).
+- Keep "{locked_sub_object}" beside or adjacent to Object B as it would logically sit with the main object in this scene (clearly visible, not cropped out). Do not add or require any secondary object belonging only to Object B.
 
 - Static product-style framing only: sharp focus, natural shadows, realistic materials. No floating objects; no extra props beyond what the scene requires.
 
@@ -4831,10 +4831,8 @@ def render_final_ad_bytes(
     object_a_context = object_a_item.get("classic_context", "") if object_a_item else ""
     object_b_context = object_b_item.get("classic_context", "") if object_b_item else ""
     
-    # Get sub_objects for replacement mode
-    object_a_sub = object_a_item.get("sub_object", "") if object_a_item else ""
-    object_b_sub = object_b_item.get("sub_object", "") if object_b_item else ""
-    
+    # Replacement prompts (when enabled) use only Object A's sub_object via object_a_item in create_image_prompt; B's sub_object is not used for REPLACEMENT.
+
     # SILHOUETTE SIMILARITY DECISION: Evaluate similarity (always computed for measurement)
     silhouette_similarity_pct = evaluate_silhouette_similarity(
         object_a=object_a_name,
@@ -5650,9 +5648,9 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
         "studio lighting, soft even illumination, sharp focus, realistic materials and natural shadows. "
         "Not a sketch, not a pencil drawing, not a diagram. No motion blur, no streaks, no implied camera movement. "
     )
-    has_secondary = bool(asub or bsub)
-    visibility_block = _PHASE2_SECONDARY_VISIBILITY_RULE if has_secondary else ""
     if mode_decision == "REPLACEMENT":
+        # REPLACEMENT: only Object A's secondary (a_sub) may appear beside B; do not require or show B's secondary (b_sub).
+        visibility_block = _PHASE2_SECONDARY_VISIBILITY_RULE if asub else ""
         repl = (
             photoreal_base
             + f"Only {bp} (Object B) is visible as the main object. The original {ap} (Object A) must not appear in any form "
@@ -5665,9 +5663,12 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
             )
         repl += (
             "Static product-style framing; preserve setting continuity implied by the objects. "
+            "Do not add or depict any separate secondary object for Object B (no b_sub). "
         )
         repl += visibility_block + no_text_rule
         return repl + "\n\n" + PHOTOREAL_STYLE_BLOCK
+    has_secondary = bool(asub or bsub)
+    visibility_block = _PHASE2_SECONDARY_VISIBILITY_RULE if has_secondary else ""
     side = (
         photoreal_base + f"Two main objects in one frame with partial overlap: {a_str} and {b_str}. "
         "Clear partial overlap in the center (foreground object occludes part of the other). "
@@ -6098,19 +6099,28 @@ def generate_preview_data(
                 prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
                 a_sub_p = (pair.get("a_sub") or "").strip()
                 b_sub_p = (pair.get("b_sub") or "").strip()
-                if a_sub_p or b_sub_p:
-                    logger.info("IMAGE_PROMPT_SECONDARY_OBJECT_REQUIRED=true")
-                    logger.info("IMAGE_PROMPT_FRAME_BALANCE_ENFORCED=true")
-                if a_sub_p:
-                    logger.info(
-                        f"SECONDARY_OBJECT_VISIBILITY_ENFORCED primary=\"{pair.get('a_primary', '')}\" "
-                        f"sub=\"{a_sub_p}\" mode=\"{mode_decision}\" request_id={request_id}"
-                    )
-                if b_sub_p:
-                    logger.info(
-                        f"SECONDARY_OBJECT_VISIBILITY_ENFORCED primary=\"{pair.get('b_primary', '')}\" "
-                        f"sub=\"{b_sub_p}\" mode=\"{mode_decision}\" request_id={request_id}"
-                    )
+                if mode_decision == "REPLACEMENT":
+                    if a_sub_p:
+                        logger.info("IMAGE_PROMPT_SECONDARY_OBJECT_REQUIRED=true")
+                        logger.info("IMAGE_PROMPT_FRAME_BALANCE_ENFORCED=true")
+                        logger.info(
+                            f"SECONDARY_OBJECT_VISIBILITY_ENFORCED primary=\"{pair.get('a_primary', '')}\" "
+                            f"sub=\"{a_sub_p}\" mode=\"{mode_decision}\" request_id={request_id}"
+                        )
+                else:
+                    if a_sub_p or b_sub_p:
+                        logger.info("IMAGE_PROMPT_SECONDARY_OBJECT_REQUIRED=true")
+                        logger.info("IMAGE_PROMPT_FRAME_BALANCE_ENFORCED=true")
+                    if a_sub_p:
+                        logger.info(
+                            f"SECONDARY_OBJECT_VISIBILITY_ENFORCED primary=\"{pair.get('a_primary', '')}\" "
+                            f"sub=\"{a_sub_p}\" mode=\"{mode_decision}\" request_id={request_id}"
+                        )
+                    if b_sub_p:
+                        logger.info(
+                            f"SECONDARY_OBJECT_VISIBILITY_ENFORCED primary=\"{pair.get('b_primary', '')}\" "
+                            f"sub=\"{b_sub_p}\" mode=\"{mode_decision}\" request_id={request_id}"
+                        )
         else:
             prompt_base = IMAGE_ONLY_HARDCODED_PROMPT
         # Resolve product name: use user's if provided, else keep invented-at-start or Stage 2/fallback
