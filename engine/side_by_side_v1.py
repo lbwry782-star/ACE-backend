@@ -4386,6 +4386,20 @@ Object B must occupy Object A's original role and position in the scene continui
 Do not add any banner, sign, poster, billboard, frame-with-blank-area, or substitute flat surface as a composition device.
 """
 
+# Canonical outer form only — keep silhouettes aligned with the A/B match (esp. cone-like / simple solids).
+BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT = """
+CANONICAL MORPHOLOGY AND ANTI-EMBELLISHMENT (preserve the silhouette that justified the A/B pairing):
+- Each primary main object must appear in its core canonical form — the clean outer shell whose contour was matched. In side-by-side that means both Object A and Object B; when only one main subject is visible (replacement), that rule applies to Object B as the sole main product.
+- No optional add-ons, accessories, packaging clutter, loose props, or extras that materially change, break, or hide the main outer silhouette of either object.
+
+FOOD / PRODUCT / SIMPLE SOLIDS (e.g. cone, cup, bottle, bulb, horn, jar, dome, cylinder, similar):
+- Do NOT add toppings, decorations, fillings, splashes, sprinkles, scoops, steam, smoke, garnish, whipped cream, drizzle, loose fruit, nuts, straws, cup sleeves, or other attached extras — except when they are intrinsic to the stock geometry of the object type itself (not marketing garnish).
+- For cone-like or tapering shapes: keep the outer cone/cup contour fully readable; do not let toppings or piled contents destroy the main-form similarity.
+
+SHAPE-FIDELITY (critical):
+- Preserve the clean outer contour that created the shape match — do not weaken the pairing with embellishments, busy surface noise, or “hero” styling that obscures the outline.
+"""
+
 
 def create_image_prompt(
     object_a: str,
@@ -4482,6 +4496,7 @@ REPLACEMENT (main subject):
 
 - No sketch, pencil, diagram, or illustration look. No motion blur, streaks, or implied camera movement.
 
+{BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT}
 {BUILDER1_IMAGE_REPLACEMENT_COMPOSITION_HARD}
 {BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
 {BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
@@ -4515,6 +4530,7 @@ Background and style:
 
 - No sketch, pencil, diagram, or illustration look. No motion blur, streaks, or implied camera movement.
 
+{BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT}
 {BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD}
 {BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
 {BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
@@ -4725,6 +4741,8 @@ CRITICAL RULES:
 - Ignore sub-objects completely.
 - Ignore background and composition.
 - Compare ONLY the pure outer contour (dominant silhouette).
+- Judge each object in its canonical core form (e.g. a plain cone, empty cup, label-free bottle, bare bulb): infer the class silhouette, not hypothetical toppings or garnish.
+- For food or product solids (cone, cup, bottle, bulb, horn, etc.), mentally discount non-intrinsic toppings, sprinkles, fillings, splashes, steam, garnish, or loose extras when scoring — they must not reduce similarity if the underlying outer form matches.
 
 Objects:
 - Object A: {object_a}
@@ -4927,7 +4945,6 @@ def create_text_file(
 ) -> str:
     """
     Create minimal text.txt content (optional, for documentation only).
-    All text is already in the image.
     """
     lines = []
     if session_id:
@@ -4944,6 +4961,7 @@ IMAGE_ONLY_HARDCODED_PROMPT = (
     "High-quality photorealistic product photography, clean white seamless background, studio lighting, sharp focus. "
     "Two simple main objects in one frame with partial overlap in the center (not two separated cutouts): "
     "a playing card next to a card deck, and a notebook with spiral binding. "
+    + BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT
     + BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD
     + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN
     + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN
@@ -5678,6 +5696,7 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
             "Static product-style framing; preserve setting continuity implied by the objects. "
             "Do not add or depict any separate secondary object for Object B (no b_sub). "
         )
+        repl += BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT
         repl += BUILDER1_IMAGE_REPLACEMENT_COMPOSITION_HARD + no_text_rule
         repl += visibility_block
         return repl + "\n\n" + PHOTOREAL_STYLE_BLOCK
@@ -5688,6 +5707,7 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
         "Clear partial overlap in the center (foreground object occludes part of the other). "
         "Composition reads as one unified product shot. Sub-objects visible per rules below."
     )
+    side += BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT
     side += BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD + no_text_rule
     side += visibility_block
     return side + "\n\n" + PHOTOREAL_STYLE_BLOCK
@@ -5747,7 +5767,8 @@ def _build_phase2_image_prompt_final(pair: Dict, mode_decision: str, headline_te
     reinforce = (
         " FINAL RENDER: repeat — absolutely NO text, letters, words, typography, signage, banner, poster, label, "
         "printed surface, logo, numbers, branding, watermarks, captions, or blank ad surfaces. "
-        "Do not degrade into object-plus-sign or object-plus-banner composition."
+        "Do not degrade into object-plus-sign or object-plus-banner composition. "
+        "Reaffirm canonical main-object forms — no toppings or extras that obscure the matched silhouette."
     )
     return (
         prompt_base.strip()
