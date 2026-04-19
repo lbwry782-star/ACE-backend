@@ -1533,11 +1533,11 @@ Each pair must:
 - Provide one-sentence shape_reason explaining silhouette similarity.
 
 5) HEADLINE PER PAIR:
-- English only.
+- English only (target language for these headlines is English).
 - Max 7 words including product name (count each word in a multi-word product name).
-- Base the headline on an existing expression when possible (idiom, saying, proverb, slogan pattern, or other widely familiar wording in English); prefer that over an invented phrase.
+- Base the headline on an existing expression when possible (idiom, saying, proverb, slogan pattern, or other widely familiar wording in the target language); prefer that over an invented phrase.
 - The expression must fit the pair's planned visual and be justified by ad_goal.
-- Double-meaning slogan: familiar wording that gains new advertising meaning because of the visual pairing (the visual is the cause of the twist); do not describe objects or layout.
+- The result must be a double-meaning slogan: familiar wording that gains new advertising meaning because of the visual — the image is the cause of the headline; interpret the visual, do not describe objects or layout.
 - Must begin with the exact product name from INPUT above (verbatim token sequence), then one space, then the rest; product name must read as the dominant/larger typographic part on the same baseline as any following words in the eventual layout.
 - Do NOT put object main names from the pair into the headline.
 
@@ -3652,11 +3652,12 @@ Message: {message}{ad_goal_context}
 Planned visual for the photograph (objects already selected; do not change selection; do not write these object names in the headline): {object_a} and {object_b}
 
 CREATIVE RULE (mandatory):
-- Base the headline on an existing expression if possible (idiom, saying, proverb, slogan pattern, stock phrase, or other widely familiar wording in English).
-- Prefer a widely familiar expression in English over an invented phrase.
+- Base the headline on an existing expression if possible (idiom, saying, proverb, slogan pattern, stock phrase, or other widely familiar wording in the target language).
+- Prefer a widely familiar expression in the target language over an invented phrase (for this path the target language is English).
 - The expression must fit the planned visual above and be justified by the advertising promise (message/goal).
-- Aim for a double-meaning slogan: the familiar expression stays correct as ordinary language, but gains a new advertising meaning once paired with that planned visual — the visual is the cause of that twist, not something the headline narrates, labels, or literally describes.
-- Interpret the intended visual idea (metaphorically); do not describe objects, layout, lighting, or scene.
+- The result must be a double-meaning slogan: the familiar expression stays correct as ordinary language, but gains a new advertising meaning once paired with that planned visual.
+- The headline interprets the intended visual idea (metaphorically); it does not describe objects, layout, lighting, or scene.
+- The image is the cause of the headline (the twist lands because of what will be shown), not a caption of it.
 
 TYPOGRAPHY / LAYOUT (how the headline will be placed on the ad):
 - The headline includes the product name; the product name must read as the larger, dominant typographic part relative to any following words, on the same baseline.
@@ -4554,7 +4555,8 @@ def create_image_prompt(
     object_a_item: Optional[Dict] = None,
     object_b_item: Optional[Dict] = None,
     product_name: Optional[str] = None,
-    force_mode: Optional[str] = None  # "replacement" | "side_by_side" | None (use ACE_IMAGE_MODE)
+    force_mode: Optional[str] = None,  # "replacement" | "side_by_side" | None (use ACE_IMAGE_MODE)
+    validation_retry_extra: Optional[str] = None,
 ) -> str:
     """
     STEP 3 - IMAGE GENERATION PROMPT
@@ -4644,6 +4646,8 @@ REPLACEMENT (main subject):
 {BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
 No surreal distortions."""
         replacement_prompt = replacement_prompt.rstrip() + negative_space_rules
+        if validation_retry_extra:
+            replacement_prompt = replacement_prompt + validation_retry_extra
         return replacement_prompt
     
     # MODE 2 — SIDE_BY_SIDE (AUTO FALLBACK IF < 85%)
@@ -4691,6 +4695,8 @@ Background and style:
 {BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
 No logos. No brand graphics.{shape_instruction}{negative_space_rules}"""
 
+    if validation_retry_extra:
+        side_by_side_prompt = side_by_side_prompt + validation_retry_extra
     return side_by_side_prompt
 
 
@@ -4730,6 +4736,65 @@ def _parse_json_object_from_llm_text(raw: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _builder1_image_validation_requires_retry(mode_u: str, flags: Dict[str, Any]) -> bool:
+    """
+    True if automated vision check says we should run one strengthened image retry.
+    REPLACEMENT: require B visible as main, forbid A primary as competing main, forbid bad surfaces.
+    SIDE_BY_SIDE: require both primaries visible, forbid bad surfaces.
+    """
+    if bool(flags.get("contains_forbidden_text_surface")):
+        return True
+    da = bool(flags.get("does_A_primary_appear"))
+    db = bool(flags.get("does_B_primary_appear"))
+    m = (mode_u or "SIDE_BY_SIDE").strip().upper()
+    if m == "REPLACEMENT":
+        return (not db) or da
+    return (not da) or (not db)
+
+
+def _builder1_image_validation_retry_extra(
+    a_primary: str,
+    b_primary: str,
+    a_sub: str,
+    b_sub: str,
+    mode_u: str,
+) -> str:
+    """Appended to the image prompt for a single post-validation regeneration pass."""
+    ap = str(a_primary).strip()
+    bp = str(b_primary).strip()
+    asx = str(a_sub or "").strip()
+    bsx = str(b_sub or "").strip()
+    m = (mode_u or "SIDE_BY_SIDE").strip().upper()
+    sub_lines_a = (
+        f'- A secondary "{asx}" must stay clearly secondary: smaller and less salient than the dominant main; never replace or visually stand in for A primary.'
+        if asx
+        else ""
+    )
+    sub_lines_b = (
+        f'- B secondary "{bsx}" must stay clearly secondary: smaller and less salient than the dominant main; never replace or visually stand in for B primary.'
+        if bsx and m != "REPLACEMENT"
+        else ""
+    )
+    if m == "REPLACEMENT":
+        return f"""
+
+PRIOR FRAME FAILED AUTOMATED VISUAL CHECK — REGENERATE; OBEY STRICTLY:
+- Only B primary "{bp}" is the dominant visible main object in the frame (correct scale, salience, identity). A primary "{ap}" must NOT appear as a separate or competing main subject (no duplicate, twinning, ghosting, or side-by-side comparison of A).
+- B primary "{bp}" must visibly read as the selected main object.
+{sub_lines_a}
+- Preserve the core outer silhouette that justified the A/B match for B; no toppings, garnishes, scoop-heavy masses, splashes, or attached extras that break the matched form.
+- Do NOT introduce text, letters, words, typography, logos, numbers, branding, signage, banners, placards, posters, labels, or flat printed surfaces unless that object IS literally "{bp}" or the mandated secondary — no sign-like composition cheats."""
+    extra_sub = "\n".join(x for x in (sub_lines_a, sub_lines_b) if x)
+    return f"""
+
+PRIOR FRAME FAILED AUTOMATED VISUAL CHECK — REGENERATE; OBEY STRICTLY:
+- A primary "{ap}" must visibly appear as the intended main selected object (clear identity, salience, correct scale — not tiny background clutter).
+- B primary "{bp}" must visibly appear as the intended main selected object (clear identity, salience, correct scale — not tiny background clutter).
+{extra_sub}
+- Preserve the core outer silhouette for BOTH primaries that justified the match; no embellishments that break silhouette readability.
+- Do NOT introduce text, letters, words, typography, logos, numbers, branding, signage, banners, placards, posters, labels, or flat printed surfaces unless that object IS literally "{ap}" or "{bp}" or a mandated secondary — no sign-like composition cheats."""
+
+
 def _diagnose_generated_image_primary_objects(
     image_base64: str,
     a_primary: str,
@@ -4738,13 +4803,13 @@ def _diagnose_generated_image_primary_objects(
     b_sub: str = "",
     mode_decision: str = "SIDE_BY_SIDE",
     request_id: Optional[str] = None,
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """
-    Diagnostics only: send image to o3-pro vision and compare to expected primaries.
-    Does not raise; does not block or retry generation.
+    Send image to o3-pro vision; log IMAGE_VALIDATION_RESULT. Returns flags dict on success,
+    or None if skipped / parse failed / error. Caller may use flags for one correction retry.
     """
     if not image_base64 or not str(a_primary).strip() or not str(b_primary).strip():
-        return
+        return None
     ap = str(a_primary).strip()
     bp = str(b_primary).strip()
     asx = str(a_sub or "").strip()
@@ -4815,7 +4880,7 @@ Definitions:
                 mode_u,
                 len(raw or ""),
             )
-            return
+            return None
 
         visible = data.get("visible_main_objects")
         if not isinstance(visible, list):
@@ -4920,12 +4985,14 @@ Definitions:
                 rid,
                 flags,
             )
+        return flags
     except Exception as e:
         logger.warning(
             "IMAGE_VALIDATION_SKIP request_id=%s error=%s",
             rid,
             e,
         )
+        return None
 
 
 def generate_image_with_dalle(
@@ -4985,82 +5052,124 @@ def generate_image_with_dalle(
     logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\", mode={mode}")
     logger.info(f"STEP 3 VISUAL_RULES_APPLIED: no_logos=true, photorealistic_only=true")
     logger.info(f"STEP 3 COMPOSITION: side_by_side=true, partial_overlap=expected")
-    
-    for attempt in range(max_retries):
-        is_strict = attempt > 0  # Use stricter prompt on retries
-        
-        prompt = create_image_prompt(
-            object_a=object_a,
-            object_b=object_b,
-            headline=headline,
-            shape_hint=shape_hint,
-            physical_context=physical_context,
-            hybrid_plan=hybrid_plan,
-            is_strict=is_strict,
-            object_a_context=object_a_context,
-            object_b_context=object_b_context,
-            object_a_item=object_a_item,
-            object_b_item=object_b_item,
-            product_name=product_name,
-            force_mode=force_mode,
-        )
-        
-        try:
-            logger.info(f"STEP 3 - IMAGE GENERATION: attempt={attempt + 1}/{max_retries}, image_model={model}, image_size={image_size}")
-            logger.info("NEGATIVE_SPACE=enabled subject_scale=small margins=very_wide background=white")
-            
-            # Simple call without response_format for gpt-image-1.5 compatibility
-            # Include quality parameter for preview (low) vs generate (high)
-            # 429 is handled by openai_retry (exponential backoff + Retry-After)
-            response = openai_retry.openai_call_with_retry(
-                lambda: client.images.generate(
-                    model=model,
-                    prompt=prompt,
-                    size=image_size,
-                    quality=quality
-                ),
-                endpoint="images"
-            )
-            
-            # Extract base64 from response
-            image_base64 = response.data[0].b64_json
-            
-            # Basic quality check
-            if attempt < max_retries - 1:
-                if not check_text_quality(image_base64):
-                    logger.warning(f"Text quality check failed (attempt {attempt + 1}), retrying with stricter prompt...")
-                    time.sleep(1)
-                    continue
-            
-            # Decode base64 to bytes
-            image_bytes = base64.b64decode(image_base64)
-            logger.info(f"Image generated successfully (attempt {attempt + 1}), image_model={model}, image_size={image_size}")
-            _em = (force_mode if force_mode else ACE_IMAGE_MODE) or "side_by_side"
-            _is_repl = "replacement" in str(_em).lower()
-            _diagnose_generated_image_primary_objects(
-                image_base64,
+
+    mode_upper = mode
+    _is_repl = mode_upper == "REPLACEMENT"
+    b_sub_for_diag = "" if _is_repl else (object_b_sub or "")
+    rid = validation_request_id or "-"
+
+    for val_pass in range(2):
+        validation_correction = val_pass >= 1
+        if validation_correction:
+            logger.info(
+                "IMAGE_VALIDATION_RETRY pass=%s request_id=%s object_a=%r object_b=%r mode=%s",
+                val_pass + 1,
+                rid,
                 object_a,
                 object_b,
-                a_sub=object_a_sub or "",
-                b_sub=("" if _is_repl else (object_b_sub or "")),
-                mode_decision=("REPLACEMENT" if _is_repl else "SIDE_BY_SIDE"),
-                request_id=validation_request_id,
+                mode_upper,
             )
-            return image_bytes
-            
-        except openai_retry.OpenAIRateLimitError:
-            raise
-        except Exception as e:
-            error_str = str(e)
-            logger.error(f"DALL-E generation failed (attempt {attempt + 1}/{max_retries}): {error_str}")
-            
-            if attempt < max_retries - 1:
-                # Retry on errors (non-429)
-                time.sleep(1 + attempt)
-                continue
-            else:
+        retry_extra = None
+        if validation_correction:
+            retry_extra = _builder1_image_validation_retry_extra(
+                object_a,
+                object_b,
+                object_a_sub or "",
+                object_b_sub or "",
+                mode_upper,
+            )
+
+        for attempt in range(max_retries):
+            is_strict = attempt > 0 or validation_correction
+
+            prompt = create_image_prompt(
+                object_a=object_a,
+                object_b=object_b,
+                headline=headline,
+                shape_hint=shape_hint,
+                physical_context=physical_context,
+                hybrid_plan=hybrid_plan,
+                is_strict=is_strict,
+                object_a_context=object_a_context,
+                object_b_context=object_b_context,
+                object_a_item=object_a_item,
+                object_b_item=object_b_item,
+                product_name=product_name,
+                force_mode=force_mode,
+                validation_retry_extra=retry_extra,
+            )
+
+            try:
+                logger.info(
+                    f"STEP 3 - IMAGE GENERATION: attempt={attempt + 1}/{max_retries} val_pass={val_pass + 1}/2 image_model={model} image_size={image_size}"
+                )
+                logger.info("NEGATIVE_SPACE=enabled subject_scale=small margins=very_wide background=white")
+
+                response = openai_retry.openai_call_with_retry(
+                    lambda: client.images.generate(
+                        model=model,
+                        prompt=prompt,
+                        size=image_size,
+                        quality=quality,
+                    ),
+                    endpoint="images",
+                )
+
+                image_base64 = response.data[0].b64_json
+
+                if attempt < max_retries - 1:
+                    if not check_text_quality(image_base64):
+                        logger.warning(
+                            f"Text quality check failed (attempt {attempt + 1}), retrying with stricter prompt..."
+                        )
+                        time.sleep(1)
+                        continue
+
+                image_bytes = base64.b64decode(image_base64)
+                logger.info(
+                    f"Image generated successfully (attempt {attempt + 1}), image_model={model}, image_size={image_size}"
+                )
+                flags = _diagnose_generated_image_primary_objects(
+                    image_base64,
+                    object_a,
+                    object_b,
+                    a_sub=object_a_sub or "",
+                    b_sub=b_sub_for_diag,
+                    mode_decision=mode_upper,
+                    request_id=validation_request_id,
+                )
+                if flags is None or not _builder1_image_validation_requires_retry(
+                    mode_upper, flags
+                ):
+                    return image_bytes
+                if validation_correction:
+                    logger.warning(
+                        "IMAGE_VALIDATION_RETRY_EXHAUSTED request_id=%s returning_last_image flags=%s",
+                        rid,
+                        flags,
+                    )
+                    return image_bytes
+                logger.info(
+                    "IMAGE_VALIDATION_RETRY_AFTER_FAIL request_id=%s mode=%s flags=%s",
+                    rid,
+                    mode_upper,
+                    flags,
+                )
+                break
+
+            except openai_retry.OpenAIRateLimitError:
                 raise
-    
+            except Exception as e:
+                error_str = str(e)
+                logger.error(
+                    f"DALL-E generation failed (attempt {attempt + 1}/{max_retries}): {error_str}"
+                )
+
+                if attempt < max_retries - 1:
+                    time.sleep(1 + attempt)
+                    continue
+                raise
+
     raise Exception("Failed to generate image after retries")
 
 
@@ -6238,7 +6347,7 @@ Objects in image: A primary={a_primary}, A sub={a_sub}; B primary={b_primary}, B
 Look at the ad image. Return valid JSON with exactly two keys: "headline" and "body".
 
 Rules:
-- headline: up to 7 words total including the product name (count each word in a multi-word product name). Must begin with the product name ({product_name}), then one normal space, then the rest — no comma or other punctuation between name and tail. Must NOT be only the product name. Base the headline on an existing expression if possible (idiom, saying, proverb, slogan pattern, or other widely familiar English wording); prefer that over an invented phrase. The expression must fit what you see and be justified by the advertising goal. Double-meaning slogan: familiar wording that gains new advertising meaning because of this image — the image is the cause of the headline; interpret the image, do not describe it literally (no inventory of objects, layout, or style). Do not put A/B primary object names in the headline. For eventual on-ad typography: product name is the dominant, larger part on the same baseline as any following words.
+- headline: up to 7 words total including the product name (count each word in a multi-word product name). Target language for this headline is English. Must begin with the product name ({product_name}), then one normal space, then the rest — no comma or other punctuation between name and tail. Must NOT be only the product name. Base the headline on an existing expression if possible (idiom, saying, proverb, slogan pattern, or other widely familiar wording in the target language); prefer that over an invented phrase. The expression must fit what you see and be justified by the advertising goal. The result must be a double-meaning slogan: familiar wording that gains new advertising meaning because of this image. The headline interprets the image, not describes it; the image is the cause of the headline (no literal inventory of objects, layout, or style). Do not put A/B primary object names in the headline. For eventual on-ad typography: product name is the dominant, larger part on the same baseline as any following words.
 - body: about 50 words. Marketing copy grounded in what is visible; interpretive (not a literal caption). Do not invent action or causality between the objects A and B. Focus on meaning, positioning, impact.
 
 Output format only: {{ "headline": "...", "body": "..." }}"""
@@ -6396,13 +6505,11 @@ def _image_only_single_call(
     validate_mode_decision: Optional[str] = None,
 ) -> Tuple[str, bool]:
     """
-    Single gpt-image-1.5 call for ACE_IMAGE_ONLY mode. No retries, 60s timeout.
+    gpt-image-1.5 call(s) for ACE_IMAGE_ONLY mode. No API retries; 60s timeout per call.
+    After IMAGE_VALIDATION_RESULT, may run one second generation with a strengthened correction prompt.
     Returns (image_base64_str, success). If prompt is None, uses IMAGE_ONLY_HARDCODED_PROMPT.
-    log_prefix: for logging (e.g. IMAGE_BASE, IMAGE_FINAL, IMAGE_CALL).
-    quality: "low" (layout/composition) or "high" (final photoreal rendering).
     """
-    t0 = time.time()
-    image_prompt = prompt if prompt else IMAGE_ONLY_HARDCODED_PROMPT
+    image_prompt_base = prompt if prompt else IMAGE_ONLY_HARDCODED_PROMPT
     logger.info(f"{log_prefix}_START size={image_size} quality={quality} request_id={request_id}")
     if log_prefix == "IMAGE_BASE":
         pencil_level, pencil_defaulted = get_pencil_quality_level()
@@ -6410,41 +6517,94 @@ def _image_only_single_call(
     timeout_sec = IMAGE_ONLY_CALL_TIMEOUT_SECONDS
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
-        timeout=httpx.Timeout(timeout_sec)
+        timeout=httpx.Timeout(timeout_sec),
     )
     model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
-    try:
-        response = client.images.generate(
-            model=model,
-            prompt=image_prompt,
-            size=image_size,
-            quality=quality
-        )
-        latency_ms = int((time.time() - t0) * 1000)
-        b64 = response.data[0].b64_json if response.data else None
-        if not b64:
-            raise ValueError("No image data in response")
-        logger.info(f"{log_prefix}_OK latency_ms={latency_ms} request_id={request_id}")
-        if validate_a_primary and validate_b_primary:
-            vm = (validate_mode_decision or "SIDE_BY_SIDE").strip().upper()
-            if vm not in ("REPLACEMENT", "SIDE_BY_SIDE"):
-                vm = "SIDE_BY_SIDE"
-            _is_repl = vm == "REPLACEMENT"
-            _diagnose_generated_image_primary_objects(
-                b64,
+    vm = (validate_mode_decision or "SIDE_BY_SIDE").strip().upper()
+    if vm not in ("REPLACEMENT", "SIDE_BY_SIDE"):
+        vm = "SIDE_BY_SIDE"
+    _is_repl = vm == "REPLACEMENT"
+    b_sub_diag = "" if _is_repl else (validate_b_sub or "")
+
+    for val_pass in range(2):
+        validation_correction = val_pass >= 1
+        if validation_correction:
+            if not (validate_a_primary and validate_b_primary):
+                break
+            logger.info(
+                "IMAGE_VALIDATION_RETRY pass=%s request_id=%s log_prefix=%s",
+                val_pass + 1,
+                request_id,
+                log_prefix,
+            )
+        image_prompt = image_prompt_base
+        if validation_correction and validate_a_primary and validate_b_primary:
+            image_prompt = image_prompt_base + _builder1_image_validation_retry_extra(
                 validate_a_primary,
                 validate_b_primary,
-                a_sub=validate_a_sub or "",
-                b_sub=("" if _is_repl else (validate_b_sub or "")),
-                mode_decision=vm,
-                request_id=request_id,
+                validate_a_sub or "",
+                validate_b_sub or "",
+                vm,
             )
-        return (b64, True)
-    except Exception as e:
-        latency_ms = int((time.time() - t0) * 1000)
-        logger.error(f"{log_prefix}_FAIL latency_ms={latency_ms} error={e}")
-        logger.info("IMAGE_FALLBACK_PLACEHOLDER_USED=true")
-        return (_IMAGE_ONLY_PLACEHOLDER_BASE64, False)
+        t0 = time.time()
+        try:
+            response = client.images.generate(
+                model=model,
+                prompt=image_prompt,
+                size=image_size,
+                quality=quality,
+            )
+            latency_ms = int((time.time() - t0) * 1000)
+            b64 = response.data[0].b64_json if response.data else None
+            if not b64:
+                raise ValueError("No image data in response")
+            logger.info(f"{log_prefix}_OK latency_ms={latency_ms} request_id={request_id}")
+            if validate_a_primary and validate_b_primary:
+                flags = _diagnose_generated_image_primary_objects(
+                    b64,
+                    validate_a_primary,
+                    validate_b_primary,
+                    a_sub=validate_a_sub or "",
+                    b_sub=b_sub_diag,
+                    mode_decision=vm,
+                    request_id=request_id,
+                )
+                if (
+                    flags
+                    and _builder1_image_validation_requires_retry(vm, flags)
+                    and not validation_correction
+                ):
+                    logger.info(
+                        "IMAGE_VALIDATION_RETRY_AFTER_FAIL request_id=%s log_prefix=%s flags=%s",
+                        request_id,
+                        log_prefix,
+                        flags,
+                    )
+                    continue
+                if (
+                    flags
+                    and _builder1_image_validation_requires_retry(vm, flags)
+                    and validation_correction
+                ):
+                    logger.warning(
+                        "IMAGE_VALIDATION_RETRY_EXHAUSTED request_id=%s log_prefix=%s flags=%s",
+                        request_id,
+                        log_prefix,
+                        flags,
+                    )
+            return (b64, True)
+        except Exception as e:
+            latency_ms = int((time.time() - t0) * 1000)
+            logger.error(f"{log_prefix}_FAIL latency_ms={latency_ms} error={e}")
+            logger.info("IMAGE_FALLBACK_PLACEHOLDER_USED=true")
+            return (_IMAGE_ONLY_PLACEHOLDER_BASE64, False)
+
+    logger.error(
+        "IMAGE_ONLY_UNEXPECTED_LOOP_EXIT request_id=%s log_prefix=%s",
+        request_id,
+        log_prefix,
+    )
+    return (_IMAGE_ONLY_PLACEHOLDER_BASE64, False)
 
 
 def generate_preview_data(
