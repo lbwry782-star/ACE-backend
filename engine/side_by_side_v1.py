@@ -4364,6 +4364,29 @@ def generate_short_phrase(product_name: str) -> str:
     return headline
 
 
+# Builder1 gpt-image-1.5: hard constraints (headline/marketing copy is generated separately — never burned into pixels).
+BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN = """
+TEXT AND SURFACE BAN (ABSOLUTE — the rendered image must contain NONE of these):
+NO text; NO letters; NO words; NO typography; NO signage; NO banner; NO poster; NO label; NO printed surface; NO logo; NO numbers; NO branding; NO watermarks; NO captions; NO subtitles; NO UI chrome.
+Repeat: zero readable characters in the frame — only physical objects and clean background. No blank boards, placards, screens, or paper sheets that imply a text area.
+"""
+
+BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD = """
+HARD LAYOUT (SIDE BY SIDE):
+Both Object A and Object B must be fully visible as physical objects.
+They must partially overlap each other directly (foreground/background occlusion — one object clearly in front of part of the other).
+They must read as one joined visual mass, not two separate product shots parked far apart with empty dead space between.
+Do not place either object beside a blank sign, banner, poster, placard, billboard, dry-erase board, device screen, sheet of paper, or any flat surface that reads as a text or ad placeholder.
+"""
+
+BUILDER1_IMAGE_REPLACEMENT_COMPOSITION_HARD = """
+HARD LAYOUT (REPLACEMENT):
+Only Object B is visible as the main object. Object A must not appear as a separate main object, duplicate, ghost, split panel, or side-by-side twin.
+Object B must occupy Object A's original role and position in the scene continuity.
+Do not add any banner, sign, poster, billboard, frame-with-blank-area, or substitute flat surface as a composition device.
+"""
+
+
 def create_image_prompt(
     object_a: str,
     object_b: str,
@@ -4389,7 +4412,7 @@ def create_image_prompt(
     Args:
         object_a: First object (from STEP 1)
         object_b: Second object (from STEP 1)
-        headline: Headline from STEP 2 (ALL CAPS, max 7 words)
+        headline: From STEP 2; passed for API compatibility only — not embedded in-image (hard text ban).
         shape_hint: Shape hint from STEP 1 (e.g., "tall-vertical", "round-flat"), optional
         physical_context: Physical context extensions (ignored, kept for compatibility), optional
         hybrid_plan: Hybrid context plan (ignored, kept for compatibility), optional
@@ -4397,14 +4420,13 @@ def create_image_prompt(
         object_a_context: Classic context for object_a (optional)
         object_b_context: Classic context for object_b (optional)
     """
+    _ = headline  # Generated separately; image must contain zero text per BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN.
     # Determine mode: use force_mode if provided, otherwise use ACE_IMAGE_MODE
     effective_mode = force_mode if force_mode else ACE_IMAGE_MODE
     # Log is handled in MODE_APPLIED in render_final_ad_bytes, so we don't duplicate here
+    # headline is accepted for API compatibility; it must NOT appear in the image (see hard bans below).
 
-    # Headline MUST be ALL CAPS before inserting into the image prompt; render exactly as provided
-    headline = (headline or "").strip().upper()
-
-    # Style: photoreal product-style photography. Headline: inside composition, Times, ALL CAPS.
+    # Style: photoreal product-style photography. No in-image headline or typography.
     negative_space_rules = """
 Composition and framing (CRITICAL):
 - High-quality photorealistic product photography: studio lighting, soft even illumination, sharp focus, realistic materials and natural shadows on white. Not an illustration.
@@ -4412,14 +4434,6 @@ Composition and framing (CRITICAL):
 - Very wide white margins on all four sides; generous negative space.
 - Subject(s) centered and modest in scale; together they occupy about 25-35% of the canvas.
 - Subject(s) must not touch or nearly touch the image edges; keep ample empty white space between subjects and frame."""
-
-    # Headline inside composition: ALL CAPS, TIMES font, exact text, in negative space (print-ad layout)
-    headline_typography_block = """
-Headline (INSIDE the image composition, not below):
-- Render the headline EXACTLY as provided: no paraphrasing, no spelling changes.
-- Headline must be in ALL CAPS. Use TIMES / TIMES NEW ROMAN / TIMES ROMAN font only; printed type, not handwritten.
-- Place headline as part of the composition (like a print ad layout), in negative space; do not cover key objects.
-- Only this single headline text may appear in the image. No logos, no watermarks, no extra random text."""
     
     # MODE 1 — REPLACEMENT (TEMPORARILY DISABLED - see TEMP_DISABLE_REPLACEMENT in render_final_ad_bytes)
     # This branch should not execute as replacement mode is disabled
@@ -4447,7 +4461,6 @@ Headline (INSIDE the image composition, not below):
                     break
         
         replacement_main_object = object_b
-        product_name_str = product_name or "PRODUCT"
         
         replacement_prompt = f"""Create a high-quality photorealistic advertisement photograph as one unified scene.
 
@@ -4469,14 +4482,11 @@ REPLACEMENT (main subject):
 
 - No sketch, pencil, diagram, or illustration look. No motion blur, streaks, or implied camera movement.
 
-HEADLINE RULE:
-Include exactly one headline. The headline text must be rendered EXACTLY as: "{headline}"
-Headline must include "{product_name_str}".
-{headline_typography_block}
-No logos beyond what the headline rule requires.
-No labels beyond the headline.
+{BUILDER1_IMAGE_REPLACEMENT_COMPOSITION_HARD}
+{BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
+{BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
 No surreal distortions."""
-        replacement_prompt = replacement_prompt.rstrip()
+        replacement_prompt = replacement_prompt.rstrip() + negative_space_rules
         return replacement_prompt
     
     # MODE 2 — SIDE_BY_SIDE (AUTO FALLBACK IF < 85%)
@@ -4485,14 +4495,14 @@ No surreal distortions."""
     if shape_hint:
         shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
     
-    product_name_str = product_name or "PRODUCT"
-    
     side_by_side_prompt = f"""Create a high-quality photorealistic advertisement photograph with SIDE BY SIDE composition (both products in one frame).
 
 Composition (SIDE BY SIDE):
 - Show BOTH main objects: "{object_a}" and "{object_b}".
 
 - The two objects must partially overlap in the center (clear partial occlusion; not two separated cutouts on white). The overlap must make their similar silhouette relationship obvious.
+
+- They must read as one joined visual unit — not two isolated subjects with a gap or a sign/banner between them.
 
 - Do NOT include any sub-objects (main objects only).
 
@@ -4505,13 +4515,10 @@ Background and style:
 
 - No sketch, pencil, diagram, or illustration look. No motion blur, streaks, or implied camera movement.
 
-Headline:
-Exactly one headline. The headline text must be rendered EXACTLY as: "{headline}"
-Must include "{product_name_str}". Large and legible, part of the composition (in negative space), not covering key objects.
-{headline_typography_block}
-No logos.
-No brand graphics.
-No text except this single headline.{shape_instruction}{negative_space_rules}"""
+{BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD}
+{BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
+{BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN}
+No logos. No brand graphics.{shape_instruction}{negative_space_rules}"""
 
     return side_by_side_prompt
 
@@ -4928,16 +4935,18 @@ def create_text_file(
     lines.append(f"adIndex={ad_index}")
     lines.append("layout=SIDE_BY_SIDE")
     lines.append(f"productName={product_name}")
-    # Note: All text is in the image, this file is for documentation only
+    # Note: Headline/copy may be returned in JSON separately; this file is for documentation only
     return "\n".join(lines)
 
 
-# Hardcoded prompt for ACE_IMAGE_ONLY: photoreal, two objects SIDE BY SIDE with overlap, no text
+# Hardcoded prompt for ACE_IMAGE_ONLY: photoreal, two objects SIDE BY SIDE with overlap, no text in pixels
 IMAGE_ONLY_HARDCODED_PROMPT = (
     "High-quality photorealistic product photography, clean white seamless background, studio lighting, sharp focus. "
     "Two simple main objects in one frame with partial overlap in the center (not two separated cutouts): "
     "a playing card next to a card deck, and a notebook with spiral binding. "
-    "NO text, NO logos, NO letters, NO numbers."
+    + BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD
+    + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN
+    + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN
 )
 
 # Fallback similarity: always < 85 so mode_decision is SIDE_BY_SIDE (no REPLACEMENT in fallback)
@@ -5642,7 +5651,11 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
     bsub = pair.get("b_sub", "")
     a_str = f"{ap} with {asub}" if asub else ap
     b_str = f"{bp} with {bsub}" if bsub else bp
-    no_text_rule = " NO text, NO headlines, NO logos, NO letters, NO numbers in the image."
+    no_text_rule = (
+        " "
+        + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN.replace("\n", " ")
+        + " "
+    )
     photoreal_base = (
         "High-quality photorealistic product photography; clean white seamless background where the composition is isolated; "
         "studio lighting, soft even illumination, sharp focus, realistic materials and natural shadows. "
@@ -5665,7 +5678,8 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
             "Static product-style framing; preserve setting continuity implied by the objects. "
             "Do not add or depict any separate secondary object for Object B (no b_sub). "
         )
-        repl += visibility_block + no_text_rule
+        repl += BUILDER1_IMAGE_REPLACEMENT_COMPOSITION_HARD + no_text_rule
+        repl += visibility_block
         return repl + "\n\n" + PHOTOREAL_STYLE_BLOCK
     has_secondary = bool(asub or bsub)
     visibility_block = _PHASE2_SECONDARY_VISIBILITY_RULE if has_secondary else ""
@@ -5674,7 +5688,8 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
         "Clear partial overlap in the center (foreground object occludes part of the other). "
         "Composition reads as one unified product shot. Sub-objects visible per rules below."
     )
-    side += visibility_block + no_text_rule
+    side += BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD + no_text_rule
+    side += visibility_block
     return side + "\n\n" + PHOTOREAL_STYLE_BLOCK
 
 
@@ -5683,7 +5698,8 @@ PHOTOREAL_FINAL_STYLE = (
     " High-quality photorealistic product photography: studio lighting, soft even illumination, sharp focus throughout, "
     "realistic materials, natural shadows on white. Clean white seamless background for isolated compositions. "
     "Professional advertising still — not a sketch, not a pencil drawing, not a diagram, not an illustration. "
-    "No motion blur, no streaks, no implied camera movement."
+    "No motion blur, no streaks, no implied camera movement. "
+    "ABSOLUTELY NO text, letters, words, typography, signage, banner, poster, label, printed surface, logo, numbers, or branding in the image."
 )
 
 PHOTOREAL_STYLE_BLOCK = """
@@ -5697,6 +5713,8 @@ professional advertising still
 no sketch or illustration look
 no pencil or line-art look
 no diagram or schematic look
+NO text NO letters NO words NO typography NO signage NO banner NO poster NO label NO printed surface NO logo NO numbers NO branding
+no object-plus-sign compositions no blank boards for text
 """
 
 # ACE_PENCIL_QUALITY: low | medium | high (default medium). Append-only detail level for FINAL image prompt.
@@ -5722,27 +5740,26 @@ def get_photoreal_quality_block() -> str:
     return "\n\nIMAGE_QUALITY:\n" + text
 
 
-# IMAGE_FINAL headline: INSIDE composition, ALL CAPS, TIMES font, exact text; printed type (not handwritten).
-HEADLINE_TYPOGRAPHY_FINAL = (
-    "Headline must be rendered INSIDE the image composition (like a print ad layout), in negative space, not covering key objects. "
-    "Use TIMES / TIMES NEW ROMAN / TIMES ROMAN font only: high-contrast serif strokes, traditional editorial typography, crisp black ink. "
-    "Headline must be in ALL CAPS. Printed type only — not handwritten, not decorative novelty fonts, not sans-serif, not script. "
-    "Render the headline EXACTLY as provided; no paraphrasing, no spelling changes. "
-    "No other text in the image; no logos or brands on objects or packaging."
-)
-
-
 def _build_phase2_image_prompt_final(pair: Dict, mode_decision: str, headline_text: str) -> str:
-    """Build gpt-image-1.5 prompt for IMAGE_FINAL: same composition as base + headline (ALL CAPS, Times) + photoreal style."""
-    headline_upper = (headline_text or "").strip().upper()
+    """Build gpt-image-1.5 prompt for IMAGE_FINAL: base + stronger no-text rules + photoreal (headline_text is not rendered in-image)."""
+    _ = headline_text  # Headline is returned separately in API/JSON — never embedded in pixels.
     prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
-    # Remove the "NO text..." rule and add headline rule + photoreal style
-    prompt_base = prompt_base.replace(" NO text, NO headlines, NO logos, NO letters, NO numbers in the image.", "")
-    headline_rule = (
-        f" Include a required headline INSIDE the image: the text must be exactly \"{headline_upper}\". "
-        + HEADLINE_TYPOGRAPHY_FINAL
+    reinforce = (
+        " FINAL RENDER: repeat — absolutely NO text, letters, words, typography, signage, banner, poster, label, "
+        "printed surface, logo, numbers, branding, watermarks, captions, or blank ad surfaces. "
+        "Do not degrade into object-plus-sign or object-plus-banner composition."
     )
-    return prompt_base.strip() + ". " + headline_rule + " " + PHOTOREAL_FINAL_STYLE + " " + PHOTOREAL_STYLE_BLOCK + get_photoreal_quality_block()
+    return (
+        prompt_base.strip()
+        + ". "
+        + reinforce
+        + " "
+        + PHOTOREAL_FINAL_STYLE
+        + " "
+        + PHOTOREAL_STYLE_BLOCK
+        + get_photoreal_quality_block()
+        + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN
+    )
 
 
 def _build_phase2_image_prompt(pair: Dict, mode_decision: str, product_name: str = "") -> str:
@@ -6206,11 +6223,14 @@ def generate_preview_data(
                 mode_decision = "REPLACEMENT" if int(pair.get("silhouette_similarity", 50)) >= SIMILARITY_THRESHOLD_REPLACEMENT else "SIDE_BY_SIDE"
                 prompt_final = _build_phase2_image_prompt_final(pair, mode_decision, headline_for_final)
             else:
-                headline_final_upper = (headline_for_final or "").strip().upper()
-                base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace("NO text, NO logos, NO letters, NO numbers.", "").strip()
                 prompt_final = (
-                    base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_final_upper}\". "
-                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PHOTOREAL_FINAL_STYLE + " " + PHOTOREAL_STYLE_BLOCK + get_photoreal_quality_block()
+                    IMAGE_ONLY_HARDCODED_PROMPT
+                    + " FINAL RENDER: absolutely no text or typography in the image. "
+                    + PHOTOREAL_FINAL_STYLE
+                    + " "
+                    + PHOTOREAL_STYLE_BLOCK
+                    + get_photoreal_quality_block()
+                    + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN
                 )
             image_final, ok_final = _image_only_single_call(
                 size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
