@@ -2103,7 +2103,7 @@ def select_three_pairs_single_call(
     reserved_main_objects: Optional[set] = None,
 ) -> List[Dict]:
     """
-    Builder1: three (A,B) pairs for ads 1–3. Per pair:
+    Builder1: one (A,B) pair per call. For that pair:
     1) Object A from product description (painter-like whole-form read).
     2) Object B by strongest morphological (outline-batch) similarity to A.
     3) Keep B only if it supports the advertising promise; if none qualify, relax with warning.
@@ -2114,8 +2114,8 @@ def select_three_pairs_single_call(
     object_list = _builder1_prioritize_object_list_for_session(list(object_list), sid)
     reserved = set(reserved_main_objects or [])
     local_excluded = set(reserved)
-    triple: List[Dict] = []
-    for slot in range(3):
+    out: List[Dict] = []
+    for slot in range(1):
         a_id = _select_object_a_from_description_llm(
             object_list, product_description, ad_goal, model_name, local_excluded
         )
@@ -2128,7 +2128,7 @@ def select_three_pairs_single_call(
         item_b = next((it for it in object_list if str(it.get("id")) == str(b_id)), None)
         if not item_b:
             raise ValueError("PAIRSET_INVALID: B_id_not_in_list")
-        triple.append({"a_id": str(a_id), "b_id": str(b_id), "shape_similarity_score": int(sc)})
+        out.append({"a_id": str(a_id), "b_id": str(b_id), "shape_similarity_score": int(sc)})
         ma = _ab_main_lower(item_a)
         mb = _ab_main_lower(item_b)
         if ma:
@@ -2136,14 +2136,14 @@ def select_three_pairs_single_call(
         if mb:
             local_excluded.add(mb)
         logger.info(
-            "BUILDER1_AB_TRIPLE slot=%s a_id=%s b_id=%s morph_score=%s",
+            "BUILDER1_AB_PAIR slot=%s a_id=%s b_id=%s morph_score=%s",
             slot + 1,
             a_id,
             b_id,
             sc,
         )
-    logger.info("SELECT_THREE_PAIRS_AB_SUCCESS pairs=%s", triple)
-    return triple
+    logger.info("SELECT_ONE_PAIR_AB_SUCCESS pairs=%s", out)
+    return out
 
 
 def select_pair_from_three_pairs(
@@ -2158,29 +2158,26 @@ def select_pair_from_three_pairs(
     product_description: str = "",
 ) -> Dict:
     """
-    Select a single pair for the given ad_index from 3 pre-selected pairs.
-    
-    Uses select_three_pairs_single_call to get 3 pairs, then returns the pair
-    corresponding to ad_index (1 -> pairs[0], 2 -> pairs[1], 3 -> pairs[2]).
-    
+    Select a single pair for the given ad_index from one pre-selected pair.
+
+    Uses select_three_pairs_single_call to get 1 pair, then returns that pair
+    (ad_index is clamped to the sole entry when only one pair exists).
+
     Args:
         object_list: List[Dict] with keys: id, object, classic_context, theme_link, theme_tag
         sid: Session ID
-        ad_index: Ad index (1-3)
+        ad_index: Ad index (1-3; only one pair is available, so all map to pairs[0])
         ad_goal: Advertising goal (for context)
         image_size: Image size (for cache key)
         used_objects: Set of already used object IDs from history (optional; excludes their mains from new triples)
         model_name: Model name (optional, defaults to OPENAI_SHAPE_MODEL)
         allowed_theme_tags: Optional list of theme tags (ignored - full list is used)
         product_description: Product text for description-first Object A selection (optional)
-    
+
     Returns:
         Dict with keys: object_a, object_b, object_a_id, object_b_id, shape_similarity_score, shape_hint
     """
-    # Normalize ad_index to 0-based for array access
-    pair_index = (ad_index - 1) % 3  # Ensure 0-2 range
-    
-    # Cache key for 3 pairs (shared across all ad_index in same session)
+    # Cache key for pre-selected pair(s) (shared across ad_index in same session)
     # Use object_list hash for cache key stability
     # Normalize ids to string for hash calculation
     object_list_hash = hashlib.md5(json.dumps([str(item.get("id")) if item.get("id") is not None else "" for item in object_list], sort_keys=True).encode()).hexdigest()[:16]
@@ -2213,20 +2210,18 @@ def select_pair_from_three_pairs(
             product_description=product_description or "",
             reserved_main_objects=reserved_mains,
         )
-        
-        # Cache the 3 pairs
+
+        # Cache the pair list (length 1)
         with _three_pairs_cache_lock:
             _three_pairs_cache[cache_key] = (three_pairs, time.time())
-        logger.info(f"THREE_PAIRS_CACHE miss=true key={cache_key[:16]}... generated 3 pairs")
-    
+        logger.info(f"THREE_PAIRS_CACHE miss=true key={cache_key[:16]}... generated 1 pair")
+
     # Guard: Validate three_pairs is not empty
     if not three_pairs or len(three_pairs) == 0:
         raise ValueError("PAIRSET_EMPTY_FOR_AD_INDEX: No pairs available")
-    
-    # Get the pair for this ad_index
-    if pair_index >= len(three_pairs):
-        raise ValueError(f"PAIRSET_EMPTY_FOR_AD_INDEX: Pair index {pair_index} out of range (got {len(three_pairs)} pairs) for ad_index={ad_index}")
-    
+
+    pair_index = min(max(0, (ad_index or 1) - 1), len(three_pairs) - 1)
+
     selected_pair = three_pairs[pair_index]
     raw_a_id = selected_pair.get("a_id")
     raw_b_id = selected_pair.get("b_id")
@@ -2257,9 +2252,9 @@ def select_pair_from_three_pairs(
         "object_b_id": b_id,
         "shape_similarity_score": int(selected_pair.get("shape_similarity_score", 85)),
         "shape_hint": shape_hint,
-        "shape_reason": f"Selected from 3 pre-computed pairs (pair {pair_index + 1}/3)"
+        "shape_reason": f"Selected from 1 pre-computed pair (index {pair_index + 1}/{len(three_pairs)})",
     }
-    
+
     logger.info(f"PAIR_SELECTED_FROM_THREE sid={sid} ad={ad_index} pair_index={pair_index} A={a_id} B={b_id} A_obj={object_a_name} B_obj={object_b_name}")
     _builder1_note_session_primary_mains(sid, str(object_a_name), str(object_b_name))
     
