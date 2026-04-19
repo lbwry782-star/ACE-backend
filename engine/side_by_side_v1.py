@@ -4404,13 +4404,13 @@ def create_image_prompt(
     # Headline MUST be ALL CAPS before inserting into the image prompt; render exactly as provided
     headline = (headline or "").strip().upper()
 
-    # Style: high-end professional graphite pencil (museum-quality). Headline: inside composition, Times, ALL CAPS.
+    # Style: photoreal product-style photography. Headline: inside composition, Times, ALL CAPS.
     negative_space_rules = """
 Composition and framing (CRITICAL):
-- High-end professional graphite pencil drawing: museum-quality, clean confident lines, precise shading, subtle paper texture, sharp focus, high detail. NOT rough sketch, NOT childish, NOT low-res, NOT blurry.
-- Pure white background only; no scene, no texture, no gradient.
-- Very wide white margins on all four sides; lots of negative space.
-- Subject(s) centered and small; together they occupy about 25-35% of the canvas.
+- High-quality photorealistic product photography: studio lighting, soft even illumination, sharp focus, realistic materials and natural shadows on white. Not an illustration.
+- Clean white seamless background only; no environmental scene, no textured backdrop, no gradient.
+- Very wide white margins on all four sides; generous negative space.
+- Subject(s) centered and modest in scale; together they occupy about 25-35% of the canvas.
 - Subject(s) must not touch or nearly touch the image edges; keep ample empty white space between subjects and frame."""
 
     # Headline inside composition: ALL CAPS, TIMES font, exact text, in negative space (print-ad layout)
@@ -4449,42 +4449,34 @@ Headline (INSIDE the image composition, not below):
         replacement_main_object = object_b
         product_name_str = product_name or "PRODUCT"
         
-        replacement_prompt = f"""Create a professional advertisement image in pencil drawing style as a single unified scene.
+        replacement_prompt = f"""Create a high-quality photorealistic advertisement photograph as one unified scene.
 
-BASE SCENE:
+SCENE (Object A's original situation — preserve setting continuity):
 The scene is based entirely on:
 "{scene_context}"
 
-The sub-object from Object A must remain visible:
+Secondary from Object A's scene (must stay visible, placed naturally next to the main subject):
 "{locked_sub_object}"
 
-The environment, lighting, camera angle, framing, and depth of field remain identical to A's original situation.
+REPLACEMENT (main subject):
+- Only "{replacement_main_object}" (Object B) is visible as the main product/object. Do not show "{object_a}" (Object A) anywhere — no duplicate, ghosting, outline, or split comparison of A.
 
-MAIN OBJECT REPLACEMENT:
+- Object B replaces Object A in A's original setting: same situational role, placement, scale, and orientation that A would have had in this frame.
 
-Replace ONLY the main object body of A with "{replacement_main_object}".
+- Keep "{locked_sub_object}" beside or adjacent to Object B as it would logically sit with the main object in this scene (clearly visible, not cropped out).
 
-Do NOT show A anywhere.
+- Static product-style framing only: sharp focus, natural shadows, realistic materials. No floating objects; no extra props beyond what the scene requires.
 
-Keep exact same pose, position, orientation, and scale.
-
-Maintain natural physics.
-
-Object B must interact physically with "{locked_sub_object}".
-
-No floating objects.
-
-No added B.sub_object.
+- No sketch, pencil, diagram, or illustration look. No motion blur, streaks, or implied camera movement.
 
 HEADLINE RULE:
 Include exactly one headline. The headline text must be rendered EXACTLY as: "{headline}"
 Headline must include "{product_name_str}".
 {headline_typography_block}
-Pencil drawing style only; high-end professional graphite, museum-quality. Pure white background.
-No logos.
-No labels.
+No logos beyond what the headline rule requires.
+No labels beyond the headline.
 No surreal distortions."""
-        replacement_prompt = replacement_prompt.rstrip() + negative_space_rules
+        replacement_prompt = replacement_prompt.rstrip()
         return replacement_prompt
     
     # MODE 2 — SIDE_BY_SIDE (AUTO FALLBACK IF < 85%)
@@ -4495,34 +4487,28 @@ No surreal distortions."""
     
     product_name_str = product_name or "PRODUCT"
     
-    side_by_side_prompt = f"""Create a professional advertisement image in pencil drawing style with SIDE BY SIDE composition.
+    side_by_side_prompt = f"""Create a high-quality photorealistic advertisement photograph with SIDE BY SIDE composition (both products in one frame).
 
-Composition Rules:
+Composition (SIDE BY SIDE):
+- Show BOTH main objects: "{object_a}" and "{object_b}".
 
-Display BOTH main objects: "{object_a}" and "{object_b}".
+- The two objects must partially overlap in the center (clear partial occlusion; not two separated cutouts on white). The overlap must make their similar silhouette relationship obvious.
 
-Do NOT include any sub-objects.
+- Do NOT include any sub-objects (main objects only).
 
-No sub-objects from either object.
+- Objects must not be duplicated. Main object types must be different.
 
-Clean isolated presentation.
+Background and style:
+- Clean white seamless background only; no scene, texture, or gradient.
 
-Both objects must partially overlap visually in the center.
+- Studio lighting, soft and even, sharp focus, realistic materials and contact shadows on white.
 
-The overlap must clearly show their similar silhouette logic.
-
-Objects must not be duplicated.
-
-Main object types must be different.
-
-Background:
-Pure white only; no scene, no texture, no gradient.
+- No sketch, pencil, diagram, or illustration look. No motion blur, streaks, or implied camera movement.
 
 Headline:
 Exactly one headline. The headline text must be rendered EXACTLY as: "{headline}"
-Must include "{product_name_str}". Must be large and dominant, part of the composition (in negative space), not covering key objects.
+Must include "{product_name_str}". Large and legible, part of the composition (in negative space), not covering key objects.
 {headline_typography_block}
-Pencil drawing style only; high-end professional graphite, museum-quality.
 No logos.
 No brand graphics.
 No text except this single headline.{shape_instruction}{negative_space_rules}"""
@@ -4576,7 +4562,7 @@ def generate_image_with_dalle(
     
     Rules:
     - SIDE BY SIDE
-    - no overlap
+    - partial overlap between main objects (prompt-enforced)
     - headline prominent
     - no extra text
     - no CTA
@@ -4595,7 +4581,7 @@ def generate_image_with_dalle(
     logger.info(f"STEP3_MODE={mode}")
     logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\", mode={mode}")
     logger.info(f"STEP 3 VISUAL_RULES_APPLIED: no_logos=true, photorealistic_only=true")
-    logger.info(f"STEP 3 COMPOSITION: two_full_panels=true, overlap=false_expected")
+    logger.info(f"STEP 3 COMPOSITION: side_by_side=true, partial_overlap=expected")
     
     for attempt in range(max_retries):
         is_strict = attempt > 0  # Use stricter prompt on retries
@@ -4948,10 +4934,10 @@ def create_text_file(
     return "\n".join(lines)
 
 
-# Hardcoded prompt for ACE_IMAGE_ONLY: pencil sketch, two objects SIDE BY SIDE, no text
+# Hardcoded prompt for ACE_IMAGE_ONLY: photoreal, two objects SIDE BY SIDE with overlap, no text
 IMAGE_ONLY_HARDCODED_PROMPT = (
-    "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
-    "Two simple objects side by side with slight overlap: "
+    "High-quality photorealistic product photography, clean white seamless background, studio lighting, sharp focus. "
+    "Two simple main objects in one frame with partial overlap in the center (not two separated cutouts): "
     "a playing card next to a card deck, and a notebook with spiral binding. "
     "NO text, NO logos, NO letters, NO numbers."
 )
@@ -5643,7 +5629,7 @@ def _fetch_goal_pairs_o3(product_name: str, product_description: str, request_id
 
 # Composition rule: secondary object must be visible and framed; primary must not fill frame if it would hide the secondary.
 _PHASE2_SECONDARY_VISIBILITY_RULE = (
-    " The secondary/contextual object must always appear clearly in the drawing and must not be omitted, hidden, cropped out, or visually lost against the background. "
+    " The secondary/contextual object must always appear clearly in the photograph and must not be omitted, hidden, cropped out, or visually lost against the background. "
     "Place it in a natural contextual position relative to the primary (e.g. a wall switch on a wall surface, a straw next to or inside a can, a bone near a dog, a flower near a bee). "
     "The primary object must not fill the entire frame if that would hide or exclude the secondary; leave enough frame space so the secondary is clearly within the image. "
     "The secondary object should remain smaller than the primary but clearly readable. "
@@ -5659,65 +5645,64 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
     a_str = f"{ap} with {asub}" if asub else ap
     b_str = f"{bp} with {bsub}" if bsub else bp
     no_text_rule = " NO text, NO headlines, NO logos, NO letters, NO numbers in the image."
-    base = "Classical pencil sketch diagram, white background, minimal shading, clean contours. "
+    photoreal_base = (
+        "High-quality photorealistic product photography; clean white seamless background where the composition is isolated; "
+        "studio lighting, soft even illumination, sharp focus, realistic materials and natural shadows. "
+        "Not a sketch, not a pencil drawing, not a diagram. No motion blur, no streaks, no implied camera movement. "
+    )
     has_secondary = bool(asub or bsub)
     visibility_block = _PHASE2_SECONDARY_VISIBILITY_RULE if has_secondary else ""
     if mode_decision == "REPLACEMENT":
         repl = (
-            base + f"{bp} fully occupies the structural role of {ap}: the replacing object takes over the other's form. "
-            f"The original {ap} must not be visible in any form — no traces, no outlines, no blending, no ghosting. "
-            f"The composition must read as a single object that has taken over the other's form. Sketch style."
+            photoreal_base
+            + f"Only {bp} (Object B) is visible as the main object. The original {ap} (Object A) must not appear in any form "
+            f"— no ghosting, outlines, duplication, or side-by-side comparison. {bp} replaces {ap} in {ap}'s original situational role and framing. "
         )
         if asub:
             repl += (
-                f" The contextual object \"{asub}\" (from the original scene) must remain clearly visible in the image, "
-                "in a natural position relative to the replacing object (e.g. mounted on a wall, beside it, or in its typical context). "
-                "Do not let the replacing object fill the whole frame; leave space so the viewer can clearly see and identify the secondary object."
+                f"The secondary \"{asub}\" from Object A's scene must remain clearly visible beside or adjacent to {bp}, "
+                "in a natural position (not cropped out). "
             )
+        repl += (
+            "Static product-style framing; preserve setting continuity implied by the objects. "
+        )
         repl += visibility_block + no_text_rule
-        return repl + "\n\n" + GRAPHITE_STYLE_BLOCK
+        return repl + "\n\n" + PHOTOREAL_STYLE_BLOCK
     side = (
-        base + f"Two objects that physically overlap: {a_str} and {b_str}. "
-        "Clear physical overlap (approx. 25–40% area intersection); no spacing between objects. "
-        "The smaller object must be in the foreground (on top), visibly occluding part of the larger object. "
-        "Composition must feel like a single fused visual unit. Sub-objects visible."
+        photoreal_base + f"Two main objects in one frame with partial overlap: {a_str} and {b_str}. "
+        "Clear partial overlap in the center (foreground object occludes part of the other). "
+        "Composition reads as one unified product shot. Sub-objects visible per rules below."
     )
     side += visibility_block + no_text_rule
-    return side + "\n\n" + GRAPHITE_STYLE_BLOCK
+    return side + "\n\n" + PHOTOREAL_STYLE_BLOCK
 
 
-# High-end professional graphite pencil (museum-quality); NOT rough sketch, NOT childish, NOT low-res, NOT blurry.
-PENCIL_FINAL_STYLE = (
-    " High-end professional graphite pencil drawing: museum-quality, clean confident lines, precise shading, "
-    "subtle paper texture, sharp focus, high detail. Fine cross-hatching with directional consistency, sharp edge definition, "
-    "deep tonal range (strong blacks and clean whites), high contrast line weight variation. "
-    "NOT rough sketch, NOT childish, NOT low-res, NOT blurry. No soft sketch look, no digital painting feel, no watercolor or charcoal. "
-    "Clean white background only. The drawing must look like a professionally scanned high-resolution pencil illustration."
+# Final-image photoreal addendum (headline pass).
+PHOTOREAL_FINAL_STYLE = (
+    " High-quality photorealistic product photography: studio lighting, soft even illumination, sharp focus throughout, "
+    "realistic materials, natural shadows on white. Clean white seamless background for isolated compositions. "
+    "Professional advertising still — not a sketch, not a pencil drawing, not a diagram, not an illustration. "
+    "No motion blur, no streaks, no implied camera movement."
 )
 
-GRAPHITE_STYLE_BLOCK = """
+PHOTOREAL_STYLE_BLOCK = """
 STYLE:
-museum-quality graphite pencil drawing
-extremely detailed illustration
-clean confident linework
-precise tonal shading
-fine cross-hatching shading
-dense graphite texture
+high-quality photorealistic product photography
+clean white seamless background (when scene is isolated)
+studio lighting
 sharp focus
-high contrast pencil rendering
-professional illustration quality
-white background
-no color
-no paint
-no digital painting look
-pure graphite pencil drawing
+realistic materials and natural shadows
+professional advertising still
+no sketch or illustration look
+no pencil or line-art look
+no diagram or schematic look
 """
 
-# ACE_PENCIL_QUALITY: low | medium | high (default medium). Append-only block for FINAL image prompt.
-_PENCIL_QUALITY_TEXTS = {
-    "low": "simple clean pencil sketch, lighter shading, minimal cross-hatching, fewer fine details",
-    "medium": "high-quality graphite pencil drawing, clear linework, balanced shading, moderate cross-hatching, good detail",
-    "high": "museum-quality graphite pencil illustration, extremely detailed, dense cross-hatching, precise tonal rendering, sharp crisp linework",
+# ACE_PENCIL_QUALITY: low | medium | high (default medium). Append-only detail level for FINAL image prompt.
+_PHOTOREAL_QUALITY_TEXTS = {
+    "low": "lighter detail, slightly softer micro-contrast, simpler surface texture, still photoreal",
+    "medium": "balanced photoreal detail, crisp edges, natural highlights and contact shadows",
+    "high": "maximum photoreal detail, very crisp texture and edge definition, premium catalog-style rendering",
 }
 
 
@@ -5729,34 +5714,34 @@ def get_pencil_quality_level() -> tuple:
     return raw, False
 
 
-def get_pencil_quality_block() -> str:
-    """Return the additive PENCIL_QUALITY block string for the current ACE_PENCIL_QUALITY env."""
+def get_photoreal_quality_block() -> str:
+    """Return the additive quality block string for the current ACE_PENCIL_QUALITY env (photoreal detail tier)."""
     level, _ = get_pencil_quality_level()
-    text = _PENCIL_QUALITY_TEXTS[level]
-    return "\n\nPENCIL_QUALITY:\n" + text
+    text = _PHOTOREAL_QUALITY_TEXTS[level]
+    return "\n\nIMAGE_QUALITY:\n" + text
 
 
 # IMAGE_FINAL headline: INSIDE composition, ALL CAPS, TIMES font, exact text; printed type (not handwritten).
 HEADLINE_TYPOGRAPHY_FINAL = (
     "Headline must be rendered INSIDE the image composition (like a print ad layout), in negative space, not covering key objects. "
     "Use TIMES / TIMES NEW ROMAN / TIMES ROMAN font only: high-contrast serif strokes, traditional editorial typography, crisp black ink. "
-    "Headline must be in ALL CAPS. Printed type only — not handwritten, not sketch-style lettering, not sans-serif, not script. "
+    "Headline must be in ALL CAPS. Printed type only — not handwritten, not decorative novelty fonts, not sans-serif, not script. "
     "Render the headline EXACTLY as provided; no paraphrasing, no spelling changes. "
     "No other text in the image; no logos or brands on objects or packaging."
 )
 
 
 def _build_phase2_image_prompt_final(pair: Dict, mode_decision: str, headline_text: str) -> str:
-    """Build gpt-image-1.5 prompt for IMAGE_FINAL: same composition as base + headline (ALL CAPS, Times) + pencil style."""
+    """Build gpt-image-1.5 prompt for IMAGE_FINAL: same composition as base + headline (ALL CAPS, Times) + photoreal style."""
     headline_upper = (headline_text or "").strip().upper()
     prompt_base = _build_phase2_image_prompt_base(pair, mode_decision)
-    # Remove the "NO text..." rule and add headline rule + pencil style
+    # Remove the "NO text..." rule and add headline rule + photoreal style
     prompt_base = prompt_base.replace(" NO text, NO headlines, NO logos, NO letters, NO numbers in the image.", "")
     headline_rule = (
         f" Include a required headline INSIDE the image: the text must be exactly \"{headline_upper}\". "
         + HEADLINE_TYPOGRAPHY_FINAL
     )
-    return prompt_base.strip() + ". " + headline_rule + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK + get_pencil_quality_block()
+    return prompt_base.strip() + ". " + headline_rule + " " + PHOTOREAL_FINAL_STYLE + " " + PHOTOREAL_STYLE_BLOCK + get_photoreal_quality_block()
 
 
 def _build_phase2_image_prompt(pair: Dict, mode_decision: str, product_name: str = "") -> str:
@@ -5942,7 +5927,7 @@ def _image_only_single_call(
     Single gpt-image-1.5 call for ACE_IMAGE_ONLY mode. No retries, 60s timeout.
     Returns (image_base64_str, success). If prompt is None, uses IMAGE_ONLY_HARDCODED_PROMPT.
     log_prefix: for logging (e.g. IMAGE_BASE, IMAGE_FINAL, IMAGE_CALL).
-    quality: "low" (layout/composition) or "high" (final pencil rendering).
+    quality: "low" (layout/composition) or "high" (final photoreal rendering).
     """
     t0 = time.time()
     image_prompt = prompt if prompt else IMAGE_ONLY_HARDCODED_PROMPT
@@ -6215,7 +6200,7 @@ def generate_preview_data(
                 base_hardcoded = IMAGE_ONLY_HARDCODED_PROMPT.replace("NO text, NO logos, NO letters, NO numbers.", "").strip()
                 prompt_final = (
                     base_hardcoded + f". Include a required headline INSIDE the image: the text must be exactly \"{headline_final_upper}\". "
-                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PENCIL_FINAL_STYLE + " " + GRAPHITE_STYLE_BLOCK + get_pencil_quality_block()
+                    + HEADLINE_TYPOGRAPHY_FINAL + " " + PHOTOREAL_FINAL_STYLE + " " + PHOTOREAL_STYLE_BLOCK + get_photoreal_quality_block()
                 )
             image_final, ok_final = _image_only_single_call(
                 size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
@@ -6695,7 +6680,7 @@ def generate_preview_data(
         ad_goal=ad_goal,
         output_language=_mk_lang,
     )
-    # Return image + headline + body for display and for artifact store (sketch only in image; headline/body separate)
+    # Return image + headline + body for display and for artifact store (photoreal image; headline/body separate)
     return {
         "imageBase64": image_base64,
         "headline": headline,
