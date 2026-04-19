@@ -17,7 +17,7 @@ import base64
 import string
 import hashlib
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
@@ -125,6 +125,13 @@ _IMAGE_ONLY_PLACEHOLDER_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAA
 # Timeout for single image call in IMAGE_ONLY mode (no retries)
 IMAGE_ONLY_CALL_TIMEOUT_SECONDS = 60
 
+# Post-generation diagnostics: o3-pro vision check (does not block pipeline)
+IMAGE_VALIDATION_VISION_MODEL = os.environ.get("IMAGE_VALIDATION_VISION_MODEL", "o3-pro")
+IMAGE_VALIDATION_TIMEOUT_SECONDS = int(os.environ.get("IMAGE_VALIDATION_TIMEOUT_SECONDS", "90"))
+
+# Builder1 headline: max words including every token in a multi-word product name
+BUILDER1_HEADLINE_MAX_WORDS = 7
+
 # Phase 2: o3-pro goal+pair call timeout (1 attempt, no retries); on timeout/error -> fallback to image
 GOAL_PAIRS_O3_TIMEOUT_SECONDS = 30
 GOAL_PAIRS_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes
@@ -193,6 +200,11 @@ _diversity_guard_lock = Lock()
 # Session-based anti-repeat: sid -> (used_pairs, used_objects, timestamp)
 _session_used_pairs: Dict[str, Tuple[set, set, float]] = {}  # key: sid, value: (set of pair_hashes, set of object_ids, timestamp)
 _session_used_lock = Lock()
+
+# Builder1: lowercased primary "object" names already chosen in-session (deprioritize in later triple selection)
+_builder1_session_used_primary_mains: Dict[str, Tuple[set, float]] = {}
+_builder1_session_primaries_lock = Lock()
+BUILDER1_SESSION_PRIMARY_TTL_SECONDS = int(os.environ.get("BUILDER1_SESSION_PRIMARY_TTL_SECONDS", "3600"))
 
 
 def _get_cache_key_plan(
@@ -1522,9 +1534,12 @@ Each pair must:
 
 5) HEADLINE PER PAIR:
 - English only.
-- Max 7 words including product name.
-- Bold, commercial, not poetic.
-- Must relate to ad_goal.
+- Max 7 words including product name (count each word in a multi-word product name).
+- Base the headline on an existing expression when possible (idiom, saying, proverb, slogan pattern, or other widely familiar wording in English); prefer that over an invented phrase.
+- The expression must fit the pair's planned visual and be justified by ad_goal.
+- Double-meaning slogan: familiar wording that gains new advertising meaning because of the visual pairing (the visual is the cause of the twist); do not describe objects or layout.
+- Must begin with the exact product name from INPUT above (verbatim token sequence), then one space, then the rest; product name must read as the dominant/larger typographic part on the same baseline as any following words in the eventual layout.
+- Do NOT put object main names from the pair into the headline.
 
 6) SIDE BY SIDE ONLY:
 - Two full objects.
@@ -1784,6 +1799,69 @@ def _ab_reserved_mains_from_history(
     return out
 
 
+def _builder1_get_session_used_primaries(sid: str) -> set:
+    """Lowercased primary main names already used in this session (for deprioritizing later picks)."""
+    if not sid or sid == "no_session":
+        return set()
+    now = time.time()
+    with _builder1_session_primaries_lock:
+        ent = _builder1_session_used_primary_mains.get(sid)
+        if not ent:
+            return set()
+        mains, ts = ent
+        if now - ts > BUILDER1_SESSION_PRIMARY_TTL_SECONDS:
+            del _builder1_session_used_primary_mains[sid]
+            return set()
+        return set(mains)
+
+
+def _builder1_note_session_primary_mains(sid: str, a_main: str, b_main: str) -> None:
+    if not sid or sid == "no_session":
+        return
+    am = str(a_main or "").strip().lower()
+    bm = str(b_main or "").strip().lower()
+    if not am and not bm:
+        return
+    now = time.time()
+    with _builder1_session_primaries_lock:
+        ent = _builder1_session_used_primary_mains.get(sid)
+        mains = set(ent[0]) if ent else set()
+        if am:
+            mains.add(am)
+        if bm:
+            mains.add(bm)
+        _builder1_session_used_primary_mains[sid] = (mains, now)
+    logger.info(
+        "BUILDER1_SESSION_PRIMARY_MAINS_UPDATED sid=%s count=%s mains=%s",
+        sid[:16] if len(sid) > 16 else sid,
+        len(mains),
+        sorted(mains)[:12],
+    )
+
+
+def _builder1_prioritize_object_list_for_session(object_list: List[Dict], sid: str) -> List[Dict]:
+    """Move rows whose primary main was already used in-session toward the end of the list (soft deprioritize)."""
+    used = _builder1_get_session_used_primaries(sid)
+    if not used:
+        return object_list
+    front: List[Dict] = []
+    back: List[Dict] = []
+    for it in object_list:
+        m = _ab_main_lower(it)
+        if m and m in used:
+            back.append(it)
+        else:
+            front.append(it)
+    if not front:
+        return object_list
+    logger.info(
+        "BUILDER1_SESSION_PRIMARY_DEPRIORITIZE sid=%s moved_to_end=%s",
+        sid[:16] if len(sid) > 16 else sid,
+        len(back),
+    )
+    return front + back
+
+
 def _ab_llm_text(model_name: str, system_msg: str, user_msg: str) -> str:
     client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
@@ -2033,6 +2111,7 @@ def select_three_pairs_single_call(
     """
     if model_name is None:
         model_name = _get_shape_model()
+    object_list = _builder1_prioritize_object_list_for_session(list(object_list), sid)
     reserved = set(reserved_main_objects or [])
     local_excluded = set(reserved)
     triple: List[Dict] = []
@@ -2109,7 +2188,9 @@ def select_pair_from_three_pairs(
     used_h = hashlib.md5(
         "|".join(sorted(str(x) for x in (used_objects or set()))).encode()
     ).hexdigest()[:12]
-    cache_key = f"THREE_PAIRS_AB|{sid}|{ad_goal}|{image_size}|{object_list_hash}|{pd_h}|{used_h}"
+    sess_mains = sorted(_builder1_get_session_used_primaries(sid))
+    sess_h = hashlib.md5("|".join(sess_mains).encode()).hexdigest()[:10]
+    cache_key = f"THREE_PAIRS_AB|{sid}|{ad_goal}|{image_size}|{object_list_hash}|{pd_h}|{used_h}|{sess_h}"
     
     # Check cache
     cached_pairs = None
@@ -2180,6 +2261,7 @@ def select_pair_from_three_pairs(
     }
     
     logger.info(f"PAIR_SELECTED_FROM_THREE sid={sid} ad={ad_index} pair_index={pair_index} A={a_id} B={b_id} A_obj={object_a_name} B_obj={object_b_name}")
+    _builder1_note_session_primary_mains(sid, str(object_a_name), str(object_b_name))
     
     return result
 
@@ -3457,6 +3539,67 @@ def generate_marketing_copy(
     return fb
 
 
+def _normalize_builder1_headline_product_prefix_and_word_cap(
+    headline: str,
+    product_name_upper: str,
+    max_words: int = BUILDER1_HEADLINE_MAX_WORDS,
+) -> str:
+    """Ensure full product-name token prefix and total word count <= max_words."""
+    pw = product_name_upper.split()
+    hw = (headline or "").split()
+    if not pw:
+        return " ".join(hw[:max_words])
+    merged = list(hw)
+    if len(merged) < len(pw) or merged[: len(pw)] != pw:
+        merged = pw + merged
+    while (
+        len(merged) >= 2 * len(pw)
+        and merged[: len(pw)] == pw
+        and merged[len(pw) : 2 * len(pw)] == pw
+    ):
+        merged = merged[len(pw) :]
+    if len(merged) <= max_words:
+        return " ".join(merged)
+    rest_n = max_words - len(pw)
+    if rest_n <= 0:
+        return " ".join(pw[:max_words])
+    return " ".join(pw + merged[len(pw) : len(pw) + rest_n])
+
+
+def _postprocess_builder1_headline(
+    headline: str,
+    product_name: str,
+    object_a: Optional[str] = None,
+    object_b: Optional[str] = None,
+    max_words: int = BUILDER1_HEADLINE_MAX_WORDS,
+) -> str:
+    """ALL CAPS, strip punctuation, drop object tokens, ensure product prefix, cap words."""
+    import string
+
+    h = (headline or "").strip().strip("\"'")
+    h = h.upper()
+    h = "".join(char for char in h if char not in string.punctuation)
+    words = h.split()
+    if object_a or object_b:
+        object_a_upper = (object_a or "").upper()
+        object_b_upper = (object_b or "").upper()
+        words = [w for w in words if w != object_a_upper and w != object_b_upper]
+    h = " ".join(words)
+    product_name_upper = product_name.upper().strip()
+    product_words = product_name_upper.split()
+    headline_words = h.split()
+    product_in_headline = any(word in headline_words for word in product_words)
+    if not product_in_headline:
+        logger.info(
+            "STEP 2 - HEADLINE: Product name %r not found, prefixing headline",
+            product_name,
+        )
+        h = f"{product_name_upper} {h}".strip()
+    return _normalize_builder1_headline_product_prefix_and_word_cap(
+        h, product_name_upper, max_words
+    )
+
+
 def generate_headline_only(
     product_name: str,
     message: str,
@@ -3484,7 +3627,7 @@ def generate_headline_only(
     Rules:
     - English only
     - ALL CAPS
-    - Max 7 words INCLUDING productName
+    - Max BUILDER1_HEADLINE_MAX_WORDS words INCLUDING productName
     - Do NOT change the pair
     - Do NOT re-select objects
     """
@@ -3506,18 +3649,28 @@ def generate_headline_only(
 
 Product name: {product_name}
 Message: {message}{ad_goal_context}
-Objects (already selected, do not change): {object_a} and {object_b}
+Planned visual for the photograph (objects already selected; do not change selection; do not write these object names in the headline): {object_a} and {object_b}
 
-Requirements:
+CREATIVE RULE (mandatory):
+- Base the headline on an existing expression if possible (idiom, saying, proverb, slogan pattern, stock phrase, or other widely familiar wording in English).
+- Prefer a widely familiar expression in English over an invented phrase.
+- The expression must fit the planned visual above and be justified by the advertising promise (message/goal).
+- Aim for a double-meaning slogan: the familiar expression stays correct as ordinary language, but gains a new advertising meaning once paired with that planned visual — the visual is the cause of that twist, not something the headline narrates, labels, or literally describes.
+- Interpret the intended visual idea (metaphorically); do not describe objects, layout, lighting, or scene.
+
+TYPOGRAPHY / LAYOUT (how the headline will be placed on the ad):
+- The headline includes the product name; the product name must read as the larger, dominant typographic part relative to any following words, on the same baseline.
+
+FORMAT (mandatory):
 - English only
 - ALL CAPS
-- Start with the exact product name, then one normal space, then any additional words — no comma, colon, dash, dot, or semicolon between the name and the rest
+- Start with the exact product name, then exactly one normal space, then the rest — no comma, colon, dash, dot, or semicolon between the name and the rest
 - Include the product name in the headline (mandatory)
-- Do NOT mention the objects ({object_a} or {object_b}) in the headline
+- Maximum {BUILDER1_HEADLINE_MAX_WORDS} words total INCLUDING the product name (count every word in a multi-word product name)
+- Do NOT write the object names ({object_a} or {object_b}) anywhere in the headline
 - Do NOT change or re-select the objects
-- No punctuation (no colons, commas, periods, etc.)
+- No punctuation in the headline (no colons, commas, periods, etc.)
 - Return ONLY the headline text, no JSON, no quotes
-- Full headline (no word limit restriction)
 
 Headline:"""
 
@@ -3542,38 +3695,9 @@ Headline:"""
                 r = client.chat.completions.create(**request_params)
                 return r.choices[0].message.content.strip() if r.choices else ""
             headline = openai_retry.openai_call_with_retry(_headline_call, endpoint="responses")
-            # Clean headline (remove quotes, ensure ALL CAPS, remove punctuation)
-            headline = headline.strip('"\'')
-            headline = headline.upper()
-            
-            # Remove punctuation (colons, commas, periods, etc.)
-            import string
-            headline = ''.join(char for char in headline if char not in string.punctuation)
-            
-            # Remove object_a and object_b from headline if present
-            object_a_upper = object_a.upper()
-            object_b_upper = object_b.upper()
-            words = headline.split()
-            words = [w for w in words if w != object_a_upper and w != object_b_upper]
-            headline = " ".join(words)
-            
-            # CRITICAL: Ensure product name is always in headline
-            product_name_upper = product_name.upper()
-            product_words = product_name_upper.split()
-            headline_words = headline.split()
-            
-            # Check if product name (or any part of it) is in headline
-            product_in_headline = any(word in headline_words for word in product_words)
-            
-            if not product_in_headline:
-                # Add product name at the beginning
-                logger.info(f"STEP 2 - HEADLINE: Product name '{product_name}' not found, adding it to headline")
-                headline = f"{product_name_upper} {headline}".strip()
-                headline_words = headline.split()
-            
-            # HARD_MODE: No truncation (full headline required)
-            # In hard_mode, we keep the full headline as generated
-            
+            headline = _postprocess_builder1_headline(
+                headline, product_name, object_a, object_b
+            )
             words_count = len(headline.split())
             logger.info(f"HEADLINE_POLICY hard_mode=True headline_words={words_count} headline='{headline}'")
             return headline
@@ -4367,37 +4491,53 @@ def generate_short_phrase(product_name: str) -> str:
 # Builder1 gpt-image-1.5: hard constraints (headline/marketing copy is generated separately — never burned into pixels).
 BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN = """
 TEXT AND SURFACE BAN (ABSOLUTE — the rendered image must contain NONE of these):
-NO text; NO letters; NO words; NO typography; NO signage; NO banner; NO poster; NO label; NO printed surface; NO logo; NO numbers; NO branding; NO watermarks; NO captions; NO subtitles; NO UI chrome.
-Repeat: zero readable characters in the frame — only physical objects and clean background. No blank boards, placards, screens, or paper sheets that imply a text area.
+NO text; NO letters; NO words; NO typography; NO signage; NO banner; NO poster; NO placard; NO label; NO printed surface; NO logo; NO numbers; NO branding; NO watermarks; NO captions; NO subtitles; NO UI chrome.
+Repeat: zero readable characters in the frame — only physical objects and clean background. No blank boards, placards, screens, paper sheets, sticky notes, phone UIs, or flat panes that read as a text or ad placeholder.
+Unless a selected primary object is literally that kind of object by definition, do NOT introduce sign-like, banner-like, or poster-like surfaces as a composition cheat or substitute for real overlap between A and B.
 """
 
 BUILDER1_IMAGE_SIDE_BY_SIDE_COMPOSITION_HARD = """
 HARD LAYOUT (SIDE BY SIDE):
-Both Object A and Object B must be fully visible as physical objects.
+Both Object A primary and Object B primary must be fully visible and must be the two dominant subjects — larger and more salient than any secondary/context elements.
 They must partially overlap each other directly (foreground/background occlusion — one object clearly in front of part of the other).
 They must read as one joined visual mass, not two separate product shots parked far apart with empty dead space between.
-Do not place either object beside a blank sign, banner, poster, placard, billboard, dry-erase board, device screen, sheet of paper, or any flat surface that reads as a text or ad placeholder.
+Do not degrade into “one main object + sign/banner/placard/poster” — the composition must be two real overlapping objects, not one object beside a flat ad surface.
+Do not place either primary beside a blank sign, banner, poster, placard, billboard, dry-erase board, device screen, sheet of paper, or any flat surface that reads as a text or ad placeholder.
 """
 
 BUILDER1_IMAGE_REPLACEMENT_COMPOSITION_HARD = """
 HARD LAYOUT (REPLACEMENT):
-Only Object B is visible as the main object. Object A must not appear as a separate main object, duplicate, ghost, split panel, or side-by-side twin.
-Object B must occupy Object A's original role and position in the scene continuity.
-Do not add any banner, sign, poster, billboard, frame-with-blank-area, or substitute flat surface as a composition device.
+Only Object B primary is the dominant visible main product. Object A primary must NOT appear as a second main object, duplicate, ghost, reflection twin, or side-by-side panel.
+Object B must occupy Object A's original situational role, scale, and framing in the scene so the image reads as true replacement, not a comparison layout.
+Do not add any banner, sign, poster, placard, billboard, frame-with-blank-area, or substitute flat surface as a composition device.
 """
 
 # Canonical outer form only — keep silhouettes aligned with the A/B match (esp. cone-like / simple solids).
 BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT = """
-CANONICAL MORPHOLOGY AND ANTI-EMBELLISHMENT (preserve the silhouette that justified the A/B pairing):
-- Each primary main object must appear in its core canonical form — the clean outer shell whose contour was matched. In side-by-side that means both Object A and Object B; when only one main subject is visible (replacement), that rule applies to Object B as the sole main product.
-- No optional add-ons, accessories, packaging clutter, loose props, or extras that materially change, break, or hide the main outer silhouette of either object.
+CANONICAL MORPHOLOGY AND ANTI-EMBELLISHMENT (preserve the exact outer shape that justified the A/B pairing):
+- The visible main form of each selected primary must match the intended primary label exactly — no substitute objects and no different product category standing in for A or B.
+- Each primary must appear in its core canonical outer shell — the contour that was matched. No add-ons that break or hide that outer silhouette.
 
-FOOD / PRODUCT / SIMPLE SOLIDS (e.g. cone, cup, bottle, bulb, horn, jar, dome, cylinder, similar):
-- Do NOT add toppings, decorations, fillings, splashes, sprinkles, scoops, steam, smoke, garnish, whipped cream, drizzle, loose fruit, nuts, straws, cup sleeves, or other attached extras — except when they are intrinsic to the stock geometry of the object type itself (not marketing garnish).
-- For cone-like or tapering shapes: keep the outer cone/cup contour fully readable; do not let toppings or piled contents destroy the main-form similarity.
+FOOD / PRODUCT / SIMPLE SOLIDS (cone, cup, bottle, bulb, horn, jar, dome, cylinder, similar):
+- Do NOT add toppings, decorations, fillings, splashes, sprinkles, scoop-heavy ice masses, steam, smoke, garnish, whipped cream, drizzle, loose fruit, nuts, straws, cup sleeves, or attached extras — except when strictly intrinsic to the stock geometry (not garnish).
+- For cone-like or tapering shapes (e.g. ice-cream cone vs megaphone match): preserve a clear cone outer silhouette; do not let scoops or piled mass dominate so the cone form is lost.
 
 SHAPE-FIDELITY (critical):
-- Preserve the clean outer contour that created the shape match — do not weaken the pairing with embellishments, busy surface noise, or “hero” styling that obscures the outline.
+- Preserve the clean outer contour that created the shape match — minimize non-core additions so the matched form stays unmistakable.
+"""
+
+BUILDER1_IMAGE_OBJECT_HIERARCHY_SIDE_BY_SIDE_TEMPLATE = """
+VISUAL HIERARCHY (SIDE BY SIDE — hard):
+- The two co-dominant main objects must be exactly A primary (“{ap}”) and B primary (“{bp}”). They must match those labels visually — not different products.
+- Secondary/context elements (A_sub “{asub}”, B_sub “{bsub}”) must NEVER replace, impersonate, or visually stand in for a primary. They must stay clearly smaller and subordinate — supporting context only, never the star of the frame.
+- If secondaries appear, they must read as minor adjacent props; they must not dominate salience, size, or center of attention over either primary.
+"""
+
+BUILDER1_IMAGE_OBJECT_HIERARCHY_REPLACEMENT_EXTRA = """
+VISUAL HIERARCHY (REPLACEMENT — hard):
+- Only B primary is the dominant main subject. A primary must not remain visible as a competing main object.
+- A_sub may appear only as clearly secondary and smaller than B primary — never dominant over B.
+- Do not depict or require B_sub in replacement; ignore B secondary for this layout.
 """
 
 
@@ -4485,12 +4625,14 @@ The scene is based entirely on:
 Secondary from Object A's scene (must stay visible, placed naturally next to the main subject):
 "{locked_sub_object}"
 
+{BUILDER1_IMAGE_OBJECT_HIERARCHY_REPLACEMENT_EXTRA}
+
 REPLACEMENT (main subject):
-- Only "{replacement_main_object}" (Object B) is visible as the main product/object. Do not show "{object_a}" (Object A) anywhere — no duplicate, ghosting, outline, or split comparison of A.
+- Only "{replacement_main_object}" (Object B primary) is visible as the main product/object. Do not show "{object_a}" (Object A primary) anywhere — no duplicate, ghosting, outline, or split comparison of A.
 
 - Object B replaces Object A in A's original setting: same situational role, placement, scale, and orientation that A would have had in this frame.
 
-- Keep "{locked_sub_object}" beside or adjacent to Object B as it would logically sit with the main object in this scene (clearly visible, not cropped out). Do not add or require any secondary object belonging only to Object B.
+- Keep "{locked_sub_object}" (A_sub) beside or adjacent to Object B as it would logically sit with the main object in this scene (clearly visible, not cropped out). A_sub must stay secondary — smaller and less salient than B primary. Do not add or require any secondary object belonging only to Object B (no B_sub).
 
 - Static product-style framing only: sharp focus, natural shadows, realistic materials. No floating objects; no extra props beyond what the scene requires.
 
@@ -4510,16 +4652,29 @@ No surreal distortions."""
     if shape_hint:
         shape_instruction = f"\n- Both objects must share a similar outline: {shape_hint}. Emphasize comparable silhouettes."
     
+    asub_disp = str((object_a_item or {}).get("sub_object") or "").strip() or "(none)"
+    bsub_disp = str((object_b_item or {}).get("sub_object") or "").strip() or "(none)"
+    hierarchy_sbs = BUILDER1_IMAGE_OBJECT_HIERARCHY_SIDE_BY_SIDE_TEMPLATE.format(
+        ap=object_a, bp=object_b, asub=asub_disp, bsub=bsub_disp
+    )
+    sub_objects_line = (
+        "- Secondaries (if any) appear only as specified above — never as large or as central as either primary."
+        if (asub_disp != "(none)" or bsub_disp != "(none)")
+        else "- Include ONLY the two primaries as the main subjects — no extra secondary objects or scene props beyond minimal white-background context."
+    )
+
     side_by_side_prompt = f"""Create a high-quality photorealistic advertisement photograph with SIDE BY SIDE composition (both products in one frame).
 
 Composition (SIDE BY SIDE):
-- Show BOTH main objects: "{object_a}" and "{object_b}".
+- Show BOTH main objects: "{object_a}" (A primary) and "{object_b}" (B primary). These two labels must match what is visibly depicted — no stand-in objects.
 
-- The two objects must partially overlap in the center (clear partial occlusion; not two separated cutouts on white). The overlap must make their similar silhouette relationship obvious.
+{hierarchy_sbs}
+
+- The two primaries must partially overlap in the center (clear partial occlusion; not two separated cutouts on white). The overlap must make their similar silhouette relationship obvious.
 
 - They must read as one joined visual unit — not two isolated subjects with a gap or a sign/banner between them.
 
-- Do NOT include any sub-objects (main objects only).
+{sub_objects_line}
 
 - Objects must not be duplicated. Main object types must be different.
 
@@ -4555,6 +4710,224 @@ def check_text_quality(image_base64: str) -> bool:
     return True
 
 
+def _parse_json_object_from_llm_text(raw: str) -> Optional[Dict[str, Any]]:
+    t = (raw or "").strip()
+    if not t:
+        return None
+    if t.startswith("```"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1]) if len(lines) > 2 else t
+    if t.startswith("```json"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1]) if len(lines) > 2 else t
+    t = t.strip()
+    if "{" in t and "}" in t:
+        t = t[t.find("{") : t.rfind("}") + 1]
+    try:
+        obj = json.loads(t)
+        return obj if isinstance(obj, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def _diagnose_generated_image_primary_objects(
+    image_base64: str,
+    a_primary: str,
+    b_primary: str,
+    a_sub: str = "",
+    b_sub: str = "",
+    mode_decision: str = "SIDE_BY_SIDE",
+    request_id: Optional[str] = None,
+) -> None:
+    """
+    Diagnostics only: send image to o3-pro vision and compare to expected primaries.
+    Does not raise; does not block or retry generation.
+    """
+    if not image_base64 or not str(a_primary).strip() or not str(b_primary).strip():
+        return
+    ap = str(a_primary).strip()
+    bp = str(b_primary).strip()
+    asx = str(a_sub or "").strip()
+    bsx = str(b_sub or "").strip()
+    rid = request_id or "-"
+    mode_u = (mode_decision or "SIDE_BY_SIDE").strip().upper()
+    mode_line = (
+        f"Expected creative mode: {mode_u}. "
+        "If REPLACEMENT: A primary should not appear as a competing main product; B primary should dominate. "
+        "If SIDE_BY_SIDE: both A and B primaries should appear as co-dominant overlapping subjects."
+    )
+    prompt = f"""You are verifying a generated advertisement image against expected objects.
+
+{mode_line}
+
+Expected A primary: "{ap}"
+Expected B primary: "{bp}"
+Expected A secondary (may be empty): "{asx}"
+Expected B secondary (may be empty): "{bsx}"
+
+Look at the image. Return JSON ONLY with exactly these keys (no markdown, no commentary):
+{{
+  "visible_main_objects": ["short English noun phrases for distinct main physical objects you see"],
+  "does_A_primary_appear": true or false,
+  "does_B_primary_appear": true or false,
+  "is_A_sub_dominant": true or false,
+  "is_B_sub_dominant": true or false,
+  "does_the_image_read_as_side_by_side": true or false,
+  "does_the_image_read_as_replacement": true or false,
+  "contains_forbidden_text_surface": true or false
+}}
+
+Definitions:
+- does_A_primary_appear / does_B_primary_appear: true if that primary reads as a clear main subject at appropriate scale (not tiny clutter). For REPLACEMENT mode, set does_A_primary_appear to false if A is correctly absent as a main object.
+- is_A_sub_dominant: true only if "{asx}" is non-empty AND that secondary is visually more dominant than A primary; else false.
+- is_B_sub_dominant: true only if "{bsx}" is non-empty AND that secondary is visually more dominant than B primary; else false.
+- does_the_image_read_as_side_by_side: true if two overlapping co-primary objects on a simple background, not a sign-ad layout.
+- does_the_image_read_as_replacement: true if one main object occupies the scene as if it replaced the other (no side-by-side twinning of two mains).
+- contains_forbidden_text_surface: true if you see readable text, logos, or flat sign/banner/placard/poster surfaces used like an ad panel (should be false for a clean pass)."""
+
+    image_url = f"data:image/png;base64,{image_base64}"
+    input_content: List[Dict[str, Any]] = [
+        {"type": "input_text", "text": prompt},
+        {"type": "input_image", "image_url": image_url},
+    ]
+    try:
+        client = OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            timeout=httpx.Timeout(IMAGE_VALIDATION_TIMEOUT_SECONDS),
+            max_retries=0,
+        )
+        r = client.responses.create(
+            model=IMAGE_VALIDATION_VISION_MODEL,
+            input=[{"role": "user", "content": input_content}],
+            reasoning={"effort": "low"},
+        )
+        raw = (r.output_text or "").strip()
+
+        data = _parse_json_object_from_llm_text(raw)
+        if not data:
+            logger.warning(
+                "IMAGE_VALIDATION_RESULT request_id=%s status=parse_fail A_primary=%r B_primary=%r A_sub=%r B_sub=%r mode=%s raw_len=%s",
+                rid,
+                ap,
+                bp,
+                asx,
+                bsx,
+                mode_u,
+                len(raw or ""),
+            )
+            return
+
+        visible = data.get("visible_main_objects")
+        if not isinstance(visible, list):
+            visible = []
+        vis_clean = [str(x) for x in visible if x is not None][:32]
+
+        da = bool(data.get("does_A_primary_appear"))
+        db = bool(data.get("does_B_primary_appear"))
+        a_sub_dom = bool(data.get("is_A_sub_dominant"))
+        b_sub_dom = bool(data.get("is_B_sub_dominant"))
+        reads_sbs = bool(data.get("does_the_image_read_as_side_by_side"))
+        reads_repl = bool(data.get("does_the_image_read_as_replacement"))
+        bad_surface = bool(data.get("contains_forbidden_text_surface"))
+        flags: Dict[str, Any] = {
+            "does_A_primary_appear": da,
+            "does_B_primary_appear": db,
+            "is_A_sub_dominant": a_sub_dom,
+            "is_B_sub_dominant": b_sub_dom,
+            "does_the_image_read_as_side_by_side": reads_sbs,
+            "does_the_image_read_as_replacement": reads_repl,
+            "contains_forbidden_text_surface": bad_surface,
+        }
+
+        logger.info(
+            "IMAGE_VALIDATION_RESULT request_id=%s A_primary=%r A_sub=%r B_primary=%r B_sub=%r mode_decision=%s visible_main_objects=%s flags=%s",
+            rid,
+            ap,
+            asx,
+            bp,
+            bsx,
+            mode_u,
+            vis_clean,
+            flags,
+        )
+
+        if mode_u == "REPLACEMENT":
+            if da:
+                logger.error(
+                    "IMAGE_VALIDATION_FAILED request_id=%s reason=A_primary_should_be_absent_in_replacement A_primary=%r visible_main_objects=%s",
+                    rid,
+                    ap,
+                    vis_clean,
+                )
+            if not db:
+                logger.error(
+                    "IMAGE_VALIDATION_FAILED request_id=%s reason=B_primary_not_visible B_primary=%r visible_main_objects=%s",
+                    rid,
+                    bp,
+                    vis_clean,
+                )
+        else:
+            if not da:
+                logger.error(
+                    "IMAGE_VALIDATION_FAILED request_id=%s reason=A_primary_not_visible A_primary=%r visible_main_objects=%s",
+                    rid,
+                    ap,
+                    vis_clean,
+                )
+            if not db:
+                logger.error(
+                    "IMAGE_VALIDATION_FAILED request_id=%s reason=B_primary_not_visible B_primary=%r visible_main_objects=%s",
+                    rid,
+                    bp,
+                    vis_clean,
+                )
+            if not reads_sbs:
+                logger.warning(
+                    "IMAGE_VALIDATION_WARNING request_id=%s reason=may_not_read_as_side_by_side mode=%s flags=%s",
+                    rid,
+                    mode_u,
+                    flags,
+                )
+        if a_sub_dom:
+            logger.warning(
+                "IMAGE_VALIDATION_WARNING request_id=%s reason=A_sub_dominant_over_A_primary A_primary=%r A_sub=%r",
+                rid,
+                ap,
+                asx,
+            )
+        if b_sub_dom:
+            logger.warning(
+                "IMAGE_VALIDATION_WARNING request_id=%s reason=B_sub_dominant_over_B_primary B_primary=%r B_sub=%r",
+                rid,
+                bp,
+                bsx,
+            )
+        if bad_surface:
+            logger.warning(
+                "IMAGE_VALIDATION_WARNING request_id=%s reason=forbidden_text_or_sign_like_surface flags=%s",
+                rid,
+                flags,
+            )
+        if mode_u == "REPLACEMENT" and reads_sbs:
+            logger.warning(
+                "IMAGE_VALIDATION_WARNING request_id=%s reason=replacement_but_reads_as_side_by_side flags=%s",
+                rid,
+                flags,
+            )
+        if mode_u == "SIDE_BY_SIDE" and reads_repl and not reads_sbs:
+            logger.warning(
+                "IMAGE_VALIDATION_WARNING request_id=%s reason=side_by_side_but_reads_as_replacement flags=%s",
+                rid,
+                flags,
+            )
+    except Exception as e:
+        logger.warning(
+            "IMAGE_VALIDATION_SKIP request_id=%s error=%s",
+            rid,
+            e,
+        )
+
+
 def generate_image_with_dalle(
     client: OpenAI,
     object_a: str,
@@ -4569,7 +4942,13 @@ def generate_image_with_dalle(
     object_a_context: Optional[str] = None,
     object_b_context: Optional[str] = None,
     quality: str = "high",
-    product_name: Optional[str] = None
+    product_name: Optional[str] = None,
+    object_a_sub: Optional[str] = None,
+    object_b_sub: Optional[str] = None,
+    object_a_item: Optional[Dict] = None,
+    object_b_item: Optional[Dict] = None,
+    force_mode: Optional[str] = None,
+    validation_request_id: Optional[str] = None,
 ) -> bytes:
     """
     STEP 3 - IMAGE GENERATION
@@ -4597,9 +4976,10 @@ def generate_image_with_dalle(
     model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-1.5")
     image_size = f"{width}x{height}"
     
-    # Log before image generation (SIDE BY SIDE only)
+    # Log before image generation
     image_prompt_includes_shape_hint = shape_hint is not None and shape_hint != ""
-    mode = "SIDE_BY_SIDE"  # Always SIDE BY SIDE
+    _eff = (force_mode if force_mode else ACE_IMAGE_MODE) or "side_by_side"
+    mode = "REPLACEMENT" if "replacement" in str(_eff).lower() else "SIDE_BY_SIDE"
     logger.info(f"ACE_LAYOUT_MODE={ACE_LAYOUT_MODE}")
     logger.info(f"STEP3_MODE={mode}")
     logger.info(f"STEP 3 - IMAGE GENERATION: image_model={model}, image_size={image_size}, object_a={object_a}, object_b={object_b}, headline={headline}, image_prompt_includes_shape_hint={image_prompt_includes_shape_hint}, shape_hint=\"{shape_hint or ''}\", mode={mode}")
@@ -4619,7 +4999,10 @@ def generate_image_with_dalle(
             is_strict=is_strict,
             object_a_context=object_a_context,
             object_b_context=object_b_context,
-            product_name=product_name
+            object_a_item=object_a_item,
+            object_b_item=object_b_item,
+            product_name=product_name,
+            force_mode=force_mode,
         )
         
         try:
@@ -4652,6 +5035,17 @@ def generate_image_with_dalle(
             # Decode base64 to bytes
             image_bytes = base64.b64decode(image_base64)
             logger.info(f"Image generated successfully (attempt {attempt + 1}), image_model={model}, image_size={image_size}")
+            _em = (force_mode if force_mode else ACE_IMAGE_MODE) or "side_by_side"
+            _is_repl = "replacement" in str(_em).lower()
+            _diagnose_generated_image_primary_objects(
+                image_base64,
+                object_a,
+                object_b,
+                a_sub=object_a_sub or "",
+                b_sub=("" if _is_repl else (object_b_sub or "")),
+                mode_decision=("REPLACEMENT" if _is_repl else "SIDE_BY_SIDE"),
+                request_id=validation_request_id,
+            )
             return image_bytes
             
         except openai_retry.OpenAIRateLimitError:
@@ -4682,7 +5076,13 @@ def _generate_final_image_unified(
     object_b_context: Optional[str] = None,
     quality: str = "high",
     max_retries: int = 3,
-    product_name: Optional[str] = None
+    product_name: Optional[str] = None,
+    object_a_sub: Optional[str] = None,
+    object_b_sub: Optional[str] = None,
+    object_a_item: Optional[Dict] = None,
+    object_b_item: Optional[Dict] = None,
+    force_mode: Optional[str] = None,
+    validation_request_id: Optional[str] = None,
 ) -> bytes:
     """
     Unified function to generate final image (used by both preview and zip).
@@ -4704,7 +5104,13 @@ def _generate_final_image_unified(
         object_a_context=object_a_context,
         object_b_context=object_b_context,
         quality=quality,
-        product_name=product_name
+        product_name=product_name,
+        object_a_sub=object_a_sub,
+        object_b_sub=object_b_sub,
+        object_a_item=object_a_item,
+        object_b_item=object_b_item,
+        force_mode=force_mode,
+        validation_request_id=validation_request_id,
     )
 
 
@@ -4909,6 +5315,12 @@ def render_final_ad_bytes(
     )
     
     # Generate image
+    object_a_sub_val = ""
+    object_b_sub_val = ""
+    if object_a_item:
+        object_a_sub_val = str(object_a_item.get("sub_object") or "").strip()
+    if object_b_item:
+        object_b_sub_val = str(object_b_item.get("sub_object") or "").strip()
     image_bytes = _generate_final_image_unified(
         client=client,
         object_a=object_a_name,
@@ -4921,7 +5333,13 @@ def render_final_ad_bytes(
         object_b_context=object_b_context,
         quality=quality,
         max_retries=max_retries,
-        product_name=product_name
+        product_name=product_name,
+        object_a_sub=object_a_sub_val or None,
+        object_b_sub=object_b_sub_val or None,
+        object_a_item=object_a_item,
+        object_b_item=object_b_item,
+        force_mode=final_mode,
+        validation_request_id=None,
     )
     
     # Build selected_pair dict
@@ -5696,14 +6114,23 @@ def _build_phase2_image_prompt_base(pair: Dict, mode_decision: str) -> str:
             "Static product-style framing; preserve setting continuity implied by the objects. "
             "Do not add or depict any separate secondary object for Object B (no b_sub). "
         )
+        repl += BUILDER1_IMAGE_OBJECT_HIERARCHY_REPLACEMENT_EXTRA
         repl += BUILDER1_IMAGE_CANONICAL_MORPHOLOGY_ANTI_EMBELLISHMENT
         repl += BUILDER1_IMAGE_REPLACEMENT_COMPOSITION_HARD + no_text_rule
         repl += visibility_block
         return repl + "\n\n" + PHOTOREAL_STYLE_BLOCK
     has_secondary = bool(asub or bsub)
     visibility_block = _PHASE2_SECONDARY_VISIBILITY_RULE if has_secondary else ""
+    hierarchy_phase2 = BUILDER1_IMAGE_OBJECT_HIERARCHY_SIDE_BY_SIDE_TEMPLATE.format(
+        ap=str(ap or ""),
+        bp=str(bp or ""),
+        asub=str(asub or "").strip() or "(none)",
+        bsub=str(bsub or "").strip() or "(none)",
+    )
     side = (
-        photoreal_base + f"Two main objects in one frame with partial overlap: {a_str} and {b_str}. "
+        photoreal_base
+        + hierarchy_phase2
+        + f" Two main objects in one frame with partial overlap: {a_str} and {b_str}. "
         "Clear partial overlap in the center (foreground object occludes part of the other). "
         "Composition reads as one unified product shot. Sub-objects visible per rules below."
     )
@@ -5802,7 +6229,7 @@ The image is a marketing metaphor. Do NOT describe the image literally (objects,
 Rules:
 - body: about 50 words. Persuasive marketing copy that interprets the visual metaphor and supports the Advertising Goal. No literal description of what is in the image. No headline. Output format: {{ "body": "..." }}"""
 
-# VISION_COPY: headline + body from image (two-pass flow). Output: headline (3–6 words, include productName naturally) + body (~50 words).
+# VISION_COPY: headline + body from image (two-pass flow). Headline capped post-parse to BUILDER1_HEADLINE_MAX_WORDS.
 VISION_COPY_HEADLINE_BODY_TEMPLATE = """Product: {product_name}
 Description: {product_description}
 Advertising goal: {advertising_goal}
@@ -5811,7 +6238,7 @@ Objects in image: A primary={a_primary}, A sub={a_sub}; B primary={b_primary}, B
 Look at the ad image. Return valid JSON with exactly two keys: "headline" and "body".
 
 Rules:
-- headline: 3–6 words. Must begin with the product name ({product_name}), then one normal space, then the rest — no comma or other punctuation between name and tail. Must NOT be only the product name. Persuasive marketing headline (not descriptive).
+- headline: up to 7 words total including the product name (count each word in a multi-word product name). Must begin with the product name ({product_name}), then one normal space, then the rest — no comma or other punctuation between name and tail. Must NOT be only the product name. Base the headline on an existing expression if possible (idiom, saying, proverb, slogan pattern, or other widely familiar English wording); prefer that over an invented phrase. The expression must fit what you see and be justified by the advertising goal. Double-meaning slogan: familiar wording that gains new advertising meaning because of this image — the image is the cause of the headline; interpret the image, do not describe it literally (no inventory of objects, layout, or style). Do not put A/B primary object names in the headline. For eventual on-ad typography: product name is the dominant, larger part on the same baseline as any following words.
 - body: about 50 words. Marketing copy grounded in what is visible; interpretive (not a literal caption). Do not invent action or causality between the objects A and B. Focus on meaning, positioning, impact.
 
 Output format only: {{ "headline": "...", "body": "..." }}"""
@@ -5961,6 +6388,12 @@ def _image_only_single_call(
     prompt: Optional[str] = None,
     log_prefix: str = "IMAGE_CALL",
     quality: str = "low",
+    *,
+    validate_a_primary: Optional[str] = None,
+    validate_b_primary: Optional[str] = None,
+    validate_a_sub: str = "",
+    validate_b_sub: str = "",
+    validate_mode_decision: Optional[str] = None,
 ) -> Tuple[str, bool]:
     """
     Single gpt-image-1.5 call for ACE_IMAGE_ONLY mode. No retries, 60s timeout.
@@ -5992,6 +6425,20 @@ def _image_only_single_call(
         if not b64:
             raise ValueError("No image data in response")
         logger.info(f"{log_prefix}_OK latency_ms={latency_ms} request_id={request_id}")
+        if validate_a_primary and validate_b_primary:
+            vm = (validate_mode_decision or "SIDE_BY_SIDE").strip().upper()
+            if vm not in ("REPLACEMENT", "SIDE_BY_SIDE"):
+                vm = "SIDE_BY_SIDE"
+            _is_repl = vm == "REPLACEMENT"
+            _diagnose_generated_image_primary_objects(
+                b64,
+                validate_a_primary,
+                validate_b_primary,
+                a_sub=validate_a_sub or "",
+                b_sub=("" if _is_repl else (validate_b_sub or "")),
+                mode_decision=vm,
+                request_id=request_id,
+            )
         return (b64, True)
     except Exception as e:
         latency_ms = int((time.time() - t0) * 1000)
@@ -6175,7 +6622,36 @@ def generate_preview_data(
             product_name = (invented or "").strip() or _derive_fallback_product_name(product_description)
             logger.info(f"PRODUCT_NAME_SOURCE=invented request_id={request_id}")
             logger.info(f"PRODUCT_NAME_RESOLVED=\"{product_name}\" request_id={request_id}")
-        image_base64, ok_base = _image_only_single_call(size, request_id, prompt=prompt_base, log_prefix="IMAGE_BASE", quality="high")
+        _val_a: Optional[str] = None
+        _val_b: Optional[str] = None
+        _val_asub = ""
+        _val_bsub = ""
+        _val_mode: Optional[str] = None
+        if goal_pairs_data and goal_pairs_data.get("pairs"):
+            _pidx = max(0, min(len(goal_pairs_data["pairs"]) - 1, (ad_index or 1) - 1))
+            _pv = goal_pairs_data["pairs"][_pidx]
+            _val_a = (_pv.get("a_primary") or "").strip() or None
+            _val_b = (_pv.get("b_primary") or "").strip() or None
+            _val_asub = (_pv.get("a_sub") or "").strip()
+            _val_bsub = (_pv.get("b_sub") or "").strip()
+            _sim_v = int(_pv.get("silhouette_similarity", 50))
+            _val_mode = (
+                "REPLACEMENT"
+                if _sim_v >= SIMILARITY_THRESHOLD_REPLACEMENT
+                else "SIDE_BY_SIDE"
+            )
+        image_base64, ok_base = _image_only_single_call(
+            size,
+            request_id,
+            prompt=prompt_base,
+            log_prefix="IMAGE_BASE",
+            quality="high",
+            validate_a_primary=_val_a,
+            validate_b_primary=_val_b,
+            validate_a_sub=_val_asub,
+            validate_b_sub=_val_bsub,
+            validate_mode_decision=_val_mode,
+        )
         if not ok_base:
             image_base64 = _IMAGE_ONLY_PLACEHOLDER_BASE64
         headline = (product_name or "Ad Headline").strip()
@@ -6220,7 +6696,12 @@ def generate_preview_data(
                         )
                         if copy_status == "completed":
                             if headline_res:
-                                headline = headline_res
+                                headline = _postprocess_builder1_headline(
+                                    headline_res,
+                                    product_name,
+                                    a_pri or None,
+                                    b_pri or None,
+                                )
                             if body_res:
                                 body = body_res
                             vision_copy_ok = True
@@ -6254,7 +6735,16 @@ def generate_preview_data(
                     + BUILDER1_IMAGE_NO_TEXT_AND_SURFACE_BAN
                 )
             image_final, ok_final = _image_only_single_call(
-                size, request_id, prompt=prompt_final, log_prefix="IMAGE_FINAL", quality="high"
+                size,
+                request_id,
+                prompt=prompt_final,
+                log_prefix="IMAGE_FINAL",
+                quality="high",
+                validate_a_primary=_val_a,
+                validate_b_primary=_val_b,
+                validate_a_sub=_val_asub,
+                validate_b_sub=_val_bsub,
+                validate_mode_decision=_val_mode,
             )
             if not ok_final:
                 image_final = _IMAGE_ONLY_PLACEHOLDER_BASE64
