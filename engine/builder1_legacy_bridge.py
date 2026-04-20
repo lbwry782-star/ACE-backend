@@ -2,21 +2,19 @@
 Compatibility bridge for Builder1 preview job wiring used by app.py.
 
 Exceptions and GOAL_PAIR_* constants below are local copies matching
-engine.side_by_side_v1. create_goal_pair_background and _build_goal_pair_prompt
-are implemented here; poll/cancel remain in side_by_side_v1.
+engine.side_by_side_v1. Goal-pair OpenAI helpers are fully local; this module
+does not import engine.side_by_side_v1.
 """
 
+import json
 import logging
 import os
-from typing import Optional
+import re
+import time
+from typing import Dict, Optional, Tuple
 
 import httpx
 from openai import OpenAI
-
-from engine.side_by_side_v1 import (
-    poll_goal_pair_response,
-    cancel_goal_pair_response,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +126,101 @@ def _build_goal_pair_prompt(product_name: str, product_description: str) -> str:
     return GOAL_PAIR_O3_PROMPT_WHEN_NO_PRODUCT.format(product_description=desc)
 
 
+_SECONDARY_OBJECT_INTEGRAL_PART_WORDS = frozenset({
+    "sole", "soles", "pip", "pips", "face", "faces", "horn", "horns", "opening", "openings",
+    "edge", "edges", "cap", "caps", "handle", "handles", "base", "bases", "frame", "frames",
+    "peel", "peels", "rim", "rims", "mouth", "neck", "lid", "lids", "dial", "dials", "needle", "needles",
+    "stem", "stems", "blade", "blades", "tip", "tips", "point", "points", "hole", "holes", "slot", "slots",
+    "texture", "surface", "component", "components", "part", "parts", "glassy", "builtin", "built-in",
+})
+
+# Safe fallback when a_sub/b_sub is rejected (external contextual placeholder).
+_SECONDARY_OBJECT_SAFE_FALLBACK = "context object"
+
+
+def _validate_secondary_object(primary: str, sub: str, request_id: Optional[str] = None) -> Tuple[bool, str]:
+    """
+    Return (is_valid, reason). Secondary must be external, contextual; not a physical part of the primary.
+    """
+    primary = (primary or "").strip().lower()
+    sub = (sub or "").strip().lower()
+    if not sub:
+        return (False, "empty")
+    sub_words = set(re.sub(r"[^\w\s]", "", sub).split())
+    if not sub_words:
+        return (False, "empty")
+    for w in sub_words:
+        if w in _SECONDARY_OBJECT_INTEGRAL_PART_WORDS:
+            logger.info(
+                f"SECONDARY_OBJECT_VALIDATION primary=\"{primary or ''}\" sub=\"{sub}\" valid=false "
+                f"reason=integral_part request_id={request_id or ''}"
+            )
+            return (False, "integral_part")
+    logger.info(
+        f"SECONDARY_OBJECT_VALIDATION primary=\"{primary or ''}\" sub=\"{sub}\" valid=true "
+        f"reason=external_context request_id={request_id or ''}"
+    )
+    return (True, "external_context")
+
+
+def _parse_goal_pair_output(raw: str, request_id: Optional[str] = None) -> Optional[Dict]:
+    """Parse raw o3 output to goal + 3 pairs dict. Validates secondary objects; replaces invalid a_sub/b_sub with safe fallback. Returns None on parse failure."""
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("```"):
+        lines = raw.split("\n")
+        raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+    if raw.startswith("```json"):
+        lines = raw.split("\n")
+        raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
+    try:
+        data = json.loads(raw)
+        goal = (data.get("advertising_goal") or "").strip()
+        pairs = data.get("pairs")
+        if not isinstance(pairs, list) or len(pairs) != 3:
+            return None
+        out_pairs = []
+        for p in pairs:
+            if not isinstance(p, dict):
+                return None
+            ap = str(p.get("a_primary") or "").strip()
+            bp = str(p.get("b_primary") or "").strip()
+            if not ap or not bp:
+                return None
+            a_sub_raw = str(p.get("a_sub") or "").strip()
+            b_sub_raw = str(p.get("b_sub") or "").strip()
+            a_sub = a_sub_raw
+            b_sub = b_sub_raw
+            valid_a, _ = _validate_secondary_object(ap, a_sub_raw, request_id)
+            if not valid_a and a_sub_raw:
+                a_sub = _SECONDARY_OBJECT_SAFE_FALLBACK
+            valid_b, _ = _validate_secondary_object(bp, b_sub_raw, request_id)
+            if not valid_b and b_sub_raw:
+                b_sub = _SECONDARY_OBJECT_SAFE_FALLBACK
+            logger.info(f"SECONDARY_OBJECT_FINAL primary=\"{ap}\" sub=\"{a_sub}\" request_id={request_id or ''}")
+            logger.info(f"SECONDARY_OBJECT_FINAL primary=\"{bp}\" sub=\"{b_sub}\" request_id={request_id or ''}")
+            sim = p.get("silhouette_similarity")
+            if sim is not None:
+                try:
+                    sim = max(0, min(100, int(sim)))
+                except (TypeError, ValueError):
+                    sim = 50
+            else:
+                sim = 50
+            out_pairs.append({
+                "a_primary": ap,
+                "a_sub": a_sub,
+                "b_primary": bp,
+                "b_sub": b_sub,
+                "silhouette_similarity": sim,
+            })
+        invented_name = (data.get("product_name") or "").strip() or None
+        return {"advertising_goal": goal or "Advertising goal", "pairs": out_pairs, "product_name": invented_name}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+
+
 __all__ = [
     "Step0BundleTimeoutError",
     "Step0BundleOpenAIError",
@@ -185,3 +278,76 @@ def create_goal_pair_background(
         logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=create_error")
         logger.error(f"GOAL_PAIR_BG_CREATE_FAIL error={e} request_id={request_id}")
         return None
+
+
+def poll_goal_pair_response(
+    response_id: str, request_id: str, created_at_ts: float
+) -> Tuple[Optional[Dict], str]:
+    """
+    Poll OpenAI GET /v1/responses/{id}. Returns (goal_pairs_data or None, status).
+    status in ("pending", "completed", "failed").
+    Enforces GOAL_PAIR_BG_MAX_WAIT_SECONDS; after that returns (None, "failed").
+    """
+    if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=timeout")
+        total_wait_s = int(time.time() - created_at_ts)
+        logger.info(f"GOAL_PAIR_BG_FAIL status=timeout total_wait_s={total_wait_s} max_wait_s={GOAL_PAIR_BG_MAX_WAIT_SECONDS} FALLBACK_USED=true request_id={request_id}")
+        return (None, "failed")
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(15),
+        max_retries=0,
+    )
+    try:
+        resp = client.responses.retrieve(response_id)
+    except Exception as e:
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=retrieve_error")
+        logger.error(f"GOAL_PAIR_BG_STATUS status=retrieve_error error={e} request_id={request_id}")
+        logger.info(f"GOAL_PAIR_BG_FAIL status=retrieve_error FALLBACK_USED=true request_id={request_id}")
+        return (None, "failed")
+    status = (getattr(resp, "status", None) or "").lower()
+    logger.info(f"GOAL_PAIR_BG_STATUS status={status} request_id={request_id}")
+    if status in ("queued", "in_progress"):
+        return (None, "pending")
+    if status == "completed":
+        raw = getattr(resp, "output_text", None) or ""
+        data = _parse_goal_pair_output(raw, request_id=request_id)
+        if data:
+            latency_ms = int((time.time() - created_at_ts) * 1000)
+            goal = (data.get("advertising_goal") or "Advertising goal")
+            logger.info(f"STAGE2_RESULT_OK request_id={request_id} latency_ms={latency_ms} output_chars={len(raw)}")
+            logger.info(f'STAGE2_MESSAGE advertising_goal="{goal}"')
+            for idx, p in enumerate(data.get("pairs") or [], 1):
+                a = p.get("a_primary") or ""
+                a_sub = p.get("a_sub") or ""
+                b = p.get("b_primary") or ""
+                b_sub = p.get("b_sub") or ""
+                sim = p.get("silhouette_similarity", 0)
+                logger.info(f'STAGE2_PAIR idx={idx} A="{a}" A_sub="{a_sub}" B="{b}" B_sub="{b_sub}" similarity={sim}')
+            logger.info(f'GOAL_DERIVED advertising_goal="{goal}"')
+            sim0 = data["pairs"][0].get("silhouette_similarity", 50) if data.get("pairs") else 50
+            logger.info(f"GOAL_PAIR_BG_COMPLETED latency_ms={latency_ms} output_chars={len(raw)} similarity={sim0} request_id={request_id}")
+            return (data, "completed")
+        logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=parse_error")
+        logger.error(f"GOAL_PAIR_BG_FAIL status=parse_error FALLBACK_USED=true request_id={request_id}")
+        return (None, "failed")
+    # failed, cancelled, incomplete, etc.
+    logger.info(f"STAGE2_RESULT_FAIL request_id={request_id} reason=status_{status}")
+    logger.info(f"GOAL_PAIR_BG_FAIL status={status} FALLBACK_USED=true request_id={request_id}")
+    return (None, "failed")
+
+
+def cancel_goal_pair_response(response_id: str, request_id: str) -> None:
+    """Cancel an in-progress background GOAL_PAIR response. No-op if cancel fails."""
+    if not response_id:
+        return
+    try:
+        client = OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            timeout=httpx.Timeout(10),
+            max_retries=0,
+        )
+        client.responses.cancel(response_id)
+        logger.info(f"GOAL_PAIR_BG_CANCELLED response_id={response_id} request_id={request_id}")
+    except Exception as e:
+        logger.warning(f"GOAL_PAIR_BG_CANCEL_FAIL response_id={response_id} error={e} request_id={request_id}")
