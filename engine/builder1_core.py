@@ -238,3 +238,27 @@ def build_builder1_scaffold_plan(
         marketing_text=marketing_text,
         image_validation_passed=image_validation_passed,
     )
+
+
+def builder1_plan_to_preview_response(
+    plan: Builder1Plan,
+    image_base64: str = "",
+    image_url: str = "",
+) -> dict:
+    return {
+        "imageBase64": normalize_text(image_base64),
+        "image_base64": normalize_text(image_base64),
+        "headline": normalize_text(plan.headline),
+        "bodyText50": normalize_text(plan.marketing_text),
+        "body_text": normalize_text(plan.marketing_text),
+        "resolvedProductName": normalize_text(plan.product_name),
+        "image_url": normalize_text(image_url),
+        "ad_goal": normalize_text(plan.advertising_promise),
+        "object_a": normalize_text(plan.object_a),
+        "object_b": normalize_text(plan.object_b),
+        "marketing_copy_50_words": normalize_text(plan.marketing_text),
+        "headline_placement": normalize_text(plan.headline_placement),
+        "mode": normalize_text(plan.mode),
+        "composition": normalize_text(plan.composition),
+        "shape_similarity_score": plan.similarity_score,
+    }
