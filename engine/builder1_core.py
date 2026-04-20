@@ -9,6 +9,19 @@ SIMILARITY_THRESHOLD_REPLACEMENT = 85
 MODE_SIDE_BY_SIDE = "SIDE_BY_SIDE"
 MODE_REPLACEMENT = "REPLACEMENT"
 
+BUILDER1_MODEL_OUTPUT_REQUIRED_FIELDS = {
+    "resolved_product_name": str,
+    "language": str,
+    "object_a": str,
+    "secondary_object_a": str,
+    "object_b": str,
+    "similarity_score": float,
+    "advertising_promise": str,
+    "headline": str,
+    "headline_placement": str,
+    "marketing_text": str,
+}
+
 
 def decide_mode(similarity: float) -> str:
     if similarity >= SIMILARITY_THRESHOLD_REPLACEMENT:
@@ -150,6 +163,24 @@ def builder1_model_output_to_dict(model_output: Builder1ModelOutput) -> dict:
         "headline_placement": normalize_text(model_output.headline_placement),
         "marketing_text": normalize_text(model_output.marketing_text),
     }
+
+
+def validate_builder1_model_output_dict(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    for key, expected_type in BUILDER1_MODEL_OUTPUT_REQUIRED_FIELDS.items():
+        if key not in data:
+            return False
+        value = data[key]
+        if expected_type == float:
+            try:
+                float(value)
+            except:
+                return False
+        else:
+            if not isinstance(value, expected_type):
+                return False
+    return True
 
 
 def build_builder1_scaffold_plan(
