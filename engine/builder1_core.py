@@ -118,25 +118,31 @@ def is_valid_b_candidate(candidate: ObjectCandidate) -> bool:
     return True
 
 
-def build_builder1_scaffold_plan(user_input: Builder1Input) -> Builder1Plan:
-    name = normalize_text(user_input.product_name)
-    description = normalize_text(user_input.product_description)
-
-    language = detect_language(description)
-
-    object_a_candidate = build_object_candidate(
+def select_object_a_candidate(description: str) -> ObjectCandidate:
+    return build_object_candidate(
         derive_object_a_placeholder(description),
         0.0,
         morphological_match_notes="",
         advertising_reason="",
     )
 
-    object_b_candidate = build_object_candidate(
+
+def select_object_b_candidate(object_a_candidate: ObjectCandidate) -> ObjectCandidate:
+    return build_object_candidate(
         "",
         0.0,
         morphological_match_notes="",
         advertising_reason="",
     )
+
+
+def build_builder1_scaffold_plan(user_input: Builder1Input) -> Builder1Plan:
+    name = normalize_text(user_input.product_name)
+    description = normalize_text(user_input.product_description)
+    language = detect_language(description)
+
+    object_a_candidate = select_object_a_candidate(description)
+    object_b_candidate = select_object_b_candidate(object_a_candidate)
 
     secondary_object_a = derive_secondary_object_a_placeholder(object_a_candidate.name)
 
