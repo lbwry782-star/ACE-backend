@@ -86,7 +86,26 @@ def is_concrete_physical_object_candidate(name: str) -> bool:
 
 def maybe_has_forbidden_textual_markings(name: str) -> bool:
     value = normalize_text(name)
-    return any(ch.isdigit() for ch in value)
+    if not value:
+        return False
+    if any(ch.isdigit() for ch in value):
+        return True
+    if any(ch.isupper() for ch in value if ch.isalpha()):
+        return True
+    forbidden_tokens = {
+        "logo",
+        "brand",
+        "text",
+        "label",
+        "word",
+        "letters",
+        "number",
+        "numbers",
+        "digit",
+        "digits",
+    }
+    lowered = value.lower()
+    return any(token in lowered for token in forbidden_tokens)
 
 
 def build_object_candidate(
