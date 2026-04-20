@@ -120,14 +120,36 @@ def generate_marketing_text(headline: str, advertisingPromise: str) -> str:
 
 
 def generate_builder1_ad(product_name: str, product_description: str) -> dict:
-    """Orchestrate Builder1 pipeline (placeholder)."""
-    _ = product_name, product_description
+    """Orchestrate Builder1: concept → mode → prompts → headline → marketing text."""
+    concept = get_concept_from_o3(product_name, product_description)
+    required = (
+        "objectA",
+        "objectB",
+        "advertisingPromise",
+        "morphologicalSimilarity",
+    )
+    for k in required:
+        if k not in concept:
+            raise KeyError(f"BUILDER1_AD: concept missing required key {k!r}")
+
+    object_a = concept["objectA"]
+    object_b = concept["objectB"]
+    advertising_promise = concept["advertisingPromise"]
+    sim = concept["morphologicalSimilarity"]
+
+    mode = mode_from_similarity(sim)
+    image_prompt = build_image_prompt(object_a, object_b, mode)
+    headline = generate_headline(
+        object_a, object_b, advertising_promise, product_name
+    )
+    marketing_text = generate_marketing_text(headline, advertising_promise)
+
     return {
-        "objectA": "",
-        "objectB": "",
-        "advertisingPromise": "",
-        "mode": mode_from_similarity(0),
-        "headline": "",
-        "imagePrompt": "",
-        "marketingText": "",
+        "objectA": object_a,
+        "objectB": object_b,
+        "advertisingPromise": advertising_promise,
+        "mode": mode,
+        "headline": headline,
+        "imagePrompt": image_prompt,
+        "marketingText": marketing_text,
     }
