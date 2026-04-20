@@ -26,10 +26,22 @@ class Builder1Input:
 class ObjectCandidate:
     name: str
     similarity_to_a: float
-    is_concrete_physical: bool
-    has_forbidden_textual_markings: bool
     morphological_match_notes: str
     advertising_reason: str
+
+
+@dataclass
+class Builder1ModelOutput:
+    resolved_product_name: str
+    language: str
+    object_a: str
+    secondary_object_a: str
+    object_b: str
+    similarity_score: float
+    advertising_promise: str
+    headline: str
+    headline_placement: str
+    marketing_text: str
 
 
 @dataclass
@@ -65,49 +77,6 @@ def detect_language(text: str) -> str:
     return "en"
 
 
-def derive_object_a_placeholder(description: str) -> str:
-    value = normalize_text(description)
-    if not value:
-        return ""
-    return value.split()[0]
-
-
-def derive_secondary_object_a_placeholder(object_a: str) -> str:
-    value = normalize_text(object_a)
-    if not value:
-        return ""
-    return ""
-
-
-def is_concrete_physical_object_candidate(name: str) -> bool:
-    value = normalize_text(name)
-    return bool(value)
-
-
-def maybe_has_forbidden_textual_markings(name: str) -> bool:
-    value = normalize_text(name)
-    if not value:
-        return False
-    if any(ch.isdigit() for ch in value):
-        return True
-    if any(ch.isupper() for ch in value if ch.isalpha()):
-        return True
-    forbidden_tokens = {
-        "logo",
-        "brand",
-        "text",
-        "label",
-        "word",
-        "letters",
-        "number",
-        "numbers",
-        "digit",
-        "digits",
-    }
-    lowered = value.lower()
-    return any(token in lowered for token in forbidden_tokens)
-
-
 def build_object_candidate(
     name: str,
     similarity_to_a: float,
@@ -118,60 +87,97 @@ def build_object_candidate(
     return ObjectCandidate(
         name=clean_name,
         similarity_to_a=similarity_to_a,
-        is_concrete_physical=is_concrete_physical_object_candidate(clean_name),
-        has_forbidden_textual_markings=maybe_has_forbidden_textual_markings(clean_name),
         morphological_match_notes=normalize_text(morphological_match_notes),
         advertising_reason=normalize_text(advertising_reason),
     )
 
 
-def is_valid_b_candidate(candidate: ObjectCandidate) -> bool:
-    if not candidate.name:
-        return False
-    if not candidate.is_concrete_physical:
-        return False
-    if candidate.has_forbidden_textual_markings:
-        return False
-    if candidate.similarity_to_a <= 0:
-        return False
-    return True
-
-
-def select_object_a_candidate(description: str) -> ObjectCandidate:
+def build_object_candidate_from_model(
+    name: str,
+    similarity_to_a: float,
+    morphological_match_notes: str = "",
+    advertising_reason: str = "",
+) -> ObjectCandidate:
     return build_object_candidate(
-        derive_object_a_placeholder(description),
+        name=name,
+        similarity_to_a=similarity_to_a,
+        morphological_match_notes=morphological_match_notes,
+        advertising_reason=advertising_reason,
+    )
+
+
+def empty_builder1_model_output() -> Builder1ModelOutput:
+    return Builder1ModelOutput(
+        resolved_product_name="",
+        language="",
+        object_a="",
+        secondary_object_a="",
+        object_b="",
+        similarity_score=0.0,
+        advertising_promise="",
+        headline="",
+        headline_placement="",
+        marketing_text="",
+    )
+
+
+def builder1_model_output_from_dict(data: dict) -> Builder1ModelOutput:
+    data = data or {}
+    return Builder1ModelOutput(
+        resolved_product_name=normalize_text(data.get("resolved_product_name", "")),
+        language=normalize_text(data.get("language", "")),
+        object_a=normalize_text(data.get("object_a", "")),
+        secondary_object_a=normalize_text(data.get("secondary_object_a", "")),
+        object_b=normalize_text(data.get("object_b", "")),
+        similarity_score=float(data.get("similarity_score", 0.0) or 0.0),
+        advertising_promise=normalize_text(data.get("advertising_promise", "")),
+        headline=normalize_text(data.get("headline", "")),
+        headline_placement=normalize_text(data.get("headline_placement", "")),
+        marketing_text=normalize_text(data.get("marketing_text", "")),
+    )
+
+
+def builder1_model_output_to_dict(model_output: Builder1ModelOutput) -> dict:
+    return {
+        "resolved_product_name": normalize_text(model_output.resolved_product_name),
+        "language": normalize_text(model_output.language),
+        "object_a": normalize_text(model_output.object_a),
+        "secondary_object_a": normalize_text(model_output.secondary_object_a),
+        "object_b": normalize_text(model_output.object_b),
+        "similarity_score": model_output.similarity_score,
+        "advertising_promise": normalize_text(model_output.advertising_promise),
+        "headline": normalize_text(model_output.headline),
+        "headline_placement": normalize_text(model_output.headline_placement),
+        "marketing_text": normalize_text(model_output.marketing_text),
+    }
+
+
+def build_builder1_scaffold_plan(
+    user_input: Builder1Input,
+    model_output: Builder1ModelOutput,
+) -> Builder1Plan:
+    input_product_name = normalize_text(user_input.product_name)
+    input_description = normalize_text(user_input.product_description)
+
+    resolved_product_name = normalize_text(model_output.resolved_product_name)
+    language = normalize_text(model_output.language) or detect_language(input_description)
+
+    object_a_candidate = build_object_candidate_from_model(
+        model_output.object_a,
         0.0,
         morphological_match_notes="",
         advertising_reason="",
     )
 
-
-def select_object_b_candidate(object_a_candidate: ObjectCandidate) -> ObjectCandidate:
-    return build_object_candidate(
-        "",
-        0.0,
+    object_b_candidate = build_object_candidate_from_model(
+        model_output.object_b,
+        model_output.similarity_score,
         morphological_match_notes="",
-        advertising_reason="",
+        advertising_reason=model_output.advertising_promise,
     )
 
-
-def build_builder1_scaffold_plan(user_input: Builder1Input) -> Builder1Plan:
-    name = normalize_text(user_input.product_name)
-    description = normalize_text(user_input.product_description)
-    language = detect_language(description)
-
-    object_a_candidate = select_object_a_candidate(description)
-    object_b_candidate = select_object_b_candidate(object_a_candidate)
-
-    secondary_object_a = derive_secondary_object_a_placeholder(object_a_candidate.name)
-
-    if is_valid_b_candidate(object_b_candidate):
-        similarity_score = object_b_candidate.similarity_to_a
-        advertising_promise = object_b_candidate.advertising_reason
-    else:
-        similarity_score = 0.0
-        advertising_promise = ""
-
+    similarity_score = object_b_candidate.similarity_to_a
+    advertising_promise = normalize_text(model_output.advertising_promise)
     mode = decide_mode(similarity_score)
 
     if mode == MODE_REPLACEMENT:
@@ -179,18 +185,19 @@ def build_builder1_scaffold_plan(user_input: Builder1Input) -> Builder1Plan:
     else:
         composition = "partial_overlap"
 
-    headline = ""
-    headline_placement = ""
-    marketing_text = ""
+    final_product_name = resolved_product_name or input_product_name
+    headline = normalize_text(model_output.headline)
+    headline_placement = normalize_text(model_output.headline_placement)
+    marketing_text = normalize_text(model_output.marketing_text)
     image_validation_passed = False
 
     return Builder1Plan(
-        product_name=name,
-        product_description=description,
+        product_name=final_product_name,
+        product_description=input_description,
         language=language,
         advertising_promise=advertising_promise,
         object_a=object_a_candidate.name,
-        secondary_object_a=secondary_object_a,
+        secondary_object_a=normalize_text(model_output.secondary_object_a),
         object_b=object_b_candidate.name,
         similarity_score=similarity_score,
         mode=mode,
