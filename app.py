@@ -45,6 +45,13 @@ from engine.ad_promise_memory import (
 )
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 import db_session
+from engine.builder1_core import (
+    Builder1Input,
+    Builder1ModelOutput,
+    builder1_model_output_from_dict,
+    build_builder1_scaffold_plan,
+    builder1_plan_to_preview_response,
+)
 
 app = Flask(__name__)
 
@@ -393,6 +400,42 @@ def generate():
             return jsonify({'ok': False, 'error': 'rate_limited', 'message': 'Temporarily rate limited. Please retry.'}), 503
         return jsonify({'ok': False, 'error': 'generation_failed', 'message': str(e)}), 500
     
+
+
+@app.route("/api/builder1-preview-test", methods=["POST"])
+def builder1_preview_test():
+    try:
+        data = request.get_json(force=True) or {}
+
+        user_input = Builder1Input(
+            product_name=data.get("productName", ""),
+            product_description=data.get("productDescription", ""),
+        )
+
+        # TEMP MOCK (no model call yet)
+        mock_model_output_dict = {
+            "resolved_product_name": data.get("productName", ""),
+            "language": "en",
+            "object_a": "can",
+            "secondary_object_a": "straw",
+            "object_b": "battery",
+            "similarity_score": 87.0,
+            "advertising_promise": "long lasting energy",
+            "headline": "POWER THAT LASTS",
+            "headline_placement": "top_center",
+            "marketing_text": "A powerful product that keeps going when others stop.",
+        }
+
+        model_output = builder1_model_output_from_dict(mock_model_output_dict)
+
+        plan = build_builder1_scaffold_plan(user_input, model_output)
+
+        response = builder1_plan_to_preview_response(plan)
+
+        return jsonify({"ok": True, "data": response})
+
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route('/api/preview', methods=['POST'])
