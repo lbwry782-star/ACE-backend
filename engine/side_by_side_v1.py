@@ -197,8 +197,39 @@ Output: return ONLY the headline characters — no quotes, no JSON, no numbering
 
 
 def generate_marketing_text(headline: str, advertisingPromise: str) -> str:
-    """Generate ~50 word marketing text (placeholder)."""
-    return ""
+    """Single o3-pro call: ~50 words of body copy under the ad (Download ZIP area)."""
+    h = (headline or "").strip()
+    p = (advertisingPromise or "").strip()
+    user_input = f"""Write the short marketing body copy that appears under the ad (near a Download ZIP control).
+
+Headline (fixed): {h}
+Advertising promise (conceptual anchor): {p}
+
+Rules:
+- About 50 words (45–55 is acceptable).
+- Ground the copy in the headline and the advertising promise; do not contradict them.
+- Concise, polished, advertising-style prose.
+- No bullet points or lists.
+- No quotation marks in the output.
+- Return ONLY the final body text: no titles, no labels, no JSON, no numbering, no preamble."""
+
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(120.0),
+        max_retries=0,
+    )
+    response = client.responses.create(
+        model="o3-pro",
+        input=user_input,
+        reasoning={"effort": "low"},
+    )
+    raw = (getattr(response, "output_text", None) or "").strip()
+    if not raw:
+        raise ValueError("BUILDER1_MARKETING_O3: empty output_text from o3-pro")
+    out = " ".join(raw.split())
+    if not out:
+        raise ValueError("BUILDER1_MARKETING_O3: empty marketing text after normalizing whitespace")
+    return out
 
 
 def generate_builder1_ad(product_name: str, product_description: str) -> dict:
