@@ -103,8 +103,28 @@ Rules for the model:
 
 
 def build_image_prompt(objectA: str, objectB: str, mode: str) -> str:
-    """Build gpt-image-1.5 photorealistic prompt (placeholder)."""
-    return ""
+    """Build a single gpt-image-1.5 photorealistic prompt from objects and layout mode."""
+    a = (objectA or "").strip()
+    b = (objectB or "").strip()
+    if mode == "SIDE_BY_SIDE":
+        return f"""Photorealistic product-ad image, studio quality, pure white seamless background.
+No text, letters, numbers, logos, signage, labels, or brands anywhere in the image.
+Clean studio lighting, sharp focus, clear silhouettes for both subjects.
+
+Show these two physical objects together: Object A is "{a}". Object B is "{b}".
+Place them side by side with partial overlap so both remain clearly visible; the overlap should emphasize their morphological similarity.
+Do not add any secondary object, prop, or extra item beyond A and B.
+Composition is minimal and centered; only the two objects matter."""
+    if mode == "REPLACEMENT":
+        return f"""Photorealistic product-ad image, studio quality, pure white seamless background.
+No text, letters, numbers, logos, signage, labels, or brands anywhere in the image.
+Clean studio lighting, sharp focus, clear readable silhouette.
+
+Object A is "{a}". Object B is "{b}".
+Show Object B replacing Object A in Object A's role and original spatial logic (same position/scale relationship as A would occupy).
+Include only Object A's classic, minimal secondary object (one simple everyday companion object strongly associated with A) — do not add any secondary object for B.
+The replacement must read instantly: B clearly occupies A's role; composition is minimal and centered."""
+    raise ValueError(f"BUILDER1_IMAGE_PROMPT: unknown mode {mode!r} (expected SIDE_BY_SIDE or REPLACEMENT)")
 
 
 def generate_headline(
