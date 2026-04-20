@@ -362,7 +362,29 @@ def generate():
                 "sessionId": session_id,
                 "includeImage": True,
             }
-            result = generate_preview_data(gen_payload)
+            data = payload or {}
+
+            user_input = Builder1Input(
+                product_name=data.get("productName", ""),
+                product_description=data.get("productDescription", ""),
+            )
+
+            mock_model_output_dict = {
+                "resolved_product_name": data.get("productName", ""),
+                "language": "en",
+                "object_a": "can",
+                "secondary_object_a": "straw",
+                "object_b": "battery",
+                "similarity_score": 87.0,
+                "advertising_promise": "long lasting energy",
+                "headline": "POWER THAT LASTS",
+                "headline_placement": "top_center",
+                "marketing_text": "A powerful product that keeps going when others stop.",
+            }
+
+            model_output = builder1_model_output_from_dict(mock_model_output_dict)
+            plan = build_builder1_scaffold_plan(user_input, model_output)
+            result = builder1_plan_to_preview_response(plan)
             image_base64 = result["imageBase64"]
             headline = result.get("headline", "")
             body_text_50 = result.get("bodyText50", "")
