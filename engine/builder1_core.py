@@ -44,6 +44,10 @@ class Builder1Plan:
     similarity_score: float
     mode: str
     composition: str
+    headline: str
+    headline_placement: str
+    marketing_text: str
+    image_validation_passed: bool
 
 
 def normalize_text(value: str) -> str:
@@ -117,6 +121,7 @@ def is_valid_b_candidate(candidate: ObjectCandidate) -> bool:
 def build_builder1_scaffold_plan(user_input: Builder1Input) -> Builder1Plan:
     name = normalize_text(user_input.product_name)
     description = normalize_text(user_input.product_description)
+
     language = detect_language(description)
 
     object_a_candidate = build_object_candidate(
@@ -149,6 +154,11 @@ def build_builder1_scaffold_plan(user_input: Builder1Input) -> Builder1Plan:
     else:
         composition = "partial_overlap"
 
+    headline = ""
+    headline_placement = ""
+    marketing_text = ""
+    image_validation_passed = False
+
     return Builder1Plan(
         product_name=name,
         product_description=description,
@@ -160,4 +170,8 @@ def build_builder1_scaffold_plan(user_input: Builder1Input) -> Builder1Plan:
         similarity_score=similarity_score,
         mode=mode,
         composition=composition,
+        headline=headline,
+        headline_placement=headline_placement,
+        marketing_text=marketing_text,
+        image_validation_passed=image_validation_passed,
     )
