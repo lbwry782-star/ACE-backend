@@ -51,6 +51,7 @@ from engine.builder1_core import (
     build_builder1_scaffold_plan,
     builder1_plan_to_preview_response,
 )
+from engine.side_by_side_v1 import generate_builder1_ad
 
 app = Flask(__name__)
 
@@ -427,31 +428,36 @@ def generate():
 def builder1_preview_test():
     try:
         data = request.get_json(force=True) or {}
+        product_name = data.get("productName", "") or ""
+        product_description = data.get("productDescription", "") or ""
 
-        user_input = Builder1Input(
-            product_name=data.get("productName", ""),
-            product_description=data.get("productDescription", ""),
+        ad = generate_builder1_ad(product_name, product_description)
+        img_b64 = base64.standard_b64encode(ad["imageBytes"]).decode("ascii")
+        composition = (
+            "replacement" if ad["mode"] == "REPLACEMENT" else "partial_overlap"
         )
 
-        # TEMP MOCK (no model call yet)
-        mock_model_output_dict = {
-            "resolved_product_name": data.get("productName", ""),
-            "language": "en",
-            "object_a": "can",
-            "secondary_object_a": "straw",
-            "object_b": "battery",
-            "similarity_score": 87.0,
-            "advertising_promise": "long lasting energy",
-            "headline": "POWER THAT LASTS",
-            "headline_placement": "top_center",
-            "marketing_text": "A powerful product that keeps going when others stop.",
+        response = {
+            "objectA": ad["objectA"],
+            "objectB": ad["objectB"],
+            "object_a": ad["objectA"],
+            "object_b": ad["objectB"],
+            "advertisingPromise": ad["advertisingPromise"],
+            "mode": ad["mode"],
+            "headline": ad["headline"],
+            "marketingText": ad["marketingText"],
+            "bodyText50": ad["marketingText"],
+            "body_text": ad["marketingText"],
+            "ad_goal": ad["advertisingPromise"],
+            "marketing_copy_50_words": ad["marketingText"],
+            "resolvedProductName": product_name,
+            "headline_placement": "",
+            "composition": composition,
+            "imageBase64": img_b64,
+            "image_base64": img_b64,
+            "image_url": "",
+            "imagePrompt": ad["imagePrompt"],
         }
-
-        model_output = builder1_model_output_from_dict(mock_model_output_dict)
-
-        plan = build_builder1_scaffold_plan(user_input, model_output)
-
-        response = builder1_plan_to_preview_response(plan)
 
         return jsonify({"ok": True, "data": response})
 
