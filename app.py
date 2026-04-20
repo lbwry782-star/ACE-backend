@@ -651,7 +651,29 @@ def preview():
                         use_fallback = j.get("goal_pair_fallback", False) if j else False
                     # Resolved product name: only from engine result (canonical). Never set from goal_data or description-derived fallback.
                     if goal_data:
-                        result = generate_preview_data(payload_data, goal_pairs_data_override=goal_data, request_id=job_request_id)
+                        data = payload_data or {}
+
+                        user_input = Builder1Input(
+                            product_name=data.get("productName", ""),
+                            product_description=data.get("productDescription", ""),
+                        )
+
+                        mock_model_output_dict = {
+                            "resolved_product_name": data.get("productName", ""),
+                            "language": "en",
+                            "object_a": "can",
+                            "secondary_object_a": "straw",
+                            "object_b": "battery",
+                            "similarity_score": 87.0,
+                            "advertising_promise": "long lasting energy",
+                            "headline": "POWER THAT LASTS",
+                            "headline_placement": "top_center",
+                            "marketing_text": "A powerful product that keeps going when others stop.",
+                        }
+
+                        model_output = builder1_model_output_from_dict(mock_model_output_dict)
+                        plan = build_builder1_scaffold_plan(user_input, model_output)
+                        result = builder1_plan_to_preview_response(plan)
                     elif use_fallback:
                         logger.info(f"FALLBACK_ABORTED remaining_ads_skipped=true request_id={job_request_id} jobId={jid} adIndex={ad_idx}")
                         if ACE_FALLBACK_RETURN_ERROR:
@@ -665,7 +687,29 @@ def preview():
                                     job["error_message"] = "Stage 2 failed. Please retry."
                             logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} error=stage2_fallback (no fallback ad generated)")
                         else:
-                            result = generate_preview_data(payload_data, goal_pair_skip_fetch=True, request_id=job_request_id)
+                            data = payload_data or {}
+
+                            user_input = Builder1Input(
+                                product_name=data.get("productName", ""),
+                                product_description=data.get("productDescription", ""),
+                            )
+
+                            mock_model_output_dict = {
+                                "resolved_product_name": data.get("productName", ""),
+                                "language": "en",
+                                "object_a": "can",
+                                "secondary_object_a": "straw",
+                                "object_b": "battery",
+                                "similarity_score": 87.0,
+                                "advertising_promise": "long lasting energy",
+                                "headline": "POWER THAT LASTS",
+                                "headline_placement": "top_center",
+                                "marketing_text": "A powerful product that keeps going when others stop.",
+                            }
+
+                            model_output = builder1_model_output_from_dict(mock_model_output_dict)
+                            plan = build_builder1_scaffold_plan(user_input, model_output)
+                            result = builder1_plan_to_preview_response(plan)
                             with _jobs_lock:
                                 job = _jobs.get(jid)
                                 if job is not None:
@@ -677,7 +721,29 @@ def preview():
                                     job["error_message"] = None
                             logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={int((time.time() - start) * 1000)}")
                     else:
-                        result = generate_preview_data(payload_data, request_id=job_request_id)
+                        data = payload_data or {}
+
+                        user_input = Builder1Input(
+                            product_name=data.get("productName", ""),
+                            product_description=data.get("productDescription", ""),
+                        )
+
+                        mock_model_output_dict = {
+                            "resolved_product_name": data.get("productName", ""),
+                            "language": "en",
+                            "object_a": "can",
+                            "secondary_object_a": "straw",
+                            "object_b": "battery",
+                            "similarity_score": 87.0,
+                            "advertising_promise": "long lasting energy",
+                            "headline": "POWER THAT LASTS",
+                            "headline_placement": "top_center",
+                            "marketing_text": "A powerful product that keeps going when others stop.",
+                        }
+
+                        model_output = builder1_model_output_from_dict(mock_model_output_dict)
+                        plan = build_builder1_scaffold_plan(user_input, model_output)
+                        result = builder1_plan_to_preview_response(plan)
                     if not (use_fallback and ACE_FALLBACK_RETURN_ERROR):
                         elapsed_ms = int((time.time() - start) * 1000)
                         with _jobs_lock:
