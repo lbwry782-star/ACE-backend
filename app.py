@@ -458,6 +458,28 @@ def preview():
     
     Returns: 200 JSON with ad_goal, object_a, object_b, headline, marketing_copy_50_words, etc.
     """
+    data = request.get_json(force=True) or {}
+    return jsonify({
+        "ok": True,
+        "data": {
+            "imageBase64": "",
+            "image_base64": "",
+            "headline": "POWER THAT LASTS",
+            "bodyText50": "A powerful product that keeps going when others stop.",
+            "body_text": "A powerful product that keeps going when others stop.",
+            "resolvedProductName": data.get("productName", ""),
+            "image_url": "",
+            "ad_goal": "long lasting energy",
+            "object_a": "can",
+            "object_b": "battery",
+            "marketing_copy_50_words": "A powerful product that keeps going when others stop.",
+            "headline_placement": "top_center",
+            "mode": "REPLACEMENT",
+            "composition": "replacement",
+            "shape_similarity_score": 87.0
+        }
+    })
+
     request_id = str(uuid.uuid4())
     try:
         if not request.is_json:
