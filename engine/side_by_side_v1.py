@@ -1,7 +1,8 @@
-"""Builder1 side-by-side pipeline scaffold (no model calls yet)."""
+"""Builder1 side-by-side pipeline: o3-pro concept/copy + gpt-image still generation."""
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 
@@ -125,6 +126,39 @@ Show Object B replacing Object A in Object A's role and original spatial logic (
 Include only Object A's classic, minimal secondary object (one simple everyday companion object strongly associated with A) — do not add any secondary object for B.
 The replacement must read instantly: B clearly occupies A's role; composition is minimal and centered."""
     raise ValueError(f"BUILDER1_IMAGE_PROMPT: unknown mode {mode!r} (expected SIDE_BY_SIDE or REPLACEMENT)")
+
+
+def generate_image_bytes(image_prompt: str) -> bytes:
+    """One gpt-image call from prompt; returns raw image bytes (PNG)."""
+    prompt = (image_prompt or "").strip()
+    if not prompt:
+        raise ValueError("BUILDER1_IMAGE: image_prompt is empty")
+
+    model = (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-1.5").strip()
+    size = (os.environ.get("OPENAI_BUILDER1_IMAGE_SIZE") or "1024x1024").strip()
+    quality = (os.environ.get("OPENAI_BUILDER1_IMAGE_QUALITY") or "low").strip()
+    timeout_s = float((os.environ.get("OPENAI_BUILDER1_IMAGE_TIMEOUT_SECONDS") or "120").strip() or "120")
+
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(timeout_s),
+        max_retries=0,
+    )
+    response = client.images.generate(
+        model=model,
+        prompt=prompt,
+        size=size,
+        quality=quality,
+    )
+    if not response.data:
+        raise ValueError("BUILDER1_IMAGE: empty response.data from images.generate")
+    b64 = getattr(response.data[0], "b64_json", None)
+    if not b64:
+        raise ValueError("BUILDER1_IMAGE: no b64_json in image response")
+    try:
+        return base64.b64decode(b64)
+    except Exception as e:
+        raise ValueError(f"BUILDER1_IMAGE: failed to decode image bytes: {e}") from e
 
 
 def generate_headline(
@@ -256,6 +290,7 @@ def generate_builder1_ad(product_name: str, product_description: str) -> dict:
         object_a, object_b, advertising_promise, product_name
     )
     marketing_text = generate_marketing_text(headline, advertising_promise)
+    image_bytes = generate_image_bytes(image_prompt)
 
     return {
         "objectA": object_a,
@@ -264,5 +299,6 @@ def generate_builder1_ad(product_name: str, product_description: str) -> dict:
         "mode": mode,
         "headline": headline,
         "imagePrompt": image_prompt,
+        "imageBytes": image_bytes,
         "marketingText": marketing_text,
     }
