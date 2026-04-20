@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 
 import httpx
 from openai import OpenAI
+from PIL import Image
 
 
 def mode_from_similarity(morphological_similarity: int) -> str:
@@ -161,6 +163,17 @@ def generate_image_bytes(image_prompt: str) -> bytes:
         raise ValueError(f"BUILDER1_IMAGE: failed to decode image bytes: {e}") from e
 
 
+def validate_image_bytes(image_bytes: bytes) -> None:
+    """Non-empty bytes must load as a raster image or raise ValueError."""
+    if not image_bytes:
+        raise ValueError("BUILDER1_IMAGE_VALIDATE: image_bytes is empty")
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            im.load()
+    except Exception as e:
+        raise ValueError(f"BUILDER1_IMAGE_VALIDATE: not a decodable image: {e}") from e
+
+
 def generate_headline(
     objectA: str, objectB: str, advertisingPromise: str, product_name: str
 ) -> str:
@@ -291,6 +304,7 @@ def generate_builder1_ad(product_name: str, product_description: str) -> dict:
     )
     marketing_text = generate_marketing_text(headline, advertising_promise)
     image_bytes = generate_image_bytes(image_prompt)
+    validate_image_bytes(image_bytes)
 
     return {
         "objectA": object_a,
