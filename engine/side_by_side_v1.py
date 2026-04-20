@@ -130,8 +130,70 @@ The replacement must read instantly: B clearly occupies A's role; composition is
 def generate_headline(
     objectA: str, objectB: str, advertisingPromise: str, product_name: str
 ) -> str:
-    """Generate headline via o3-pro (placeholder)."""
-    return ""
+    """Single o3-pro call: one-line headline; product name (ALL CAPS) then existing expression (≤7 words)."""
+    a = (objectA or "").strip()
+    b = (objectB or "").strip()
+    promise = (advertisingPromise or "").strip()
+    pname = " ".join((product_name or "").strip().split())
+    if not pname:
+        raise ValueError("BUILDER1_HEADLINE_O3: product_name is empty")
+    pname_upper = pname.upper()
+
+    user_input = f"""Write exactly one print headline for this Builder1 ad visual.
+
+Context (do not paste these labels into the headline):
+Object A: {a}
+Object B: {b}
+Advertising promise (conceptual, for tone only): {promise}
+Product name (canonical spelling): {pname}
+
+Rules (all mandatory):
+1) The headline must hinge on an EXISTING expression people already know (idiom, proverb, common saying, stock phrase, or familiar slogan fragment). Do not coin a brand-new phrase.
+2) After the product name, the expression part must be at most 7 words.
+3) That expression part must describe what the viewer literally sees (objects, layout, relation) — not interpret hidden meaning in explanatory prose.
+4) Any double meaning should arise only because the photographed visual naturally fits the existing expression; do not spell out the second reading.
+5) The headline must begin with the product name in ALL CAPS exactly as: {pname_upper} then one normal space, then the expression part.
+6) Keep the product name at the start in ALL CAPS as given; do not lowercase or alter those characters.
+7) Assume the product name and the expression sit on one line on the same baseline in the layout.
+8) You choose light punctuation or spacing between name and expression only; keep it one readable line.
+
+Output: return ONLY the headline characters — no quotes, no JSON, no numbering, no explanation, no line breaks."""
+
+    client = OpenAI(
+        api_key=os.environ.get("OPENAI_API_KEY"),
+        timeout=httpx.Timeout(120.0),
+        max_retries=0,
+    )
+    response = client.responses.create(
+        model="o3-pro",
+        input=user_input,
+        reasoning={"effort": "low"},
+    )
+    raw = (getattr(response, "output_text", None) or "").strip()
+    if not raw:
+        raise ValueError("BUILDER1_HEADLINE_O3: empty output_text from o3-pro")
+
+    out = raw.strip()
+    if (out.startswith('"') and out.endswith('"')) or (out.startswith("'") and out.endswith("'")):
+        out = out[1:-1].strip()
+    out = " ".join(out.split())
+    if not out:
+        raise ValueError("BUILDER1_HEADLINE_O3: empty headline after normalizing whitespace")
+
+    if not out.startswith(pname_upper + " "):
+        raise ValueError(
+            f"BUILDER1_HEADLINE_O3: headline must start with {pname_upper!r} followed by a space, got {out!r}"
+        )
+
+    expression = out[len(pname_upper):].strip()
+    if not expression:
+        raise ValueError("BUILDER1_HEADLINE_O3: missing expression after product name")
+    if len(expression.split()) > 7:
+        raise ValueError(
+            f"BUILDER1_HEADLINE_O3: expression part exceeds 7 words: {expression!r}"
+        )
+
+    return out
 
 
 def generate_marketing_text(headline: str, advertisingPromise: str) -> str:
