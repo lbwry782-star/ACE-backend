@@ -11,8 +11,7 @@ import secrets
 from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional
-from engine.side_by_side_v1 import (
-    generate_preview_data,
+from engine.builder1_legacy_bridge import (
     Step0BundleTimeoutError,
     Step0BundleOpenAIError,
     create_goal_pair_background,
