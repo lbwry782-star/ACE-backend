@@ -46,13 +46,13 @@ def _memory_instruction_appendix(session_id: Optional[str]) -> str:
     if sess_rows:
         lines = [_memory_triplet_line(r) for r in sess_rows]
         blocks.append(
-            "Session memory (vary; morphology rules above always win): "
+            "Session memory (morphology wins; do not repeat/near-duplicate advertisingPromise vs lines; A|B|promise): "
             + " ; ".join(lines)
         )
     if glob_rows:
         lines = [_memory_triplet_line(r) for r in glob_rows]
         blocks.append(
-            "Global memory (avoid clichés; morphology first): "
+            "Global memory (morphology first; novel advertisingPromise vs lines; A|B|promise): "
             + " ; ".join(lines)
         )
     return "\n\n".join(blocks) if blocks else ""
@@ -663,13 +663,16 @@ def composite_headline_on_image(image_bytes: bytes, headline: str, product_name:
                     bb = draw.textbbox((0, 0), s, font=fnt)
                     y += bb[3] - bb[1] + 8
             else:
-                # True portrait: larger visual, slightly tighter bottom band; square below: more headline room
+                # Portrait headline-below: larger visual, tighter gutters; square-below unchanged.
                 is_portrait = h > w
                 if is_portrait:
-                    visual_frac = 0.74
-                    min_text = int(h * 0.11)
-                    scale_mul = 0.996
+                    mx_u = max(5, int(round(w * 0.08)))
+                    my_u = max(5, int(round(h * 0.08)))
+                    visual_frac = 0.83
+                    min_text = int(h * 0.098)
+                    scale_mul = 1.0
                 else:
+                    mx_u, my_u = mx, my
                     visual_frac = 0.66
                     min_text = int(h * 0.12)
                     scale_mul = 0.98
@@ -678,33 +681,38 @@ def composite_headline_on_image(image_bytes: bytes, headline: str, product_name:
                 if text_band < min_text:
                     top_h = h - min_text
                     text_band = h - top_h
-                tw = w - 2 * mx
-                th = top_h - my
+                tw = w - 2 * mx_u
+                th = top_h - my_u
                 scale = min(tw / max(1, src.width), th / max(1, src.height)) * scale_mul
                 nw = max(1, int(src.width * scale))
                 nh = max(1, int(src.height * scale))
                 scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
-                ox = mx + max(0, (tw - nw) // 2)
-                oy = my + max(0, (th - nh) // 2)
+                ox = mx_u + max(0, (tw - nw) // 2)
+                oy = my_u + max(0, (th - nh) // 2)
                 out.paste(scaled, (ox, oy))
                 draw = ImageDraw.Draw(out)
-                mid_y = top_h + text_band // 2
-                max_w = w - 2 * mx
-                y_text_min = top_h + 2
-                y_text_max = h - my - 2
+                if is_portrait:
+                    gap_top = max(3, int(round(h * 0.012)))
+                    mid_y = top_h + gap_top + max(0, (text_band - gap_top) // 2)
+                    y_text_min = top_h + gap_top
+                else:
+                    mid_y = top_h + text_band // 2
+                    y_text_min = top_h + 2
+                max_w = w - 2 * mx_u
+                y_text_max = h - my_u - 2
                 name_sz = max(14, min(46, max_w // 8))
                 base_sz = max(11, int(name_sz // 1.35))
                 for _ in range(56):
                     fn, fr, fo, two = _shrink_fonts_to_width(draw, pu, rest, line, text, max_w, name_sz, base_sz)
                     bb = _headline_one_line_union_bbox(
-                        draw, mid_y, w, mx, pu, rest, line, stroke, fn, fr, fo, two
+                        draw, mid_y, w, mx_u, pu, rest, line, stroke, fn, fr, fo, two
                     )
                     if bb[1] >= y_text_min and bb[3] <= y_text_max:
                         break
                     name_sz = max(8, name_sz - 2)
                     base_sz = max(7, base_sz - 1)
                 _draw_headline_one_line_centered(
-                    draw, mid_y, w, mx, pu, rest, line, text, stroke, fn, fr, fo, two
+                    draw, mid_y, w, mx_u, pu, rest, line, text, stroke, fn, fr, fo, two
                 )
 
         out_buf = io.BytesIO()
