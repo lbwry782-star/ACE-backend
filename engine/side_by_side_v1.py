@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import contextvars
+import inspect
 import io
 import json
 import os
@@ -202,14 +204,71 @@ The replacement must read instantly: B clearly occupies A's role; composition is
     raise ValueError(f"BUILDER1_IMAGE_PROMPT: unknown mode {mode!r} (expected SIDE_BY_SIDE or REPLACEMENT)")
 
 
-def generate_image_bytes(image_prompt: str) -> bytes:
+_BUILDER1_ALLOWED_IMAGE_SIZES = frozenset({"1024x1024", "1536x1024", "1024x1536"})
+# Optional per-request override (e.g. host sets from client `imageSize` before `generate_builder1_ad`).
+_builder1_request_image_size: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "builder1_request_image_size", default=None
+)
+
+
+def set_builder1_request_image_size(size: Optional[str]) -> contextvars.Token:
+    """Set OpenAI images.generate size for the current context (e.g. ``1024x1536``). Reset with ``reset_builder1_request_image_size``."""
+    normalized = _normalize_builder1_image_size(size)
+    return _builder1_request_image_size.set(normalized)
+
+
+def reset_builder1_request_image_size(token: contextvars.Token) -> None:
+    _builder1_request_image_size.reset(token)
+
+
+def _normalize_builder1_image_size(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip().lower().replace("×", "x")
+    if s in _BUILDER1_ALLOWED_IMAGE_SIZES:
+        return s
+    return None
+
+
+def _image_size_from_call_stack() -> Optional[str]:
+    """If a caller frame holds preview ``payload_data`` / ``payload`` with ``imageSize``, use it (preview job wiring)."""
+    try:
+        for fr in inspect.stack()[2:28]:
+            loc = fr.frame.f_locals
+            for key in ("payload_data", "payload", "data"):
+                pd = loc.get(key)
+                if isinstance(pd, dict):
+                    n = _normalize_builder1_image_size(pd.get("imageSize") or pd.get("image_size"))
+                    if n:
+                        return n
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_builder1_generate_size(explicit: Optional[str]) -> str:
+    """Pick images.generate size: explicit → contextvar → call-stack preview dict → env → default."""
+    for candidate in (
+        explicit,
+        _builder1_request_image_size.get(),
+        _image_size_from_call_stack(),
+        os.environ.get("ACE_BUILDER1_IMAGE_SIZE"),
+        os.environ.get("OPENAI_BUILDER1_IMAGE_SIZE"),
+    ):
+        norm = _normalize_builder1_image_size(candidate)
+        if norm:
+            return norm
+    return "1024x1024"
+
+
+def generate_image_bytes(image_prompt: str, image_size: Optional[str] = None) -> bytes:
     """One gpt-image call from prompt; returns raw image bytes (PNG)."""
     prompt = (image_prompt or "").strip()
     if not prompt:
         raise ValueError("BUILDER1_IMAGE: image_prompt is empty")
 
     model = (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-1.5").strip()
-    size = (os.environ.get("OPENAI_BUILDER1_IMAGE_SIZE") or "1024x1024").strip()
+    size = _resolve_builder1_generate_size(image_size)
     quality = (os.environ.get("OPENAI_BUILDER1_IMAGE_QUALITY") or "low").strip()
     timeout_s = float((os.environ.get("OPENAI_BUILDER1_IMAGE_TIMEOUT_SECONDS") or "120").strip() or "120")
 
@@ -604,17 +663,24 @@ def composite_headline_on_image(image_bytes: bytes, headline: str, product_name:
                     bb = draw.textbbox((0, 0), s, font=fnt)
                     y += bb[3] - bb[1] + 8
             else:
-                # Portrait or square “below”: visual in upper ~66%, headline single line bottom
-                visual_frac = 0.66
+                # True portrait: larger visual, slightly tighter bottom band; square below: more headline room
+                is_portrait = h > w
+                if is_portrait:
+                    visual_frac = 0.74
+                    min_text = int(h * 0.11)
+                    scale_mul = 0.996
+                else:
+                    visual_frac = 0.66
+                    min_text = int(h * 0.12)
+                    scale_mul = 0.98
                 top_h = int(h * visual_frac)
                 text_band = h - top_h
-                min_text = int(h * 0.12)
                 if text_band < min_text:
                     top_h = h - min_text
                     text_band = h - top_h
                 tw = w - 2 * mx
                 th = top_h - my
-                scale = min(tw / max(1, src.width), th / max(1, src.height)) * 0.98
+                scale = min(tw / max(1, src.width), th / max(1, src.height)) * scale_mul
                 nw = max(1, int(src.width * scale))
                 nh = max(1, int(src.height * scale))
                 scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
@@ -752,9 +818,17 @@ Rules:
 
 
 def generate_builder1_ad(
-    product_name: str, product_description: str, session_id: Optional[str] = None
+    product_name: str,
+    product_description: str,
+    session_id: Optional[str] = None,
+    *,
+    image_size: Optional[str] = None,
 ) -> dict:
-    """Orchestrate Builder1: concept → mode → prompts → headline → marketing text."""
+    """Orchestrate Builder1: concept → mode → prompts → headline → marketing text.
+
+    ``image_size`` must be one of 1024x1024, 1536x1024, 1024x1536 when set; otherwise
+    resolution follows context (``set_builder1_request_image_size``) then env vars.
+    """
     concept = get_concept_from_o3(product_name, product_description, session_id=session_id)
     required = (
         "objectA",
@@ -777,7 +851,7 @@ def generate_builder1_ad(
         object_a, object_b, advertising_promise, product_name
     )
     marketing_text = generate_marketing_text(headline, advertising_promise)
-    image_bytes = generate_image_bytes(image_prompt)
+    image_bytes = generate_image_bytes(image_prompt, image_size=image_size)
     validate_image_bytes(image_bytes)
     image_bytes = composite_headline_on_image(image_bytes, headline, product_name)
     validate_image_bytes(image_bytes)
