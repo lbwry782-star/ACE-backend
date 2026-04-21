@@ -14,13 +14,6 @@ from typing import Dict, Optional
 from engine.builder1_legacy_bridge import (
     Step0BundleTimeoutError,
     Step0BundleOpenAIError,
-    create_goal_pair_background,
-    poll_goal_pair_response,
-    cancel_goal_pair_response,
-    GOAL_PAIR_BG_MAX_WAIT_SECONDS,
-    GOAL_PAIR_BG_POLL_INTERVAL_SECONDS,
-    GOAL_PAIR_MIN_SIMILARITY_ACCEPT,
-    GOAL_PAIR_RETRY_INSTRUCTION,
 )
 from engine.openai_retry import OpenAIRateLimitError
 from engine.video_headline_postprocess import (
@@ -581,221 +574,61 @@ def preview():
                     f'imageSize="{payload_data.get("imageSize", "") or ""}" flags="{flags}" request_id={job_request_id}'
                 )
                 try:
-                    if ACE_PHASE2_GOAL_PAIRS and ACE_IMAGE_ONLY:
-                        product_name = payload_data.get("productName", "") or "product"
-                        product_description = payload_data.get("productDescription", "") or "description"
-                        response_id = create_goal_pair_background(product_name, product_description, job_request_id)
-                        if not response_id:
-                            with _jobs_lock:
-                                j = _jobs.get(jid)
-                                if j is not None:
-                                    j["goal_pair_fallback"] = True
-                        elif response_id:
-                            with _jobs_lock:
-                                j = _jobs.get(jid)
-                                if j is not None:
-                                    j["openai_response_id"] = response_id
-                                    j["openai_goal_pair_response_id"] = response_id
-                                    j["goal_pair_created_at"] = time.time()
-                                    j["goal_pair_poll_attempt"] = 0
-                                    j["goal_pair_next_poll_time_ms"] = 0
-                            while True:
-                                with _jobs_lock:
-                                    j = _jobs.get(jid)
-                                    if j is None:
-                                        break
-                                    rid = j.get("openai_goal_pair_response_id") or j.get("openai_response_id")
-                                    created_at_ts = j.get("goal_pair_created_at") or 0
-                                    poll_attempt = j.get("goal_pair_poll_attempt", 0)
-                                    next_poll_time_ms = j.get("goal_pair_next_poll_time_ms", 0)
-                                    job_request_id = j.get("request_id") or job_request_id
-                                if not rid:
-                                    break
-                                if time.time() - created_at_ts > GOAL_PAIR_BG_MAX_WAIT_SECONDS:
-                                    total_wait_s = int(time.time() - created_at_ts)
-                                    logger.info(f"GOAL_PAIR_BG_FAIL status=timeout total_wait_s={total_wait_s} max_wait_s={GOAL_PAIR_BG_MAX_WAIT_SECONDS} FALLBACK_USED=true request_id={job_request_id}")
-                                    cancel_goal_pair_response(rid, job_request_id)
-                                    j["goal_pair_fallback"] = True
-                                    break
-                                now_ms = int(time.time() * 1000)
-                                if next_poll_time_ms and now_ms < next_poll_time_ms:
-                                    wait_ms = next_poll_time_ms - now_ms
-                                    logger.info(f"GOAL_PAIR_BG_POLL_SKIPPED wait_ms={wait_ms} request_id={job_request_id}")
-                                    time.sleep(wait_ms / 1000.0)
-                                    continue
-                                logger.info(f"GOAL_PAIR_BG_POLL_CALL attempt={poll_attempt + 1} request_id={job_request_id}")
-                                goal_data, status = poll_goal_pair_response(rid, job_request_id, created_at_ts)
-                                with _jobs_lock:
-                                    j = _jobs.get(jid)
-                                    if j is None:
-                                        break
-                                    new_attempt = poll_attempt + 1
-                                    # Progressive backoff 2s → 3s → 5s → 8s → 10s (cap 10s)
-                                    if new_attempt == 1:
-                                        delay_ms = 2000
-                                    elif new_attempt == 2:
-                                        delay_ms = 3000
-                                    elif new_attempt == 3:
-                                        delay_ms = 5000
-                                    elif new_attempt == 4:
-                                        delay_ms = 8000
-                                    else:
-                                        delay_ms = 10000
-                                    j["goal_pair_poll_attempt"] = new_attempt
-                                    j["goal_pair_next_poll_time_ms"] = int(time.time() * 1000) + delay_ms
-                                    if status == "completed" and goal_data:
-                                        sim = goal_data.get("pairs", [{}])[0].get("silhouette_similarity", 0)
-                                        if sim < GOAL_PAIR_MIN_SIMILARITY_ACCEPT and not j.get("goal_pair_retry_done"):
-                                            logger.info(f"GOAL_PAIR_REJECTED similarity={sim} reason=too_low retrying=true request_id={job_request_id}")
-                                            retry_response_id = create_goal_pair_background(
-                                                product_name, product_description, job_request_id,
-                                                retry_instruction=GOAL_PAIR_RETRY_INSTRUCTION,
-                                            )
-                                            if retry_response_id:
-                                                logger.info(f"GOAL_PAIR_RETRY_STARTED attempt=2 request_id={job_request_id}")
-                                                j["openai_response_id"] = retry_response_id
-                                                j["openai_goal_pair_response_id"] = retry_response_id
-                                                j["goal_pair_created_at"] = time.time()
-                                                j["goal_pair_poll_attempt"] = 0
-                                                j["goal_pair_next_poll_time_ms"] = 0
-                                                j["goal_pair_retry_done"] = True
-                                            else:
-                                                j["goal_pairs_data"] = goal_data
-                                                break
-                                        elif sim < GOAL_PAIR_MIN_SIMILARITY_ACCEPT and j.get("goal_pair_retry_done"):
-                                            logger.info(f"GOAL_PAIR_RETRY_RESULT similarity={sim} request_id={job_request_id}")
-                                            j["goal_pairs_data"] = goal_data
-                                            break
-                                        else:
-                                            j["goal_pairs_data"] = goal_data
-                                            break
-                                    if status == "failed":
-                                        j["goal_pair_fallback"] = True
-                                        break
+                    data = payload_data or {}
+                    product_name = (data.get("productName", "") or "").strip()
+                    product_description = (data.get("productDescription", "") or "").strip()
+                    if not product_description:
+                        raise ValueError("productDescription is required")
+
+                    ad = generate_builder1_ad(product_name, product_description)
+                    img_b64 = base64.standard_b64encode(ad["imageBytes"]).decode("ascii")
+                    composition = (
+                        "replacement" if ad["mode"] == "REPLACEMENT" else "partial_overlap"
+                    )
+                    result = {
+                        "imageBase64": img_b64,
+                        "image_base64": img_b64,
+                        "headline": ad["headline"],
+                        "bodyText50": ad["marketingText"],
+                        "body_text": ad["marketingText"],
+                        "marketing_copy_50_words": ad["marketingText"],
+                        "ad_goal": ad["advertisingPromise"],
+                        "resolvedProductName": product_name,
+                        "image_url": "",
+                        "object_a": ad["objectA"],
+                        "object_b": ad["objectB"],
+                        "objectA": ad["objectA"],
+                        "objectB": ad["objectB"],
+                        "advertisingPromise": ad["advertisingPromise"],
+                        "imagePrompt": ad["imagePrompt"],
+                        "headline_placement": "",
+                        "mode": ad["mode"],
+                        "composition": composition,
+                    }
+                    elapsed_ms = int((time.time() - start) * 1000)
                     with _jobs_lock:
-                        j = _jobs.get(jid)
-                        goal_data = j.get("goal_pairs_data") if j else None
-                        use_fallback = j.get("goal_pair_fallback", False) if j else False
-                    # Resolved product name: only from engine result (canonical). Never set from goal_data or description-derived fallback.
-                    if goal_data:
-                        data = payload_data or {}
-
-                        user_input = Builder1Input(
-                            product_name=data.get("productName", ""),
-                            product_description=data.get("productDescription", ""),
-                        )
-
-                        mock_model_output_dict = {
-                            "resolved_product_name": data.get("productName", ""),
-                            "language": "en",
-                            "object_a": "can",
-                            "secondary_object_a": "straw",
-                            "object_b": "battery",
-                            "similarity_score": 87.0,
-                            "advertising_promise": "long lasting energy",
-                            "headline": "POWER THAT LASTS",
-                            "headline_placement": "top_center",
-                            "marketing_text": "A powerful product that keeps going when others stop.",
-                        }
-
-                        model_output = builder1_model_output_from_dict(mock_model_output_dict)
-                        plan = build_builder1_scaffold_plan(user_input, model_output)
-                        result = builder1_plan_to_preview_response(plan)
-                    elif use_fallback:
-                        logger.info(f"FALLBACK_ABORTED remaining_ads_skipped=true request_id={job_request_id} jobId={jid} adIndex={ad_idx}")
-                        if ACE_FALLBACK_RETURN_ERROR:
-                            with _jobs_lock:
-                                job = _jobs.get(jid)
-                                if job is not None:
-                                    job["status"] = "error"
-                                    job["finished_at"] = time.time()
-                                    job["result"] = None
-                                    job["error"] = "stage2_fallback"
-                                    job["error_message"] = "Stage 2 failed. Please retry."
-                            logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} error=stage2_fallback (no fallback ad generated)")
-                        else:
-                            data = payload_data or {}
-
-                            user_input = Builder1Input(
-                                product_name=data.get("productName", ""),
-                                product_description=data.get("productDescription", ""),
-                            )
-
-                            mock_model_output_dict = {
-                                "resolved_product_name": data.get("productName", ""),
-                                "language": "en",
-                                "object_a": "can",
-                                "secondary_object_a": "straw",
-                                "object_b": "battery",
-                                "similarity_score": 87.0,
-                                "advertising_promise": "long lasting energy",
-                                "headline": "POWER THAT LASTS",
-                                "headline_placement": "top_center",
-                                "marketing_text": "A powerful product that keeps going when others stop.",
-                            }
-
-                            model_output = builder1_model_output_from_dict(mock_model_output_dict)
-                            plan = build_builder1_scaffold_plan(user_input, model_output)
-                            result = builder1_plan_to_preview_response(plan)
-                            with _jobs_lock:
-                                job = _jobs.get(jid)
-                                if job is not None:
-                                    job["status"] = "done"
-                                    job["finished_at"] = time.time()
-                                    job["result"] = result
-                                    job["resolved_product_name"] = (result or {}).get("resolvedProductName", "") or ""
-                                    job["error"] = None
-                                    job["error_message"] = None
-                            logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={int((time.time() - start) * 1000)}")
-                    else:
-                        data = payload_data or {}
-
-                        user_input = Builder1Input(
-                            product_name=data.get("productName", ""),
-                            product_description=data.get("productDescription", ""),
-                        )
-
-                        mock_model_output_dict = {
-                            "resolved_product_name": data.get("productName", ""),
-                            "language": "en",
-                            "object_a": "can",
-                            "secondary_object_a": "straw",
-                            "object_b": "battery",
-                            "similarity_score": 87.0,
-                            "advertising_promise": "long lasting energy",
-                            "headline": "POWER THAT LASTS",
-                            "headline_placement": "top_center",
-                            "marketing_text": "A powerful product that keeps going when others stop.",
-                        }
-
-                        model_output = builder1_model_output_from_dict(mock_model_output_dict)
-                        plan = build_builder1_scaffold_plan(user_input, model_output)
-                        result = builder1_plan_to_preview_response(plan)
-                    if not (use_fallback and ACE_FALLBACK_RETURN_ERROR):
-                        elapsed_ms = int((time.time() - start) * 1000)
-                        with _jobs_lock:
-                            job = _jobs.get(jid)
-                            if job is not None:
-                                job["status"] = "done"
-                                job["finished_at"] = time.time()
-                                job["result"] = result
-                                job["resolved_product_name"] = (result or {}).get("resolvedProductName", "") or ""
-                                job["error"] = None
-                                job["error_message"] = None
-                        try:
-                            img_b64 = (result or {}).get("imageBase64") or (result or {}).get("image_base64")
-                            if img_b64:
-                                img_bytes = base64.b64decode(img_b64)
-                                body_50 = (result or {}).get("bodyText50") or (result or {}).get("body_text") or ""
-                                headline = (result or {}).get("headline") or ""
-                                _set_artifact(sid, ad_idx, img_bytes, body_50, headline)
-                                req_sid = (job.get("requested_session_id") or "").strip() if job else ""
-                                if req_sid and req_sid != sid:
-                                    _set_sid_alias(req_sid, sid)
-                                logger.info(f"RESULT_STORED sessionId={sid} adIndex={ad_idx} bytes={len(img_bytes)} request_id={job_request_id}")
-                        except Exception:
-                            pass
-                        logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={elapsed_ms}")
+                        job = _jobs.get(jid)
+                        if job is not None:
+                            job["status"] = "done"
+                            job["finished_at"] = time.time()
+                            job["result"] = result
+                            job["resolved_product_name"] = (result or {}).get("resolvedProductName", "") or ""
+                            job["error"] = None
+                            job["error_message"] = None
+                    try:
+                        img_b64_art = (result or {}).get("imageBase64") or (result or {}).get("image_base64")
+                        if img_b64_art:
+                            img_bytes = base64.b64decode(img_b64_art)
+                            body_50 = (result or {}).get("bodyText50") or (result or {}).get("body_text") or ""
+                            headline = (result or {}).get("headline") or ""
+                            _set_artifact(sid, ad_idx, img_bytes, body_50, headline)
+                            req_sid = (job.get("requested_session_id") or "").strip() if job else ""
+                            if req_sid and req_sid != sid:
+                                _set_sid_alias(req_sid, sid)
+                            logger.info(f"RESULT_STORED sessionId={sid} adIndex={ad_idx} bytes={len(img_bytes)} request_id={job_request_id}")
+                    except Exception:
+                        pass
+                    logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={elapsed_ms}")
                 except OpenAIRateLimitError as e:
                     with _jobs_lock:
                         job = _jobs.get(jid)
