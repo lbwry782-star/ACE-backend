@@ -46,13 +46,13 @@ def _memory_instruction_appendix(session_id: Optional[str]) -> str:
     if sess_rows:
         lines = [_memory_triplet_line(r) for r in sess_rows]
         blocks.append(
-            "Session memory (morphology wins; do not repeat/near-duplicate advertisingPromise vs lines; A|B|promise): "
+            "Session (morphology wins; each line A|B|promise): do not reuse the same advertisingPromise, the same core idea, nor similar concept logic with different objects: "
             + " ; ".join(lines)
         )
     if glob_rows:
         lines = [_memory_triplet_line(r) for r in glob_rows]
         blocks.append(
-            "Global memory (morphology first; novel advertisingPromise vs lines; A|B|promise): "
+            "Global (morphology first; each line A|B|promise): do not reuse the same advertisingPromise, the same core idea, nor similar concept logic with different objects: "
             + " ; ".join(lines)
         )
     return "\n\n".join(blocks) if blocks else ""
