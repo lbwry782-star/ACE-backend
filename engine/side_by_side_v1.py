@@ -19,8 +19,15 @@ _session_memory: Dict[str, List[dict]] = {}
 # Cross-session recent concepts (bounded list, no TTL).
 _global_concepts: List[dict] = []
 _GLOBAL_LIST_MAX = 100
-_SESSION_PROMPT_TAIL = 24
-_GLOBAL_PROMPT_TAIL = 36
+_SESSION_PROMPT_TAIL = 3
+_GLOBAL_PROMPT_TAIL = 4
+
+
+def _memory_triplet_line(rec: dict) -> str:
+    a = ((rec.get("objectA") or "").replace("\n", " ").strip())[:64]
+    b = ((rec.get("objectB") or "").replace("\n", " ").strip())[:64]
+    p = ((rec.get("advertisingPromise") or "").replace("\n", " ").strip())[:96]
+    return f"{a} | {b} | {p}"
 
 
 def mode_from_similarity(morphological_similarity: int) -> str:
@@ -29,35 +36,22 @@ def mode_from_similarity(morphological_similarity: int) -> str:
 
 
 def _memory_instruction_appendix(session_id: Optional[str]) -> str:
-    """Build o3 prompt addendum from session + global memory (does not alter JSON schema)."""
+    """Tiny o3 addendum: last few triplets only; morphology stays primary."""
     with _memory_lock:
         sess_rows = list(_session_memory.get(session_id or "", []))[-_SESSION_PROMPT_TAIL:] if session_id else []
         glob_rows = list(_global_concepts)[-_GLOBAL_PROMPT_TAIL:]
     blocks: list[str] = []
     if sess_rows:
-        lines = []
-        for i, rec in enumerate(sess_rows, 1):
-            lines.append(
-                f'{i}. objectA={rec["objectA"]!r}, objectB={rec["objectB"]!r}, '
-                f'advertisingPromise={rec["advertisingPromise"]!r}, mode={rec["mode"]!r}, headline={rec["headline"]!r}'
-            )
+        lines = [_memory_triplet_line(r) for r in sess_rows]
         blocks.append(
-            "AVOID REPEATING PREVIOUS SESSION CONCEPTS:\n"
-            "Do not reuse the same objectA, the same objectB, the same A+B pairing, or the same advertising idea with only minor variation. "
-            "Morphological silhouette strength and all core method rules above always take priority over avoidance — never weaken B's match to A to avoid repetition.\n"
-            "Previously used in this session:\n" + "\n".join(lines)
+            "Session memory (vary; morphology rules above always win): "
+            + " ; ".join(lines)
         )
     if glob_rows:
-        lines = []
-        for i, rec in enumerate(glob_rows, 1):
-            lines.append(
-                f'{i}. objectA={rec["objectA"]!r}, objectB={rec["objectB"]!r}, '
-                f'advertisingPromise={rec["advertisingPromise"]!r}'
-            )
+        lines = [_memory_triplet_line(r) for r in glob_rows]
         blocks.append(
-            "AVOID OVERUSED OR REPEATED SYSTEM-WIDE CONCEPTS:\n"
-            "Steer away from clichéd or recently repeated pairs and promises listed below; shape accuracy and morphology rules still dominate.\n"
-            "Recent system-wide concepts:\n" + "\n".join(lines)
+            "Global memory (avoid clichés; morphology first): "
+            + " ; ".join(lines)
         )
     return "\n\n".join(blocks) if blocks else ""
 
