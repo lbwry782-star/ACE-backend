@@ -33,8 +33,9 @@ def _memory_triplet_line(rec: dict) -> str:
 
 
 def mode_from_similarity(morphological_similarity: int) -> str:
-    """REPLACEMENT if morphological similarity >= 85, otherwise SIDE_BY_SIDE."""
-    return "REPLACEMENT" if morphological_similarity >= 85 else "SIDE_BY_SIDE"
+    """Explicit/stable threshold: >=85 REPLACEMENT, else SIDE_BY_SIDE."""
+    replacement_threshold = 85
+    return "REPLACEMENT" if morphological_similarity >= replacement_threshold else "SIDE_BY_SIDE"
 
 
 def _memory_instruction_appendix(session_id: Optional[str]) -> str:
@@ -99,12 +100,16 @@ Return ONLY valid JSON with exactly these keys and no others (no markdown fences
 {{ "objectA": "<string>", "objectB": "<string>", "advertisingPromise": "<string>", "morphologicalSimilarity": <integer 0-100>, "reasoning": "<string>" }}
 
 Rules for the model:
-- Choose Object A from the product name and description by grasping its overall physical form intuitively, like a painter, not as a technical contour only.
-- Then find Object B with the strongest possible morphological similarity to A.
-- Stop only when B also introduces an additional conceptual reason, which is the advertising promise (the advertisingPromise field).
+- Choose Object A from the product name and description by reading the overall physical form like a painter (mass, flow, proportions, visual weight, overall shape), not by contour-only analysis.
+- Object A must be exactly one classic, well-defined, real physical object, and a complete object (not a part).
+- Reject Object A candidates that are text-bearing, logo-bearing, branded, environmental scenes, abstract, unclear, non-physical, or object parts.
+- Then search for Object B by strongest morphological similarity to A, but do NOT stop at visual similarity alone.
+- Stop searching only when BOTH are true: (1) strong morphological similarity exists between A and B, and (2) there is an additional conceptual reason connecting A and B.
+- That additional conceptual reason is the advertisingPromise field; if condition (2) is missing, continue searching.
+- Reject any Object B candidate that is text-bearing, logo-bearing, branded, environmental, abstract, unclear, non-physical, or just a part of an object.
 - Do not choose a weaker B just to make the advertising promise more obvious.
 - Trust viewer intuition.
-- objectA and objectB must be physical, simple, everyday, clearly defined. No text, logos, or brands. No vague environments or non-physical situations.
+- objectA and objectB must each be one classic, well-defined, real physical complete object.
 - Keep reasoning short.
 """
     appendix = _memory_instruction_appendix(session_id)
@@ -189,7 +194,9 @@ No text, letters, numbers, logos, signage, labels, or brands anywhere in the ima
 Clean studio lighting, sharp focus, clear silhouettes for both subjects.
 
 Show these two physical objects together: Object A is "{a}". Object B is "{b}".
-Place them side by side with partial overlap so both remain clearly visible; the overlap should emphasize their morphological similarity.
+Show only Object A and Object B (no third object).
+Place A and B with clear partial overlap; overlap is mandatory (not optional) while both objects remain readable.
+Make the overlap visibly reveal their shape similarity, and make that overlap the core visual mechanism that conveys the advertising promise.
 Do not add any secondary object, prop, or extra item beyond A and B.
 Composition is minimal and centered; only the two objects matter."""
     if mode == "REPLACEMENT":
@@ -198,9 +205,14 @@ No text, letters, numbers, logos, signage, labels, or brands anywhere in the ima
 Clean studio lighting, sharp focus, clear readable silhouette.
 
 Object A is "{a}". Object B is "{b}".
-Show Object B replacing Object A in Object A's role and original spatial logic (same position/scale relationship as A would occupy).
-Include only Object A's classic, minimal secondary object (one simple everyday companion object strongly associated with A) — do not add any secondary object for B.
-The replacement must read instantly: B clearly occupies A's role; composition is minimal and centered."""
+In REPLACEMENT mode, Object B fully replaces Object A as the main object.
+Keep Object A's original composition and position logic, with B occupying A's exact role (same placement/scale relationship).
+Include only one secondary object for A, and it must be a separate physical object: A's classic, natural companion that belongs in a familiar real-world context next to A.
+Reject any secondary candidate that is attached to A, a component/part of A, a surface detail, a label, text, logo/branding, abstract, or environmental.
+Do not add any secondary object for B.
+Keep A's secondary object in its original position relative to the replaced main object.
+Ensure that secondary object physically interacts with B so B reads as the natural original object for that setup.
+The scene should feel immediately natural, as if B always belonged there; composition is minimal and centered."""
     raise ValueError(f"BUILDER1_IMAGE_PROMPT: unknown mode {mode!r} (expected SIDE_BY_SIDE or REPLACEMENT)")
 
 
