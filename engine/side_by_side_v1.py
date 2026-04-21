@@ -666,10 +666,10 @@ def composite_headline_on_image(image_bytes: bytes, headline: str, product_name:
                 # Portrait headline-below: larger visual, tighter gutters; square-below unchanged.
                 is_portrait = h > w
                 if is_portrait:
-                    mx_u = max(5, int(round(w * 0.08)))
-                    my_u = max(5, int(round(h * 0.08)))
-                    visual_frac = 0.83
-                    min_text = int(h * 0.098)
+                    mx_u = max(4, int(round(w * 0.065)))
+                    my_u = max(4, int(round(h * 0.07)))
+                    visual_frac = 0.89
+                    min_text = int(h * 0.086)
                     scale_mul = 1.0
                 else:
                     mx_u, my_u = mx, my
@@ -692,7 +692,7 @@ def composite_headline_on_image(image_bytes: bytes, headline: str, product_name:
                 out.paste(scaled, (ox, oy))
                 draw = ImageDraw.Draw(out)
                 if is_portrait:
-                    gap_top = max(3, int(round(h * 0.012)))
+                    gap_top = max(2, int(round(h * 0.005)))
                     mid_y = top_h + gap_top + max(0, (text_band - gap_top) // 2)
                     y_text_min = top_h + gap_top
                 else:
