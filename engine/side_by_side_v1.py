@@ -309,8 +309,192 @@ def _wrap_words_to_width(
     return lines
 
 
+def _safe_margins_xy(w: int, h: int) -> tuple[int, int]:
+    """~10% horizontal and vertical padding (within 8–12%)."""
+    mx = max(6, int(round(w * 0.10)))
+    my = max(6, int(round(h * 0.10)))
+    return mx, my
+
+
+def _corner_mean_rgb(im: Image.Image) -> tuple[int, int, int]:
+    s = max(2, min(im.width, im.height) // 32)
+    samples: list[tuple[int, int, int]] = []
+    for box in (
+        (0, 0, s, s),
+        (im.width - s, 0, im.width, s),
+        (0, im.height - s, s, im.height),
+        (im.width - s, im.height - s, im.width, im.height),
+    ):
+        crop = im.crop(box)
+        samples.append(tuple(int(sum(c) / len(c)) for c in zip(*list(crop.getdata()))))
+    r = sum(p[0] for p in samples) // len(samples)
+    g = sum(p[1] for p in samples) // len(samples)
+    b = sum(p[2] for p in samples) // len(samples)
+    return (r, g, b)
+
+
+def _estimate_foreground_bbox_full(im: Image.Image) -> tuple[int, int, int, int]:
+    """Rough subject bbox on full image via downsampled mask (no new deps)."""
+    sw = min(200, im.width)
+    sh = min(200, im.height)
+    if sw < 2 or sh < 2:
+        return 0, 0, im.width, im.height
+    mini = im.resize((sw, sh), Image.Resampling.BILINEAR).convert("L")
+    edge: list[int] = []
+    for x in range(0, sw, max(1, sw // 32)):
+        edge.append(mini.getpixel((x, 0)))
+        edge.append(mini.getpixel((x, sh - 1)))
+    for y in range(0, sh, max(1, sh // 32)):
+        edge.append(mini.getpixel((0, y)))
+        edge.append(mini.getpixel((sw - 1, y)))
+    bg = sum(edge) // max(1, len(edge))
+    xs: list[int] = []
+    ys: list[int] = []
+    for y in range(sh):
+        for x in range(sw):
+            if abs(mini.getpixel((x, y)) - bg) > 22:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return 0, 0, im.width, im.height
+    sx = im.width / sw
+    sy = im.height / sh
+    x0 = int(min(xs) * sx)
+    y0 = int(min(ys) * sy)
+    x1 = min(im.width, int((max(xs) + 1) * sx))
+    y1 = min(im.height, int((max(ys) + 1) * sy))
+    if x1 <= x0 or y1 <= y0:
+        return 0, 0, im.width, im.height
+    return x0, y0, x1, y1
+
+
+def _square_allow_side_by_side(w: int, h: int, bbox: tuple[int, int, int, int]) -> bool:
+    """Prefer below; side-by-side only for compact, centered subject mass."""
+    bx0, by0, bx1, by1 = bbox
+    bw, bh = bx1 - bx0, by1 - by0
+    if bw < 8 or bh < 8:
+        return False
+    area_f = (bw * bh) / max(1, w * h)
+    ar = bw / max(bh, 1)
+    cx = (bx0 + bx1) / 2.0 / max(1, w)
+    cy = (by0 + by1) / 2.0 / max(1, h)
+    compact = 0.20 <= area_f <= 0.45 and 0.80 <= ar <= 1.25
+    centered = 0.28 <= cx <= 0.72 and 0.28 <= cy <= 0.72
+    return compact and centered
+
+
+def _shrink_fonts_to_width(
+    draw: ImageDraw.ImageDraw,
+    pu: str,
+    rest: str,
+    line: str,
+    text: str,
+    max_w: int,
+    name_sz0: int,
+    base_sz0: int,
+) -> tuple[ImageFont.FreeTypeFont | ImageFont.ImageFont, ImageFont.FreeTypeFont | ImageFont.ImageFont | None, ImageFont.FreeTypeFont | ImageFont.ImageFont, bool]:
+    """Return (font_name, font_rest_or_none, font_one, two_fonts) sized so one-line headline fits max_w."""
+    name_sz, base_sz = name_sz0, base_sz0
+    for _ in range(48):
+        font_name = _builder1_headline_font(name_sz)
+        font_rest = _builder1_headline_font(base_sz)
+        font_one = _builder1_headline_font(base_sz)
+        if pu and rest:
+            gap_w = _text_width(draw, " ", font_rest)
+            total = _text_width(draw, pu, font_name) + gap_w + _text_width(draw, rest, font_rest)
+            if total <= max_w:
+                return font_name, font_rest, font_one, True
+        elif pu:
+            total = _text_width(draw, pu, font_name)
+            if total <= max_w:
+                return font_name, None, font_one, True
+        else:
+            total = _text_width(draw, line, font_one)
+            if total <= max_w:
+                return font_name, None, font_one, False
+        name_sz = max(8, name_sz - 2)
+        base_sz = max(7, base_sz - 1)
+    font_one = _builder1_headline_font(base_sz)
+    return font_name, font_rest if pu and rest else None, font_one, bool(pu and rest)
+
+
+def _headline_one_line_union_bbox(
+    draw: ImageDraw.ImageDraw,
+    mid_y: int,
+    w: int,
+    mx: int,
+    pu: str,
+    rest: str,
+    line: str,
+    stroke: int,
+    font_name: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    font_rest: ImageFont.FreeTypeFont | ImageFont.ImageFont | None,
+    font_one: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    two_fonts: bool,
+) -> tuple[int, int, int, int]:
+    max_w = w - 2 * mx
+    sw = stroke
+    if two_fonts and font_rest is not None:
+        gap_w = _text_width(draw, " ", font_rest)
+        total = _text_width(draw, pu, font_name) + gap_w + _text_width(draw, rest, font_rest)
+        x = mx + max(0, (max_w - total) // 2)
+        try:
+            b1 = draw.textbbox((x, mid_y), pu, font=font_name, anchor="lm", stroke_width=sw)
+            x2 = x + int(draw.textlength(pu, font=font_name)) + gap_w
+            b2 = draw.textbbox((x2, mid_y), rest, font=font_rest, anchor="lm", stroke_width=sw)
+        except TypeError:
+            b1 = draw.textbbox((x, mid_y), pu, font=font_name, stroke_width=sw)
+            x2 = x + _text_width(draw, pu, font_name) + gap_w
+            b2 = draw.textbbox((x2, mid_y), rest, font=font_rest, stroke_width=sw)
+        return (min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3]))
+    twl = _text_width(draw, line, font_one)
+    x = mx + max(0, (max_w - twl) // 2)
+    try:
+        return draw.textbbox((x, mid_y), line, font=font_one, anchor="lm", stroke_width=sw)
+    except TypeError:
+        return draw.textbbox((x, mid_y), line, font=font_one, stroke_width=sw)
+
+
+def _draw_headline_one_line_centered(
+    draw: ImageDraw.ImageDraw,
+    mid_y: int,
+    w: int,
+    mx: int,
+    pu: str,
+    rest: str,
+    line: str,
+    text: str,
+    stroke: int,
+    font_name: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    font_rest: ImageFont.FreeTypeFont | ImageFont.ImageFont | None,
+    font_one: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+    two_fonts: bool,
+) -> None:
+    max_w = w - 2 * mx
+    kw = dict(fill=(16, 16, 16), stroke_width=stroke, stroke_fill=(248, 248, 248))
+    if two_fonts and font_rest is not None:
+        gap_w = _text_width(draw, " ", font_rest)
+        total = _text_width(draw, pu, font_name) + gap_w + _text_width(draw, rest, font_rest)
+        x_cursor = mx + max(0, (max_w - total) // 2)
+        try:
+            draw.text((x_cursor, mid_y), pu, font=font_name, anchor="lm", **kw)
+            x_cursor += int(draw.textlength(pu, font=font_name)) + gap_w
+            draw.text((x_cursor, mid_y), rest, font=font_rest, anchor="lm", **kw)
+        except TypeError:
+            draw.text((x_cursor, mid_y), pu, font=font_name, **kw)
+            x_cursor += _text_width(draw, pu, font_name) + gap_w
+            draw.text((x_cursor, mid_y), rest, font=font_rest, **kw)
+    else:
+        twl = _text_width(draw, line, font_one)
+        x = mx + max(0, (max_w - twl) // 2)
+        try:
+            draw.text((x, mid_y), line, font=font_one, anchor="lm", **kw)
+        except TypeError:
+            draw.text((x, mid_y), line, font=font_one, **kw)
+
+
 def composite_headline_on_image(image_bytes: bytes, headline: str, product_name: str) -> bytes:
-    """Compose final ad: orientation-driven layout; product name larger and first. Returns PNG bytes."""
+    """Compose onto same WxH as generation; safe margins; square uses bbox heuristic."""
     text = (headline or "").strip()
     if not text:
         return image_bytes
@@ -318,112 +502,52 @@ def composite_headline_on_image(image_bytes: bytes, headline: str, product_name:
     with Image.open(io.BytesIO(image_bytes)) as src:
         src = src.convert("RGB")
         w, h = src.size
-        margin = max(10, min(w, h) // 48)
-        is_vertical = h > w
+        mx, my = _safe_margins_xy(w, h)
+        bg = _corner_mean_rgb(src)
+        out = Image.new("RGB", (w, h), bg)
         pu, rest = _split_headline_product_rest(headline, product_name)
         stroke = max(1, min(w, h) // 256)
+        line = f"{pu} {rest}".strip() if pu else text
 
-        if is_vertical:
-            out = Image.new("RGB", (w, h), (255, 255, 255))
-            top_h = int(h * 0.72)
-            bottom_h = h - top_h
-            tw, th = w - 2 * margin, top_h - 2 * margin
-            scale = min(tw / max(1, src.width), th / max(1, src.height))
-            nw, nh = max(1, int(src.width * scale)), max(1, int(src.height * scale))
+        if w > h:
+            # Landscape: balanced split, visual ~65% of left band
+            split_x = int(w * 0.50)
+            left_inner_w = split_x - mx - mx // 2
+            zone_h = h - 2 * my
+            scale = min(left_inner_w / max(1, src.width), zone_h / max(1, src.height)) * 0.97
+            nw = max(1, int(src.width * scale))
+            nh = max(1, int(src.height * scale))
             scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
-            ox = margin + max(0, (tw - nw) // 2)
-            oy = margin + max(0, (th - nh) // 2)
+            ox = mx + max(0, (left_inner_w - nw) // 2)
+            oy = my + max(0, (zone_h - nh) // 2)
             out.paste(scaled, (ox, oy))
             draw = ImageDraw.Draw(out)
-            line = f"{pu} {rest}".strip() if pu else text
-            max_w = w - 2 * margin
-            base_sz = max(14, min(44, w // 18))
-            name_sz = int(base_sz * 1.35)
-            for _ in range(40):
+            tx0 = split_x + mx // 2
+            max_tw = w - mx - tx0
+            name_sz = max(14, min(48, max_tw // 7))
+            body_sz = max(12, int(name_sz * 0.72))
+            for shrink in range(30):
                 font_name = _builder1_headline_font(name_sz)
-                font_rest = _builder1_headline_font(base_sz)
-                if pu and rest:
-                    gap_w = _text_width(draw, " ", font_rest)
-                    total = _text_width(draw, pu, font_name) + gap_w + _text_width(draw, rest, font_rest)
-                elif pu:
-                    total = _text_width(draw, pu, font_name)
+                font_body = _builder1_headline_font(body_sz)
+                if pu:
+                    lines_r = _wrap_words_to_width(draw, rest.split(), font_body, max_tw) if rest else []
+                    block: list[tuple[str, ImageFont.FreeTypeFont | ImageFont.ImageFont]] = [(pu, font_name)]
+                    for ln in lines_r:
+                        block.append((ln, font_body))
                 else:
-                    total = _text_width(draw, line, font_rest)
-                if total <= max_w:
+                    block = [(text, font_body)]
+                heights = [draw.textbbox((0, 0), s, font=f)[3] - draw.textbbox((0, 0), s, font=f)[1] + 6 for s, f in block]
+                total_block = sum(heights)
+                if total_block <= zone_h - 4:
                     break
-                name_sz = max(12, name_sz - 2)
-                base_sz = max(10, base_sz - 2)
-            font_name = _builder1_headline_font(name_sz)
-            font_rest = _builder1_headline_font(base_sz)
-            mid_y = top_h + bottom_h // 2
-            if pu and rest:
-                gap_w = _text_width(draw, " ", font_rest)
-                total = _text_width(draw, pu, font_name) + gap_w + _text_width(draw, rest, font_rest)
-                x_cursor = margin + max(0, (w - 2 * margin - total) // 2)
-                kw = dict(
-                    fill=(16, 16, 16),
-                    stroke_width=stroke,
-                    stroke_fill=(248, 248, 248),
-                )
-                try:
-                    draw.text((x_cursor, mid_y), pu, font=font_name, anchor="lm", **kw)
-                    x_cursor += int(draw.textlength(pu, font=font_name)) + gap_w
-                    draw.text((x_cursor, mid_y), rest, font=font_rest, anchor="lm", **kw)
-                except TypeError:
-                    draw.text((x_cursor, mid_y), pu, font=font_name, **kw)
-                    x_cursor += _text_width(draw, pu, font_name) + gap_w
-                    draw.text((x_cursor, mid_y), rest, font=font_rest, **kw)
-            else:
-                font_one = _builder1_headline_font(base_sz)
-                twl = _text_width(draw, line, font_one)
-                x = margin + max(0, (w - 2 * margin - twl) // 2)
-                kw = dict(
-                    fill=(16, 16, 16),
-                    stroke_width=stroke,
-                    stroke_fill=(248, 248, 248),
-                )
-                try:
-                    draw.text((x, mid_y), line, font=font_one, anchor="lm", **kw)
-                except TypeError:
-                    draw.text((x, mid_y), line, font=font_one, **kw)
-        else:
-            out = Image.new("RGB", (w, h), (250, 250, 250))
-            split_x = w // 2
-            left_w = split_x - 2 * margin
-            right_w = w - split_x - 2 * margin
-            lh, rh = h - 2 * margin, h - 2 * margin
-            scale = min(left_w / max(1, src.width), lh / max(1, src.height))
-            nw, nh = max(1, int(src.width * scale)), max(1, int(src.height * scale))
-            scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
-            ox = margin + max(0, (left_w - nw) // 2)
-            oy = margin + max(0, (lh - nh) // 2)
-            out.paste(scaled, (ox, oy))
-            draw = ImageDraw.Draw(out)
-            tx0 = split_x + margin
-            max_tw = right_w - margin
-            name_sz = max(16, min(52, right_w // 8))
-            body_sz = max(14, int(name_sz * 0.72))
-            font_name = _builder1_headline_font(name_sz)
-            font_body = _builder1_headline_font(body_sz)
-            if pu:
-                lines_r = _wrap_words_to_width(draw, rest.split(), font_body, max_tw) if rest else []
-                block: list[tuple[str, ImageFont.FreeTypeFont | ImageFont.ImageFont]] = [(pu, font_name)]
-                for ln in lines_r:
-                    block.append((ln, font_body))
-            else:
-                block = [(text, font_body)]
-            heights = []
-            for s, fnt in block:
-                bb = draw.textbbox((0, 0), s, font=fnt)
-                heights.append(bb[3] - bb[1] + 8)
-            total_block = sum(heights)
-            y_start = margin + max(0, (lh - total_block) // 2)
-            y = y_start
+                name_sz = max(11, name_sz - 2)
+                body_sz = max(10, int(name_sz * 0.72))
+            y = my + max(0, (zone_h - total_block) // 2)
             for s, fnt in block:
                 twl = _text_width(draw, s, fnt)
                 x = tx0 + max(0, (max_tw - twl) // 2)
                 draw.text(
-                    (x, y),
+                    (min(x, w - mx - 1), min(y, h - my - 1)),
                     s,
                     font=fnt,
                     fill=(16, 16, 16),
@@ -431,7 +555,91 @@ def composite_headline_on_image(image_bytes: bytes, headline: str, product_name:
                     stroke_fill=(248, 248, 248),
                 )
                 bb = draw.textbbox((0, 0), s, font=fnt)
-                y += bb[3] - bb[1] + 10
+                y += bb[3] - bb[1] + 8
+        else:
+            bbox = _estimate_foreground_bbox_full(src)
+            use_side = w == h and _square_allow_side_by_side(w, h, bbox)
+            if use_side:
+                split_x = int(w * 0.50)
+                left_inner_w = split_x - mx - mx // 2
+                zone_h = h - 2 * my
+                scale = min(left_inner_w / max(1, src.width), zone_h / max(1, src.height)) * 0.97
+                nw = max(1, int(src.width * scale))
+                nh = max(1, int(src.height * scale))
+                scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
+                ox = mx + max(0, (left_inner_w - nw) // 2)
+                oy = my + max(0, (zone_h - nh) // 2)
+                out.paste(scaled, (ox, oy))
+                draw = ImageDraw.Draw(out)
+                tx0 = split_x + mx // 2
+                max_tw = w - mx - tx0
+                name_sz = max(14, min(48, max_tw // 7))
+                body_sz = max(12, int(name_sz * 0.72))
+                for shrink in range(30):
+                    font_name = _builder1_headline_font(name_sz)
+                    font_body = _builder1_headline_font(body_sz)
+                    if pu:
+                        lines_r = _wrap_words_to_width(draw, rest.split(), font_body, max_tw) if rest else []
+                        block = [(pu, font_name)] + [(ln, font_body) for ln in lines_r]
+                    else:
+                        block = [(text, font_body)]
+                    heights = [draw.textbbox((0, 0), s, font=f)[3] - draw.textbbox((0, 0), s, font=f)[1] + 6 for s, f in block]
+                    total_block = sum(heights)
+                    if total_block <= zone_h - 4:
+                        break
+                    name_sz = max(11, name_sz - 2)
+                    body_sz = max(10, int(name_sz * 0.72))
+                y = my + max(0, (zone_h - total_block) // 2)
+                for s, fnt in block:
+                    twl = _text_width(draw, s, fnt)
+                    x = tx0 + max(0, (max_tw - twl) // 2)
+                    draw.text(
+                        (min(x, w - mx - 1), min(y, h - my - 1)),
+                        s,
+                        font=fnt,
+                        fill=(16, 16, 16),
+                        stroke_width=stroke,
+                        stroke_fill=(248, 248, 248),
+                    )
+                    bb = draw.textbbox((0, 0), s, font=fnt)
+                    y += bb[3] - bb[1] + 8
+            else:
+                # Portrait or square “below”: visual in upper ~66%, headline single line bottom
+                visual_frac = 0.66
+                top_h = int(h * visual_frac)
+                text_band = h - top_h
+                min_text = int(h * 0.12)
+                if text_band < min_text:
+                    top_h = h - min_text
+                    text_band = h - top_h
+                tw = w - 2 * mx
+                th = top_h - my
+                scale = min(tw / max(1, src.width), th / max(1, src.height)) * 0.98
+                nw = max(1, int(src.width * scale))
+                nh = max(1, int(src.height * scale))
+                scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
+                ox = mx + max(0, (tw - nw) // 2)
+                oy = my + max(0, (th - nh) // 2)
+                out.paste(scaled, (ox, oy))
+                draw = ImageDraw.Draw(out)
+                mid_y = top_h + text_band // 2
+                max_w = w - 2 * mx
+                y_text_min = top_h + 2
+                y_text_max = h - my - 2
+                name_sz = max(14, min(46, max_w // 8))
+                base_sz = max(11, int(name_sz // 1.35))
+                for _ in range(56):
+                    fn, fr, fo, two = _shrink_fonts_to_width(draw, pu, rest, line, text, max_w, name_sz, base_sz)
+                    bb = _headline_one_line_union_bbox(
+                        draw, mid_y, w, mx, pu, rest, line, stroke, fn, fr, fo, two
+                    )
+                    if bb[1] >= y_text_min and bb[3] <= y_text_max:
+                        break
+                    name_sz = max(8, name_sz - 2)
+                    base_sz = max(7, base_sz - 1)
+                _draw_headline_one_line_centered(
+                    draw, mid_y, w, mx, pu, rest, line, text, stroke, fn, fr, fo, two
+                )
 
         out_buf = io.BytesIO()
         out.save(out_buf, format="PNG", optimize=True)
