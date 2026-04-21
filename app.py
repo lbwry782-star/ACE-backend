@@ -580,7 +580,7 @@ def preview():
                     if not product_description:
                         raise ValueError("productDescription is required")
 
-                    ad = generate_builder1_ad(product_name, product_description)
+                    ad = generate_builder1_ad(product_name, product_description, sid)
                     img_b64 = base64.standard_b64encode(ad["imageBytes"]).decode("ascii")
                     composition = (
                         "replacement" if ad["mode"] == "REPLACEMENT" else "partial_overlap"

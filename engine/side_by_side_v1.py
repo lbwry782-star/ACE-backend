@@ -6,10 +6,21 @@ import base64
 import io
 import json
 import os
+from threading import Lock
+from typing import Dict, List, Optional
 
 import httpx
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
+
+_memory_lock = Lock()
+# Per sessionId: all prior runs (no TTL; new sessionId starts empty).
+_session_memory: Dict[str, List[dict]] = {}
+# Cross-session recent concepts (bounded list, no TTL).
+_global_concepts: List[dict] = []
+_GLOBAL_LIST_MAX = 100
+_SESSION_PROMPT_TAIL = 24
+_GLOBAL_PROMPT_TAIL = 36
 
 
 def mode_from_similarity(morphological_similarity: int) -> str:
@@ -17,7 +28,71 @@ def mode_from_similarity(morphological_similarity: int) -> str:
     return "REPLACEMENT" if morphological_similarity >= 85 else "SIDE_BY_SIDE"
 
 
-def get_concept_from_o3(product_name: str, product_description: str) -> dict:
+def _memory_instruction_appendix(session_id: Optional[str]) -> str:
+    """Build o3 prompt addendum from session + global memory (does not alter JSON schema)."""
+    with _memory_lock:
+        sess_rows = list(_session_memory.get(session_id or "", []))[-_SESSION_PROMPT_TAIL:] if session_id else []
+        glob_rows = list(_global_concepts)[-_GLOBAL_PROMPT_TAIL:]
+    blocks: list[str] = []
+    if sess_rows:
+        lines = []
+        for i, rec in enumerate(sess_rows, 1):
+            lines.append(
+                f'{i}. objectA={rec["objectA"]!r}, objectB={rec["objectB"]!r}, '
+                f'advertisingPromise={rec["advertisingPromise"]!r}, mode={rec["mode"]!r}, headline={rec["headline"]!r}'
+            )
+        blocks.append(
+            "AVOID REPEATING PREVIOUS SESSION CONCEPTS:\n"
+            "Do not reuse the same objectA, the same objectB, the same A+B pairing, or the same advertising idea with only minor variation. "
+            "Morphological silhouette strength and all core method rules above always take priority over avoidance — never weaken B's match to A to avoid repetition.\n"
+            "Previously used in this session:\n" + "\n".join(lines)
+        )
+    if glob_rows:
+        lines = []
+        for i, rec in enumerate(glob_rows, 1):
+            lines.append(
+                f'{i}. objectA={rec["objectA"]!r}, objectB={rec["objectB"]!r}, '
+                f'advertisingPromise={rec["advertisingPromise"]!r}'
+            )
+        blocks.append(
+            "AVOID OVERUSED OR REPEATED SYSTEM-WIDE CONCEPTS:\n"
+            "Steer away from clichéd or recently repeated pairs and promises listed below; shape accuracy and morphology rules still dominate.\n"
+            "Recent system-wide concepts:\n" + "\n".join(lines)
+        )
+    return "\n\n".join(blocks) if blocks else ""
+
+
+def _record_builder1_memories(
+    session_id: Optional[str],
+    object_a: str,
+    object_b: str,
+    advertising_promise: str,
+    mode: str,
+    headline: str,
+) -> None:
+    sess_rec = {
+        "objectA": object_a,
+        "objectB": object_b,
+        "advertisingPromise": advertising_promise,
+        "mode": mode,
+        "headline": headline,
+    }
+    glob_rec = {
+        "objectA": object_a,
+        "objectB": object_b,
+        "advertisingPromise": advertising_promise,
+    }
+    with _memory_lock:
+        if session_id:
+            _session_memory.setdefault(session_id, []).append(sess_rec)
+        _global_concepts.append(glob_rec)
+        while len(_global_concepts) > _GLOBAL_LIST_MAX:
+            _global_concepts.pop(0)
+
+
+def get_concept_from_o3(
+    product_name: str, product_description: str, session_id: Optional[str] = None
+) -> dict:
     """One o3-pro call: structured concept JSON for Builder1. Raises ValueError if JSON is invalid."""
     pn = (product_name or "").strip() or "Product"
     desc = (product_description or "").strip() or "No description provided."
@@ -36,6 +111,9 @@ Rules for the model:
 - objectA and objectB must be physical, simple, everyday, clearly defined. No text, logos, or brands. No vague environments or non-physical situations.
 - Keep reasoning short.
 """
+    appendix = _memory_instruction_appendix(session_id)
+    if appendix:
+        user_input = user_input.rstrip() + "\n\n" + appendix
 
     client = OpenAI(
         api_key=os.environ.get("OPENAI_API_KEY"),
@@ -471,9 +549,11 @@ Rules:
     return out
 
 
-def generate_builder1_ad(product_name: str, product_description: str) -> dict:
+def generate_builder1_ad(
+    product_name: str, product_description: str, session_id: Optional[str] = None
+) -> dict:
     """Orchestrate Builder1: concept → mode → prompts → headline → marketing text."""
-    concept = get_concept_from_o3(product_name, product_description)
+    concept = get_concept_from_o3(product_name, product_description, session_id=session_id)
     required = (
         "objectA",
         "objectB",
@@ -499,6 +579,10 @@ def generate_builder1_ad(product_name: str, product_description: str) -> dict:
     validate_image_bytes(image_bytes)
     image_bytes = composite_headline_on_image(image_bytes, headline, product_name)
     validate_image_bytes(image_bytes)
+
+    _record_builder1_memories(
+        session_id, object_a, object_b, advertising_promise, mode, headline
+    )
 
     return {
         "objectA": object_a,
