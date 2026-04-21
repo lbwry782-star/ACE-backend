@@ -9,7 +9,7 @@ import os
 
 import httpx
 from openai import OpenAI
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 
 def mode_from_similarity(morphological_similarity: int) -> str:
@@ -174,6 +174,99 @@ def validate_image_bytes(image_bytes: bytes) -> None:
         raise ValueError(f"BUILDER1_IMAGE_VALIDATE: not a decodable image: {e}") from e
 
 
+def _builder1_headline_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    env_path = (os.environ.get("BUILDER1_HEADLINE_FONT") or "").strip()
+    candidates = [
+        p for p in (
+            env_path,
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+        )
+        if p
+    ]
+    for path in candidates:
+        if os.path.isfile(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def _wrap_headline_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, max_width: int) -> list[str]:
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current: list[str] = []
+    for w in words:
+        trial = " ".join(current + [w]) if current else w
+        bbox = draw.textbbox((0, 0), trial, font=font)
+        if bbox[2] - bbox[0] <= max_width:
+            current.append(w)
+        else:
+            if current:
+                lines.append(" ".join(current))
+            current = [w]
+    if current:
+        lines.append(" ".join(current))
+    return lines
+
+
+def composite_headline_on_image(image_bytes: bytes, headline: str) -> bytes:
+    """Draw headline near the top of the ad image; returns PNG bytes."""
+    text = (headline or "").strip()
+    if not text:
+        return image_bytes
+
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = img.convert("RGB")
+        w, h = img.size
+        draw = ImageDraw.Draw(img)
+        margin_x = max(8, w // 64)
+        margin_y = max(8, h // 80)
+        max_text_w = w - 2 * margin_x
+        font_size = max(18, min(56, w // 22))
+        font = _builder1_headline_font(font_size)
+        while font_size >= 14:
+            font = _builder1_headline_font(font_size)
+            lines = _wrap_headline_lines(draw, text, font, max_text_w)
+            if lines:
+                line_height = 0
+                for ln in lines:
+                    bbox = draw.textbbox((0, 0), ln, font=font)
+                    line_height = max(line_height, bbox[3] - bbox[1])
+                total_h = line_height * len(lines) + (len(lines) - 1) * 4
+                if total_h < h // 3:
+                    break
+            font_size -= 2
+        else:
+            font = _builder1_headline_font(14)
+            lines = _wrap_headline_lines(draw, text, font, max_text_w) or [text]
+
+        y = margin_y
+        stroke = max(1, font_size // 22)
+        for ln in lines:
+            bbox = draw.textbbox((0, 0), ln, font=font)
+            tw = bbox[2] - bbox[0]
+            x = margin_x + max(0, (max_text_w - tw) // 2)
+            draw.text(
+                (x, y),
+                ln,
+                font=font,
+                fill=(20, 20, 20),
+                stroke_width=stroke,
+                stroke_fill=(250, 250, 250),
+            )
+            y += (bbox[3] - bbox[1]) + 6
+
+        out = io.BytesIO()
+        img.save(out, format="PNG", optimize=True)
+        return out.getvalue()
+
+
 def generate_headline(
     objectA: str, objectB: str, advertisingPromise: str, product_name: str
 ) -> str:
@@ -304,6 +397,8 @@ def generate_builder1_ad(product_name: str, product_description: str) -> dict:
     )
     marketing_text = generate_marketing_text(headline, advertising_promise)
     image_bytes = generate_image_bytes(image_prompt)
+    validate_image_bytes(image_bytes)
+    image_bytes = composite_headline_on_image(image_bytes, headline)
     validate_image_bytes(image_bytes)
 
     return {
