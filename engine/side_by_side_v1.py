@@ -195,76 +195,175 @@ def _builder1_headline_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.Ima
     return ImageFont.load_default()
 
 
-def _wrap_headline_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont, max_width: int) -> list[str]:
-    words = text.split()
+def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont | ImageFont.ImageFont) -> int:
+    try:
+        return int(draw.textlength(text, font=font))
+    except Exception:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return bbox[2] - bbox[0]
+
+
+def _split_headline_product_rest(headline: str, product_name: str) -> tuple[str, str]:
+    """Product token(s) in ALL CAPS first, then remainder; matches generate_headline layout."""
+    pname = " ".join((product_name or "").strip().split())
+    if not pname:
+        return "", (headline or "").strip()
+    pu = pname.upper()
+    hw = (headline or "").strip().split()
+    pw = pu.split()
+    if len(hw) >= len(pw) and " ".join(hw[: len(pw)]).upper() == pu:
+        rest = " ".join(hw[len(pw) :]).strip()
+        return pu, rest
+    return "", (headline or "").strip()
+
+
+def _wrap_words_to_width(
+    draw: ImageDraw.ImageDraw, words: list[str], font: ImageFont.FreeTypeFont | ImageFont.ImageFont, max_width: int
+) -> list[str]:
     if not words:
         return []
     lines: list[str] = []
-    current: list[str] = []
+    cur: list[str] = []
     for w in words:
-        trial = " ".join(current + [w]) if current else w
-        bbox = draw.textbbox((0, 0), trial, font=font)
-        if bbox[2] - bbox[0] <= max_width:
-            current.append(w)
+        trial = " ".join(cur + [w]) if cur else w
+        if _text_width(draw, trial, font) <= max_width:
+            cur.append(w)
         else:
-            if current:
-                lines.append(" ".join(current))
-            current = [w]
-    if current:
-        lines.append(" ".join(current))
+            if cur:
+                lines.append(" ".join(cur))
+            cur = [w]
+    if cur:
+        lines.append(" ".join(cur))
     return lines
 
 
-def composite_headline_on_image(image_bytes: bytes, headline: str) -> bytes:
-    """Draw headline near the top of the ad image; returns PNG bytes."""
+def composite_headline_on_image(image_bytes: bytes, headline: str, product_name: str) -> bytes:
+    """Compose final ad: orientation-driven layout; product name larger and first. Returns PNG bytes."""
     text = (headline or "").strip()
     if not text:
         return image_bytes
 
-    with Image.open(io.BytesIO(image_bytes)) as img:
-        img = img.convert("RGB")
-        w, h = img.size
-        draw = ImageDraw.Draw(img)
-        margin_x = max(8, w // 64)
-        margin_y = max(8, h // 80)
-        max_text_w = w - 2 * margin_x
-        font_size = max(18, min(56, w // 22))
-        font = _builder1_headline_font(font_size)
-        while font_size >= 14:
-            font = _builder1_headline_font(font_size)
-            lines = _wrap_headline_lines(draw, text, font, max_text_w)
-            if lines:
-                line_height = 0
-                for ln in lines:
-                    bbox = draw.textbbox((0, 0), ln, font=font)
-                    line_height = max(line_height, bbox[3] - bbox[1])
-                total_h = line_height * len(lines) + (len(lines) - 1) * 4
-                if total_h < h // 3:
+    with Image.open(io.BytesIO(image_bytes)) as src:
+        src = src.convert("RGB")
+        w, h = src.size
+        margin = max(10, min(w, h) // 48)
+        is_vertical = h > w
+        pu, rest = _split_headline_product_rest(headline, product_name)
+        stroke = max(1, min(w, h) // 256)
+
+        if is_vertical:
+            out = Image.new("RGB", (w, h), (255, 255, 255))
+            top_h = int(h * 0.72)
+            bottom_h = h - top_h
+            tw, th = w - 2 * margin, top_h - 2 * margin
+            scale = min(tw / max(1, src.width), th / max(1, src.height))
+            nw, nh = max(1, int(src.width * scale)), max(1, int(src.height * scale))
+            scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
+            ox = margin + max(0, (tw - nw) // 2)
+            oy = margin + max(0, (th - nh) // 2)
+            out.paste(scaled, (ox, oy))
+            draw = ImageDraw.Draw(out)
+            line = f"{pu} {rest}".strip() if pu else text
+            max_w = w - 2 * margin
+            base_sz = max(14, min(44, w // 18))
+            name_sz = int(base_sz * 1.35)
+            for _ in range(40):
+                font_name = _builder1_headline_font(name_sz)
+                font_rest = _builder1_headline_font(base_sz)
+                if pu and rest:
+                    gap_w = _text_width(draw, " ", font_rest)
+                    total = _text_width(draw, pu, font_name) + gap_w + _text_width(draw, rest, font_rest)
+                elif pu:
+                    total = _text_width(draw, pu, font_name)
+                else:
+                    total = _text_width(draw, line, font_rest)
+                if total <= max_w:
                     break
-            font_size -= 2
+                name_sz = max(12, name_sz - 2)
+                base_sz = max(10, base_sz - 2)
+            font_name = _builder1_headline_font(name_sz)
+            font_rest = _builder1_headline_font(base_sz)
+            mid_y = top_h + bottom_h // 2
+            if pu and rest:
+                gap_w = _text_width(draw, " ", font_rest)
+                total = _text_width(draw, pu, font_name) + gap_w + _text_width(draw, rest, font_rest)
+                x_cursor = margin + max(0, (w - 2 * margin - total) // 2)
+                kw = dict(
+                    fill=(16, 16, 16),
+                    stroke_width=stroke,
+                    stroke_fill=(248, 248, 248),
+                )
+                try:
+                    draw.text((x_cursor, mid_y), pu, font=font_name, anchor="lm", **kw)
+                    x_cursor += int(draw.textlength(pu, font=font_name)) + gap_w
+                    draw.text((x_cursor, mid_y), rest, font=font_rest, anchor="lm", **kw)
+                except TypeError:
+                    draw.text((x_cursor, mid_y), pu, font=font_name, **kw)
+                    x_cursor += _text_width(draw, pu, font_name) + gap_w
+                    draw.text((x_cursor, mid_y), rest, font=font_rest, **kw)
+            else:
+                font_one = _builder1_headline_font(base_sz)
+                twl = _text_width(draw, line, font_one)
+                x = margin + max(0, (w - 2 * margin - twl) // 2)
+                kw = dict(
+                    fill=(16, 16, 16),
+                    stroke_width=stroke,
+                    stroke_fill=(248, 248, 248),
+                )
+                try:
+                    draw.text((x, mid_y), line, font=font_one, anchor="lm", **kw)
+                except TypeError:
+                    draw.text((x, mid_y), line, font=font_one, **kw)
         else:
-            font = _builder1_headline_font(14)
-            lines = _wrap_headline_lines(draw, text, font, max_text_w) or [text]
+            out = Image.new("RGB", (w, h), (250, 250, 250))
+            split_x = w // 2
+            left_w = split_x - 2 * margin
+            right_w = w - split_x - 2 * margin
+            lh, rh = h - 2 * margin, h - 2 * margin
+            scale = min(left_w / max(1, src.width), lh / max(1, src.height))
+            nw, nh = max(1, int(src.width * scale)), max(1, int(src.height * scale))
+            scaled = src.resize((nw, nh), Image.Resampling.LANCZOS)
+            ox = margin + max(0, (left_w - nw) // 2)
+            oy = margin + max(0, (lh - nh) // 2)
+            out.paste(scaled, (ox, oy))
+            draw = ImageDraw.Draw(out)
+            tx0 = split_x + margin
+            max_tw = right_w - margin
+            name_sz = max(16, min(52, right_w // 8))
+            body_sz = max(14, int(name_sz * 0.72))
+            font_name = _builder1_headline_font(name_sz)
+            font_body = _builder1_headline_font(body_sz)
+            if pu:
+                lines_r = _wrap_words_to_width(draw, rest.split(), font_body, max_tw) if rest else []
+                block: list[tuple[str, ImageFont.FreeTypeFont | ImageFont.ImageFont]] = [(pu, font_name)]
+                for ln in lines_r:
+                    block.append((ln, font_body))
+            else:
+                block = [(text, font_body)]
+            heights = []
+            for s, fnt in block:
+                bb = draw.textbbox((0, 0), s, font=fnt)
+                heights.append(bb[3] - bb[1] + 8)
+            total_block = sum(heights)
+            y_start = margin + max(0, (lh - total_block) // 2)
+            y = y_start
+            for s, fnt in block:
+                twl = _text_width(draw, s, fnt)
+                x = tx0 + max(0, (max_tw - twl) // 2)
+                draw.text(
+                    (x, y),
+                    s,
+                    font=fnt,
+                    fill=(16, 16, 16),
+                    stroke_width=stroke,
+                    stroke_fill=(248, 248, 248),
+                )
+                bb = draw.textbbox((0, 0), s, font=fnt)
+                y += bb[3] - bb[1] + 10
 
-        y = margin_y
-        stroke = max(1, font_size // 22)
-        for ln in lines:
-            bbox = draw.textbbox((0, 0), ln, font=font)
-            tw = bbox[2] - bbox[0]
-            x = margin_x + max(0, (max_text_w - tw) // 2)
-            draw.text(
-                (x, y),
-                ln,
-                font=font,
-                fill=(20, 20, 20),
-                stroke_width=stroke,
-                stroke_fill=(250, 250, 250),
-            )
-            y += (bbox[3] - bbox[1]) + 6
-
-        out = io.BytesIO()
-        img.save(out, format="PNG", optimize=True)
-        return out.getvalue()
+        out_buf = io.BytesIO()
+        out.save(out_buf, format="PNG", optimize=True)
+        return out_buf.getvalue()
 
 
 def generate_headline(
@@ -398,7 +497,7 @@ def generate_builder1_ad(product_name: str, product_description: str) -> dict:
     marketing_text = generate_marketing_text(headline, advertising_promise)
     image_bytes = generate_image_bytes(image_prompt)
     validate_image_bytes(image_bytes)
-    image_bytes = composite_headline_on_image(image_bytes, headline)
+    image_bytes = composite_headline_on_image(image_bytes, headline, product_name)
     validate_image_bytes(image_bytes)
 
     return {
