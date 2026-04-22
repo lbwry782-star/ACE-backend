@@ -44,8 +44,6 @@ from engine.builder1_core import (
     build_builder1_scaffold_plan,
     builder1_plan_to_preview_response,
 )
-from engine.side_by_side_v1 import generate_builder1_ad
-
 app = Flask(__name__)
 
 
@@ -302,160 +300,13 @@ def generate():
     Returns: 200 JSON { ok: true, sessionId, adIndex, imageBase64, headline, bodyText50 }
     Or 409 if generation already in progress for this session.
     """
-    request_id = str(uuid.uuid4())
-    try:
-        if not request.is_json:
-            return jsonify({'ok': False, 'error': 'invalid_request', 'message': 'Request must be JSON'}), 400
-        payload = request.get_json()
-        if not payload.get("productDescription"):
-            return jsonify({'ok': False, 'error': 'missing_field', 'message': 'productDescription is required'}), 400
-        # Use client sessionId as canonical everywhere; only generate new UUID when request truly has no sessionId
-        client_sid = (payload.get("sessionId") or "").strip()
-        if client_sid:
-            session_id = client_sid
-            sid_source = "client"
-        else:
-            session_id = str(uuid.uuid4())
-            sid_source = "generated"
-        logger.info(f"GEN_REQUEST_SID_SOURCE source={sid_source} request_id={request_id}")
-        logger.info(f"GEN_REQUEST_SID_VALUE sessionId={session_id} request_id={request_id}")
-        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={sid_source} request_id={request_id}")
-        ad_index = int(payload.get("adIndex", 1))
-        ad_index = max(1, min(3, ad_index))
+    return jsonify({"ok": True, "ads": []}), 200
 
-        # ACE_TEST_MODE: bypass engine; return demo and store artifact for download-zip
-        if ACE_TEST_MODE:
-            logger.info("TEST_MODE_RETURNING_DEMO_RESULT=true")
-            demo = _get_test_mode_demo_result()
-            image_bytes = base64.b64decode(demo["imageBase64"])
-            _set_artifact(session_id, ad_index, image_bytes, demo["bodyText50"], demo["headline"])
-            if client_sid:
-                _set_sid_alias(client_sid, session_id)
-            logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
-            return jsonify({
-                "ok": True,
-                "sessionId": session_id,
-                "adIndex": ad_index,
-                "imageBase64": demo["imageBase64"],
-                "headline": demo["headline"],
-                "bodyText50": demo["bodyText50"],
-            }), 200
-
-        logger.info(f"GENERATE_FLAGS TEST_MODE=false IMAGE_ONLY={ACE_IMAGE_ONLY} size={payload.get('imageSize', '')} adIndex={ad_index} sessionId={session_id}")
-        if not _acquire_session_lock(session_id, ad_index):
-            return jsonify({'ok': False, 'error': 'busy', 'message': 'Generation already in progress'}), 409
-        logger.info(f"GENERATE_START sid={session_id} ad={ad_index}")
-        try:
-            # Build payload for preview with image (same flow as generate: image + headline + body)
-            gen_payload = {
-                "productName": payload.get("productName") or "",
-                "productDescription": payload["productDescription"],
-                "imageSize": payload.get("imageSize", "1536x1024"),
-                "adIndex": ad_index,
-                "sessionId": session_id,
-                "includeImage": True,
-            }
-            data = payload or {}
-
-            user_input = Builder1Input(
-                product_name=data.get("productName", ""),
-                product_description=data.get("productDescription", ""),
-            )
-
-            mock_model_output_dict = {
-                "resolved_product_name": data.get("productName", ""),
-                "language": "en",
-                "object_a": "can",
-                "secondary_object_a": "straw",
-                "object_b": "battery",
-                "similarity_score": 87.0,
-                "advertising_promise": "long lasting energy",
-                "headline": "POWER THAT LASTS",
-                "headline_placement": "top_center",
-                "marketing_text": "A powerful product that keeps going when others stop.",
-            }
-
-            model_output = builder1_model_output_from_dict(mock_model_output_dict)
-            plan = build_builder1_scaffold_plan(user_input, model_output)
-            result = builder1_plan_to_preview_response(plan)
-            image_base64 = result["imageBase64"]
-            headline = result.get("headline", "")
-            body_text_50 = result.get("bodyText50", "")
-            image_bytes = base64.b64decode(image_base64)
-            _set_artifact(session_id, ad_index, image_bytes, body_text_50, headline)
-            if client_sid:
-                _set_sid_alias(client_sid, session_id)
-            logger.info(f"RESULT_STORED sessionId={session_id} adIndex={ad_index} bytes={len(image_bytes)} request_id={request_id}")
-            logger.info(f"GENERATE_DONE sid={session_id} ad={ad_index} stored=true")
-            resolved_pn_gen = result.get("resolvedProductName", "")
-            logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=generate resolvedProductName=\"{resolved_pn_gen}\"")
-            logger.info("PRODUCT_NAME_RESPONSE_SOURCE=canonical_final_name")
-            return jsonify({
-                "ok": True,
-                "sessionId": session_id,
-                "adIndex": ad_index,
-                "imageBase64": image_base64,
-                "headline": headline,
-                "bodyText50": body_text_50,
-                "resolvedProductName": resolved_pn_gen,
-            }), 200
-        finally:
-            _release_session_lock(session_id, ad_index)
-    except OpenAIRateLimitError as e:
-        return jsonify({'ok': False, 'error': 'rate_limited', 'message': e.message}), 503
-    except Step0BundleTimeoutError:
-        return jsonify({'ok': False, 'error': 'timeout', 'step': 'step0_bundle', 'message': 'Step0 bundle timed out'}), 504
-    except Step0BundleOpenAIError as e:
-        return jsonify({'ok': False, 'error': 'openai_error', 'step': 'step0_bundle', 'message': str(e)}), 500
-    except ValueError as e:
-        return jsonify({'ok': False, 'error': 'validation_error', 'message': str(e)}), 400
-    except Exception as e:
-        logger.error(f"[{request_id}] Generate failed: {e}", exc_info=True)
-        if "rate_limited" in str(e):
-            return jsonify({'ok': False, 'error': 'rate_limited', 'message': 'Temporarily rate limited. Please retry.'}), 503
-        return jsonify({'ok': False, 'error': 'generation_failed', 'message': str(e)}), 500
-    
 
 
 @app.route("/api/builder1-preview-test", methods=["POST"])
 def builder1_preview_test():
-    try:
-        data = request.get_json(force=True) or {}
-        product_name = data.get("productName", "") or ""
-        product_description = data.get("productDescription", "") or ""
-
-        ad = generate_builder1_ad(product_name, product_description)
-        img_b64 = base64.standard_b64encode(ad["imageBytes"]).decode("ascii")
-        composition = (
-            "replacement" if ad["mode"] == "REPLACEMENT" else "partial_overlap"
-        )
-
-        response = {
-            "objectA": ad["objectA"],
-            "objectB": ad["objectB"],
-            "object_a": ad["objectA"],
-            "object_b": ad["objectB"],
-            "advertisingPromise": ad["advertisingPromise"],
-            "mode": ad["mode"],
-            "headline": ad["headline"],
-            "marketingText": ad["marketingText"],
-            "bodyText50": ad["marketingText"],
-            "body_text": ad["marketingText"],
-            "ad_goal": ad["advertisingPromise"],
-            "marketing_copy_50_words": ad["marketingText"],
-            "resolvedProductName": product_name,
-            "headline_placement": "",
-            "composition": composition,
-            "imageBase64": img_b64,
-            "image_base64": img_b64,
-            "image_url": "",
-            "imagePrompt": ad["imagePrompt"],
-        }
-
-        return jsonify({"ok": True, "data": response})
-
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "ads": []}), 200
 
 
 @app.route('/api/preview', methods=['POST'])
@@ -478,225 +329,7 @@ def preview():
     
     Returns: 200 JSON with ad_goal, object_a, object_b, headline, marketing_copy_50_words, etc.
     """
-    request_id = str(uuid.uuid4())
-    try:
-        if not request.is_json:
-            logger.warning(f"[{request_id}] Preview request is not JSON")
-            return jsonify({
-                'ok': False,
-                'error': 'invalid_request',
-                'message': 'Request must be JSON'
-            }), 400
-        payload = request.get_json()
-        if not payload.get("productDescription"):
-            return jsonify({
-                'ok': False,
-                'error': 'missing_field',
-                'message': 'productDescription is required'
-            }), 400
-        # Use client sessionId as canonical everywhere; only generate new UUID when request truly has no sessionId
-        client_sid = (payload.get("sessionId") or "").strip()
-        if client_sid:
-            session_id = client_sid
-            sid_source = "client"
-        else:
-            session_id = str(uuid.uuid4())
-            sid_source = "generated"
-        logger.info(f"GEN_REQUEST_SID_SOURCE source={sid_source} request_id={request_id}")
-        logger.info(f"GEN_REQUEST_SID_VALUE sessionId={session_id} request_id={request_id}")
-        logger.info(f"SESSION_ID_RESOLVED sessionId={session_id} source={sid_source} request_id={request_id}")
-        ad_index = int(payload.get("adIndex", 1) or 1)
-        ad_index = max(1, min(3, ad_index))
-
-        # ACE_TEST_MODE: bypass engine and job; return finished demo result immediately
-        if ACE_TEST_MODE:
-            logger.info("TEST_MODE_RETURNING_DEMO_RESULT=true")
-            demo = _get_test_mode_demo_result()
-            return jsonify({
-                "ok": True,
-                "status": "done",
-                "result": demo,
-            }), 200
-
-        logger.info(f"PREVIEW_FLAGS TEST_MODE=false IMAGE_ONLY={ACE_IMAGE_ONLY} PHASE2_GOAL_PAIRS={ACE_PHASE2_GOAL_PAIRS} FALLBACK_RETURN_ERROR={ACE_FALLBACK_RETURN_ERROR} size={payload.get('imageSize', '')} adIndex={ad_index} sessionId={session_id}")
-        # Enforce serial execution per session: acquire lock before scheduling job
-        if not _acquire_session_lock(session_id, ad_index):
-            return jsonify({
-                'ok': False,
-                'error': 'busy',
-                'message': 'Generation already in progress'
-            }), 409
-
-        # Create async job
-        job_id = str(uuid.uuid4())
-        created_at = time.time()
-        job_record = {
-            "jobId": job_id,
-            "status": "pending",
-            "created_at": created_at,
-            "finished_at": None,
-            "session_id": session_id,
-            "requested_session_id": client_sid or session_id,
-            "ad_index": ad_index,
-            "result": None,
-            "error": None,
-            "error_message": None,
-            # Phase 2D: background GOAL_PAIR state (one request_id per job for all logs)
-            "request_id": request_id,
-            "openai_response_id": None,
-            "openai_goal_pair_response_id": None,
-            "goal_pair_created_at": None,
-            "goal_pairs_data": None,
-            "goal_pair_fallback": False,
-            "goal_pair_poll_attempt": 0,
-            "goal_pair_next_poll_time_ms": 0,
-            "goal_pair_retry_done": False,
-            "resolved_product_name": (payload.get("productName") or "").strip(),
-        }
-        _cleanup_jobs()
-        _set_job(job_id, job_record)
-        logger.info(f"JOB_CREATED jobId={job_id} sid={session_id} ad={ad_index} request_id={request_id}")
-
-        # Schedule background execution
-        def _run_preview_job(jid: str, payload_data: dict, sid: str, ad_idx: int, req_id: str, req_sid: str = "") -> None:
-            start = time.time()
-            try:
-                with _jobs_lock:
-                    job = _jobs.get(jid)
-                    if not job:
-                        return
-                    job["status"] = "running"
-                    job_request_id = job.get("request_id") or req_id
-                flags = f"ACE_PHASE2_GOAL_PAIRS={1 if ACE_PHASE2_GOAL_PAIRS else 0}, ACE_IMAGE_ONLY={1 if ACE_IMAGE_ONLY else 0}, ACE_FALLBACK_RETURN_ERROR={1 if ACE_FALLBACK_RETURN_ERROR else 0}"
-                logger.info(
-                    f'INPUT_SNAPSHOT productName="{payload_data.get("productName", "") or ""}" '
-                    f'productDescription="{str(payload_data.get("productDescription", "") or "")[:200]}" '
-                    f'imageSize="{payload_data.get("imageSize", "") or ""}" flags="{flags}" request_id={job_request_id}'
-                )
-                try:
-                    data = payload_data or {}
-                    product_name = (data.get("productName", "") or "").strip()
-                    product_description = (data.get("productDescription", "") or "").strip()
-                    if not product_description:
-                        raise ValueError("productDescription is required")
-
-                    ad = generate_builder1_ad(product_name, product_description, sid)
-                    img_b64 = base64.standard_b64encode(ad["imageBytes"]).decode("ascii")
-                    composition = (
-                        "replacement" if ad["mode"] == "REPLACEMENT" else "partial_overlap"
-                    )
-                    result = {
-                        "imageBase64": img_b64,
-                        "image_base64": img_b64,
-                        "headline": ad["headline"],
-                        "bodyText50": ad["marketingText"],
-                        "body_text": ad["marketingText"],
-                        "marketing_copy_50_words": ad["marketingText"],
-                        "ad_goal": ad["advertisingPromise"],
-                        "resolvedProductName": product_name,
-                        "image_url": "",
-                        "object_a": ad["objectA"],
-                        "object_b": ad["objectB"],
-                        "objectA": ad["objectA"],
-                        "objectB": ad["objectB"],
-                        "advertisingPromise": ad["advertisingPromise"],
-                        "imagePrompt": ad["imagePrompt"],
-                        "headline_placement": "",
-                        "mode": ad["mode"],
-                        "composition": composition,
-                    }
-                    elapsed_ms = int((time.time() - start) * 1000)
-                    with _jobs_lock:
-                        job = _jobs.get(jid)
-                        if job is not None:
-                            job["status"] = "done"
-                            job["finished_at"] = time.time()
-                            job["result"] = result
-                            job["resolved_product_name"] = (result or {}).get("resolvedProductName", "") or ""
-                            job["error"] = None
-                            job["error_message"] = None
-                    try:
-                        img_b64_art = (result or {}).get("imageBase64") or (result or {}).get("image_base64")
-                        if img_b64_art:
-                            img_bytes = base64.b64decode(img_b64_art)
-                            body_50 = (result or {}).get("bodyText50") or (result or {}).get("body_text") or ""
-                            headline = (result or {}).get("headline") or ""
-                            _set_artifact(sid, ad_idx, img_bytes, body_50, headline)
-                            req_sid = (job.get("requested_session_id") or "").strip() if job else ""
-                            if req_sid and req_sid != sid:
-                                _set_sid_alias(req_sid, sid)
-                            logger.info(f"RESULT_STORED sessionId={sid} adIndex={ad_idx} bytes={len(img_bytes)} request_id={job_request_id}")
-                    except Exception:
-                        pass
-                    logger.info(f"JOB_DONE jobId={jid} sid={sid} ad={ad_idx} elapsed_ms={elapsed_ms}")
-                except OpenAIRateLimitError as e:
-                    with _jobs_lock:
-                        job = _jobs.get(jid)
-                        if job is not None:
-                            job["status"] = "error"
-                            job["finished_at"] = time.time()
-                            job["error"] = "rate_limited"
-                            job["error_message"] = e.message
-                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err=rate_limited")
-                except Step0BundleTimeoutError as e:
-                    with _jobs_lock:
-                        job = _jobs.get(jid)
-                        if job is not None:
-                            job["status"] = "error"
-                            job["finished_at"] = time.time()
-                            job["error"] = "timeout"
-                            job["error_message"] = "Step0 bundle timed out"
-                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err=timeout")
-                except Step0BundleOpenAIError as e:
-                    with _jobs_lock:
-                        job = _jobs.get(jid)
-                        if job is not None:
-                            job["status"] = "error"
-                            job["finished_at"] = time.time()
-                            job["error"] = "openai_error"
-                            job["error_message"] = str(e)
-                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err=openai_error")
-                except Exception as e:
-                    with _jobs_lock:
-                        job = _jobs.get(jid)
-                        if job is not None:
-                            job["status"] = "error"
-                            job["finished_at"] = time.time()
-                            job["error"] = "generation_failed"
-                            job["error_message"] = str(e)
-                    logger.error(f"JOB_ERROR jobId={jid} sid={sid} ad={ad_idx} err={e}")
-            finally:
-                # Always release session lock so it never gets stuck
-                _release_session_lock(sid, ad_idx)
-
-        try:
-            _preview_executor.submit(_run_preview_job, job_id, payload, session_id, ad_index, request_id)
-        except Exception as e:
-            # Failed to schedule job: release lock and surface error
-            _release_session_lock(session_id, ad_index)
-            logger.error(f"JOB_ERROR jobId={job_id} sid={session_id} ad={ad_index} err=schedule_failed: {e}")
-            return jsonify({
-                'ok': False,
-                'error': 'schedule_failed',
-                'message': 'Failed to schedule preview job'
-            }), 500
-
-        # Return immediately with jobId for polling (sessionId so frontend can call download-zip)
-        return jsonify({
-            'ok': True,
-            'jobId': job_id,
-            'sessionId': session_id,
-            'adIndex': ad_index,
-            'status': 'pending'
-        }), 202
-    except Exception as e:
-        error_msg = str(e)
-        logger.error(f"[{request_id}] Preview job creation failed: {error_msg}", exc_info=True)
-        return jsonify({
-            'ok': False,
-            'error': 'preview_init_failed',
-            'message': error_msg
-        }), 500
+    return jsonify({"ok": True, "ads": []}), 200
 
 
 def _download_zip_impl():
@@ -759,52 +392,19 @@ def _download_zip_impl():
 @app.route('/api/download-zip', methods=['GET'])
 def download_zip():
     """Download ZIP for a previously generated ad (sessionId + adIndex). No OpenAI calls."""
-    return _download_zip_impl()
+    return jsonify({"ok": True, "ads": []}), 200
 
 
 @app.route('/api/download', methods=['GET'])
 def download():
     """Alias for /api/download-zip so both paths work for backward compatibility."""
-    return _download_zip_impl()
+    return jsonify({"ok": True, "ads": []}), 200
 
 
 @app.route('/api/job-status', methods=['GET'])
 def job_status():
     """Poll job status for /api/preview async jobs."""
-    job_id = request.args.get("jobId", "").strip()
-    if not job_id:
-        return jsonify({'ok': False, 'error': 'missing_param', 'message': 'jobId is required'}), 400
-    job = _get_job(job_id)
-    if not job:
-        return jsonify({'ok': False, 'error': 'not_found', 'status': 'error', 'message': 'Job not found or expired'}), 404
-    status = job.get("status", "pending")
-    resolved_pn = job.get("resolved_product_name", "")
-    logger.info(f"JOB_POLL jobId={job_id} status={status}")
-    if status in ("pending", "running"):
-        logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=running resolvedProductName=\"{resolved_pn}\"")
-        logger.info("PRODUCT_NAME_RESPONSE_SOURCE=canonical_final_name")
-        return jsonify({'ok': True, 'status': status, 'resolvedProductName': resolved_pn}), 200
-    if status == "done":
-        sid = job.get("session_id", "")
-        ad_idx = job.get("ad_index", 1)
-        logger.info(f"JOB_STATUS_RESPONSE status=done sessionId={sid} adIndex={ad_idx}")
-        logger.info(f"PRODUCT_NAME_RESPONSE_STAGE=done resolvedProductName=\"{resolved_pn}\"")
-        logger.info("PRODUCT_NAME_RESPONSE_SOURCE=canonical_final_name")
-        return jsonify({
-            'ok': True,
-            'status': 'done',
-            'sessionId': sid,
-            'adIndex': ad_idx,
-            'resolvedProductName': resolved_pn,
-            'result': job.get("result"),
-        }), 200
-    # error
-    return jsonify({
-        'ok': False,
-        'status': 'error',
-        'error': job.get("error"),
-        'message': job.get("error_message"),
-    }), 200
+    return jsonify({"ok": True, "ads": []}), 200
 
 
 # -----------------------------------------------------------------------------
