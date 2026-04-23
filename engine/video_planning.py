@@ -377,6 +377,35 @@ def _runway_ace_half_orbit_focus() -> str:
     )
 
 
+_PRECISE_ACTION_CAMERA_RULES: List[Tuple[str, re.Pattern]] = [
+    ("press", re.compile(r"\bpress(?:es|ed|ing)?\b", re.I)),
+    ("carve", re.compile(r"\bcarv(?:e|es|ed|ing)\b", re.I)),
+    ("cut", re.compile(r"\bcut(?:s|ting)?\b", re.I)),
+    ("imprint", re.compile(r"\bimprint(?:s|ed|ing)?\b", re.I)),
+    ("insert", re.compile(r"\binsert(?:s|ed|ing)?\b", re.I)),
+    ("align", re.compile(r"\balign(?:s|ed|ing)?\b", re.I)),
+    ("stamp", re.compile(r"\bstamp(?:s|ed|ing)?\b", re.I)),
+    ("squeeze", re.compile(r"\bsqueez(?:e|es|ed|ing)\b", re.I)),
+]
+
+
+def _runway_camera_motion_focus(plan: Dict[str, Any]) -> Tuple[str, str]:
+    """
+    Default: half-orbit.
+    For single precise interactions that must read instantly, use stable visibility-first framing.
+    Returns (motion_text, motion_mode_label).
+    """
+    interaction_summary = (plan.get("interactionSummary") or "").strip()
+    for _, rx in _PRECISE_ACTION_CAMERA_RULES:
+        if rx.search(interaction_summary):
+            return (
+                "MANDATORY: stable locked camera framing focused on the exact contact/action point so the precise action reads instantly. "
+                "Keep both objects visible and readable throughout. No orbit, no sweeping camera path, no cuts.",
+                "stable_precise_action",
+            )
+    return _runway_ace_half_orbit_focus(), "half_orbit"
+
+
 # snake_case / alternate keys from some models → camelCase
 _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("product_name_resolved", "productNameResolved"),
@@ -1049,7 +1078,7 @@ def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bo
     oa = (plan.get("objectA") or "").strip()
     ob = (plan.get("objectB") or "").strip()
     script = (plan.get("interactionScript") or "").strip()
-    motion = _runway_ace_half_orbit_focus()
+    motion, _ = _runway_camera_motion_focus(plan)
     lang_vis = _runway_language_visual_constraints(plan)
     parts = [
         "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
@@ -1071,7 +1100,7 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     if not oa or not ob or not script:
         raise ValueError("missing objectA/objectB/interactionScript")
 
-    motion = _runway_ace_half_orbit_focus()
+    motion, _ = _runway_camera_motion_focus(plan)
     lang_vis = _runway_language_visual_constraints(plan)
     body = (
         "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
@@ -1114,7 +1143,8 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=half_orbit")
+    _, motion_mode = _runway_camera_motion_focus(plan)
+    logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=%s", motion_mode)
     return out
 
 
@@ -1128,7 +1158,7 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
     if not oa or not ob or not script:
         raise ValueError("missing objectA/objectB/interactionScript")
 
-    motion_focus = _runway_ace_half_orbit_focus()
+    motion_focus, _ = _runway_camera_motion_focus(plan)
     lang_vis = _runway_language_visual_constraints(plan)
     scene = (
         f"{lang_vis} "
@@ -1155,10 +1185,11 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
     ob = (plan.get("objectB") or "").strip()
     script = (plan.get("interactionScript") or "").strip()
     lang_vis = _runway_language_visual_constraints(plan)
+    motion_focus, _ = _runway_camera_motion_focus(plan)
     motion = (
         f"{lang_vis} "
         f"Start frame supplied; {oa} and {ob} already visible together. "
-        f"{_runway_ace_half_orbit_focus()}"
+        f"{motion_focus}"
         f"Physical interaction: {script}."
     )
     parts = [
@@ -1193,6 +1224,7 @@ def build_runway_interaction_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=half_orbit")
+    _, motion_mode = _runway_camera_motion_focus(plan)
+    logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=%s", motion_mode)
     out = f"{out.rstrip()} {RUNWAY_PHYSICS_REALISM_CONSTRAINT}".strip()
     return out

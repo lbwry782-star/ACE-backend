@@ -12,6 +12,16 @@ from typing import List, Optional, Tuple
 
 # (log_label, regex) — first match wins; labels are for logs only.
 _VIDEO_PLAN_GRAPHIC_CONTENT_RULES: List[Tuple[str, re.Pattern[str]]] = [
+    # Reject amorphous/unstable non-classic physical object descriptions.
+    ("amorphous_lump", re.compile(r"\blumps?\b", re.I)),
+    ("amorphous_blob", re.compile(r"\bblobs?\b", re.I)),
+    ("amorphous_clay", re.compile(r"\b(modeling\s+)?clay\b", re.I)),
+    ("amorphous_dough", re.compile(r"\bdough\b", re.I)),
+    ("amorphous_smoke", re.compile(r"\bsmoke\b", re.I)),
+    ("amorphous_splash", re.compile(r"\bsplashes?\b", re.I)),
+    ("amorphous_foam", re.compile(r"\bfoam\b", re.I)),
+    ("amorphous_liquid_mass", re.compile(r"\bliquid\s+mass\b", re.I)),
+    ("amorphous_material_pile", re.compile(r"\bpile\s+of\s+material\b", re.I)),
     ("poster", re.compile(r"\bposters?\b", re.I)),
     ("flyer", re.compile(r"\bflyers?\b", re.I)),
     ("magazine", re.compile(r"\bmagazines?\b", re.I)),
