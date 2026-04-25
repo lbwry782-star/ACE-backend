@@ -9,9 +9,11 @@ import json
 import logging
 import os
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
+import httpx
 from flask import Flask, Response, jsonify, request, send_file
+from openai import OpenAI
 
 from engine.video_headline_postprocess import (
     get_headline_video_path,
@@ -27,6 +29,8 @@ from engine.video_jobs_redis import (
 )
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 from engine.builder1_generate_demo import build_demo_ad
+from engine.builder1_image_generator import generate_builder1_image
+from engine.builder1_planner import plan_builder1
 
 app = Flask(__name__)
 
@@ -352,6 +356,85 @@ def builder1_demo():
         )
     except Exception as e:
         return jsonify({"error": str(e)}), 200
+
+
+def _parse_builder1_o3_json_text(raw: str) -> dict[str, Any]:
+    t = (raw or "").strip()
+    if t.startswith("```"):
+        lines = t.split("\n")
+        t = "\n".join(lines[1:-1]) if len(lines) > 2 else t
+    t = t.strip()
+    if t.lower().startswith("```json"):
+        t = t[7:].lstrip()
+    t = t.strip()
+    start, end = t.find("{"), t.rfind("}")
+    if start < 0 or end < 0 or end <= start:
+        raise ValueError("no_json_object")
+    obj = json.loads(t[start : end + 1])
+    if not isinstance(obj, dict):
+        raise ValueError("model_output_not_object")
+    return obj
+
+
+def _o3_pro_planning_model_caller(system_prompt: str, user_prompt: str) -> object:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("openai_unconfigured")
+    client = OpenAI(
+        api_key=api_key,
+        timeout=httpx.Timeout(150.0),
+        max_retries=0,
+    )
+    combined = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
+    response = client.responses.create(
+        model="o3-pro",
+        input=combined,
+        reasoning={"effort": "low"},
+    )
+    out_text = getattr(response, "output_text", None) or ""
+    return _parse_builder1_o3_json_text(out_text)
+
+
+def _fake_image_bytes_caller(_prompt: str, _format_value: str) -> bytes:
+    return b"demo-image-bytes"
+
+
+@app.route("/api/builder1-plan-demo", methods=["GET"])
+def builder1_plan_demo():
+    try:
+        product_name = (request.args.get("productName") or "AeroSip Bottle").strip()
+        product_description = (
+            request.args.get("productDescription")
+            or "A lightweight bottle that feels effortless to carry all day."
+        ).strip()
+        format_val = (request.args.get("format") or "portrait").strip()
+        p = plan_builder1(
+            product_name=product_name,
+            product_description=product_description,
+            format_value=format_val,
+            model_caller=_o3_pro_planning_model_caller,
+        )
+        image_result = generate_builder1_image(p, _fake_image_bytes_caller)
+        return (
+            jsonify(
+                {
+                    "productNameResolved": p.product_name_resolved,
+                    "detectedLanguage": p.detected_language,
+                    "advertisingPromise": p.advertising_promise,
+                    "objectA": p.object_a,
+                    "objectASecondary": p.object_a_secondary,
+                    "objectB": p.object_b,
+                    "visualSimilarityScore": p.visual_similarity_score,
+                    "modeDecision": p.mode_decision,
+                    "visualDescription": p.visual_description,
+                    "visualPrompt": image_result.visual_prompt,
+                    "imageBytesBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
 
 
 @app.route("/health", methods=["GET"])
