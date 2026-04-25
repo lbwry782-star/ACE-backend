@@ -437,6 +437,78 @@ def builder1_plan_demo():
         return jsonify({"ok": False, "error": str(e)}), 200
 
 
+def _builder1_gpt_image_size_for_format(format_value: str) -> str:
+    f = (format_value or "").strip().lower()
+    if f == "landscape":
+        return "1536x1080"
+    if f == "portrait":
+        return "1080x1536"
+    if f == "square":
+        return "1080x1080"
+    return "1080x1536"
+
+
+def _gpt_image_15_caller(prompt: str, format_value: str) -> bytes:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("openai_unconfigured")
+    client = OpenAI(
+        api_key=api_key,
+        timeout=httpx.Timeout(120.0),
+        max_retries=0,
+    )
+    r = client.images.generate(
+        model="gpt-image-1.5",
+        prompt=prompt,
+        size=_builder1_gpt_image_size_for_format(format_value),
+        quality="low",
+    )
+    if not r.data:
+        raise ValueError("image_generation_empty")
+    b64 = r.data[0].b64_json
+    if not b64:
+        raise ValueError("image_generation_empty")
+    return base64.b64decode(b64)
+
+
+@app.route("/api/builder1-real-image-demo", methods=["GET"])
+def builder1_real_image_demo():
+    try:
+        product_name = (request.args.get("productName") or "AeroSip Bottle").strip()
+        product_description = (
+            request.args.get("productDescription")
+            or "A lightweight bottle that feels effortless to carry all day."
+        ).strip()
+        format_val = (request.args.get("format") or "portrait").strip()
+        p = plan_builder1(
+            product_name=product_name,
+            product_description=product_description,
+            format_value=format_val,
+            model_caller=_o3_pro_planning_model_caller,
+        )
+        image_result = generate_builder1_image(p, _gpt_image_15_caller)
+        return (
+            jsonify(
+                {
+                    "productNameResolved": p.product_name_resolved,
+                    "detectedLanguage": p.detected_language,
+                    "advertisingPromise": p.advertising_promise,
+                    "objectA": p.object_a,
+                    "objectASecondary": p.object_a_secondary,
+                    "objectB": p.object_b,
+                    "visualSimilarityScore": p.visual_similarity_score,
+                    "modeDecision": p.mode_decision,
+                    "visualDescription": p.visual_description,
+                    "visualPrompt": image_result.visual_prompt,
+                    "imageBytesBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+
+
 @app.route("/health", methods=["GET"])
 def health():
     """
