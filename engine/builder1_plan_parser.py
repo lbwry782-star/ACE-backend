@@ -7,8 +7,9 @@ from engine.builder1_plan_spec import (
     Builder1Plan,
     MODE_REPLACEMENT,
     MODE_SIDE_BY_SIDE,
-    REPLACEMENT_THRESHOLD,
 )
+
+REPLACEMENT_THRESHOLD = 90
 
 
 class Builder1PlanParseError(ValueError):

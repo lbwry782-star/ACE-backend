@@ -32,27 +32,27 @@ Rules:
 - In REPLACEMENT, objectB must keep objectA's background/context while appearing in objectA's original position.
 - In REPLACEMENT, objectASecondary must remain visible and interact with objectB in a way that demonstrates objectB's nature, as if objectASecondary were naturally paired with objectB.
 - REPLACEMENT requires replacement-grade similarity, not just general silhouette similarity.
-- Score 85+ only when objectB can literally occupy objectA's exact physical role, pose, position, and objectASecondary interaction without reconfiguring the scene.
+- Score 90+ only when objectB can literally occupy objectA's exact physical role, pose, position, and objectASecondary interaction without reconfiguring the scene.
 - objectASecondary interaction must still make physical sense as originally paired with objectA.
-- If objectB needs a different grip, support, usage posture, or a different interaction from objectASecondary, similarity is below 85 and modeDecision must be SIDE_BY_SIDE.
+- If objectB needs a different grip, support, usage posture, or a different interaction from objectASecondary, similarity is below 90 and modeDecision must be SIDE_BY_SIDE.
 - Shared cone/bell shape alone is not enough for REPLACEMENT.
 - Forbidden example: megaphone + hand -> trumpet must be SIDE_BY_SIDE, not REPLACEMENT, because hand/grip/usage changes and the viewer will not read it as replacement.
 - Forbidden example: laptop computer + table -> open magazine must not be REPLACEMENT merely because both are open/flat/rectangular/book-like; this should be SIDE_BY_SIDE unless true replacement-grade continuity is proven.
 - Forbidden example: smartphone + hand -> business card must not be REPLACEMENT merely because both can be held upright in the same hand.
 - visualSimilarityScore below 70 is not allowed. If the best pair is below 70, choose a different Object A/Object B pair.
-- Score bands: 85-100 => REPLACEMENT, 70-84 => SIDE_BY_SIDE, below 70 => invalid pair (must choose a new pair).
+- Score bands: 90-100 => REPLACEMENT, 70-89 => SIDE_BY_SIDE, below 70 => invalid pair (must choose a new pair).
 - SIDE_BY_SIDE reasoning flow: first choose Object A from product name + product description.
 - For SIDE_BY_SIDE, grasp Object A's whole general form like a painter, not only technical contour/silhouette.
 - Then search for Object B by morphological similarity to Object A.
 - In SIDE_BY_SIDE, stop only when Object B is also a result of the advertising promise.
 - The advertising promise is not merely a justification for the move; the moment it is discovered is what makes the move possible.
 - In SIDE_BY_SIDE, Object A and Object B must be shown with partial overlap, one over the other.
-- SIDE_BY_SIDE is valid only for visualSimilarityScore 70-84.
+- SIDE_BY_SIDE is valid only for visualSimilarityScore 70-89.
 - Below 70, choose a new pair.
-- 85+ is reserved for true REPLACEMENT only.
-- If unsure whether replacement-grade conditions are met, score below 85 and choose SIDE_BY_SIDE.
+- 90+ is reserved for true REPLACEMENT only.
+- If unsure whether replacement-grade conditions are met, score below 90 and choose SIDE_BY_SIDE.
 - detectedLanguage must be "he" or "en".
-- modeDecision must be "REPLACEMENT" if visualSimilarityScore >= 85; otherwise "SIDE_BY_SIDE".
+- modeDecision must be "REPLACEMENT" if visualSimilarityScore >= 90; otherwise "SIDE_BY_SIDE".
 """.strip()
 
 
@@ -82,16 +82,16 @@ BUILDER1_PLANNING_JSON_SCHEMA: dict = {
             "minimum": 0,
             "maximum": 100,
             "description": (
-                "Conservative replacement-grade score. Use 85+ only if objectB can literally replace objectA "
+                "Conservative replacement-grade score. Use 90+ only if objectB can literally replace objectA "
                 "in the same role/pose/position with objectASecondary interaction unchanged. "
-                "Score band policy: 85-100 REPLACEMENT, 70-84 SIDE_BY_SIDE, below 70 invalid (choose a new pair)."
+                "Score band policy: 90-100 REPLACEMENT, 70-89 SIDE_BY_SIDE, below 70 invalid (choose a new pair)."
             ),
         },
         "modeDecision": {
             "type": "string",
             "enum": ["REPLACEMENT", "SIDE_BY_SIDE"],
             "description": (
-                "Must be REPLACEMENT only when visualSimilarityScore >= 85 under replacement-grade rules; "
+                "Must be REPLACEMENT only when visualSimilarityScore >= 90 under replacement-grade rules; "
                 "if unsure or any reconfiguration is required, choose SIDE_BY_SIDE."
             ),
         },
