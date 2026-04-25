@@ -472,6 +472,87 @@ def _gpt_image_15_caller(prompt: str, format_value: str) -> bytes:
     return base64.b64decode(b64)
 
 
+def _builder1_json_real_generate(
+    product_name: str, product_description: str, format_val: str
+) -> dict[str, Any]:
+    try:
+        p = plan_builder1(
+            product_name=product_name,
+            product_description=product_description,
+            format_value=format_val,
+            model_caller=_o3_pro_planning_model_caller,
+        )
+    except Exception as e:
+        return {"ok": False, "error": "planning_failed", "message": str(e)}
+    try:
+        image_result = generate_builder1_image(p, _gpt_image_15_caller)
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": "builder1_image_call_failed",
+            "message": str(e),
+        }
+    return {
+        "ok": True,
+        "productNameResolved": p.product_name_resolved,
+        "detectedLanguage": p.detected_language,
+        "advertisingPromise": p.advertising_promise,
+        "objectA": p.object_a,
+        "objectASecondary": p.object_a_secondary,
+        "objectB": p.object_b,
+        "visualSimilarityScore": p.visual_similarity_score,
+        "modeDecision": p.mode_decision,
+        "visualDescription": p.visual_description,
+        "visualPrompt": image_result.visual_prompt,
+        "imageBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
+        "marketingText": "",
+    }
+
+
+@app.route("/api/builder1-generate", methods=["POST"])
+def builder1_generate():
+    if not request.is_json:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "invalid_input",
+                    "message": "expected JSON body",
+                }
+            ),
+            200,
+        )
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "invalid_input",
+                    "message": "expected JSON object",
+                }
+            ),
+            200,
+        )
+    product_name = (body.get("productName") or "").strip()
+    product_description = (body.get("productDescription") or "").strip()
+    format_val = (body.get("format") or "portrait").strip() or "portrait"
+    if not product_description:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "invalid_input",
+                    "message": "productDescription is required",
+                }
+            ),
+            200,
+        )
+    return jsonify(
+        _builder1_json_real_generate(product_name, product_description, format_val)
+    ), 200
+
+
 @app.route("/api/builder1-real-image-demo", methods=["GET"])
 def builder1_real_image_demo():
     try:
