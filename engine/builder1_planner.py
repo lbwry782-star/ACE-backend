@@ -43,9 +43,11 @@ def plan_builder1(
     except Exception as exc:
         raise Builder1PlannerError("planning_model_call_failed") from exc
     plan = parse_builder1_plan(raw_payload)
+    forced_resolved_name = normalized.product_name or plan.product_name_resolved
     return replace(
         plan,
-        product_name=normalized.product_name,
+        product_name=forced_resolved_name,
+        product_name_resolved=forced_resolved_name,
         product_description=normalized.product_description,
         format=normalized.format,
     )
