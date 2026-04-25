@@ -33,6 +33,7 @@ from engine.builder1_generate_demo import build_demo_ad
 from engine.builder1_composition import generate_builder1_composition_o3
 from engine.builder1_headline import generate_builder1_headline_o3
 from engine.builder1_image_generator import generate_builder1_image
+from engine.builder1_marketing_text import generate_builder1_marketing_text_o3
 from engine.builder1_planner import plan_builder1
 
 app = Flask(__name__)
@@ -474,6 +475,24 @@ def _gpt_image_15_caller(prompt: str, format_value: str) -> bytes:
     return base64.b64decode(b64)
 
 
+def _o3_pro_marketing_text_model_caller(system_prompt: str, user_prompt: str) -> str:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("openai_unconfigured")
+    client = OpenAI(
+        api_key=api_key,
+        timeout=httpx.Timeout(120.0),
+        max_retries=0,
+    )
+    combined = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
+    response = client.responses.create(
+        model="o3-pro",
+        input=combined,
+        reasoning={"effort": "low"},
+    )
+    return (getattr(response, "output_text", None) or "").strip()
+
+
 def _builder1_json_real_generate(
     product_name: str, product_description: str, format_val: str
 ) -> dict[str, Any]:
@@ -525,6 +544,26 @@ def _builder1_json_real_generate(
         )
     except Exception as e:
         return {"ok": False, "error": "composition_failed", "message": str(e)}
+    marketing_text = ""
+    try:
+        marketing_text = generate_builder1_marketing_text_o3(
+            product_name_resolved=p.product_name_resolved,
+            product_description=p.product_description,
+            detected_language=p.detected_language,
+            advertising_promise=p.advertising_promise,
+            object_a=p.object_a,
+            object_a_secondary=p.object_a_secondary,
+            object_b=p.object_b,
+            mode_decision=p.mode_decision,
+            visual_description=p.visual_description,
+            visual_prompt=image_result.visual_prompt,
+            headline_product_name=headline["headlineProductName"],
+            headline_text=headline["headlineText"],
+            headline_full=headline["headlineFull"],
+            model_caller=_o3_pro_marketing_text_model_caller,
+        )
+    except Exception as e:
+        logger.warning("BUILDER1_MARKETING_TEXT_FAILED error=%r", str(e))
     return {
         "ok": True,
         "productNameResolved": p.product_name_resolved,
@@ -538,7 +577,7 @@ def _builder1_json_real_generate(
         "visualDescription": p.visual_description,
         "visualPrompt": image_result.visual_prompt,
         "imageBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
-        "marketingText": "",
+        "marketingText": marketing_text,
         "headlineProductName": headline["headlineProductName"],
         "headlineText": headline["headlineText"],
         "headlineFull": headline["headlineFull"],
