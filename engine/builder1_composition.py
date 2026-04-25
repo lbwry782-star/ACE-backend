@@ -36,14 +36,15 @@ def generate_builder1_composition_o3(
     elif fmt == "portrait":
         layout = "headline_below_visual"
     else:
+        # TODO: For square, choose below/beside by visual orientation (horizontal -> below, vertical -> beside).
         layout = "headline_below_visual"
 
     if layout == "headline_below_visual":
-        visual_weight = "dominant"
-        headline_weight = "secondary"
+        visual_weight = 0.72
+        headline_weight = 0.28
     else:
-        visual_weight = "equal"
-        headline_weight = "equal"
+        visual_weight = 0.5
+        headline_weight = 0.5
 
     return {
         "compositionLayout": layout,
@@ -52,9 +53,13 @@ def generate_builder1_composition_o3(
         "headlineRelativeSize": "max_allowed_but_not_larger_than_visual",
         "visualWeight": visual_weight,
         "headlineWeight": headline_weight,
-        "safeMarginRule": "minimum_1cm",
+        "safeMarginRule": "minimum_1cm_between_elements_and_edges",
+        "safeMarginCss": "clamp(24px, 4vw, 48px)",
+        "headlineSizeRule": "largest_possible_not_larger_than_visual",
+        "productNameScale": 1.25,
+        "headlineTextScale": 1.0,
         "compositionNotes": (
-            "Deterministic safe composition: center-aligned headline, 1cm minimum margin, "
-            "and layout/weight selected by format and language rules."
+            "Deterministic composition from format/language with centered headline, "
+            "at least 1cm safe spacing, and max headline sizing within visual dominance rules."
         ),
     }
