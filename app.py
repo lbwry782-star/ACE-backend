@@ -30,6 +30,7 @@ from engine.video_jobs_redis import (
 )
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 from engine.builder1_generate_demo import build_demo_ad
+from engine.builder1_composition import generate_builder1_composition_o3
 from engine.builder1_headline import generate_builder1_headline_o3
 from engine.builder1_image_generator import generate_builder1_image
 from engine.builder1_planner import plan_builder1
@@ -507,6 +508,23 @@ def _builder1_json_real_generate(
         )
     except Exception as e:
         return {"ok": False, "error": "headline_failed", "message": str(e)}
+    try:
+        composition = generate_builder1_composition_o3(
+            format=p.format,
+            detectedLanguage=p.detected_language,
+            productNameResolved=p.product_name_resolved,
+            headlineProductName=headline["headlineProductName"],
+            headlineText=headline["headlineText"],
+            headlineFull=headline["headlineFull"],
+            objectA=p.object_a,
+            objectASecondary=p.object_a_secondary,
+            objectB=p.object_b,
+            modeDecision=p.mode_decision,
+            visualDescription=p.visual_description,
+            visualPrompt=image_result.visual_prompt,
+        )
+    except Exception as e:
+        return {"ok": False, "error": "composition_failed", "message": str(e)}
     return {
         "ok": True,
         "productNameResolved": p.product_name_resolved,
@@ -524,6 +542,14 @@ def _builder1_json_real_generate(
         "headlineProductName": headline["headlineProductName"],
         "headlineText": headline["headlineText"],
         "headlineFull": headline["headlineFull"],
+        "compositionLayout": composition["compositionLayout"],
+        "headlineAlign": composition["headlineAlign"],
+        "headlineLines": composition["headlineLines"],
+        "headlineRelativeSize": composition["headlineRelativeSize"],
+        "visualWeight": composition["visualWeight"],
+        "headlineWeight": composition["headlineWeight"],
+        "safeMarginRule": composition["safeMarginRule"],
+        "compositionNotes": composition["compositionNotes"],
     }
 
 
