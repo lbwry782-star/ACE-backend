@@ -440,12 +440,12 @@ def builder1_plan_demo():
 def _builder1_gpt_image_size_for_format(format_value: str) -> str:
     f = (format_value or "").strip().lower()
     if f == "landscape":
-        return "1536x1080"
+        return "1536x1024"
     if f == "portrait":
-        return "1080x1536"
+        return "1024x1536"
     if f == "square":
-        return "1080x1080"
-    return "1080x1536"
+        return "1024x1024"
+    return "1024x1536"
 
 
 def _gpt_image_15_caller(prompt: str, format_value: str) -> bytes:
@@ -486,27 +486,39 @@ def builder1_real_image_demo():
             format_value=format_val,
             model_caller=_o3_pro_planning_model_caller,
         )
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 200
+    try:
         image_result = generate_builder1_image(p, _gpt_image_15_caller)
+    except Exception as e:
         return (
             jsonify(
                 {
-                    "productNameResolved": p.product_name_resolved,
-                    "detectedLanguage": p.detected_language,
-                    "advertisingPromise": p.advertising_promise,
-                    "objectA": p.object_a,
-                    "objectASecondary": p.object_a_secondary,
-                    "objectB": p.object_b,
-                    "visualSimilarityScore": p.visual_similarity_score,
-                    "modeDecision": p.mode_decision,
-                    "visualDescription": p.visual_description,
-                    "visualPrompt": image_result.visual_prompt,
-                    "imageBytesBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
+                    "ok": False,
+                    "error": "builder1_image_call_failed",
+                    "details": str(e),
                 }
             ),
             200,
         )
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 200
+    return (
+        jsonify(
+            {
+                "productNameResolved": p.product_name_resolved,
+                "detectedLanguage": p.detected_language,
+                "advertisingPromise": p.advertising_promise,
+                "objectA": p.object_a,
+                "objectASecondary": p.object_a_secondary,
+                "objectB": p.object_b,
+                "visualSimilarityScore": p.visual_similarity_score,
+                "modeDecision": p.mode_decision,
+                "visualDescription": p.visual_description,
+                "visualPrompt": image_result.visual_prompt,
+                "imageBytesBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
+            }
+        ),
+        200,
+    )
 
 
 @app.route("/health", methods=["GET"])
