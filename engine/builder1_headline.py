@@ -84,17 +84,12 @@ def generate_builder1_headline_o3(
     )
     out_text = getattr(response, "output_text", None) or ""
     data = _parse_json_object(out_text)
-    hpn = (data.get("headlineProductName") or "").strip()
+    hpn = resolved
     htt = (data.get("headlineText") or "").strip()
-    hfull = (data.get("headlineFull") or "").strip()
-    if not hpn or not htt or not hfull:
+    if not hpn or not htt:
         raise ValueError("headline_empty_field")
-    if hpn != resolved:
-        raise ValueError("headline_product_name_mismatch")
-    norm_full = " ".join(hfull.split())
-    norm_expected = " ".join(f"{hpn} {htt}".split())
-    if norm_full != norm_expected:
-        raise ValueError("headline_full_mismatch")
+    hfull = " ".join(f"{hpn} {htt}".split())
+    norm_full = hfull
     if len(norm_full.split()) > 7:
         raise ValueError("headline_too_long")
     return {
