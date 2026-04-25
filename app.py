@@ -4,6 +4,7 @@ Image ad generation, preview jobs, ZIP download, Builder1, and payment routes ar
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from engine.video_jobs_redis import (
     video_job_try_finalize_stale_running,
 )
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
+from engine.builder1_generate_demo import build_demo_ad
 
 app = Flask(__name__)
 
@@ -327,6 +329,29 @@ def video_status():
         logger.info("VIDEO_JOB_POLL terminal_error jobId=%s reason=%s", job_id, err)
         out["error"] = err
     return jsonify(out), 200
+
+
+@app.route("/api/builder1-demo", methods=["GET"])
+def builder1_demo():
+    try:
+        result = build_demo_ad()
+        p = result.plan
+        return (
+            jsonify(
+                {
+                    "productNameResolved": p.product_name_resolved,
+                    "advertisingPromise": p.advertising_promise,
+                    "objectA": p.object_a,
+                    "objectB": p.object_b,
+                    "modeDecision": p.mode_decision,
+                    "visualPrompt": result.visual_prompt,
+                    "imageBytesBase64": base64.b64encode(result.image_bytes).decode("ascii"),
+                }
+            ),
+            200,
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 200
 
 
 @app.route("/health", methods=["GET"])
