@@ -22,99 +22,87 @@ from engine.builder1_planning_contract import (
 
 logger = logging.getLogger(__name__)
 
-_REPLACEMENT_BLOCKLIST: set[tuple[str, str]] = {
-    ("megaphone", "trumpet"),
-    ("megaphone", "conch shell"),
-    ("bullhorn", "trumpet"),
-    ("bullhorn", "conch shell"),
-}
-
-_SHARED_FEATURE_ONLY_HINTS: tuple[str, ...] = (
-    "cone",
-    "bell",
-    "handle",
-    "tube",
-    "rectangle",
-    "roundness",
-    "color",
+_NON_PHYSICAL_SECONDARY_HINTS: tuple[str, ...] = (
+    "idea",
+    "concept",
+    "promise",
+    "benefit",
+    "emotion",
+    "feeling",
+    "message",
+    "slogan",
+    "quality",
+    "value",
 )
-
-_POSTURE_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "blown_instrument": ("trumpet", "trombone", "clarinet", "flute", "saxophone", "conch shell"),
-    "voice_amplifier": ("megaphone", "bullhorn"),
-    "drink_container": ("cup", "mug", "bottle", "glass", "can"),
-    "seat": ("chair", "stool", "bench", "sofa"),
-    "wearable": ("shoe", "boot", "hat", "helmet", "glove"),
-}
-
-_NEAR_IDENTICAL_VARIANTS: set[frozenset[str]] = {
-    frozenset({"megaphone", "bullhorn"}),
-}
+_SCENE_CHANGE_HINTS: tuple[str, ...] = (
+    "adapted",
+    "changed grip",
+    "different grip",
+    "different posture",
+    "different pose",
+    "repositioned",
+    "reconfigured",
+    "adjusted hand",
+)
 
 
 def _norm_text(value: str) -> str:
     return " ".join((value or "").strip().lower().split())
 
 
-def _first_matching_category(name: str) -> str | None:
-    n = _norm_text(name)
-    if not n:
-        return None
-    for category, words in _POSTURE_CATEGORY_KEYWORDS.items():
-        if any(word in n for word in words):
-            return category
-    return None
-
-
-def _is_near_identical_variant(object_a: str, object_b: str) -> bool:
-    a = _norm_text(object_a)
-    b = _norm_text(object_b)
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    return frozenset({a, b}) in _NEAR_IDENTICAL_VARIANTS
-
-
-def _replacement_grade_downgrade_reason(plan: Builder1Plan) -> str | None:
+def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]:
+    reasons: list[str] = []
     a = _norm_text(plan.object_a)
     b = _norm_text(plan.object_b)
     secondary = _norm_text(plan.object_a_secondary)
     visual_desc = _norm_text(plan.visual_description)
-    pair = (a, b)
 
-    if pair in _REPLACEMENT_BLOCKLIST:
-        return "blocked_invalid_replacement_pair_not_replacement_grade"
-    if _is_near_identical_variant(a, b):
-        return "object_b_is_synonym_or_near_identical_variant_of_object_a"
+    if object_a_repeated:
+        reasons.append("object_a_already_used_in_memory")
+    if a and b and a == b:
+        reasons.append("object_b_identical_to_object_a")
+    if not secondary:
+        reasons.append("object_a_secondary_missing")
+    elif any(h in secondary for h in _NON_PHYSICAL_SECONDARY_HINTS):
+        reasons.append("object_a_secondary_not_concrete_physical")
+    if plan.mode_decision == "REPLACEMENT" and any(h in visual_desc for h in _SCENE_CHANGE_HINTS):
+        reasons.append("replacement_visual_description_indicates_scene_or_grip_change")
+    return reasons
 
-    a_cat = _first_matching_category(a)
-    b_cat = _first_matching_category(b)
-    if a_cat and b_cat and a_cat != b_cat:
-        return "object_b_is_different_functional_category_and_requires_different_use_posture"
 
-    if secondary and any(k in secondary for k in ("hand", "grip", "holder", "stand", "mount")):
-        if a_cat and b_cat and a_cat != b_cat:
-            return "object_a_secondary_interaction_would_need_to_change_for_object_b"
-
-    if visual_desc and "without changing" not in visual_desc:
-        if any(k in visual_desc for k in ("different grip", "different posture", "reposition", "reconfigure")):
-            return "object_b_cannot_occupy_object_a_context_without_scene_change"
-
-    if visual_desc and any(hint in visual_desc for hint in _SHARED_FEATURE_ONLY_HINTS):
-        if any(
-            marker in visual_desc
-            for marker in (
-                "only",
-                "just",
-                "shared",
-                "similar feature",
-                "same shape",
-            )
-        ):
-            return "similarity_based_only_on_single_shared_feature"
-
-    return None
+def _build_repair_user_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    format_value: str,
+    remembered_object_a: list[str],
+    previous_plan: Builder1Plan,
+    reasons: list[str],
+) -> str:
+    memory_list = ", ".join(remembered_object_a) if remembered_object_a else "(none)"
+    reasons_text = ", ".join(reasons)
+    return (
+        "The previous Builder1 plan violated explicit rules and must be corrected.\n"
+        f"Violations: {reasons_text}\n"
+        "Choose again and return the same JSON schema fields only.\n"
+        "Preserve user context exactly:\n"
+        f"- Product name: {product_name}\n"
+        f"- Product description: {product_description}\n"
+        f"- Format: {format_value}\n"
+        f"- detectedLanguage must remain: {previous_plan.detected_language}\n"
+        "Rules to obey:\n"
+        f"- Object A must be fresh and not in memory: {memory_list}\n"
+        "- Object A secondary must be a classic physical companion/context object of Object A.\n"
+        "- REPLACEMENT only if Object B can replace Object A without changing pose/context/secondary interaction.\n"
+        "- Otherwise choose SIDE_BY_SIDE.\n"
+        "Previous invalid plan (for correction reference only):\n"
+        f"- objectA: {previous_plan.object_a}\n"
+        f"- objectASecondary: {previous_plan.object_a_secondary}\n"
+        f"- objectB: {previous_plan.object_b}\n"
+        f"- visualSimilarityScore: {previous_plan.visual_similarity_score}\n"
+        f"- modeDecision: {previous_plan.mode_decision}\n"
+        f"- visualDescription: {previous_plan.visual_description}\n"
+    )
 
 
 class Builder1PlannerError(RuntimeError):
@@ -162,38 +150,55 @@ def plan_builder1(
         product_description=normalized.product_description,
         format=normalized.format,
     )
-    if was_object_a_used(final_plan.object_a):
+    object_a_repeated = was_object_a_used(final_plan.object_a)
+    if object_a_repeated:
         logger.info(
             "BUILDER1_MEMORY_OBJECT_A_REPEAT_DETECTED object_a=%r action=%r",
             final_plan.object_a,
             "logged_only",
         )
-    if final_plan.mode_decision == "REPLACEMENT":
-        reason = _replacement_grade_downgrade_reason(final_plan)
-        if reason:
-            previous_score = final_plan.visual_similarity_score
-            suffix = f"[Downgraded from REPLACEMENT: {reason}]"
-            merged_visual_description = (final_plan.visual_description or "").strip()
-            if merged_visual_description:
-                merged_visual_description = f"{merged_visual_description} {suffix}"
-            else:
-                merged_visual_description = suffix
-            final_plan = replace(
-                final_plan,
-                visual_similarity_score=84,
-                mode_decision="SIDE_BY_SIDE",
-                visual_description=merged_visual_description,
-            )
-            logger.info(
-                "BUILDER1_REPLACEMENT_DOWNGRADED "
-                "object_a=%r object_b=%r object_a_secondary=%r previous_score=%s new_score=%s reason=%r",
-                final_plan.object_a,
-                final_plan.object_b,
-                final_plan.object_a_secondary,
-                previous_score,
-                final_plan.visual_similarity_score,
-                reason,
-            )
+    reasons = _repair_reasons(final_plan, object_a_repeated=object_a_repeated)
+    if reasons:
+        logger.info(
+            "BUILDER1_PLAN_REPAIR_REQUESTED "
+            "reasons=%r object_a=%r object_a_secondary=%r object_b=%r mode_decision=%r visual_similarity_score=%s",
+            reasons,
+            final_plan.object_a,
+            final_plan.object_a_secondary,
+            final_plan.object_b,
+            final_plan.mode_decision,
+            final_plan.visual_similarity_score,
+        )
+        repair_user_prompt = _build_repair_user_prompt(
+            product_name=normalized.product_name,
+            product_description=normalized.product_description,
+            format_value=normalized.format,
+            remembered_object_a=remembered_object_a,
+            previous_plan=final_plan,
+            reasons=reasons,
+        )
+        try:
+            repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, repair_user_prompt)
+        except Exception as exc:
+            raise Builder1PlannerError("planning_model_repair_call_failed") from exc
+        repaired_plan = parse_builder1_plan(repaired_payload)
+        forced_repaired_name = normalized.product_name or repaired_plan.product_name_resolved
+        final_plan = replace(
+            repaired_plan,
+            product_name=forced_repaired_name,
+            product_name_resolved=forced_repaired_name,
+            product_description=normalized.product_description,
+            format=normalized.format,
+        )
+        logger.info(
+            "BUILDER1_PLAN_REPAIR_OK "
+            "object_a=%r object_a_secondary=%r object_b=%r mode_decision=%r visual_similarity_score=%s",
+            final_plan.object_a,
+            final_plan.object_a_secondary,
+            final_plan.object_b,
+            final_plan.mode_decision,
+            final_plan.visual_similarity_score,
+        )
     logger.info(
         "BUILDER1_PLAN_OK "
         "product_name=%r product_description=%r format=%r detected_language=%r "
