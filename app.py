@@ -5,6 +5,7 @@ Image ad generation, preview jobs, ZIP download, Builder1, and payment routes ar
 from __future__ import annotations
 
 import base64
+import html
 import json
 import logging
 import os
@@ -518,6 +519,30 @@ def builder1_real_image_demo():
             }
         ),
         200,
+    )
+
+
+@app.route("/api/builder1-real-image-view", methods=["GET"])
+def builder1_real_image_view():
+    raw = builder1_real_image_demo()
+    resp = raw[0] if isinstance(raw, tuple) else raw
+    data = resp.get_json(silent=True) or {}
+    if data.get("ok") is False or not data.get("imageBytesBase64"):
+        err = data.get("error", "error")
+        if data.get("details"):
+            err = f"{err}: {data['details']}"
+        return Response(
+            f"<html><body><p>{html.escape(err)}</p></body></html>",
+            mimetype="text/html",
+        )
+    b64 = data["imageBytesBase64"]
+    return Response(
+        '<html>\n'
+        '  <body style="background:white; display:flex; justify-content:center; align-items:center; height:100vh;">\n'
+        f'    <img src="data:image/png;base64,{b64}" style="max-width:90%; max-height:90%;" />\n'
+        "  </body>\n"
+        "</html>",
+        mimetype="text/html",
     )
 
 
