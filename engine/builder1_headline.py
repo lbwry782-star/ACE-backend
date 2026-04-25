@@ -4,11 +4,16 @@ Builder1 headline text via o3-pro (not burned into images).
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
 import httpx
 from openai import OpenAI
+
+from engine.builder1_memory import get_builder1_memory_snapshot, remember_headline_text
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:
@@ -45,6 +50,15 @@ def generate_builder1_headline_o3(
     if not resolved:
         raise ValueError("missing_product_name_resolved")
 
+    memory = get_builder1_memory_snapshot()
+    remembered_headlines = memory.get("headline_text") or []
+    recent_headlines = remembered_headlines[-10:]
+    logger.info(
+        "BUILDER1_MEMORY_INJECTED_TO_HEADLINE headline_count=%s recent_headlines=%r",
+        len(remembered_headlines),
+        recent_headlines,
+    )
+
     system = (
         "Return exactly one JSON object, no markdown, no prose. Keys only:\n"
         '{"headlineProductName":"...","headlineText":"...","headlineFull":"..."}\n'
@@ -56,6 +70,9 @@ def generate_builder1_headline_o3(
         "- headlineFull must be at most 7 words total (count words on headlineFull).\n"
         "- Draw wording from the advertising promise, objects, mode, and visual cues.\n"
         "- Prefer concise wordplay tied to the visual and promise.\n"
+        "- Headline memory excludes product names; compare only the slogan/title phrase part.\n"
+        "- Do not reuse any previous headlineText from memory.\n"
+        "- Do not reuse the same familiar expression; choose a fresh phrasing.\n"
     )
     user = (
         f"detectedLanguage: {detected_language}\n"
@@ -67,6 +84,7 @@ def generate_builder1_headline_o3(
         f"modeDecision: {mode_decision}\n"
         f"visualDescription: {visual_description}\n"
         f"visualPrompt: {visual_prompt}\n"
+        f"headlineTextMemoryToAvoid: {', '.join(remembered_headlines)}\n"
     )
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
@@ -92,6 +110,8 @@ def generate_builder1_headline_o3(
     norm_full = hfull
     if len(norm_full.split()) > 7:
         raise ValueError("headline_too_long")
+    logger.info("BUILDER1_MEMORY_HEADLINE_REMEMBER_CALL headline_text=%r", htt)
+    remember_headline_text(htt)
     return {
         "headlineProductName": hpn,
         "headlineText": htt,

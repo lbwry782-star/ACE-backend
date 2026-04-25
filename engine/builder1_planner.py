@@ -8,6 +8,7 @@ from dataclasses import replace
 from typing import Callable, TypeAlias
 
 from engine.builder1_input_normalizer import normalize_builder1_input
+from engine.builder1_memory import get_builder1_memory_snapshot, remember_object_a
 from engine.builder1_plan_parser import parse_builder1_plan
 from engine.builder1_plan_spec import Builder1Plan
 from engine.builder1_planning_contract import (
@@ -36,10 +37,19 @@ def plan_builder1(
         product_description=product_description,
         format_value=format_value,
     )
+    memory = get_builder1_memory_snapshot()
+    remembered_object_a = memory.get("object_a") or []
+    recent_object_a = remembered_object_a[-10:]
+    logger.info(
+        "BUILDER1_MEMORY_INJECTED_TO_PLANNING object_a_count=%s recent_object_a=%r",
+        len(remembered_object_a),
+        recent_object_a,
+    )
     user_prompt = build_builder1_planning_user_prompt(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
         format_value=normalized.format,
+        remembered_object_a=remembered_object_a,
     )
     try:
         raw_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, user_prompt)
@@ -80,4 +90,6 @@ def plan_builder1(
         final_plan.visual_similarity_score,
         final_plan.mode_decision,
     )
+    logger.info("BUILDER1_MEMORY_OBJECT_A_REMEMBER_CALL object_a=%r", final_plan.object_a)
+    remember_object_a(final_plan.object_a)
     return final_plan

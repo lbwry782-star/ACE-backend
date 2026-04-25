@@ -61,11 +61,24 @@ BUILDER1_PLANNING_JSON_SCHEMA: dict = {
 
 
 def build_builder1_planning_user_prompt(
-    product_name: str, product_description: str, format_value: str
+    product_name: str,
+    product_description: str,
+    format_value: str,
+    remembered_object_a: list[str] | None = None,
 ) -> str:
+    memory_lines = ""
+    if remembered_object_a:
+        memory_lines = (
+            "Object A memory (avoid reusing or near-equivalent ideas):\n"
+            f"- previous_object_a: {', '.join(remembered_object_a)}\n"
+            "- Do not reuse any previous Object A from memory.\n"
+            "- Avoid objects that are essentially the same as remembered Object A values.\n"
+            "- Choose a fresh Object A.\n"
+        )
     return (
         f"Product name: {product_name}\n"
         f"Product description: {product_description}\n"
         f"Format: {format_value}\n"
+        f"{memory_lines}"
         "Scope reminder: composition, headline rendering, and 50-word text are out of scope for this stage."
     )
