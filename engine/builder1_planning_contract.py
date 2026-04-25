@@ -37,6 +37,15 @@ Rules:
 - Forbidden example: smartphone + hand -> business card must not be REPLACEMENT merely because both can be held upright in the same hand.
 - visualSimilarityScore below 70 is not allowed. If the best pair is below 70, choose a different Object A/Object B pair.
 - Score bands: 85-100 => REPLACEMENT, 70-84 => SIDE_BY_SIDE, below 70 => invalid pair (must choose a new pair).
+- SIDE_BY_SIDE reasoning flow: first choose Object A from product name + product description.
+- For SIDE_BY_SIDE, grasp Object A's whole general form like a painter, not only technical contour/silhouette.
+- Then search for Object B by morphological similarity to Object A.
+- In SIDE_BY_SIDE, stop only when Object B is also a result of the advertising promise.
+- The advertising promise is not merely a justification for the move; the moment it is discovered is what makes the move possible.
+- In SIDE_BY_SIDE, Object A and Object B must be shown with partial overlap, one over the other.
+- SIDE_BY_SIDE is valid only for visualSimilarityScore 70-84.
+- Below 70, choose a new pair.
+- 85+ is reserved for true REPLACEMENT only.
 - If unsure whether replacement-grade conditions are met, score below 85 and choose SIDE_BY_SIDE.
 - detectedLanguage must be "he" or "en".
 - modeDecision must be "REPLACEMENT" if visualSimilarityScore >= 85; otherwise "SIDE_BY_SIDE".
