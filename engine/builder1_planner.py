@@ -29,6 +29,93 @@ _REPLACEMENT_BLOCKLIST: set[tuple[str, str]] = {
     ("bullhorn", "conch shell"),
 }
 
+_SHARED_FEATURE_ONLY_HINTS: tuple[str, ...] = (
+    "cone",
+    "bell",
+    "handle",
+    "tube",
+    "rectangle",
+    "roundness",
+    "color",
+)
+
+_POSTURE_CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "blown_instrument": ("trumpet", "trombone", "clarinet", "flute", "saxophone", "conch shell"),
+    "voice_amplifier": ("megaphone", "bullhorn"),
+    "drink_container": ("cup", "mug", "bottle", "glass", "can"),
+    "seat": ("chair", "stool", "bench", "sofa"),
+    "wearable": ("shoe", "boot", "hat", "helmet", "glove"),
+}
+
+_NEAR_IDENTICAL_VARIANTS: set[frozenset[str]] = {
+    frozenset({"megaphone", "bullhorn"}),
+}
+
+
+def _norm_text(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _first_matching_category(name: str) -> str | None:
+    n = _norm_text(name)
+    if not n:
+        return None
+    for category, words in _POSTURE_CATEGORY_KEYWORDS.items():
+        if any(word in n for word in words):
+            return category
+    return None
+
+
+def _is_near_identical_variant(object_a: str, object_b: str) -> bool:
+    a = _norm_text(object_a)
+    b = _norm_text(object_b)
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return frozenset({a, b}) in _NEAR_IDENTICAL_VARIANTS
+
+
+def _replacement_grade_downgrade_reason(plan: Builder1Plan) -> str | None:
+    a = _norm_text(plan.object_a)
+    b = _norm_text(plan.object_b)
+    secondary = _norm_text(plan.object_a_secondary)
+    visual_desc = _norm_text(plan.visual_description)
+    pair = (a, b)
+
+    if pair in _REPLACEMENT_BLOCKLIST:
+        return "blocked_invalid_replacement_pair_not_replacement_grade"
+    if _is_near_identical_variant(a, b):
+        return "object_b_is_synonym_or_near_identical_variant_of_object_a"
+
+    a_cat = _first_matching_category(a)
+    b_cat = _first_matching_category(b)
+    if a_cat and b_cat and a_cat != b_cat:
+        return "object_b_is_different_functional_category_and_requires_different_use_posture"
+
+    if secondary and any(k in secondary for k in ("hand", "grip", "holder", "stand", "mount")):
+        if a_cat and b_cat and a_cat != b_cat:
+            return "object_a_secondary_interaction_would_need_to_change_for_object_b"
+
+    if visual_desc and "without changing" not in visual_desc:
+        if any(k in visual_desc for k in ("different grip", "different posture", "reposition", "reconfigure")):
+            return "object_b_cannot_occupy_object_a_context_without_scene_change"
+
+    if visual_desc and any(hint in visual_desc for hint in _SHARED_FEATURE_ONLY_HINTS):
+        if any(
+            marker in visual_desc
+            for marker in (
+                "only",
+                "just",
+                "shared",
+                "similar feature",
+                "same shape",
+            )
+        ):
+            return "similarity_based_only_on_single_shared_feature"
+
+    return None
+
 
 class Builder1PlannerError(RuntimeError):
     pass
@@ -82,17 +169,10 @@ def plan_builder1(
             "logged_only",
         )
     if final_plan.mode_decision == "REPLACEMENT":
-        pair = (
-            (final_plan.object_a or "").strip().lower(),
-            (final_plan.object_b or "").strip().lower(),
-        )
-        if pair in _REPLACEMENT_BLOCKLIST:
+        reason = _replacement_grade_downgrade_reason(final_plan)
+        if reason:
             previous_score = final_plan.visual_similarity_score
-            reason = "blocked_invalid_replacement_pair_not_replacement_grade"
-            suffix = (
-                "Pair downgraded to SIDE_BY_SIDE because it is not replacement-grade "
-                "(requires changed role/grip/context interaction)."
-            )
+            suffix = f"[Downgraded from REPLACEMENT: {reason}]"
             merged_visual_description = (final_plan.visual_description or "").strip()
             if merged_visual_description:
                 merged_visual_description = f"{merged_visual_description} {suffix}"
@@ -106,9 +186,10 @@ def plan_builder1(
             )
             logger.info(
                 "BUILDER1_REPLACEMENT_DOWNGRADED "
-                "object_a=%r object_b=%r previous_score=%s new_score=%s reason=%r",
+                "object_a=%r object_b=%r object_a_secondary=%r previous_score=%s new_score=%s reason=%r",
                 final_plan.object_a,
                 final_plan.object_b,
+                final_plan.object_a_secondary,
                 previous_score,
                 final_plan.visual_similarity_score,
                 reason,
