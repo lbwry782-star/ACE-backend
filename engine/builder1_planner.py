@@ -3,6 +3,7 @@ Disconnected Builder1 planning entry point scaffold.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Callable, TypeAlias
 
 from engine.builder1_input_normalizer import normalize_builder1_input
@@ -41,4 +42,10 @@ def plan_builder1(
         raw_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, user_prompt)
     except Exception as exc:
         raise Builder1PlannerError("planning_model_call_failed") from exc
-    return parse_builder1_plan(raw_payload)
+    plan = parse_builder1_plan(raw_payload)
+    return replace(
+        plan,
+        product_name=normalized.product_name,
+        product_description=normalized.product_description,
+        format=normalized.format,
+    )
