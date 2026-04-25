@@ -118,6 +118,8 @@ def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]
         object_b_flat_paper_like = any(h in b for h in _FLAT_CARD_PAPER_OBJECT_HINTS)
         if has_hand_secondary and has_handheld_rationale and object_b_flat_paper_like:
             reasons.append("replacement_handheld_flat_object_needs_reconsideration")
+    if plan.visual_similarity_score < 70:
+        reasons.append("visual_similarity_below_side_by_side_minimum")
     return reasons
 
 
@@ -149,6 +151,8 @@ def _build_repair_user_prompt(
         "- Hand-held replacement warning: same hand/same grip/same position is not enough for REPLACEMENT when objectB is flat/card/paper-like.\n"
         "- If a flat/card/paper object replaces another device/object merely by being held in the same hand or position, reconsider and either choose SIDE_BY_SIDE (<85) or choose a different objectB.\n"
         "- If Object B cannot preserve Object A's exact physical role, pose, context, and objectASecondary interaction, choose SIDE_BY_SIDE with score below 85.\n"
+        "- Pairs with visualSimilarityScore below 70 are invalid for Builder1 and must be replaced with a new object pair.\n"
+        "- Use score bands: 70-84 for SIDE_BY_SIDE, or 85+ for REPLACEMENT only when true replacement-grade continuity is satisfied.\n"
         "- Choose a new plan if needed.\n"
         "- Otherwise choose SIDE_BY_SIDE.\n"
         "Previous invalid plan (for correction reference only):\n"

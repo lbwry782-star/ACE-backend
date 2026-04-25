@@ -35,6 +35,8 @@ Rules:
 - Forbidden example: megaphone + hand -> trumpet must be SIDE_BY_SIDE, not REPLACEMENT, because hand/grip/usage changes and the viewer will not read it as replacement.
 - Forbidden example: laptop computer + table -> open magazine must not be REPLACEMENT merely because both are open/flat/rectangular/book-like; this should be SIDE_BY_SIDE unless true replacement-grade continuity is proven.
 - Forbidden example: smartphone + hand -> business card must not be REPLACEMENT merely because both can be held upright in the same hand.
+- visualSimilarityScore below 70 is not allowed. If the best pair is below 70, choose a different Object A/Object B pair.
+- Score bands: 85-100 => REPLACEMENT, 70-84 => SIDE_BY_SIDE, below 70 => invalid pair (must choose a new pair).
 - If unsure whether replacement-grade conditions are met, score below 85 and choose SIDE_BY_SIDE.
 - detectedLanguage must be "he" or "en".
 - modeDecision must be "REPLACEMENT" if visualSimilarityScore >= 85; otherwise "SIDE_BY_SIDE".
@@ -68,7 +70,8 @@ BUILDER1_PLANNING_JSON_SCHEMA: dict = {
             "maximum": 100,
             "description": (
                 "Conservative replacement-grade score. Use 85+ only if objectB can literally replace objectA "
-                "in the same role/pose/position with objectASecondary interaction unchanged; otherwise below 85."
+                "in the same role/pose/position with objectASecondary interaction unchanged. "
+                "Score band policy: 85-100 REPLACEMENT, 70-84 SIDE_BY_SIDE, below 70 invalid (choose a new pair)."
             ),
         },
         "modeDecision": {
