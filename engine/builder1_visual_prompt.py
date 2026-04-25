@@ -50,7 +50,8 @@ def build_visual_prompt(plan: Builder1Plan) -> str:
         core = (
             f"Do not show {plan.object_a}. "
             f"Show {plan.object_b} replacing {plan.object_a} in {plan.object_a}'s position/context. "
-            f"Keep {plan.object_a_secondary} visible and interacting with {plan.object_b}. "
+            f"Keep {plan.object_a_secondary} visible in the scene. "
+            f"Make {plan.object_a_secondary} interact with {plan.object_b} to demonstrate {plan.object_b}'s nature as if naturally paired. "
             f"Only {plan.object_b} and {plan.object_a_secondary} should appear as the main visual objects."
         )
     else:

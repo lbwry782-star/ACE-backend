@@ -24,9 +24,13 @@ Rules:
 - Filter out text, logos, brands, generic environments, and unclear/non-physical situations.
 - All objects must be classic, defined, physical objects.
 - objectASecondary must be the classic physical companion/context object of objectA only (for example: can+straw, dog+bone, bee+flower, sign+pole).
+- Object A must have a nearby secondary object that is its classic physical companion/context; objectASecondary is not part of objectA.
 - Never choose objectASecondary as a product, promise, explanation, slogan, benefit, or abstract concept object.
+- objectASecondary is intended for REPLACEMENT continuity and must stay usable when objectB replaces objectA.
 - objectB must be physically distinct from objectA; do not use synonyms or near-identical variants (for example: megaphone vs bullhorn is forbidden).
 - For REPLACEMENT planning, explicitly plan a final visual where objectA is absent, objectB replaces objectA in objectA's position/context, and objectASecondary remains visible interacting with objectB.
+- In REPLACEMENT, objectB must keep objectA's background/context while appearing in objectA's original position.
+- In REPLACEMENT, objectASecondary must remain visible and interact with objectB in a way that demonstrates objectB's nature, as if objectASecondary were naturally paired with objectB.
 - REPLACEMENT requires replacement-grade similarity, not just general silhouette similarity.
 - Score 85+ only when objectB can literally occupy objectA's exact physical role, pose, position, and objectASecondary interaction without reconfiguring the scene.
 - objectASecondary interaction must still make physical sense as originally paired with objectA.
