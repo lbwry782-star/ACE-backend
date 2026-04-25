@@ -123,6 +123,21 @@ def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]
     return reasons
 
 
+def _product_name_repair_reason(
+    *,
+    user_product_name: str,
+    product_description: str,
+    model_product_name_resolved: str,
+) -> str | None:
+    """When user left productName blank, reject description-as-name fallback."""
+
+    if _norm_text(user_product_name):
+        return None
+    if _norm_text(model_product_name_resolved) == _norm_text(product_description):
+        return "product_name_blank_model_used_product_description"
+    return None
+
+
 def _build_repair_user_prompt(
     *,
     product_name: str,
@@ -153,6 +168,7 @@ def _build_repair_user_prompt(
         "- If Object B cannot preserve Object A's exact physical role, pose, context, and objectASecondary interaction, choose SIDE_BY_SIDE with score below 85.\n"
         "- Pairs with visualSimilarityScore below 70 are invalid for Builder1 and must be replaced with a new object pair.\n"
         "- Use score bands: 70-84 for SIDE_BY_SIDE, or 85+ for REPLACEMENT only when true replacement-grade continuity is satisfied.\n"
+        "- If Product name is blank, generate a short new productNameResolved; do not copy productDescription into productNameResolved.\n"
         "- Choose a new plan if needed.\n"
         "- Otherwise choose SIDE_BY_SIDE.\n"
         "Previous invalid plan (for correction reference only):\n"
@@ -203,6 +219,11 @@ def plan_builder1(
         raise Builder1PlannerError("planning_model_call_failed") from exc
     plan = parse_builder1_plan(raw_payload)
     forced_resolved_name = normalized.product_name or plan.product_name_resolved
+    name_reason = _product_name_repair_reason(
+        user_product_name=normalized.product_name,
+        product_description=normalized.product_description,
+        model_product_name_resolved=forced_resolved_name,
+    )
     final_plan = replace(
         plan,
         product_name=forced_resolved_name,
@@ -218,6 +239,8 @@ def plan_builder1(
             "logged_only",
         )
     reasons = _repair_reasons(final_plan, object_a_repeated=object_a_repeated)
+    if name_reason:
+        reasons.append(name_reason)
     if reasons:
         logger.info(
             "BUILDER1_PLAN_REPAIR_REQUESTED "
