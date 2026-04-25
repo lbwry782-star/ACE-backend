@@ -33,6 +33,7 @@ Rules:
 - If objectB needs a different grip, support, usage posture, or a different interaction from objectASecondary, similarity is below 85 and modeDecision must be SIDE_BY_SIDE.
 - Shared cone/bell shape alone is not enough for REPLACEMENT.
 - Forbidden example: megaphone + hand -> trumpet must be SIDE_BY_SIDE, not REPLACEMENT, because hand/grip/usage changes and the viewer will not read it as replacement.
+- Forbidden example: laptop computer + table -> open magazine must not be REPLACEMENT merely because both are open/flat/rectangular/book-like; this should be SIDE_BY_SIDE unless true replacement-grade continuity is proven.
 - If unsure whether replacement-grade conditions are met, score below 85 and choose SIDE_BY_SIDE.
 - detectedLanguage must be "he" or "en".
 - modeDecision must be "REPLACEMENT" if visualSimilarityScore >= 85; otherwise "SIDE_BY_SIDE".

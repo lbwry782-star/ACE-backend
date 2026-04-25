@@ -44,6 +44,27 @@ _SCENE_CHANGE_HINTS: tuple[str, ...] = (
     "reconfigured",
     "adjusted hand",
 )
+_WEAK_REPLACEMENT_RATIONALE_HINTS: tuple[str, ...] = (
+    "book-like",
+    "magazine",
+    "pages",
+    "flat rectangular",
+    "flat rectangle",
+    "rectangular body",
+    "open like a book",
+    "hinge-like",
+    "occupies the exact spot",
+    "same spot",
+)
+_REPLACEMENT_CONTINUITY_HINTS: tuple[str, ...] = (
+    "without changing pose",
+    "without changing context",
+    "without changing interaction",
+    "unchanged interaction",
+    "same role",
+    "same secondary interaction",
+    "preserves secondary interaction",
+)
 
 
 def _norm_text(value: str) -> str:
@@ -67,6 +88,11 @@ def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]
         reasons.append("object_a_secondary_not_concrete_physical")
     if plan.mode_decision == "REPLACEMENT" and any(h in visual_desc for h in _SCENE_CHANGE_HINTS):
         reasons.append("replacement_visual_description_indicates_scene_or_grip_change")
+    if plan.mode_decision == "REPLACEMENT":
+        has_weak_rationale = any(h in visual_desc for h in _WEAK_REPLACEMENT_RATIONALE_HINTS)
+        has_continuity_explanation = any(h in visual_desc for h in _REPLACEMENT_CONTINUITY_HINTS)
+        if has_weak_rationale and not has_continuity_explanation:
+            reasons.append("replacement_rationale_too_generic_flat_booklike")
     return reasons
 
 
@@ -94,6 +120,9 @@ def _build_repair_user_prompt(
         f"- Object A must be fresh and not in memory: {memory_list}\n"
         "- Object A secondary must be a classic physical companion/context object of Object A.\n"
         "- REPLACEMENT only if Object B can replace Object A without changing pose/context/secondary interaction.\n"
+        "- Weak generic rationale is invalid for REPLACEMENT: flat/open/rectangular/book-like/same-spot wording alone is never enough for 85+.\n"
+        "- If Object B cannot preserve Object A's exact physical role, pose, context, and objectASecondary interaction, choose SIDE_BY_SIDE with score below 85.\n"
+        "- Choose a new plan if needed.\n"
         "- Otherwise choose SIDE_BY_SIDE.\n"
         "Previous invalid plan (for correction reference only):\n"
         f"- objectA: {previous_plan.object_a}\n"
