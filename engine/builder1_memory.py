@@ -1,5 +1,5 @@
 """
-Global Builder1 ad repetition guard (FIFO, persisted to JSON for process restarts).
+Global Builder1 ad repetition guard (FIFO, Redis-backed when available).
 
 Tracks normalized Object A and headline text (excluding product names is the
 caller's responsibility when calling remember_headline_text).
@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
 import threading
 from collections import deque
 from typing import Deque
@@ -22,96 +20,113 @@ _lock = threading.Lock()
 _object_a_deque: Deque[str] = deque()
 _headline_text_deque: Deque[str] = deque()
 _memory_loaded = False
+_redis_available = False
 
-
-def _memory_path() -> str:
-    return os.environ.get("BUILDER1_MEMORY_FILE", "/tmp/builder1_memory.json")
-
-
-def _ensure_loaded_locked() -> None:
-    global _memory_loaded
-    if _memory_loaded:
-        return
-    path = _memory_path()
-    if not os.path.isfile(path):
-        _memory_loaded = True
-        logger.warning("BUILDER1_MEMORY_LOAD_FAILED path=%r error=%r", path, "not_found")
-        return
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError("root_must_be_object")
-        oa = data.get("object_a") or []
-        ht = data.get("headline_text") or []
-        if not isinstance(oa, list):
-            raise ValueError("object_a_must_be_list")
-        if not isinstance(ht, list):
-            raise ValueError("headline_text_must_be_list")
-        oa_s = [_norm(str(x)) for x in oa if _norm(str(x))]
-        ht_s = [_norm(str(x)) for x in ht if _norm(str(x))]
-        if len(oa_s) > _CAP:
-            oa_s = oa_s[-_CAP:]
-        if len(ht_s) > _CAP:
-            ht_s = ht_s[-_CAP:]
-        _object_a_deque.clear()
-        _headline_text_deque.clear()
-        _object_a_deque.extend(oa_s)
-        _headline_text_deque.extend(ht_s)
-        _memory_loaded = True
-        logger.info(
-            "BUILDER1_MEMORY_LOADED object_a_count=%s headline_count=%s path=%r",
-            len(_object_a_deque),
-            len(_headline_text_deque),
-            path,
-        )
-    except Exception as exc:
-        _object_a_deque.clear()
-        _headline_text_deque.clear()
-        _memory_loaded = True
-        logger.warning("BUILDER1_MEMORY_LOAD_FAILED path=%r error=%r", path, str(exc))
-
-
-def _save_locked() -> None:
-    path = _memory_path()
-    payload = {
-        "object_a": list(_object_a_deque),
-        "headline_text": list(_headline_text_deque),
-    }
-    dir_name = os.path.dirname(path) or "."
-    try:
-        os.makedirs(dir_name, exist_ok=True)
-    except OSError:
-        pass
-    fd, tmp_path = tempfile.mkstemp(
-        prefix=".builder1_memory_",
-        suffix=".tmp",
-        dir=dir_name,
-        text=True,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, path)
-        logger.info(
-            "BUILDER1_MEMORY_SAVED object_a_count=%s headline_count=%s path=%r",
-            len(_object_a_deque),
-            len(_headline_text_deque),
-            path,
-        )
-    except Exception:
-        try:
-            if os.path.isfile(tmp_path):
-                os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
+_OBJECT_A_KEY = "ACE:BUILDER1:OBJECT_A_MEMORY"
+_HEADLINE_KEY = "ACE:BUILDER1:HEADLINE_MEMORY"
 
 
 def _norm(s: str) -> str:
     return (s or "").strip().lower()
+
+
+def _normalize_list(raw: object) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    cleaned: list[str] = []
+    for item in raw:
+        n = _norm(str(item))
+        if n:
+            cleaned.append(n)
+    if len(cleaned) > _CAP:
+        cleaned = cleaned[-_CAP:]
+    return cleaned
+
+
+def _redis_get_json(key: str) -> object | None:
+    try:
+        from engine.video_jobs_redis import get_redis, redis_configured
+
+        if not redis_configured():
+            return None
+        raw = get_redis().get(key)
+        if not raw:
+            return None
+        return json.loads(raw)
+    except Exception as exc:
+        logger.warning("BUILDER1_MEMORY_REDIS_UNAVAILABLE reason=%r", f"redis_get_failed:{exc}")
+        return None
+
+
+def _redis_set_json(key: str, value: object) -> bool:
+    try:
+        from engine.video_jobs_redis import get_redis, redis_configured
+
+        if not redis_configured():
+            return False
+        get_redis().set(key, json.dumps(value, ensure_ascii=False))
+        return True
+    except Exception as exc:
+        logger.warning("BUILDER1_MEMORY_REDIS_UNAVAILABLE reason=%r", f"redis_set_failed:{exc}")
+        return False
+
+
+def _load_from_redis_locked() -> bool:
+    object_data = _redis_get_json(_OBJECT_A_KEY)
+    headline_data = _redis_get_json(_HEADLINE_KEY)
+    if object_data is None and headline_data is None:
+        return False
+    object_list = _normalize_list(object_data)
+    headline_list = _normalize_list(headline_data)
+    _object_a_deque.clear()
+    _headline_text_deque.clear()
+    _object_a_deque.extend(object_list)
+    _headline_text_deque.extend(headline_list)
+    logger.info(
+        "BUILDER1_MEMORY_REDIS_LOADED object_a_count=%s headline_count=%s",
+        len(_object_a_deque),
+        len(_headline_text_deque),
+    )
+    return True
+
+
+def _save_to_redis_locked() -> bool:
+    payload_object = list(_object_a_deque)
+    payload_headline = list(_headline_text_deque)
+    ok_object = _redis_set_json(_OBJECT_A_KEY, payload_object)
+    ok_headline = _redis_set_json(_HEADLINE_KEY, payload_headline)
+    if ok_object and ok_headline:
+        logger.info(
+            "BUILDER1_MEMORY_REDIS_SAVED object_a_count=%s headline_count=%s",
+            len(_object_a_deque),
+            len(_headline_text_deque),
+        )
+        return True
+    return False
+
+
+def _ensure_loaded_locked() -> None:
+    global _memory_loaded, _redis_available
+    if _memory_loaded:
+        return
+    try:
+        from engine.video_jobs_redis import redis_configured
+
+        if redis_configured():
+            _redis_available = _load_from_redis_locked()
+            if not _redis_available:
+                logger.warning("BUILDER1_MEMORY_REDIS_UNAVAILABLE reason=%r", "redis_keys_missing_or_unreadable")
+        else:
+            logger.warning("BUILDER1_MEMORY_REDIS_UNAVAILABLE reason=%r", "redis_not_configured")
+    except Exception as exc:
+        logger.warning("BUILDER1_MEMORY_REDIS_UNAVAILABLE reason=%r", f"redis_init_failed:{exc}")
+    _memory_loaded = True
+    if not _redis_available:
+        logger.info(
+            "BUILDER1_MEMORY_FALLBACK_IN_MEMORY object_a_count=%s headline_count=%s",
+            len(_object_a_deque),
+            len(_headline_text_deque),
+        )
 
 
 def remember_object_a(object_a: str) -> None:
@@ -129,7 +144,12 @@ def remember_object_a(object_a: str) -> None:
             if len(_object_a_deque) >= _CAP:
                 evicted = _object_a_deque.popleft()
         _object_a_deque.append(n)
-        _save_locked()
+        if not _save_to_redis_locked():
+            logger.info(
+                "BUILDER1_MEMORY_FALLBACK_IN_MEMORY object_a_count=%s headline_count=%s",
+                len(_object_a_deque),
+                len(_headline_text_deque),
+            )
     if evicted is not None:
         logger.info("BUILDER1_MEMORY_OBJECT_A_EVICTED object_a=%r", evicted)
     logger.info("BUILDER1_MEMORY_OBJECT_A_REMEMBERED object_a=%r", n)
@@ -159,7 +179,12 @@ def remember_headline_text(headline_text: str) -> None:
             if len(_headline_text_deque) >= _CAP:
                 evicted = _headline_text_deque.popleft()
         _headline_text_deque.append(n)
-        _save_locked()
+        if not _save_to_redis_locked():
+            logger.info(
+                "BUILDER1_MEMORY_FALLBACK_IN_MEMORY object_a_count=%s headline_count=%s",
+                len(_object_a_deque),
+                len(_headline_text_deque),
+            )
     if evicted is not None:
         logger.info("BUILDER1_MEMORY_HEADLINE_EVICTED headline_text=%r", evicted)
     logger.info("BUILDER1_MEMORY_HEADLINE_REMEMBERED headline_text=%r", n)
