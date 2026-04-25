@@ -23,6 +23,10 @@ Rules:
 - Stop when Object B also expresses the advertising promise.
 - Filter out text, logos, brands, generic environments, and unclear/non-physical situations.
 - All objects must be classic, defined, physical objects.
+- objectASecondary must be the classic physical companion/context object of objectA only (for example: can+straw, dog+bone, bee+flower, sign+pole).
+- Never choose objectASecondary as a product, promise, explanation, slogan, benefit, or abstract concept object.
+- objectB must be physically distinct from objectA; do not use synonyms or near-identical variants (for example: megaphone vs bullhorn is forbidden).
+- For REPLACEMENT planning, explicitly plan a final visual where objectA is absent, objectB replaces objectA in objectA's position/context, and objectASecondary remains visible interacting with objectB.
 - detectedLanguage must be "he" or "en".
 - modeDecision must be "REPLACEMENT" if visualSimilarityScore >= 85; otherwise "SIDE_BY_SIDE".
 """.strip()
