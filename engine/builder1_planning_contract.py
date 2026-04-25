@@ -34,6 +34,7 @@ Rules:
 - Shared cone/bell shape alone is not enough for REPLACEMENT.
 - Forbidden example: megaphone + hand -> trumpet must be SIDE_BY_SIDE, not REPLACEMENT, because hand/grip/usage changes and the viewer will not read it as replacement.
 - Forbidden example: laptop computer + table -> open magazine must not be REPLACEMENT merely because both are open/flat/rectangular/book-like; this should be SIDE_BY_SIDE unless true replacement-grade continuity is proven.
+- Forbidden example: smartphone + hand -> business card must not be REPLACEMENT merely because both can be held upright in the same hand.
 - If unsure whether replacement-grade conditions are met, score below 85 and choose SIDE_BY_SIDE.
 - detectedLanguage must be "he" or "en".
 - modeDecision must be "REPLACEMENT" if visualSimilarityScore >= 85; otherwise "SIDE_BY_SIDE".

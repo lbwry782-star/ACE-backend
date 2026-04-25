@@ -65,6 +65,26 @@ _REPLACEMENT_CONTINUITY_HINTS: tuple[str, ...] = (
     "same secondary interaction",
     "preserves secondary interaction",
 )
+_HANDHELD_RATIONALE_HINTS: tuple[str, ...] = (
+    "same hand",
+    "same grip",
+    "same position",
+    "holding",
+    "held",
+    "grips",
+    "occupies the same position",
+)
+_FLAT_CARD_PAPER_OBJECT_HINTS: tuple[str, ...] = (
+    "card",
+    "business card",
+    "paper",
+    "sheet",
+    "flyer",
+    "magazine",
+    "book",
+    "page",
+    "postcard",
+)
 
 
 def _norm_text(value: str) -> str:
@@ -93,6 +113,11 @@ def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]
         has_continuity_explanation = any(h in visual_desc for h in _REPLACEMENT_CONTINUITY_HINTS)
         if has_weak_rationale and not has_continuity_explanation:
             reasons.append("replacement_rationale_too_generic_flat_booklike")
+        has_hand_secondary = "hand" in secondary
+        has_handheld_rationale = any(h in visual_desc for h in _HANDHELD_RATIONALE_HINTS)
+        object_b_flat_paper_like = any(h in b for h in _FLAT_CARD_PAPER_OBJECT_HINTS)
+        if has_hand_secondary and has_handheld_rationale and object_b_flat_paper_like:
+            reasons.append("replacement_handheld_flat_object_needs_reconsideration")
     return reasons
 
 
@@ -121,6 +146,8 @@ def _build_repair_user_prompt(
         "- Object A secondary must be a classic physical companion/context object of Object A.\n"
         "- REPLACEMENT only if Object B can replace Object A without changing pose/context/secondary interaction.\n"
         "- Weak generic rationale is invalid for REPLACEMENT: flat/open/rectangular/book-like/same-spot wording alone is never enough for 85+.\n"
+        "- Hand-held replacement warning: same hand/same grip/same position is not enough for REPLACEMENT when objectB is flat/card/paper-like.\n"
+        "- If a flat/card/paper object replaces another device/object merely by being held in the same hand or position, reconsider and either choose SIDE_BY_SIDE (<85) or choose a different objectB.\n"
         "- If Object B cannot preserve Object A's exact physical role, pose, context, and objectASecondary interaction, choose SIDE_BY_SIDE with score below 85.\n"
         "- Choose a new plan if needed.\n"
         "- Otherwise choose SIDE_BY_SIDE.\n"
