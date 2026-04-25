@@ -549,6 +549,10 @@ def _builder1_json_real_generate(
         "visualWeight": composition["visualWeight"],
         "headlineWeight": composition["headlineWeight"],
         "safeMarginRule": composition["safeMarginRule"],
+        "safeMarginCss": composition["safeMarginCss"],
+        "headlineSizeRule": composition["headlineSizeRule"],
+        "productNameScale": composition["productNameScale"],
+        "headlineTextScale": composition["headlineTextScale"],
         "compositionNotes": composition["compositionNotes"],
     }
 
