@@ -349,6 +349,30 @@ def _build_unrealistic_physics_repair_input(
     )
 
 
+def _build_invalid_objects_repair_input(
+    *,
+    base_attempt_input: str,
+    product_name: str,
+    product_description: str,
+    advertising_promise: str,
+    previous_plan: Dict[str, Any],
+) -> str:
+    return (
+        f"{base_attempt_input}\n\n"
+        "REPAIR REQUEST (one retry): The previous plan used invalid objects.\n"
+        "Keep the same product name, product description, and advertising goal/promise.\n"
+        "Objects must be concrete, defined, classic physical everyday objects.\n"
+        "Do not use amorphous blobs, lumps, raw materials, or undefined masses.\n"
+        "Replace any invalid object with a clear everyday object while preserving one single-interaction video structure.\n"
+        "Return the same required JSON shape only.\n"
+        f"Product name: {product_name or '(empty)'}\n"
+        f"Product description: {product_description}\n"
+        f"Advertising goal/promise to keep: {advertising_promise}\n"
+        "Previous invalid plan (for correction):\n"
+        f"{json.dumps(previous_plan, ensure_ascii=False)}\n"
+    )
+
+
 def _runway_language_visual_constraints(plan: Dict[str, Any]) -> str:
     """Short language-consistent cue for the video model (no headline burn-in)."""
     lang = str(plan.get("language") or "").strip().lower()
@@ -902,15 +926,27 @@ Language: {lang_name} ({lang}).
         )
         if not plan:
             last_v_err = (v_err or "").strip() or "planning_failed_incomplete_plan"
-            if last_v_err == "planning_failed_unrealistic_physics":
-                logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=planning_failed_unrealistic_physics")
-                repair_input = _build_unrealistic_physics_repair_input(
-                    base_attempt_input=attempt_input,
-                    product_name=product_name,
-                    product_description=product_description,
-                    advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
-                    previous_plan=parsed,
-                )
+            if last_v_err in {
+                "planning_failed_unrealistic_physics",
+                "planning_failed_invalid_objects",
+            }:
+                logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=%s", last_v_err)
+                if last_v_err == "planning_failed_unrealistic_physics":
+                    repair_input = _build_unrealistic_physics_repair_input(
+                        base_attempt_input=attempt_input,
+                        product_name=product_name,
+                        product_description=product_description,
+                        advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
+                        previous_plan=parsed,
+                    )
+                else:
+                    repair_input = _build_invalid_objects_repair_input(
+                        base_attempt_input=attempt_input,
+                        product_name=product_name,
+                        product_description=product_description,
+                        advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
+                        previous_plan=parsed,
+                    )
                 try:
                     repair_response = client.responses.create(
                         model=model,
@@ -960,7 +996,7 @@ Language: {lang_name} ({lang}).
                 )
                 if repaired_plan:
                     plan = repaired_plan
-                    logger.info("VIDEO_PLAN_REPAIR_OK reason=planning_failed_unrealistic_physics")
+                    logger.info("VIDEO_PLAN_REPAIR_OK reason=%s", last_v_err)
                 else:
                     logger.warning(
                         "VIDEO_PLAN_REPAIR_FAILED reason=%s",
