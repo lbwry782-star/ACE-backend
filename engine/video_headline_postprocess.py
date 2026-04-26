@@ -524,11 +524,6 @@ def postprocess_video_headline(
             return _fail("mixed_headline_requires_dual_drawtext")
 
         if use_dual:
-            headline_clean = f"{lat_s}\n{he_s}"
-            use_dual = False
-            logger.info("VIDEO_HEADLINE_NEWLINE_APPLIED=true")
-
-        if use_dual:
             try:
                 fs_rem, fs_prod = _overlay_product_remainder_fontsizes(fs)
                 text_file_latin.write_text(lat_s, encoding="utf-8")
@@ -589,6 +584,7 @@ def postprocess_video_headline(
         )
         if use_dual:
             fs_rem, fs_prod = _overlay_product_remainder_fontsizes(fs)
+            logger.info("VIDEO_HEADLINE_CENTER_ALIGN_APPLIED=true")
             vf = _build_dual_drawtext_vf(
                 font_e,
                 tf_he_e,
