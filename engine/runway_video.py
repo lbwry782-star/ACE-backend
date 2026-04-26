@@ -334,8 +334,38 @@ def _fallback_packaging_marketing_copy(
     Deterministic Runway packaging copy only (no LLM). Isolates video from the Builder1
     image engine. Includes product_name verbatim for integrity checks downstream.
     """
+    def _category_phrase(desc: str, lang_code: str) -> str:
+        words = [w.strip(".,:;!?\"'()[]{}") for w in (desc or "").split() if w.strip(".,:;!?\"'()[]{}")]
+        if not words:
+            return "מוצר דיגיטלי" if lang_code == "he" else "digital service"
+        take = 3 if len(words) >= 3 else min(2, len(words))
+        phrase = " ".join(words[:take]).strip()
+        if not phrase:
+            return "מוצר דיגיטלי" if lang_code == "he" else "digital service"
+        return phrase
+
+    def _finalize_paragraph(text: str) -> str:
+        s = " ".join((text or "").split()).strip()
+        if not s:
+            return s
+        words = s.split()
+        if len(words) > 55:
+            # Cut to <=55 words on sentence boundary when possible.
+            truncated = " ".join(words[:55])
+            cut = max(truncated.rfind(". "), truncated.rfind("! "), truncated.rfind("? "))
+            if cut > 0:
+                s = truncated[: cut + 1].strip()
+            else:
+                s = truncated.strip()
+        if len(s.split()) < 45:
+            s = f"{s} {'עוד הקשר ברור ומשמעותי לצופה.' if lang == 'he' else 'It keeps the idea clear and meaningful for viewers.'}".strip()
+        if s and s[-1] not in ".!?":
+            s = f"{s}."
+        return s
+
     pn = (product_name or "").strip() or "Product"
     desc_snip = ((product_description or "").strip().replace("\n", " ") or "")[:200]
+    category = _category_phrase(desc_snip, normalize_video_content_language(output_language))
     goal = (ad_goal or "").strip()
     hl = (headline_text or "").strip()
     lang = normalize_video_content_language(output_language)
@@ -344,45 +374,29 @@ def _fallback_packaging_marketing_copy(
         goal_he = goal or "הצורך שאתם מנסים לפתור"
         hl_part = f' השורה "{hl[:100]}" מגדירה את טון הסרטון.' if hl else ""
         text = (
-            f"עם {pn} אפשר לבחור בצורה ברורה: {goal_he}.{hl_part} "
-            f"{pn} נשאר במרכז הסיפור כדי שהמסר יישאר פשוט ואמין. "
-            f"אנו מזמינים אתכם לגלות עוד על {pn} ולחוש את הערך ביום יום. "
-            f"החוויה נבנית סביב {pn} כדי לתת תשובה אמיתית למשתמשים שמחפשים פתרון. "
-            f"השוו, התנסו והמשיכו הלאה עם {pn} בביטחון. "
-            f"סיפור הווידאו מדגיש את {pn} ואת ההבטחה בצורה עקבית ובהירה. "
-            f"כשמחפשים בהירות, {pn} מספק כיוון נכון ושקט."
+            f"{pn} מוצג כרעיון חי ופשוט, והווידאו הופך את התמונה למשמעות ברורה לצופה. "
+            f"המסר נשען על הרגע החזותי ועל הטון של הכותרת, לא על סיסמה כללית. "
+            f"כ{category} הוא מקבל הקשר חד ואנושי, כך שהצופה מבין למה זה חשוב עכשיו. "
+            f"{hl_part} הסיום מזמין התקדמות טבעית ובטוחה."
         )
-        if desc_snip:
-            text = f"{text} הקשר הכללי: {desc_snip}"
-        words = text.split()
-        out = " ".join(words[:55])
+        out = _finalize_paragraph(text)
         return out if out.strip() else f"{pn} — מסר שיווקי זמני לעטיפת וידאו."
 
     goal_en = goal or "what you need right now"
-    parts = [
-        f"{pn} is the anchor for this video story: {goal_en}.",
-        f"We keep {pn} visible so viewers connect the idea fast.",
-    ]
+    parts = [f"{pn} anchors the video idea with a clear visual moment and a headline-driven meaning."]
     if hl:
-        parts.append(f'The line "{hl[:120]}" frames the tone around {pn}.')
-    if desc_snip:
-        parts.append(f"Brief context: {desc_snip}")
+        parts.append(f'The line "{hl[:120]}" sets the tone without turning into generic benefit copy.')
+    parts.append(
+        f"As a {category}, it appears in context once so viewers understand what it is while staying inside the visual story."
+    )
     parts.extend(
         [
-            f"This packaging copy exists to support {pn} with a steady, direct voice.",
-            f"Trust the visuals; {pn} carries the benefit without extra noise.",
-            f"When clarity matters, {pn} is the name to remember and share today.",
+            f"The paragraph extends the ad idea in natural language and keeps the message complete from start to finish.",
+            f"It closes with a direct, confident invitation to continue."
         ]
     )
     text = " ".join(parts)
-    words = text.split()
-    n = 0
-    while len(words) < 48 and n < 24:
-        words.extend(
-            f"{pn} stays clear, simple, and ready for your next step forward.".split()
-        )
-        n += 1
-    out = " ".join(words[:55])
+    out = _finalize_paragraph(text)
     return out if out.strip() else f"{pn} — temporary packaging copy for video delivery."
 
 
