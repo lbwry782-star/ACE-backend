@@ -334,6 +334,17 @@ def _fallback_packaging_marketing_copy(
     Deterministic Runway packaging copy only (no LLM). Isolates video from the Builder1
     image engine. Includes product_name verbatim for integrity checks downstream.
     """
+    _LRI = "\u2066"
+    _PDI = "\u2069"
+
+    def _wrap_latin_isolates_if_he(text: str, lang_code: str) -> str:
+        if lang_code != "he":
+            return text
+        # Wrap contiguous Latin/ASCII segments to preserve LTR order inside Hebrew RTL text.
+        # Includes digits and common intra-token punctuation used in names/acronyms.
+        pattern = re.compile(r"(?<!\u2066)([A-Za-z0-9][A-Za-z0-9&@#'._:/+-]*(?:\s+[A-Za-z0-9][A-Za-z0-9&@#'._:/+-]*)*)(?!\u2069)")
+        return pattern.sub(lambda m: f"{_LRI}{m.group(1)}{_PDI}", text)
+
     def _category_phrase(desc: str, lang_code: str) -> str:
         words = [w.strip(".,:;!?\"'()[]{}") for w in (desc or "").split() if w.strip(".,:;!?\"'()[]{}")]
         if not words:
@@ -379,6 +390,7 @@ def _fallback_packaging_marketing_copy(
             f"{hl_part} עכשיו הזמן לבחור צעד אחד נכון ולהמשיך בביטחון."
         )
         out = _finalize_paragraph(text)
+        out = _wrap_latin_isolates_if_he(out, lang)
         return out if out.strip() else f"{pn} — מסר שיווקי זמני לעטיפת וידאו."
 
     parts = [f"{pn} brings a clear, confident direction from the first moment."]
@@ -395,6 +407,7 @@ def _fallback_packaging_marketing_copy(
     )
     text = " ".join(parts)
     out = _finalize_paragraph(text)
+    out = _wrap_latin_isolates_if_he(out, lang)
     return out if out.strip() else f"{pn} — temporary packaging copy for video delivery."
 
 
