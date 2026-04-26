@@ -331,8 +331,10 @@ def _fallback_packaging_marketing_copy(
     headline_text: str = "",
 ) -> str:
     """
-    Deterministic Runway packaging copy only (no LLM). Isolates video from the Builder1
-    image engine. Includes product_name verbatim for integrity checks downstream.
+    Deterministic Runway packaging copy only (no LLM). Continues the headline idea in the same
+    metaphor/world; avoids generic product-benefit phrasing and forbidden Hebrew marketing clichés.
+    Includes product_name at most once; includes a 2–3 word category phrase from product_description
+    (via _ensure_category_once) for downstream integrity.
     """
     _LRI = "\u2066"
     _PDI = "\u2069"
