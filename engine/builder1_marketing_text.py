@@ -40,6 +40,9 @@ def generate_builder1_marketing_text_o3(
         "- Derive the text from the final visual and headline meaning only.\n"
         "- Derive specifically from: objectA/objectB visual relationship, overlap/replacement/interaction, and objectASecondary when relevant.\n"
         "- The text should feel like a short extension of the ad idea.\n"
+        "- Include once (naturally) a short 2-3 word product/service description derived from productDescription so the viewer understands what the product/service is.\n"
+        '- Examples: "digital advertising service", "eco-friendly utensils", "walking aid", "שירות פרסום דיגיטלי", "מוצר אקולוגי", "עזר הליכה".\n'
+        "- Keep that phrase concise and natural; do not turn the paragraph into generic product explanation.\n"
         "- Do not explain the product directly.\n"
         "- Do not restate the advertising promise.\n"
         "- Do not write generic benefit copy.\n"
