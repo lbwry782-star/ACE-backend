@@ -371,28 +371,26 @@ def _fallback_packaging_marketing_copy(
     lang = normalize_video_content_language(output_language)
 
     if lang == "he":
-        goal_he = goal or "הצורך שאתם מנסים לפתור"
-        hl_part = f' השורה "{hl[:100]}" מגדירה את טון הסרטון.' if hl else ""
+        hl_part = f' השורה "{hl[:100]}" מובילה את הכיוון הרעיוני של הסרטון.' if hl else ""
         text = (
-            f"{pn} מוצג כרעיון חי ופשוט, והווידאו הופך את התמונה למשמעות ברורה לצופה. "
-            f"המסר נשען על הרגע החזותי ועל הטון של הכותרת, לא על סיסמה כללית. "
-            f"כ{category} הוא מקבל הקשר חד ואנושי, כך שהצופה מבין למה זה חשוב עכשיו. "
-            f"{hl_part} הסיום מזמין התקדמות טבעית ובטוחה."
+            f"{pn} מקבל בסרטון מהלך רעיוני שנולד מהמפגש בין הוויזואל לכותרת, לא מתיאור טכני של הסצנה. "
+            f"הטקסט ממשיך את אותו רעיון ומציע משמעות שנרמזת בתמונה במקום להצהיר הבטחה ישירה. "
+            f"כ{category} הוא מופיע פעם אחת בהקשר טבעי שמבהיר לצופה במה מדובר. "
+            f"{hl_part} הסיום נשאר חד, אנושי וזכיר."
         )
         out = _finalize_paragraph(text)
         return out if out.strip() else f"{pn} — מסר שיווקי זמני לעטיפת וידאו."
 
-    goal_en = goal or "what you need right now"
-    parts = [f"{pn} anchors the video idea with a clear visual moment and a headline-driven meaning."]
+    parts = [f"{pn} carries a conceptual move built from the video idea and the headline, not a literal scene recap."]
     if hl:
-        parts.append(f'The line "{hl[:120]}" sets the tone without turning into generic benefit copy.')
+        parts.append(f'The line "{hl[:120]}" sets the idea direction, and this paragraph extends it naturally.')
     parts.append(
-        f"As a {category}, it appears in context once so viewers understand what it is while staying inside the visual story."
+        f"As a {category}, it appears once in context so viewers understand what it is without breaking the visual concept."
     )
     parts.extend(
         [
-            f"The paragraph extends the ad idea in natural language and keeps the message complete from start to finish.",
-            f"It closes with a direct, confident invitation to continue."
+            "The wording avoids direct promise restatement and avoids generic benefit slogans.",
+            "It stays in one complete paragraph that feels like the headline's next step."
         ]
     )
     text = " ".join(parts)
