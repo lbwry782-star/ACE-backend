@@ -326,6 +326,29 @@ _VIDEO_PLAN_SCHEMA_VERSION = "single_interaction_v3"
 _PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset({"planning_failed_no_valid_interaction"})
 
 
+def _build_unrealistic_physics_repair_input(
+    *,
+    base_attempt_input: str,
+    product_name: str,
+    product_description: str,
+    advertising_promise: str,
+    previous_plan: Dict[str, Any],
+) -> str:
+    return (
+        f"{base_attempt_input}\n\n"
+        "REPAIR REQUEST (one retry): The previous plan violated physical realism.\n"
+        "Keep the same product name, product description, and advertising goal/promise.\n"
+        "Remove any sliding/gliding/drifting/floating/frictionless/weightless/hovering motion.\n"
+        "Create grounded physical contact and use resistance, weight, friction, support, impact, or contact-based motion.\n"
+        "Return the same required JSON shape only.\n"
+        f"Product name: {product_name or '(empty)'}\n"
+        f"Product description: {product_description}\n"
+        f"Advertising goal/promise to keep: {advertising_promise}\n"
+        "Previous invalid plan (for correction):\n"
+        f"{json.dumps(previous_plan, ensure_ascii=False)}\n"
+    )
+
+
 def _runway_language_visual_constraints(plan: Dict[str, Any]) -> str:
     """Short language-consistent cue for the video model (no headline burn-in)."""
     lang = str(plan.get("language") or "").strip().lower()
@@ -879,9 +902,77 @@ Language: {lang_name} ({lang}).
         )
         if not plan:
             last_v_err = (v_err or "").strip() or "planning_failed_incomplete_plan"
-            logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
-            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            return None, last_v_err
+            if last_v_err == "planning_failed_unrealistic_physics":
+                logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=planning_failed_unrealistic_physics")
+                repair_input = _build_unrealistic_physics_repair_input(
+                    base_attempt_input=attempt_input,
+                    product_name=product_name,
+                    product_description=product_description,
+                    advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
+                    previous_plan=parsed,
+                )
+                try:
+                    repair_response = client.responses.create(
+                        model=model,
+                        input=repair_input,
+                        reasoning={"effort": _reasoning_effort()},
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "VIDEO_PLAN_REPAIR_FAILED reason=%s err_type=%s err=%s",
+                        "planning_failed_model_call",
+                        type(e).__name__,
+                        e,
+                    )
+                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
+                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                    return None, last_v_err
+
+                repair_raw = _extract_responses_output_text(repair_response)
+                repair_parsed = _parse_json_from_response(repair_raw or "")
+                if not repair_parsed:
+                    logger.warning(
+                        "VIDEO_PLAN_REPAIR_FAILED reason=%s",
+                        "planning_failed_malformed_response",
+                    )
+                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
+                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                    return None, last_v_err
+
+                repair_pf_raw = str(repair_parsed.get("planningFailure") or "").strip()
+                if repair_pf_raw:
+                    repair_code = (
+                        repair_pf_raw
+                        if repair_pf_raw in _PLANNER_SELF_FAILURE_CODES
+                        else "planning_failed_no_valid_interaction"
+                    )
+                    logger.warning("VIDEO_PLAN_REPAIR_FAILED reason=%s", repair_code)
+                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
+                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                    return None, last_v_err
+
+                repaired_plan, repaired_err = validate_and_normalize_plan(
+                    repair_parsed,
+                    planner_deadline_monotonic=deadline_monotonic,
+                    product_name=product_name,
+                    product_description=product_description,
+                    content_language=content_language,
+                )
+                if repaired_plan:
+                    plan = repaired_plan
+                    logger.info("VIDEO_PLAN_REPAIR_OK reason=planning_failed_unrealistic_physics")
+                else:
+                    logger.warning(
+                        "VIDEO_PLAN_REPAIR_FAILED reason=%s",
+                        (repaired_err or "").strip() or "planning_failed_incomplete_plan",
+                    )
+                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
+                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                    return None, last_v_err
+            else:
+                logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
+                logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                return None, last_v_err
 
         log_plan_summary(plan)
         logger.info("VIDEO_PLAN_OK model=%s", model)
