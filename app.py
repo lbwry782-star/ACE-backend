@@ -35,6 +35,7 @@ from engine.builder1_headline import generate_builder1_headline_o3
 from engine.builder1_image_generator import generate_builder1_image
 from engine.builder1_marketing_text import generate_builder1_marketing_text_o3
 from engine.builder1_planner import plan_builder1
+from engine.builder1_zip import build_builder1_zip_bytes
 
 app = Flask(__name__)
 
@@ -712,6 +713,26 @@ def builder1_real_image_view():
         "</html>",
         mimetype="text/html",
     )
+
+
+@app.route("/api/builder1-download-zip", methods=["POST"])
+def builder1_download_zip():
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "invalid_input"}), 400
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "invalid_input"}), 400
+
+    image_base64 = body.get("imageBase64") or ""
+    marketing_text = body.get("marketingText") or ""
+    try:
+        zip_bytes = build_builder1_zip_bytes(image_base64, marketing_text)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    response = Response(zip_bytes, mimetype="application/zip")
+    response.headers["Content-Disposition"] = 'attachment; filename="builder1-ad.zip"'
+    return response
 
 
 @app.route("/health", methods=["GET"])
