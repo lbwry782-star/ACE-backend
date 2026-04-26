@@ -358,7 +358,7 @@ def _fallback_packaging_marketing_copy(
             else:
                 s = truncated.strip()
         if len(s.split()) < 45:
-            s = f"{s} {'עוד הקשר ברור ומשמעותי לצופה.' if lang == 'he' else 'It keeps the idea clear and meaningful for viewers.'}".strip()
+            s = f"{s} {'כך הבחירה נשארת ברורה, יציבה ומעשית לאורך הדרך.' if lang == 'he' else 'This keeps the choice clear, steady, and practical all the way through.'}".strip()
         if s and s[-1] not in ".!?":
             s = f"{s}."
         return s
@@ -371,26 +371,26 @@ def _fallback_packaging_marketing_copy(
     lang = normalize_video_content_language(output_language)
 
     if lang == "he":
-        hl_part = f' השורה "{hl[:100]}" מובילה את הכיוון הרעיוני של הסרטון.' if hl else ""
+        hl_part = f' {hl[:100]}.' if hl else ""
         text = (
-            f"{pn} מקבל בסרטון מהלך רעיוני שנולד מהמפגש בין הוויזואל לכותרת, לא מתיאור טכני של הסצנה. "
-            f"הטקסט ממשיך את אותו רעיון ומציע משמעות שנרמזת בתמונה במקום להצהיר הבטחה ישירה. "
-            f"כ{category} הוא מופיע פעם אחת בהקשר טבעי שמבהיר לצופה במה מדובר. "
-            f"{hl_part} הסיום נשאר חד, אנושי וזכיר."
+            f"{pn} נותן תחושת כיוון בטוחה, רגועה ומדויקת מהרגע הראשון. "
+            f"כ{category} הוא נטמע באופן טבעי במהלך היום ופותח דרך שימושית וברורה יותר. "
+            f"המהלך נשאר חד, אנושי ומעשי בלי עומס ובלי סיבוך, ומוביל קדימה מול {goal or 'הצורך המרכזי'}. "
+            f"{hl_part} עכשיו הזמן לבחור צעד אחד נכון ולהמשיך בביטחון."
         )
         out = _finalize_paragraph(text)
         return out if out.strip() else f"{pn} — מסר שיווקי זמני לעטיפת וידאו."
 
-    parts = [f"{pn} carries a conceptual move built from the video idea and the headline, not a literal scene recap."]
+    parts = [f"{pn} brings a clear, confident direction from the first moment."]
     if hl:
-        parts.append(f'The line "{hl[:120]}" sets the idea direction, and this paragraph extends it naturally.')
+        parts.append(f"{hl[:120]}.")
     parts.append(
-        f"As a {category}, it appears once in context so viewers understand what it is without breaking the visual concept."
+        f"As a {category}, it fits naturally into daily use and turns decisions into practical forward action."
     )
     parts.extend(
         [
-            "The wording avoids direct promise restatement and avoids generic benefit slogans.",
-            "It stays in one complete paragraph that feels like the headline's next step."
+            f"The momentum stays focused, useful, and human while moving straight toward {goal or 'what matters now'}.",
+            "Choose the next step with confidence and keep going."
         ]
     )
     text = " ".join(parts)
