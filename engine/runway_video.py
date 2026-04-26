@@ -422,12 +422,12 @@ def _fallback_packaging_marketing_copy(
     lang = normalize_video_content_language(output_language)
 
     if lang == "he":
-        hl_part = f' {hl[:100]}.' if hl else ""
+        # Fixed four-sentence arc: continuity/outcome (not product benefits), then name + category once.
         text = (
-            f"{pn} נותן תחושת כיוון בטוחה, רגועה ומדויקת מהרגע הראשון. "
-            f"כ{category} הוא נטמע באופן טבעי במהלך היום ופותח דרך שימושית וברורה יותר. "
-            f"המהלך נשאר חד, אנושי ומעשי בלי עומס ובלי סיבוך, ומוביל קדימה מול {goal or 'הצורך המרכזי'}. "
-            f"{hl_part} עכשיו הזמן לבחור צעד אחד נכון ולהמשיך בביטחון."
+            "דברים רבים נגמרים ברגע שמפסיקים ללחוץ; יש כאלה שנשארים איתך גם אחרי שהפעולה הסתיימה. "
+            "ההבדל הוא לא בשיא של רגע אחד, אלא במה שנמשך מהצד השני שלו, שקט וברור. "
+            f"{pn} {category} נשענים על הקו שנמשך, לא על הרגע שנסגר. "
+            "מה שנשאר יציב אינו תלוי ברגש יחיד, אלא במה שחוזר ביום־יום ובוחר להישאר."
         )
         out = _finalize_paragraph(text)
         out = _ensure_category_once(out, category, lang)
