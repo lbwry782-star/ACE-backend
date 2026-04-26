@@ -266,8 +266,6 @@ def _build_dual_drawtext_vf(
     tf_product_e: str,
     fs_remainder: int,
     fs_product: int,
-    x_remainder: int,
-    x_product: int,
     alpha_expr: str,
     t0_str: str,
     *,
@@ -275,11 +273,15 @@ def _build_dual_drawtext_vf(
     product_text_shaping: bool,
 ) -> str:
     """
-    Two drawtext chains: remainder on the left (smaller), product name on the right (larger).
-    Same vertical centering; gap = one space width between blocks (via x positions only).
+    Two drawtext chains in stacked layout:
+    line 1 = product name (larger), line 2 = remainder (smaller), both centered.
     """
     sh_r = ":text_shaping=1" if remainder_text_shaping else ""
     sh_p = ":text_shaping=1" if product_text_shaping else ""
+    # Keep the two-line group vertically centered while ensuring distinct baselines.
+    line_gap = max(8, fs_remainder // 3)
+    y_product = f"(h-({fs_product}+{line_gap}+{fs_remainder}))/2"
+    y_remainder = f"{y_product}+{fs_product}+{line_gap}"
     rows: list[Tuple[int, int, str]] = [
         (1, 0, ""),
         (0, 1, ""),
@@ -287,16 +289,16 @@ def _build_dual_drawtext_vf(
     ]
     parts: list[str] = []
     for ox, oy, shadow in rows:
-        y_expr = "(h-text_h)/2+1" if oy else "(h-text_h)/2"
-        for tf_path, xb, fs, sh in (
-            (tf_remainder_e, x_remainder, fs_remainder, sh_r),
-            (tf_product_e, x_product, fs_product, sh_p),
+        for tf_path, fs, sh, y_base in (
+            (tf_product_e, fs_product, sh_p, y_product),
+            (tf_remainder_e, fs_remainder, sh_r, y_remainder),
         ):
-            xe = xb + ox
+            x_expr = "(w-text_w)/2+1" if ox else "(w-text_w)/2"
+            y_expr = f"{y_base}+1" if oy else y_base
             parts.append(
                 f"drawtext=fontfile='{font_e}':textfile='{tf_path}':fontsize={fs}"
                 f":fontcolor=white{sh}:alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
-                f"{shadow}:x={xe}:y={y_expr}"
+                f"{shadow}:x={x_expr}:y={y_expr}"
             )
     return ",".join(parts)
 
@@ -521,30 +523,17 @@ def postprocess_video_headline(
             )
             return _fail("mixed_headline_requires_dual_drawtext")
 
-        video_w = 1920
-        x_latin = x_hebrew = 0
         if use_dual:
             try:
-                video_w, _ = _ffprobe_video_dimensions(inp, _FFPROBE_TIMEOUT)
-            except Exception as e:
-                logger.warning(
-                    "VIDEO_HEADLINE_FFPROBE_DIMS_FALLBACK use_w=1920 err=%s",
-                    e,
-                )
-                video_w = 1920
-            try:
                 fs_rem, fs_prod = _overlay_product_remainder_fontsizes(fs)
-                tw_he = _pillow_text_width_px(font, he_s, fs_rem)
-                tw_lat = _pillow_text_width_px(font, lat_s, fs_prod)
-                tw_space = _pillow_text_width_px(font, " ", fs_rem)
-                # Visual: remainder (left) <space> product (right, larger).
-                total = tw_he + tw_space + tw_lat
-                x_hebrew = max(0, (video_w - total) // 2)
-                x_latin = x_hebrew + tw_he + tw_space
                 text_file_latin.write_text(lat_s, encoding="utf-8")
                 text_file_hebrew.write_text(he_s, encoding="utf-8")
                 logger.info("VIDEO_HEADLINE_OVERLAY_MODE=dual_only")
                 logger.info("VIDEO_HEADLINE_SINGLE_STRING_DISABLED=true")
+                logger.info("VIDEO_HEADLINE_TWO_LINE_LAYOUT=true")
+                logger.info("VIDEO_HEADLINE_LAYOUT_MODE=stacked_two_line")
+                logger.info("VIDEO_HEADLINE_LINE1=%s", json.dumps(lat_s, ensure_ascii=False))
+                logger.info("VIDEO_HEADLINE_LINE2=%s", json.dumps(he_s, ensure_ascii=False))
                 logger.info(
                     "VIDEO_HEADLINE_PREFIX=%s",
                     json.dumps(lat_s, ensure_ascii=False),
@@ -554,15 +543,9 @@ def postprocess_video_headline(
                     json.dumps(he_s, ensure_ascii=False),
                 )
                 logger.info(
-                    "VIDEO_HEADLINE_POSTPROCESS dual_layout video_w=%s fs_rem=%s fs_prod=%s tw_rem=%s tw_space=%s tw_prod=%s x_rem=%s x_prod=%s",
-                    video_w,
+                    "VIDEO_HEADLINE_POSTPROCESS dual_layout_stacked fs_rem=%s fs_prod=%s",
                     fs_rem,
                     fs_prod,
-                    tw_he,
-                    tw_space,
-                    tw_lat,
-                    x_hebrew,
-                    x_latin,
                 )
             except Exception as e:
                 logger.error(
@@ -607,8 +590,6 @@ def postprocess_video_headline(
                 tf_lat_e,
                 fs_rem,
                 fs_prod,
-                x_hebrew,
-                x_latin,
                 alpha_expr,
                 t0_str,
                 remainder_text_shaping=_has_hebrew_letter(he_s),
