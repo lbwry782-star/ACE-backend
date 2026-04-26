@@ -348,11 +348,11 @@ def _fallback_packaging_marketing_copy(
     def _category_phrase(desc: str, lang_code: str) -> str:
         words = [w.strip(".,:;!?\"'()[]{}") for w in (desc or "").split() if w.strip(".,:;!?\"'()[]{}")]
         if not words:
-            return "מוצר דיגיטלי" if lang_code == "he" else "digital service"
+            return "המוצר הזה" if lang_code == "he" else "this product"
         take = 3 if len(words) >= 3 else min(2, len(words))
         phrase = " ".join(words[:take]).strip()
         if not phrase:
-            return "מוצר דיגיטלי" if lang_code == "he" else "digital service"
+            return "המוצר הזה" if lang_code == "he" else "this product"
         return phrase
 
     def _finalize_paragraph(text: str) -> str:
@@ -374,6 +374,44 @@ def _fallback_packaging_marketing_copy(
             s = f"{s}."
         return s
 
+    def _ensure_category_once(text: str, category_phrase: str, lang_code: str) -> str:
+        s = " ".join((text or "").split()).strip()
+        phrase = " ".join((category_phrase or "").split()).strip()
+        if not s or not phrase:
+            return s
+        escaped = re.escape(phrase)
+        count = len(re.findall(escaped, s, flags=re.IGNORECASE))
+        if count == 0:
+            insert_tail = f" ({phrase})"
+            if s and s[-1] in ".!?":
+                s = f"{s[:-1]}{insert_tail}{s[-1]}"
+            else:
+                s = f"{s}{insert_tail}"
+        elif count > 1:
+            first_match = re.search(escaped, s, flags=re.IGNORECASE)
+            if first_match:
+                first = first_match.group(0)
+                rest = s[first_match.end() :]
+                rest = re.sub(escaped, "", rest, flags=re.IGNORECASE)
+                rest = re.sub(r"\s+", " ", rest).strip()
+                left = s[: first_match.start()].rstrip()
+                s = f"{left} {first} {rest}".strip()
+                s = re.sub(r"\s+", " ", s).strip()
+        if len(s.split()) > 55:
+            truncated = " ".join(s.split()[:55]).strip()
+            if phrase.lower() not in truncated.lower():
+                base_words = truncated.split()
+                replacement = phrase.split()
+                if len(base_words) >= len(replacement):
+                    base_words = base_words[: max(0, len(base_words) - len(replacement))] + replacement
+                else:
+                    base_words = replacement
+                truncated = " ".join(base_words[:55]).strip()
+            s = truncated
+        if s and s[-1] not in ".!?":
+            s = f"{s}."
+        return s
+
     pn = (product_name or "").strip() or "Product"
     desc_snip = ((product_description or "").strip().replace("\n", " ") or "")[:200]
     category = _category_phrase(desc_snip, normalize_video_content_language(output_language))
@@ -390,6 +428,7 @@ def _fallback_packaging_marketing_copy(
             f"{hl_part} עכשיו הזמן לבחור צעד אחד נכון ולהמשיך בביטחון."
         )
         out = _finalize_paragraph(text)
+        out = _ensure_category_once(out, category, lang)
         out = _wrap_latin_isolates_if_he(out, lang)
         return out if out.strip() else f"{pn} — מסר שיווקי זמני לעטיפת וידאו."
 
@@ -407,6 +446,7 @@ def _fallback_packaging_marketing_copy(
     )
     text = " ".join(parts)
     out = _finalize_paragraph(text)
+    out = _ensure_category_once(out, category, lang)
     out = _wrap_latin_isolates_if_he(out, lang)
     return out if out.strip() else f"{pn} — temporary packaging copy for video delivery."
 
