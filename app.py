@@ -30,6 +30,7 @@ from engine.video_jobs_redis import (
 )
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 from engine.builder1_generate_demo import build_demo_ad
+from engine.builder2_zip import build_builder2_video_zip_bytes
 from engine.builder1_composition import generate_builder1_composition_o3
 from engine.builder1_headline import generate_builder1_headline_o3
 from engine.builder1_image_generator import generate_builder1_image
@@ -712,6 +713,37 @@ def builder1_real_image_view():
         "  </body>\n"
         "</html>",
         mimetype="text/html",
+    )
+
+
+@app.route("/api/builder2-download-zip", methods=["POST"])
+def builder2_download_zip():
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "invalid_input"}), 400
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "invalid_input"}), 400
+
+    video_url = (body.get("videoUrl") or "").strip()
+    marketing_text = (body.get("marketingText") or "").strip()
+    if not video_url:
+        return jsonify({"ok": False, "error": "missing_video_url"}), 400
+
+    try:
+        resp = httpx.get(video_url, timeout=httpx.Timeout(120.0), follow_redirects=True)
+        if resp.status_code != 200 or not resp.content:
+            return jsonify({"ok": False, "error": "video_download_failed"}), 400
+        zip_bytes = build_builder2_video_zip_bytes(resp.content, marketing_text)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception:
+        return jsonify({"ok": False, "error": "video_download_failed"}), 400
+
+    return send_file(
+        io.BytesIO(zip_bytes),
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="builder2-video.zip",
     )
 
 
