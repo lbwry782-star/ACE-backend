@@ -377,6 +377,55 @@ def _build_invalid_objects_repair_input(
     )
 
 
+def _build_physics_safe_fallback_plan(
+    *,
+    product_name: str,
+    product_description: str,
+    content_language: str,
+    advertising_promise: str,
+) -> Dict[str, Any]:
+    """
+    Deterministic, physically grounded fallback plan used only when physics validation + repair fail.
+    Keeps one simple contact interaction with gravity-consistent motion.
+    """
+    lang = normalize_video_content_language(content_language)
+    pn = (product_name or "").strip() or "ACE Product"
+    promise = (advertising_promise or "").strip()
+    if not promise:
+        promise = (
+            "תוצאה יציבה שנשארת לאורך זמן" if lang == "he" else "A stable result that lasts over time"
+        )
+    if lang == "he":
+        headline = f"{pn} יציב לאורך זמן"
+    else:
+        headline = f"{pn} Built to last"
+    return {
+        "productNameResolved": pn,
+        "objectA": "product item",
+        "objectB": "wooden shelf",
+        "objectAReason": "Directly represents the marketed product in a simple physical form.",
+        "objectBReason": "Stable everyday support object that creates clear, realistic contact.",
+        "interactionSummary": "A hand places the product item on a wooden shelf and presses down to seat it firmly.",
+        "interactionScript": "Single continuous shot. The product item is placed on a wooden shelf, then a hand presses it down and releases while both objects remain in stable contact with visible resistance.",
+        "advertisingPromise": promise,
+        "promiseDerivation": (
+            "נגזר מפעולה פיזית יציבה וברורה של מגע, לחץ והתייצבות."
+            if lang == "he"
+            else "Derived from a stable physical action with clear contact, pressure, and settling."
+        ),
+        "headlineText": _word_limit(headline, 7),
+        "headlineDerivation": (
+            "הכותרת מבטאת תוצאה מתמשכת שנובעת ממגע יציב."
+            if lang == "he"
+            else "Headline expresses an enduring outcome emerging from stable contact."
+        ),
+        "language": lang,
+        "objectInferenceMode": "deterministic_physics_fallback",
+        "literalObjectCount": 2,
+        "headlineDecision": "include_product_name",
+    }
+
+
 def _runway_language_visual_constraints(plan: Dict[str, Any]) -> str:
     """Short language-consistent cue for the video model (no headline burn-in)."""
     lang = str(plan.get("language") or "").strip().lower()
@@ -966,7 +1015,32 @@ Language: {lang_name} ({lang}).
                     )
                     logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
                     logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    return None, last_v_err
+                    if last_v_err == "planning_failed_unrealistic_physics":
+                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
+                        fallback_raw = _build_physics_safe_fallback_plan(
+                            product_name=(parsed.get("productNameResolved") or product_name),
+                            product_description=product_description,
+                            content_language=content_language,
+                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
+                        )
+                        fallback_plan, fallback_err = validate_and_normalize_plan(
+                            fallback_raw,
+                            planner_deadline_monotonic=deadline_monotonic,
+                            product_name=product_name,
+                            product_description=product_description,
+                            content_language=content_language,
+                        )
+                        if fallback_plan:
+                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
+                            plan = fallback_plan
+                        else:
+                            logger.error(
+                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
+                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
+                            )
+                            return None, last_v_err
+                    else:
+                        return None, last_v_err
 
                 repair_raw = _extract_responses_output_text(repair_response)
                 repair_parsed = _parse_json_from_response(repair_raw or "")
@@ -977,7 +1051,32 @@ Language: {lang_name} ({lang}).
                     )
                     logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
                     logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    return None, last_v_err
+                    if last_v_err == "planning_failed_unrealistic_physics":
+                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
+                        fallback_raw = _build_physics_safe_fallback_plan(
+                            product_name=(parsed.get("productNameResolved") or product_name),
+                            product_description=product_description,
+                            content_language=content_language,
+                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
+                        )
+                        fallback_plan, fallback_err = validate_and_normalize_plan(
+                            fallback_raw,
+                            planner_deadline_monotonic=deadline_monotonic,
+                            product_name=product_name,
+                            product_description=product_description,
+                            content_language=content_language,
+                        )
+                        if fallback_plan:
+                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
+                            plan = fallback_plan
+                        else:
+                            logger.error(
+                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
+                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
+                            )
+                            return None, last_v_err
+                    else:
+                        return None, last_v_err
 
                 repair_pf_raw = str(repair_parsed.get("planningFailure") or "").strip()
                 if repair_pf_raw:
@@ -989,7 +1088,32 @@ Language: {lang_name} ({lang}).
                     logger.warning("VIDEO_PLAN_REPAIR_FAILED reason=%s", repair_code)
                     logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
                     logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    return None, last_v_err
+                    if last_v_err == "planning_failed_unrealistic_physics":
+                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
+                        fallback_raw = _build_physics_safe_fallback_plan(
+                            product_name=(parsed.get("productNameResolved") or product_name),
+                            product_description=product_description,
+                            content_language=content_language,
+                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
+                        )
+                        fallback_plan, fallback_err = validate_and_normalize_plan(
+                            fallback_raw,
+                            planner_deadline_monotonic=deadline_monotonic,
+                            product_name=product_name,
+                            product_description=product_description,
+                            content_language=content_language,
+                        )
+                        if fallback_plan:
+                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
+                            plan = fallback_plan
+                        else:
+                            logger.error(
+                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
+                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
+                            )
+                            return None, last_v_err
+                    else:
+                        return None, last_v_err
 
                 repaired_plan, repaired_err = validate_and_normalize_plan(
                     repair_parsed,
@@ -1008,7 +1132,32 @@ Language: {lang_name} ({lang}).
                     )
                     logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
                     logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    return None, last_v_err
+                    if last_v_err == "planning_failed_unrealistic_physics":
+                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
+                        fallback_raw = _build_physics_safe_fallback_plan(
+                            product_name=(parsed.get("productNameResolved") or product_name),
+                            product_description=product_description,
+                            content_language=content_language,
+                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
+                        )
+                        fallback_plan, fallback_err = validate_and_normalize_plan(
+                            fallback_raw,
+                            planner_deadline_monotonic=deadline_monotonic,
+                            product_name=product_name,
+                            product_description=product_description,
+                            content_language=content_language,
+                        )
+                        if fallback_plan:
+                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
+                            plan = fallback_plan
+                        else:
+                            logger.error(
+                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
+                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
+                            )
+                            return None, last_v_err
+                    else:
+                        return None, last_v_err
             else:
                 logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
                 logger.info("VIDEO_PLAN_RESPONSE_OK=false")
