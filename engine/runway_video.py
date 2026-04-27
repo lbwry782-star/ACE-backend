@@ -12,9 +12,12 @@ import logging
 import os
 import re
 import time
+import unicodedata
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from openai import OpenAI
 
 from engine.ad_promise_memory import record_ad_promise_generation_success
 from engine.video_planning import (
@@ -51,6 +54,7 @@ from engine.video_product_name import (
 )
 
 logger = logging.getLogger(__name__)
+_RECENT_VIDEO_COPY_TEXTS: deque[str] = deque(maxlen=20)
 
 
 def _maybe_log_ad_promise_skip_after_failed_generation(
@@ -331,10 +335,8 @@ def _fallback_packaging_marketing_copy(
     headline_text: str = "",
 ) -> str:
     """
-    Deterministic Runway packaging copy only (no LLM). Continues the headline idea in the same
-    metaphor/world; avoids generic product-benefit phrasing and forbidden Hebrew marketing clichés.
-    Includes product_name at most once; includes a 2–3 word category phrase from product_description
-    (via _ensure_category_once) for downstream integrity.
+    Promise-only marketing copy generation for Builder2 packaging text.
+    Primary path uses o3-pro with language + anti-repeat checks; deterministic fallback is last resort.
     """
     _LRI = "\u2066"
     _PDI = "\u2069"
@@ -375,6 +377,110 @@ def _fallback_packaging_marketing_copy(
         if s and s[-1] not in ".!?":
             s = f"{s}."
         return s
+
+    def _contains_hebrew_chars(s: str) -> bool:
+        return bool(re.search(r"[\u0590-\u05FF]", s or ""))
+
+    def _english_words_count_excluding_product(s: str, product: str) -> int:
+        txt = (s or "").strip()
+        p = (product or "").strip()
+        if p:
+            txt = re.sub(re.escape(p), " ", txt, flags=re.IGNORECASE)
+        words = re.findall(r"[A-Za-z][A-Za-z0-9'_-]*", txt)
+        return len(words)
+
+    def _normalize_repeat_key(s: str) -> str:
+        t = unicodedata.normalize("NFKC", (s or "").strip().lower())
+        t = re.sub(r"\s+", " ", t)
+        return t
+
+    def _too_similar_to_recent(candidate: str, previous: List[str]) -> bool:
+        c = _normalize_repeat_key(candidate)
+        if not c:
+            return True
+        for prev in previous:
+            p = _normalize_repeat_key(prev)
+            if not p:
+                continue
+            if c == p or c in p or p in c:
+                return True
+        return False
+
+    def _language_valid(candidate: str, lang_code: str, product: str) -> bool:
+        if lang_code == "en":
+            return not _contains_hebrew_chars(candidate)
+        # Hebrew: allow English product name only; reject heavy English mixing.
+        return _english_words_count_excluding_product(candidate, product) <= 3
+
+    def _promise_only_prompt(
+        *,
+        promise_text: str,
+        product: str,
+        lang_code: str,
+        previous_texts: List[str],
+    ) -> str:
+        prev_lines = "\n".join(f"- {x[:220]}" for x in previous_texts if (x or "").strip())
+        lang_rule = (
+            "Write ONLY in Hebrew. English is allowed only for the exact product name if it is English."
+            if lang_code == "he"
+            else "Write ONLY in English. Do not include Hebrew characters."
+        )
+        return (
+            "Write one paragraph of about 50 words (45-55), based ONLY on the advertising promise.\n"
+            "Do NOT describe objects, mechanics, actions, scenes, or visual elements.\n"
+            "Do NOT explain the concept; write a clean marketing statement.\n"
+            "Natural tone, no bullets, no hashtags, no emojis.\n"
+            "Use the product name at most once.\n"
+            f"{lang_rule}\n"
+            "Do not repeat or closely resemble previous texts.\n\n"
+            f"Advertising promise:\n{promise_text}\n\n"
+            f"Product name:\n{product}\n\n"
+            "Previous texts to avoid:\n"
+            f"{prev_lines if prev_lines else '- (none)'}\n"
+        )
+
+    def _generate_o3_copy_once(
+        *,
+        promise_text: str,
+        product: str,
+        lang_code: str,
+        previous_texts: List[str],
+    ) -> str:
+        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("openai_unconfigured")
+        client = OpenAI(api_key=api_key)
+        out = client.responses.create(
+            model="o3-pro",
+            input=_promise_only_prompt(
+                promise_text=promise_text,
+                product=product,
+                lang_code=lang_code,
+                previous_texts=previous_texts,
+            ),
+            reasoning={"effort": "low"},
+        )
+        return (getattr(out, "output_text", None) or "").strip()
+
+    def _deterministic_promise_fallback(
+        *,
+        promise_text: str,
+        product: str,
+        lang_code: str,
+    ) -> str:
+        p = " ".join((promise_text or "").split()).strip()
+        p = p.rstrip(".!?")
+        if lang_code == "he":
+            return (
+                f"{product} נבנה סביב הבטחה אחת ברורה: {p}. "
+                "כשההבטחה נשמרת לאורך הדרך, הבחירה נשארת יציבה, אמינה ומשכנעת גם אחרי המפגש הראשון. "
+                "כך נוצר אמון שנשען על תוצאה עקבית, לא על רגע חד-פעמי."
+            )
+        return (
+            f"{product} is built around one clear promise: {p}. "
+            "When that promise holds over time, the choice stays credible, confident, and persuasive beyond first contact. "
+            "This creates trust through consistent outcomes rather than a one-time impression."
+        )
 
     def _ensure_category_once(text: str, category_phrase: str, lang_code: str) -> str:
         s = " ".join((text or "").split()).strip()
@@ -418,38 +524,63 @@ def _fallback_packaging_marketing_copy(
     desc_snip = ((product_description or "").strip().replace("\n", " ") or "")[:200]
     category = _category_phrase(desc_snip, normalize_video_content_language(output_language))
     goal = (ad_goal or "").strip()
-    hl = (headline_text or "").strip()
     lang = normalize_video_content_language(output_language)
-
-    if lang == "he":
-        # Fixed four-sentence arc: continuity/outcome (not product benefits), then name + category once.
-        text = (
-            "דברים רבים נגמרים ברגע שמפסיקים ללחוץ; יש כאלה שנשארים איתך גם אחרי שהפעולה הסתיימה. "
-            "ההבדל הוא לא בשיא של רגע אחד, אלא במה שנמשך מהצד השני שלו, שקט וברור. "
-            f"{pn} {category} נשענים על הקו שנמשך, לא על הרגע שנסגר. "
-            "מה שנשאר יציב אינו תלוי ברגש יחיד, אלא במה שחוזר ביום־יום ובוחר להישאר."
+    previous_texts = list(_RECENT_VIDEO_COPY_TEXTS)
+    candidate = ""
+    ok_lang = False
+    prevented_repeat = False
+    try:
+        logger.info("VIDEO_COPY_PROMISE_USED")
+        candidate = _generate_o3_copy_once(
+            promise_text=goal,
+            product=pn,
+            lang_code=lang,
+            previous_texts=previous_texts,
         )
-        out = _finalize_paragraph(text)
-        out = _ensure_category_once(out, category, lang)
-        out = _wrap_latin_isolates_if_he(out, lang)
-        return out if out.strip() else f"{pn} — מסר שיווקי זמני לעטיפת וידאו."
+        candidate = _finalize_paragraph(candidate)
+        ok_lang = _language_valid(candidate, lang, pn)
+        is_repeat = _too_similar_to_recent(candidate, previous_texts)
+        if is_repeat:
+            prevented_repeat = True
+        if (not ok_lang) or is_repeat:
+            # One regeneration attempt with same constraints.
+            candidate_retry = _generate_o3_copy_once(
+                promise_text=goal,
+                product=pn,
+                lang_code=lang,
+                previous_texts=previous_texts + ([candidate] if candidate else []),
+            )
+            candidate_retry = _finalize_paragraph(candidate_retry)
+            ok_lang_retry = _language_valid(candidate_retry, lang, pn)
+            is_repeat_retry = _too_similar_to_recent(candidate_retry, previous_texts)
+            if ok_lang_retry and not is_repeat_retry:
+                candidate = candidate_retry
+                ok_lang = True
+                is_repeat = False
+            else:
+                ok_lang = False
+                is_repeat = True
+        logger.info("VIDEO_COPY_LANGUAGE_VALID=%s", str(ok_lang).lower())
+        logger.info("VIDEO_COPY_REPEAT_PREVENTED=%s", str(prevented_repeat).lower())
+        if ok_lang and not _too_similar_to_recent(candidate, previous_texts):
+            out = _ensure_category_once(candidate, category, lang)
+            out = _finalize_paragraph(out)
+            out = _wrap_latin_isolates_if_he(out, lang)
+            _RECENT_VIDEO_COPY_TEXTS.append(out)
+            return out
+    except Exception as e:
+        logger.warning("VIDEO_COPY_GENERATION_FAILED err=%s", e)
 
-    parts = [f"{pn} brings a clear, confident direction from the first moment."]
-    if hl:
-        parts.append(f"{hl[:120]}.")
-    parts.append(
-        f"As a {category}, it fits naturally into daily use and turns decisions into practical forward action."
+    logger.info("VIDEO_COPY_FALLBACK_USED")
+    out = _deterministic_promise_fallback(
+        promise_text=goal or ("מבטיח תוצאה ברורה" if lang == "he" else "a clear outcome"),
+        product=pn,
+        lang_code=lang,
     )
-    parts.extend(
-        [
-            f"The momentum stays focused, useful, and human while moving straight toward {goal or 'what matters now'}.",
-            "Choose the next step with confidence and keep going."
-        ]
-    )
-    text = " ".join(parts)
-    out = _finalize_paragraph(text)
     out = _ensure_category_once(out, category, lang)
+    out = _finalize_paragraph(out)
     out = _wrap_latin_isolates_if_he(out, lang)
+    _RECENT_VIDEO_COPY_TEXTS.append(out)
     return out if out.strip() else f"{pn} — temporary packaging copy for video delivery."
 
 
