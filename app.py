@@ -752,30 +752,98 @@ def builder2_download_zip():
 
 @app.route("/api/download-video-zip", methods=["GET"])
 def download_video_zip():
-    logger.info("DOWNLOAD_VIDEO_ZIP_START")
     video_url = (request.args.get("videoUrl") or "").strip()
     marketing_text = request.args.get("text") or ""
+    logger.info("DOWNLOAD_VIDEO_ZIP_START videoUrl=%s", video_url[:300])
     if not video_url:
         logger.info("DOWNLOAD_VIDEO_ZIP_MISSING_VIDEO_URL")
         return jsonify({"ok": False, "error": "missing_video_url"}), 400
 
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "video/mp4,video/*,*/*",
+    }
+    status_code: int | None = None
+    content_type = ""
+
+    def _response_text_preview(resp: requests.Response) -> str:
+        ct = (resp.headers.get("Content-Type") or "").lower()
+        if any(k in ct for k in ("text/", "application/json", "application/xml", "application/javascript")):
+            try:
+                return (resp.text or "")[:300]
+            except Exception:
+                return ""
+        return ""
+
     try:
-        resp = requests.get(video_url, timeout=60)
-        if resp.status_code != 200 or not resp.content:
+        resp = requests.get(
+            video_url,
+            headers=headers,
+            timeout=120,
+            stream=True,
+            allow_redirects=True,
+        )
+        status_code = resp.status_code
+        content_type = (resp.headers.get("Content-Type") or "").strip()
+        chunks: list[bytes] = []
+        total = 0
+        for chunk in resp.iter_content(chunk_size=1024 * 256):
+            if not chunk:
+                continue
+            chunks.append(chunk)
+            total += len(chunk)
+        video_bytes = b"".join(chunks)
+        if status_code != 200 or not video_bytes:
+            preview = _response_text_preview(resp)
             logger.warning(
-                "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED status=%s has_content=%s",
-                resp.status_code,
-                bool(resp.content),
+                "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED status=%s content_type=%s has_content=%s body_preview=%s",
+                status_code,
+                content_type,
+                bool(video_bytes),
+                json.dumps(preview, ensure_ascii=False),
             )
-            return jsonify({"ok": False, "error": "video_download_failed"}), 400
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "video_download_failed",
+                        "status": status_code,
+                        "contentType": content_type,
+                        "urlPrefix": video_url[:120],
+                    }
+                ),
+                500,
+            )
         logger.info("DOWNLOAD_VIDEO_ZIP_FETCH_OK")
     except requests.RequestException as e:
-        logger.warning("DOWNLOAD_VIDEO_ZIP_FETCH_FAILED err=%s", e)
-        return jsonify({"ok": False, "error": "video_download_failed"}), 400
+        resp = getattr(e, "response", None)
+        status_code = getattr(resp, "status_code", None)
+        content_type = (resp.headers.get("Content-Type") or "").strip() if resp is not None else ""
+        preview = _response_text_preview(resp) if resp is not None else ""
+        logger.warning(
+            "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED exc_type=%s err=%s status=%s content_type=%s body_preview=%s",
+            type(e).__name__,
+            str(e),
+            status_code,
+            content_type,
+            json.dumps(preview, ensure_ascii=False),
+        )
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "video_download_failed",
+                    "status": status_code,
+                    "contentType": content_type,
+                    "urlPrefix": video_url[:120],
+                }
+            ),
+            500,
+        )
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("ad.mp4", resp.content)
+        zf.writestr("ad.mp4", video_bytes)
         zf.writestr("marketing_text.txt", marketing_text)
     zip_buffer.seek(0)
 
