@@ -6,13 +6,16 @@ from __future__ import annotations
 
 import base64
 import html
+import io
 import json
 import logging
 import os
 import uuid
+import zipfile
 from typing import Any, Optional
 
 import httpx
+import requests
 from flask import Flask, Response, jsonify, request, send_file
 from openai import OpenAI
 
@@ -744,6 +747,44 @@ def builder2_download_zip():
         mimetype="application/zip",
         as_attachment=True,
         download_name="builder2-video.zip",
+    )
+
+
+@app.route("/api/download-video-zip", methods=["GET"])
+def download_video_zip():
+    logger.info("DOWNLOAD_VIDEO_ZIP_START")
+    video_url = (request.args.get("videoUrl") or "").strip()
+    marketing_text = request.args.get("text") or ""
+    if not video_url:
+        logger.info("DOWNLOAD_VIDEO_ZIP_MISSING_VIDEO_URL")
+        return jsonify({"ok": False, "error": "missing_video_url"}), 400
+
+    try:
+        resp = requests.get(video_url, timeout=60)
+        if resp.status_code != 200 or not resp.content:
+            logger.warning(
+                "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED status=%s has_content=%s",
+                resp.status_code,
+                bool(resp.content),
+            )
+            return jsonify({"ok": False, "error": "video_download_failed"}), 400
+        logger.info("DOWNLOAD_VIDEO_ZIP_FETCH_OK")
+    except requests.RequestException as e:
+        logger.warning("DOWNLOAD_VIDEO_ZIP_FETCH_FAILED err=%s", e)
+        return jsonify({"ok": False, "error": "video_download_failed"}), 400
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("ad.mp4", resp.content)
+        zf.writestr("marketing_text.txt", marketing_text)
+    zip_buffer.seek(0)
+
+    logger.info("DOWNLOAD_VIDEO_ZIP_RETURN_OK")
+    return send_file(
+        zip_buffer,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name="ace-video-ad.zip",
     )
 
 
