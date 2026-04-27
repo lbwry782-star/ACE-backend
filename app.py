@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import os
+import re
 import uuid
 import zipfile
 from typing import Any, Optional
@@ -754,10 +755,63 @@ def builder2_download_zip():
 def download_video_zip():
     video_url = (request.args.get("videoUrl") or "").strip()
     marketing_text = request.args.get("text") or ""
+    logger.info("DOWNLOAD_VIDEO_ZIP_START")
     logger.info("DOWNLOAD_VIDEO_ZIP_START videoUrl=%s", video_url[:300])
     if not video_url:
         logger.info("DOWNLOAD_VIDEO_ZIP_MISSING_VIDEO_URL")
         return jsonify({"ok": False, "error": "missing_video_url"}), 400
+
+    video_bytes = b""
+    local_match = re.search(r"/api/video-headline/([a-f0-9]{32})(?:[/?#]|$)", video_url)
+    if local_match:
+        token = (local_match.group(1) or "").strip()
+        logger.info("DOWNLOAD_VIDEO_ZIP_LOCAL_TOKEN_DETECTED token_prefix=%s", token[:8])
+        path = get_headline_video_path(token)
+        if not path or not path.is_file():
+            logger.warning("DOWNLOAD_VIDEO_ZIP_LOCAL_READ_FAILED reason=not_found_or_invalid_token")
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "video_download_failed",
+                        "status": None,
+                        "contentType": "",
+                        "urlPrefix": video_url[:120],
+                    }
+                ),
+                500,
+            )
+        try:
+            video_bytes = path.read_bytes()
+            if not video_bytes:
+                logger.warning("DOWNLOAD_VIDEO_ZIP_LOCAL_READ_FAILED reason=empty_file")
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": "video_download_failed",
+                            "status": None,
+                            "contentType": "",
+                            "urlPrefix": video_url[:120],
+                        }
+                    ),
+                    500,
+                )
+            logger.info("DOWNLOAD_VIDEO_ZIP_LOCAL_READ_OK bytes=%s", len(video_bytes))
+        except Exception as e:
+            logger.warning("DOWNLOAD_VIDEO_ZIP_LOCAL_READ_FAILED reason=%s", type(e).__name__)
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "video_download_failed",
+                        "status": None,
+                        "contentType": "",
+                        "urlPrefix": video_url[:120],
+                    }
+                ),
+                500,
+            )
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -775,31 +829,56 @@ def download_video_zip():
                 return ""
         return ""
 
-    try:
-        resp = requests.get(
-            video_url,
-            headers=headers,
-            timeout=120,
-            stream=True,
-            allow_redirects=True,
-        )
-        status_code = resp.status_code
-        content_type = (resp.headers.get("Content-Type") or "").strip()
-        chunks: list[bytes] = []
-        total = 0
-        for chunk in resp.iter_content(chunk_size=1024 * 256):
-            if not chunk:
-                continue
-            chunks.append(chunk)
-            total += len(chunk)
-        video_bytes = b"".join(chunks)
-        if status_code != 200 or not video_bytes:
-            preview = _response_text_preview(resp)
+    if not video_bytes:
+        try:
+            resp = requests.get(
+                video_url,
+                headers=headers,
+                timeout=120,
+                stream=True,
+                allow_redirects=True,
+            )
+            status_code = resp.status_code
+            content_type = (resp.headers.get("Content-Type") or "").strip()
+            chunks: list[bytes] = []
+            for chunk in resp.iter_content(chunk_size=1024 * 256):
+                if not chunk:
+                    continue
+                chunks.append(chunk)
+            video_bytes = b"".join(chunks)
+            if status_code != 200 or not video_bytes:
+                preview = _response_text_preview(resp)
+                logger.warning(
+                    "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED status=%s content_type=%s has_content=%s body_preview=%s",
+                    status_code,
+                    content_type,
+                    bool(video_bytes),
+                    json.dumps(preview, ensure_ascii=False),
+                )
+                return (
+                    jsonify(
+                        {
+                            "ok": False,
+                            "error": "video_download_failed",
+                            "status": status_code,
+                            "contentType": content_type,
+                            "urlPrefix": video_url[:120],
+                        }
+                    ),
+                    500,
+                )
+            logger.info("DOWNLOAD_VIDEO_ZIP_FETCH_OK")
+        except requests.RequestException as e:
+            resp = getattr(e, "response", None)
+            status_code = getattr(resp, "status_code", None)
+            content_type = (resp.headers.get("Content-Type") or "").strip() if resp is not None else ""
+            preview = _response_text_preview(resp) if resp is not None else ""
             logger.warning(
-                "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED status=%s content_type=%s has_content=%s body_preview=%s",
+                "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED exc_type=%s err=%s status=%s content_type=%s body_preview=%s",
+                type(e).__name__,
+                str(e),
                 status_code,
                 content_type,
-                bool(video_bytes),
                 json.dumps(preview, ensure_ascii=False),
             )
             return (
@@ -814,40 +893,15 @@ def download_video_zip():
                 ),
                 500,
             )
-        logger.info("DOWNLOAD_VIDEO_ZIP_FETCH_OK")
-    except requests.RequestException as e:
-        resp = getattr(e, "response", None)
-        status_code = getattr(resp, "status_code", None)
-        content_type = (resp.headers.get("Content-Type") or "").strip() if resp is not None else ""
-        preview = _response_text_preview(resp) if resp is not None else ""
-        logger.warning(
-            "DOWNLOAD_VIDEO_ZIP_FETCH_FAILED exc_type=%s err=%s status=%s content_type=%s body_preview=%s",
-            type(e).__name__,
-            str(e),
-            status_code,
-            content_type,
-            json.dumps(preview, ensure_ascii=False),
-        )
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "video_download_failed",
-                    "status": status_code,
-                    "contentType": content_type,
-                    "urlPrefix": video_url[:120],
-                }
-            ),
-            500,
-        )
 
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("ad.mp4", video_bytes)
         zf.writestr("marketing_text.txt", marketing_text)
+    zip_size = zip_buffer.tell()
     zip_buffer.seek(0)
 
-    logger.info("DOWNLOAD_VIDEO_ZIP_RETURN_OK")
+    logger.info("DOWNLOAD_VIDEO_ZIP_RETURN_OK bytes=%s", zip_size)
     return send_file(
         zip_buffer,
         mimetype="application/zip",
