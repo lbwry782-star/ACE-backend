@@ -18,6 +18,10 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 import httpx
 from openai import OpenAI
 
+from engine.ace_usage_memory import (
+    get_used_object_a,
+    remember_object_a as remember_object_a_ace,
+)
 from engine.video_language import (
     bilingual_en_he_headline_tail_struct_ok,
     english_headline_tail_after_product_no_separator_punct,
@@ -891,6 +895,11 @@ Language: {lang_name} ({lang}).
     )
     logger.info("AD_PROMISE_MEMORY_LOAD_BEFORE_GENERATION hash=%s", ph)
     history = load_ad_promise_history(product_name, product_description)
+    used_object_a = get_used_object_a("builder2")
+    logger.info(
+        "VIDEO_PLAN_MEMORY_OBJECT_A_USED engine=builder2 count=%s",
+        len(used_object_a),
+    )
     logger.info(
         "VIDEO_PLAN_MEMORY_USED_FOR_DIVERSITY=%s",
         str(bool(history)).lower(),
@@ -902,7 +911,14 @@ Language: {lang_name} ({lang}).
     )
     if len(promise_addon) > 1200:
         promise_addon = promise_addon[:1200].rstrip() + "\n…"
-    attempt_input = instructions + "\n\n" + user_block + promise_addon
+    object_a_memory_addon = ""
+    if used_object_a:
+        object_a_memory_addon = (
+            "\n\nObject A memory for Builder2 (avoid reusing these Object A values):\n"
+            f"- {', '.join(used_object_a)}\n"
+            "- Avoid reusing any Object A listed above.\n"
+        )
+    attempt_input = instructions + "\n\n" + user_block + promise_addon + object_a_memory_addon
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
         api_key=api_key,
@@ -1166,6 +1182,9 @@ Language: {lang_name} ({lang}).
         log_plan_summary(plan)
         logger.info("VIDEO_PLAN_OK model=%s", model)
         logger.info("VIDEO_PLAN_RESPONSE_OK=true")
+        object_a_value = (plan.get("objectA") or "").strip()
+        if object_a_value:
+            remember_object_a_ace("builder2", object_a_value)
         return _return_plan_with_promise_persist(
             plan,
             product_name=product_name,
