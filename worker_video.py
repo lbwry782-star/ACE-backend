@@ -15,6 +15,7 @@ import os
 import signal
 import sys
 import threading
+import time
 
 logging.basicConfig(
     level=logging.INFO,
@@ -116,9 +117,17 @@ def main() -> None:
     logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)
 
     while True:
-        job_id = video_job_brpop(timeout_seconds=30)
-        if not job_id:
+        logger.info("VIDEO_WORKER_WAITING queue=%s", QUEUE_KEY)
+        try:
+            job_id = video_job_brpop(timeout_seconds=30)
+        except Exception as e:
+            logger.error("VIDEO_WORKER_REDIS_ERROR err=%s", e, exc_info=True)
+            time.sleep(1.0)
             continue
+        if not job_id:
+            logger.info("VIDEO_WORKER_EMPTY_QUEUE")
+            continue
+        logger.info("VIDEO_WORKER_DEQUEUED jobId=%s", job_id)
 
         logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
         _set_active_job_id(job_id)
