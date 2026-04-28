@@ -12,7 +12,6 @@ import httpx
 from openai import OpenAI
 
 from engine.ace_usage_memory import get_used_headlines, remember_headline
-from engine.builder1_memory import get_builder1_memory_snapshot, remember_headline_text
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +50,6 @@ def generate_builder1_headline_o3(
     if not resolved:
         raise ValueError("missing_product_name_resolved")
 
-    memory = get_builder1_memory_snapshot()
-    remembered_headlines = memory.get("headline_text") or []
-    recent_headlines = remembered_headlines[-10:]
-    logger.info(
-        "BUILDER1_MEMORY_INJECTED_TO_HEADLINE headline_count=%s recent_headlines=%r",
-        len(remembered_headlines),
-        recent_headlines,
-    )
     used_headlines_ace = get_used_headlines("builder1")
     recent_headlines_ace = used_headlines_ace[-10:]
     logger.info(
@@ -117,7 +108,6 @@ def generate_builder1_headline_o3(
         f"modeDecision: {mode_decision}\n"
         f"visualDescription: {visual_description}\n"
         f"visualPrompt: {visual_prompt}\n"
-        f"headlineTextMemoryToAvoid: {', '.join(remembered_headlines)}\n"
         f"headlineTextMemoryToAvoidACE: {', '.join(used_headlines_ace)}\n"
     )
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -144,8 +134,6 @@ def generate_builder1_headline_o3(
     norm_full = hfull
     if len(norm_full.split()) > 7:
         raise ValueError("headline_too_long")
-    logger.info("BUILDER1_MEMORY_HEADLINE_REMEMBER_CALL headline_text=%r", htt)
-    remember_headline_text(htt)
     headline_without_product_name = htt
     hfull_norm = " ".join((hfull or "").split())
     hpn_norm = " ".join((hpn or "").split())

@@ -9,11 +9,6 @@ from typing import Callable, TypeAlias
 
 from engine.ace_usage_memory import get_used_object_a, remember_object_a as remember_object_a_ace
 from engine.builder1_input_normalizer import normalize_builder1_input
-from engine.builder1_memory import (
-    get_builder1_memory_snapshot,
-    remember_object_a,
-    was_object_a_used,
-)
 from engine.builder1_plan_parser import parse_builder1_plan
 from engine.builder1_plan_spec import Builder1Plan
 from engine.builder1_planning_contract import (
@@ -200,14 +195,6 @@ def plan_builder1(
         product_description=product_description,
         format_value=format_value,
     )
-    memory = get_builder1_memory_snapshot()
-    remembered_object_a = memory.get("object_a") or []
-    recent_object_a = remembered_object_a[-10:]
-    logger.info(
-        "BUILDER1_MEMORY_INJECTED_TO_PLANNING object_a_count=%s recent_object_a=%r",
-        len(remembered_object_a),
-        recent_object_a,
-    )
     used_object_a_ace = get_used_object_a("builder1")
     recent_object_a_ace = used_object_a_ace[-10:]
     logger.info(
@@ -246,14 +233,7 @@ def plan_builder1(
         product_description=normalized.product_description,
         format=normalized.format,
     )
-    object_a_repeated = was_object_a_used(final_plan.object_a)
-    if object_a_repeated:
-        logger.info(
-            "BUILDER1_MEMORY_OBJECT_A_REPEAT_DETECTED object_a=%r action=%r",
-            final_plan.object_a,
-            "logged_only",
-        )
-    reasons = _repair_reasons(final_plan, object_a_repeated=object_a_repeated)
+    reasons = _repair_reasons(final_plan, object_a_repeated=False)
     if name_reason:
         reasons.append(name_reason)
     if reasons:
@@ -323,8 +303,6 @@ def plan_builder1(
         final_plan.visual_similarity_score,
         final_plan.mode_decision,
     )
-    logger.info("BUILDER1_MEMORY_OBJECT_A_REMEMBER_CALL object_a=%r", final_plan.object_a)
-    remember_object_a(final_plan.object_a)
     if (final_plan.object_a or "").strip():
         remember_object_a_ace("builder1", final_plan.object_a)
     return final_plan
