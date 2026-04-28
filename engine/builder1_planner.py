@@ -7,6 +7,7 @@ import logging
 from dataclasses import replace
 from typing import Callable, TypeAlias
 
+from engine.ace_usage_memory import get_used_object_a, remember_object_a as remember_object_a_ace
 from engine.builder1_input_normalizer import normalize_builder1_input
 from engine.builder1_memory import (
     get_builder1_memory_snapshot,
@@ -207,12 +208,26 @@ def plan_builder1(
         len(remembered_object_a),
         recent_object_a,
     )
+    used_object_a_ace = get_used_object_a("builder1")
+    recent_object_a_ace = used_object_a_ace[-10:]
+    logger.info(
+        "BUILDER1_MEMORY_INJECTED_TO_PLANNING_ACE object_a_count=%s recent_object_a=%r",
+        len(used_object_a_ace),
+        recent_object_a_ace,
+    )
     user_prompt = build_builder1_planning_user_prompt(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
         format_value=normalized.format,
         remembered_object_a=remembered_object_a,
     )
+    if used_object_a_ace:
+        user_prompt = (
+            f"{user_prompt}\n"
+            "Object A memory from ACE Redis (avoid reusing or near-equivalent ideas):\n"
+            f"- previous_object_a_ace: {', '.join(used_object_a_ace)}\n"
+            "- Do not reuse any Object A listed above.\n"
+        )
     try:
         raw_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, user_prompt)
     except Exception as exc:
@@ -310,4 +325,6 @@ def plan_builder1(
     )
     logger.info("BUILDER1_MEMORY_OBJECT_A_REMEMBER_CALL object_a=%r", final_plan.object_a)
     remember_object_a(final_plan.object_a)
+    if (final_plan.object_a or "").strip():
+        remember_object_a_ace("builder1", final_plan.object_a)
     return final_plan
