@@ -197,6 +197,7 @@ def plan_builder1(
     )
     used_object_a_ace = get_used_object_a("builder1")
     recent_object_a_ace = used_object_a_ace[-10:]
+    remembered_object_a = used_object_a_ace
     logger.info(
         "BUILDER1_MEMORY_INJECTED_TO_PLANNING_ACE object_a_count=%s recent_object_a=%r",
         len(used_object_a_ace),
