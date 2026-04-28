@@ -203,10 +203,10 @@ def plan_builder1(
         recent_object_a_ace,
     )
     user_prompt = build_builder1_planning_user_prompt(
-        product_name=normalized.product_name,
-        product_description=normalized.product_description,
-        format_value=normalized.format,
-        remembered_object_a=used_object_a_ace,
+        normalized.product_name,
+        normalized.product_description,
+        normalized.format,
+        used_object_a_ace,
     )
     if used_object_a_ace:
         user_prompt = (
