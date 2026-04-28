@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
 import httpx
@@ -47,6 +49,10 @@ app = Flask(__name__)
 # Configure logging early (handlers use logger at request time)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+_builder1_jobs_lock = threading.Lock()
+_builder1_jobs: dict[str, dict[str, Any]] = {}
+_builder1_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="builder1_job")
 
 try:
     log_video_headline_delivery_startup("web")
@@ -602,6 +608,24 @@ def _builder1_json_real_generate(
     }
 
 
+def _builder1_run_job(job_id: str, product_name: str, product_description: str, format_val: str) -> None:
+    logger.info("BUILDER1_JOB_STARTED jobId=%s", job_id)
+    try:
+        result = _builder1_json_real_generate(product_name, product_description, format_val)
+        with _builder1_jobs_lock:
+            if result.get("ok") is True:
+                _builder1_jobs[job_id] = {"status": "done", "result": result}
+                logger.info("BUILDER1_JOB_DONE jobId=%s", job_id)
+            else:
+                err = (result.get("error") or "builder1_generation_failed")
+                _builder1_jobs[job_id] = {"status": "error", "error": err}
+                logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, err)
+    except Exception as e:
+        with _builder1_jobs_lock:
+            _builder1_jobs[job_id] = {"status": "error", "error": "builder1_generation_failed"}
+        logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+
+
 @app.route("/api/builder1-generate", methods=["POST"])
 def builder1_generate():
     if not request.is_json:
@@ -641,9 +665,39 @@ def builder1_generate():
             ),
             200,
         )
-    return jsonify(
-        _builder1_json_real_generate(product_name, product_description, format_val)
-    ), 200
+    job_id = str(uuid.uuid4())
+    with _builder1_jobs_lock:
+        _builder1_jobs[job_id] = {"status": "running"}
+    logger.info("BUILDER1_JOB_CREATED jobId=%s", job_id)
+    _builder1_executor.submit(_builder1_run_job, job_id, product_name, product_description, format_val)
+    return (
+        jsonify(
+            {
+                "status": "running",
+                "jobId": job_id,
+                "pollUrl": f"/api/builder1-status?jobId={job_id}",
+            }
+        ),
+        202,
+    )
+
+
+@app.route("/api/builder1-status", methods=["GET"])
+def builder1_status():
+    job_id = (request.args.get("jobId") or "").strip()
+    if not job_id:
+        return jsonify({"status": "error", "error": "missing_job_id"}), 400
+    with _builder1_jobs_lock:
+        job = _builder1_jobs.get(job_id)
+    if not job:
+        return jsonify({"status": "error", "jobId": job_id, "error": "not_found"}), 404
+    status = (job.get("status") or "running").strip()
+    logger.info("BUILDER1_JOB_STATUS jobId=%s status=%s", job_id, status)
+    if status == "running":
+        return jsonify({"status": "running", "jobId": job_id}), 200
+    if status == "done":
+        return jsonify({"status": "done", "jobId": job_id, "result": job.get("result") or {}}), 200
+    return jsonify({"status": "error", "jobId": job_id, "error": job.get("error") or "builder1_generation_failed"}), 200
 
 
 @app.route("/api/builder1-real-image-demo", methods=["GET"])
