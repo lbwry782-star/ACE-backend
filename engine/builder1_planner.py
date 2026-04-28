@@ -139,11 +139,11 @@ def _build_repair_user_prompt(
     product_name: str,
     product_description: str,
     format_value: str,
-    remembered_object_a: list[str],
+    used_object_a_ace: list[str],
     previous_plan: Builder1Plan,
     reasons: list[str],
 ) -> str:
-    memory_list = ", ".join(remembered_object_a) if remembered_object_a else "(none)"
+    memory_list = ", ".join(used_object_a_ace) if used_object_a_ace else "(none)"
     reasons_text = ", ".join(reasons)
     return (
         "The previous Builder1 plan violated explicit rules and must be corrected.\n"
@@ -197,7 +197,6 @@ def plan_builder1(
     )
     used_object_a_ace = get_used_object_a("builder1")
     recent_object_a_ace = used_object_a_ace[-10:]
-    remembered_object_a = used_object_a_ace
     logger.info(
         "BUILDER1_MEMORY_INJECTED_TO_PLANNING_ACE object_a_count=%s recent_object_a=%r",
         len(used_object_a_ace),
@@ -207,7 +206,7 @@ def plan_builder1(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
         format_value=normalized.format,
-        remembered_object_a=remembered_object_a,
+        used_object_a_ace,
     )
     if used_object_a_ace:
         user_prompt = (
@@ -252,7 +251,7 @@ def plan_builder1(
             product_name=normalized.product_name,
             product_description=normalized.product_description,
             format_value=normalized.format,
-            remembered_object_a=remembered_object_a,
+            used_object_a_ace=used_object_a_ace,
             previous_plan=final_plan,
             reasons=reasons,
         )
