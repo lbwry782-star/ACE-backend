@@ -206,7 +206,7 @@ def plan_builder1(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
         format_value=normalized.format,
-        used_object_a_ace,
+        remembered_object_a=used_object_a_ace,
     )
     if used_object_a_ace:
         user_prompt = (
