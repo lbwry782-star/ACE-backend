@@ -24,6 +24,20 @@ _ENGINE_KEYS: dict[str, dict[str, str]] = {
 }
 
 
+def _short_value(value: str, *, limit: int = 80) -> str:
+    s = str(value or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit].rstrip() + "…"
+
+
+def _log_redis_unavailable(err: Exception | None = None) -> None:
+    # Required lightweight visibility line (no crash, no secrets).
+    logger.warning("ACE_MEMORY_SKIP reason=redis_unavailable")
+    if err is not None:
+        logger.warning("ACE_MEMORY_SKIP_DETAIL err_type=%s err=%s", type(err).__name__, err)
+
+
 def normalize_memory_value(value: Any) -> str:
     s = str(value or "").strip().lower()
     s = re.sub(r"\s+", " ", s)
@@ -39,14 +53,14 @@ def _resolve_key(engine_name: EngineName, key_name: MemoryKeyName) -> str:
 def _redis_client_or_none():
     redis_url = (os.environ.get("REDIS_URL") or "").strip()
     if not redis_url:
-        logger.warning("ACE_MEMORY_SKIP reason=redis_unavailable")
+        _log_redis_unavailable()
         return None
     try:
         import redis as redis_lib
 
         return redis_lib.Redis.from_url(redis_url, decode_responses=True)
     except Exception as e:
-        logger.warning("ACE_MEMORY_SKIP reason=redis_unavailable err=%s", e)
+        _log_redis_unavailable(e)
         return None
 
 
@@ -54,7 +68,6 @@ def _read_list(engine_name: EngineName, key_name: MemoryKeyName) -> list[str]:
     key = _resolve_key(engine_name, key_name)
     r = _redis_client_or_none()
     if r is None:
-        logger.warning("ACE_MEMORY_SKIP reason=redis_unavailable")
         return []
     try:
         raw = r.lrange(key, 0, -1) or []
@@ -68,7 +81,7 @@ def _read_list(engine_name: EngineName, key_name: MemoryKeyName) -> list[str]:
         logger.info("ACE_MEMORY_READ engine=%s key=%s count=%s", engine_name, key_name, len(out))
         return out
     except Exception as e:
-        logger.warning("ACE_MEMORY_SKIP reason=redis_unavailable err=%s", e)
+        _log_redis_unavailable(e)
         return []
 
 
@@ -76,10 +89,10 @@ def _write_unique_fifo(engine_name: EngineName, key_name: MemoryKeyName, value: 
     v = normalize_memory_value(value)
     if not v:
         return
+    logger.info("ACE_MEMORY_NORMALIZED value=%s", _short_value(v))
     key = _resolve_key(engine_name, key_name)
     r = _redis_client_or_none()
     if r is None:
-        logger.warning("ACE_MEMORY_SKIP reason=redis_unavailable")
         return
     try:
         existing = r.lrange(key, 0, -1) or []
@@ -89,7 +102,7 @@ def _write_unique_fifo(engine_name: EngineName, key_name: MemoryKeyName, value: 
                 "ACE_MEMORY_DUPLICATE_SKIP engine=%s key=%s value=%s",
                 engine_name,
                 key_name,
-                v,
+                _short_value(v),
             )
             return
         r.rpush(key, v)
@@ -99,11 +112,11 @@ def _write_unique_fifo(engine_name: EngineName, key_name: MemoryKeyName, value: 
             "ACE_MEMORY_WRITE engine=%s key=%s value=%s size_after=%s",
             engine_name,
             key_name,
-            v,
+            _short_value(v),
             size_after,
         )
     except Exception as e:
-        logger.warning("ACE_MEMORY_SKIP reason=redis_unavailable err=%s", e)
+        _log_redis_unavailable(e)
 
 
 def get_used_object_a(engine_name: EngineName) -> list[str]:
