@@ -19,7 +19,9 @@ import httpx
 from openai import OpenAI
 
 from engine.ace_usage_memory import (
+    get_used_headlines,
     get_used_object_a,
+    remember_headline,
     remember_object_a as remember_object_a_ace,
 )
 from engine.video_language import (
@@ -896,9 +898,14 @@ Language: {lang_name} ({lang}).
     logger.info("AD_PROMISE_MEMORY_LOAD_BEFORE_GENERATION hash=%s", ph)
     history = load_ad_promise_history(product_name, product_description)
     used_object_a = get_used_object_a("builder2")
+    used_headlines = get_used_headlines("builder2")
     logger.info(
         "VIDEO_PLAN_MEMORY_OBJECT_A_USED engine=builder2 count=%s",
         len(used_object_a),
+    )
+    logger.info(
+        "VIDEO_PLAN_MEMORY_HEADLINES_USED engine=builder2 count=%s",
+        len(used_headlines),
     )
     logger.info(
         "VIDEO_PLAN_MEMORY_USED_FOR_DIVERSITY=%s",
@@ -918,7 +925,21 @@ Language: {lang_name} ({lang}).
             f"- {', '.join(used_object_a)}\n"
             "- Avoid reusing any Object A listed above.\n"
         )
-    attempt_input = instructions + "\n\n" + user_block + promise_addon + object_a_memory_addon
+    headline_memory_addon = ""
+    if used_headlines:
+        headline_memory_addon = (
+            "\n\nHeadline idea memory for Builder2 (avoid reusing these headline ideas):\n"
+            f"- {', '.join(used_headlines)}\n"
+            "- Avoid reusing headline ideas listed above.\n"
+        )
+    attempt_input = (
+        instructions
+        + "\n\n"
+        + user_block
+        + promise_addon
+        + object_a_memory_addon
+        + headline_memory_addon
+    )
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
         api_key=api_key,
@@ -1185,6 +1206,13 @@ Language: {lang_name} ({lang}).
         object_a_value = (plan.get("objectA") or "").strip()
         if object_a_value:
             remember_object_a_ace("builder2", object_a_value)
+        headline_full = (plan.get("headlineText") or "").strip()
+        product_resolved = (plan.get("productNameResolved") or "").strip()
+        headline_without_product = headline_full
+        if product_resolved and headline_full.startswith(product_resolved + " "):
+            headline_without_product = headline_full[len(product_resolved) + 1 :].strip()
+        if headline_without_product:
+            remember_headline("builder2", headline_without_product)
         return _return_plan_with_promise_persist(
             plan,
             product_name=product_name,
