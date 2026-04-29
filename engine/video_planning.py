@@ -194,14 +194,24 @@ def _planner_headline_rules_user_block(lang_code: str) -> str:
     """Extra headline constraints appended to the planner user block (language-specific)."""
     if normalize_video_content_language(lang_code) != "he":
         return (
-            "Headline (English): start with \"<productNameResolved>\" then one normal ASCII space, then the rest in English; "
-            "exact resolved name at the beginning; no comma, colon, dash, dot, or semicolon between name and tail; ≤7 words.\n\n"
+            "Headline (non-Hebrew request): headlineText is required. It must start with productNameResolved, "
+            "then exactly one normal ASCII space, then the remainder phrase. "
+            "Language should follow product language/context (English or mixed when context naturally requires it). "
+            "Prefer a familiar expression / idiom / proverb / well-known phrase with a contextual twist. "
+            "The phrase must be the verbal result of the advertisingPromise and should echo meanings/roots/double-meanings from the visible interaction. "
+            "Interpret the interaction; do not merely describe the shot. "
+            "Avoid generic ad lines unless clearly grounded in a known expression. "
+            "No comma, colon, dash, dot, or semicolon between name and tail; ≤7 words total.\n\n"
         )
     return (
         "Headline (Hebrew request): headlineText is required. It must start with productNameResolved, "
         "then exactly one normal space, then the rest of the headline. "
         "No comma, middle dot (·), bullet, colon, dash, or semicolon between the name and the tail — only that single space. "
+        "Language may be Hebrew/English/mixed only as justified by product language/context (do not force one language). "
+        "Prefer an existing familiar expression, idiom, proverb, or well-known phrase with a contextual twist. "
+        "The phrase should be the verbal result of the advertisingPromise and echo inflections/meanings/word-roots/double-meanings from the visible interaction. "
         "Interpret the interaction (meaning), not a shot-by-shot description. "
+        "Avoid generic benefit slogans unless clearly grounded in a known expression. "
         "Do not translate the product name. Works the same whether productNameResolved is English (Latin) or Hebrew script. "
         "≤7 words total. Do not insert bidi control characters in JSON.\n\n"
     )
@@ -956,6 +966,7 @@ Language: {lang_name} ({lang}).
         )
 
     logger.info("VIDEO_PLAN_PROMPT_PROFILE=short")
+    logger.info("VIDEO_HEADLINE_RULE=known_expression_from_interaction")
     logger.info(
         "VIDEO_PLAN_PLANNER_DESC_CHARS original=%s planner_body=%s truncated=%s",
         len(desc_src),
