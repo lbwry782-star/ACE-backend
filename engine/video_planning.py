@@ -198,6 +198,9 @@ def _planner_headline_rules_user_block(lang_code: str) -> str:
             "then exactly one normal ASCII space, then the remainder phrase. "
             "Language should follow product language/context (English or mixed when context naturally requires it). "
             "Prefer a familiar expression / idiom / proverb / well-known phrase with a contextual twist. "
+            "If using a known expression, preserve it exactly as-is: do not add extra words inside or after the expression, "
+            "and do not rewrite it to sound more advertising-like. "
+            "Only productNameResolved may be added before it, separated by one normal space. "
             "The phrase must be a result of the advertisingPromise and should contain inflections of words from the visible interaction content. "
             "The headline is not a shot description. "
             "Avoid generic ad lines unless clearly grounded in a known expression. "
@@ -209,6 +212,9 @@ def _planner_headline_rules_user_block(lang_code: str) -> str:
         "No comma, middle dot (·), bullet, colon, dash, or semicolon between the name and the tail — only that single space. "
         "Language may be Hebrew/English/mixed only as justified by product language/context (do not force one language). "
         "Prefer an existing familiar expression, idiom, proverb, or well-known phrase with a contextual twist. "
+        "If using a known expression, preserve it exactly as-is: do not add extra words inside or after the expression, "
+        "and do not rewrite it to sound more advertising-like. "
+        "Only productNameResolved may be added before it, separated by one normal space. "
         "The phrase should be a result of the advertisingPromise and contain inflections of words from the visible interaction content. "
         "The headline is not a shot-by-shot description. "
         "Avoid generic benefit slogans unless clearly grounded in a known expression. "
@@ -966,7 +972,7 @@ Language: {lang_name} ({lang}).
         )
 
     logger.info("VIDEO_PLAN_PROMPT_PROFILE=short")
-    logger.info("VIDEO_HEADLINE_RULE=known_expression_from_interaction")
+    logger.info("VIDEO_HEADLINE_RULE=preserve_known_expression_exactly")
     logger.info(
         "VIDEO_PLAN_PLANNER_DESC_CHARS original=%s planner_body=%s truncated=%s",
         len(desc_src),
