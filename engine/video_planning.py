@@ -201,7 +201,7 @@ def _planner_headline_rules_user_block(lang_code: str) -> str:
             "If using a known expression, preserve it exactly as-is: do not add extra words inside or after the expression, "
             "and do not rewrite it to sound more advertising-like. "
             "Only productNameResolved may be added before it, separated by one normal space. "
-            "The phrase must be a result of the advertisingPromise and should contain inflections of words from the visible interaction content. "
+            "The phrase should express the advertisingPromise and contain inflections of words from the visible interaction content. "
             "The headline is not a shot description. "
             "Avoid generic ad lines unless clearly grounded in a known expression. "
             "No comma, colon, dash, dot, or semicolon between name and tail; ≤7 words total.\n\n"
@@ -215,7 +215,7 @@ def _planner_headline_rules_user_block(lang_code: str) -> str:
         "If using a known expression, preserve it exactly as-is: do not add extra words inside or after the expression, "
         "and do not rewrite it to sound more advertising-like. "
         "Only productNameResolved may be added before it, separated by one normal space. "
-        "The phrase should be a result of the advertisingPromise and contain inflections of words from the visible interaction content. "
+        "The phrase should express the advertisingPromise and contain inflections of words from the visible interaction content. "
         "The headline is not a shot-by-shot description. "
         "Avoid generic benefit slogans unless clearly grounded in a known expression. "
         "Do not translate the product name. Works the same whether productNameResolved is English (Latin) or Hebrew script. "
@@ -972,7 +972,7 @@ Language: {lang_name} ({lang}).
         )
 
     logger.info("VIDEO_PLAN_PROMPT_PROFILE=short")
-    logger.info("VIDEO_HEADLINE_RULE=preserve_known_expression_exactly")
+    logger.info("VIDEO_HEADLINE_RULE=known_expression_expresses_promise")
     logger.info(
         "VIDEO_PLAN_PLANNER_DESC_CHARS original=%s planner_body=%s truncated=%s",
         len(desc_src),
