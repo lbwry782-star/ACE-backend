@@ -65,12 +65,16 @@ def generate_builder1_headline_o3(
         "- Write in the same language as detectedLanguage (he or en).\n"
         "- The advertising promise is already resolved inside the visual. The headline must not create or restate it.\n"
         "- Generate headlineText ONLY from the visual: objectA, objectB, their overlap/interaction, visualDescription, and visualPrompt.\n"
-        "- advertisingPromise is used only to validate the choice, NOT to generate wording.\n"
-        "- Prefer an existing expression or familiar phrase when possible.\n"
-        "- Use a word/meaning/inflection that emerges from the visual content.\n"
-        "- The expression must feel like something people already say.\n"
-        "- The correct headline should feel like the viewer recognizes a known expression that suddenly makes sense because of the visual.\n"
-        "- A correct headline must not only describe what is seen, but express a meaning or implication that emerges from the visual.\n"
+        "- Search for an existing expression / familiar phrase / idiom / proverb that expresses the advertisingPromise.\n"
+        "- Visual content definition: in SIDE_BY_SIDE, visual content means Object A together with Object B.\n"
+        "- Visual content definition: in REPLACEMENT, visual content means Object B together with Object A secondary.\n"
+        "- Visual content means the visual part of the ad, not the written headline.\n"
+        "- Use inflections of words from the visual content.\n"
+        "- Do not ask for roots/meanings/double-meanings unless already implied by normal inflection.\n"
+        "- The expression should feel like something people already say.\n"
+        "- If using a known expression, preserve it exactly; do not add extra words that damage it.\n"
+        "- The correct headline should feel like the viewer recognizes a known expression that suddenly fits because of the visual content.\n"
+        "- The headline is not a literal visual description.\n"
         "- headlineProductName must exactly match the given productNameResolved string.\n"
         "- The model controls headlineText only; headlineProductName is fixed by backend.\n"
         "- Do not include product description inside headlineProductName.\n"
@@ -110,6 +114,7 @@ def generate_builder1_headline_o3(
         f"visualPrompt: {visual_prompt}\n"
         f"headlineTextMemoryToAvoidACE: {', '.join(used_headlines_ace)}\n"
     )
+    logger.info("BUILDER1_HEADLINE_RULE=known_expression_expresses_promise_from_visual_inflections")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise ValueError("openai_unconfigured")
