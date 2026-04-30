@@ -508,21 +508,43 @@ def _o3_pro_marketing_text_model_caller(system_prompt: str, user_prompt: str) ->
 def _builder1_json_real_generate(
     product_name: str, product_description: str, format_val: str
 ) -> dict[str, Any]:
-    try:
-        p = plan_builder1(
-            product_name=product_name,
-            product_description=product_description,
-            format_value=format_val,
-            model_caller=_o3_pro_planning_model_caller,
+    max_attempts = 3
+    p = None
+    last_error: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        logger.info(
+            "BUILDER1_PLANNING_ATTEMPT_START attempt=%s max_attempts=3",
+            attempt,
         )
-    except Exception as e:
-        logger.error(
-            "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
-            type(e).__name__,
-            e,
-            exc_info=True,
-        )
-        return {"ok": False, "error": "planning_failed", "message": str(e)}
+        try:
+            p = plan_builder1(
+                product_name=product_name,
+                product_description=product_description,
+                format_value=format_val,
+                model_caller=_o3_pro_planning_model_caller,
+            )
+            logger.info("BUILDER1_PLANNING_ATTEMPT_OK attempt=%s", attempt)
+            break
+        except Exception as e:
+            last_error = e
+            logger.error(
+                "BUILDER1_PLANNING_ATTEMPT_FAILED attempt=%s err_type=%s err=%s",
+                attempt,
+                type(e).__name__,
+                e,
+            )
+            if attempt < max_attempts:
+                logger.info("BUILDER1_PLANNING_RETRYING next_attempt=%s", attempt + 1)
+                continue
+            logger.error(
+                "BUILDER1_PLANNING_FINAL_FAILED attempts=3 err_type=%s err=%s",
+                type(e).__name__,
+                e,
+                exc_info=True,
+            )
+    if p is None:
+        err_message = str(last_error) if last_error is not None else "planning_failed"
+        return {"ok": False, "error": "planning_failed", "message": err_message}
     try:
         image_result = generate_builder1_image(p, _gpt_image_15_caller)
     except Exception as e:
