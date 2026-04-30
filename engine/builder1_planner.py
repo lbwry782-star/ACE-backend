@@ -87,6 +87,22 @@ def _norm_text(value: str) -> str:
     return " ".join((value or "").strip().lower().split())
 
 
+def _preview_text(value: object, *, limit: int = 500) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "…"
+
+
+def _missing_invalid_from_parse_error(message: str) -> tuple[str, str]:
+    msg = (message or "").strip()
+    if msg.startswith("missing_keys:"):
+        return msg.split(":", 1)[1], ""
+    if msg.startswith("extra_keys:"):
+        return "", msg.split(":", 1)[1]
+    return "", msg
+
+
 def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]:
     reasons: list[str] = []
     a = _norm_text(plan.object_a)
@@ -195,6 +211,11 @@ def plan_builder1(
         product_description=product_description,
         format_value=format_value,
     )
+    logger.info(
+        "BUILDER1_PLANNING_START productName=%s format=%s",
+        normalized.product_name,
+        normalized.format,
+    )
     used_object_a_ace = get_used_object_a("builder1")
     recent_object_a_ace = used_object_a_ace[-10:]
     logger.info(
@@ -215,11 +236,48 @@ def plan_builder1(
             f"- previous_object_a_ace: {', '.join(used_object_a_ace)}\n"
             "- Do not reuse any Object A listed above.\n"
         )
+    logger.info("BUILDER1_PLANNING_MODEL_CALL_START")
     try:
         raw_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, user_prompt)
+        logger.info("BUILDER1_PLANNING_MODEL_CALL_OK raw_len=%s", len(str(raw_payload or "")))
     except Exception as exc:
+        logger.error(
+            "BUILDER1_PLANNING_MODEL_CALL_ERROR err_type=%s err=%s",
+            type(exc).__name__,
+            exc,
+        )
+        logger.error(
+            "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
+            type(exc).__name__,
+            exc,
+        )
         raise Builder1PlannerError("planning_model_call_failed") from exc
-    plan = parse_builder1_plan(raw_payload)
+    raw_preview = _preview_text(raw_payload)
+    logger.info("BUILDER1_PLANNING_PARSE_START raw_preview=%s", raw_preview)
+    try:
+        plan = parse_builder1_plan(raw_payload)
+    except Exception as exc:
+        err_type = type(exc).__name__
+        err_text = str(exc)
+        logger.error(
+            "BUILDER1_PLANNING_PARSE_ERROR err_type=%s err=%s raw_preview=%s",
+            err_type,
+            err_text,
+            raw_preview,
+        )
+        missing, invalid = _missing_invalid_from_parse_error(err_text)
+        logger.error(
+            "BUILDER1_PLANNING_VALIDATION_ERROR missing=%s invalid=%s plan_preview=%s",
+            missing,
+            invalid,
+            raw_preview,
+        )
+        logger.error(
+            "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
+            err_type,
+            err_text,
+        )
+        raise Builder1PlannerError("planning_parse_failed") from exc
     forced_resolved_name = normalized.product_name or plan.product_name_resolved
     name_reason = _product_name_repair_reason(
         user_product_name=normalized.product_name,
@@ -256,10 +314,47 @@ def plan_builder1(
             reasons=reasons,
         )
         try:
+            logger.info("BUILDER1_PLANNING_MODEL_CALL_START")
             repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, repair_user_prompt)
+            logger.info("BUILDER1_PLANNING_MODEL_CALL_OK raw_len=%s", len(str(repaired_payload or "")))
         except Exception as exc:
+            logger.error(
+                "BUILDER1_PLANNING_MODEL_CALL_ERROR err_type=%s err=%s",
+                type(exc).__name__,
+                exc,
+            )
+            logger.error(
+                "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
+                type(exc).__name__,
+                exc,
+            )
             raise Builder1PlannerError("planning_model_repair_call_failed") from exc
-        repaired_plan = parse_builder1_plan(repaired_payload)
+        repaired_preview = _preview_text(repaired_payload)
+        logger.info("BUILDER1_PLANNING_PARSE_START raw_preview=%s", repaired_preview)
+        try:
+            repaired_plan = parse_builder1_plan(repaired_payload)
+        except Exception as exc:
+            err_type = type(exc).__name__
+            err_text = str(exc)
+            logger.error(
+                "BUILDER1_PLANNING_PARSE_ERROR err_type=%s err=%s raw_preview=%s",
+                err_type,
+                err_text,
+                repaired_preview,
+            )
+            missing, invalid = _missing_invalid_from_parse_error(err_text)
+            logger.error(
+                "BUILDER1_PLANNING_VALIDATION_ERROR missing=%s invalid=%s plan_preview=%s",
+                missing,
+                invalid,
+                repaired_preview,
+            )
+            logger.error(
+                "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
+                err_type,
+                err_text,
+            )
+            raise Builder1PlannerError("planning_parse_failed") from exc
         forced_repaired_name = normalized.product_name or repaired_plan.product_name_resolved
         final_plan = replace(
             repaired_plan,
@@ -277,6 +372,14 @@ def plan_builder1(
             final_plan.mode_decision,
             final_plan.visual_similarity_score,
         )
+    logger.info(
+        "BUILDER1_PLANNING_OK objectA=%s objectB=%s mode=%s similarity=%s advertisingPromise=%s",
+        final_plan.object_a,
+        final_plan.object_b,
+        final_plan.mode_decision,
+        final_plan.visual_similarity_score,
+        final_plan.advertising_promise,
+    )
     logger.info(
         "BUILDER1_PLAN_OK "
         "product_name=%r product_description=%r format=%r detected_language=%r "

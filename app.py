@@ -516,6 +516,12 @@ def _builder1_json_real_generate(
             model_caller=_o3_pro_planning_model_caller,
         )
     except Exception as e:
+        logger.error(
+            "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
         return {"ok": False, "error": "planning_failed", "message": str(e)}
     try:
         image_result = generate_builder1_image(p, _gpt_image_15_caller)
