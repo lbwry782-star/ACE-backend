@@ -254,6 +254,9 @@ def video_headline_debug():
 @app.route("/api/generate-video", methods=["POST"])
 def generate_video():
     """Enqueue ACE video job in Redis; worker runs pipeline. Poll GET /api/video-status?jobId=."""
+    import time as _time
+
+    t_req0 = _time.monotonic()
     try:
         if not redis_configured():
             logger.error("VIDEO_JOB_REDIS_MISSING REDIS_URL not set")
@@ -269,12 +272,18 @@ def generate_video():
         product_name = (payload.get("productName") or "").strip()
         base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
         job_id = str(uuid.uuid4())
+        logger.info("VIDEO_TIMING_STAGE_START stage=request_received jobId=%s", job_id)
         try:
             video_job_create(job_id, product_name, product_description, base)
         except Exception as e:
             logger.error("VIDEO_JOB_REDIS_ENQUEUE_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
             return jsonify({"ok": False, "error": "video_generation_failed"}), 200
         logger.info("VIDEO_JOB_CREATED jobId=%s", job_id)
+        logger.info(
+            "VIDEO_TIMING_STAGE_END stage=job_created jobId=%s elapsed_ms=%.1f",
+            job_id,
+            (_time.monotonic() - t_req0) * 1000.0,
+        )
         return jsonify(
             {
                 "ok": True,
@@ -344,6 +353,7 @@ def video_status():
             json.dumps(rp, ensure_ascii=False),
         )
         logger.info("VIDEO_JOB_RESULT jobId=%s video_url=%s", job_id, vu)
+        logger.info("VIDEO_TIMING_STAGE_END stage=frontend_poll_done jobId=%s", job_id)
     if status == "error":
         err = job.get("error") or "video_generation_failed"
         logger.info("VIDEO_JOB_POLL terminal_error jobId=%s reason=%s", job_id, err)

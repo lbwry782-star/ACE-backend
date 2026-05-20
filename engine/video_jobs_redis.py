@@ -99,12 +99,14 @@ def video_job_create(
             "postprocess_ran": "0",
             "error": "",
             "last_progress_ts": str(now),
+            "enqueued_ts": str(now),
         },
     )
     pipe.expire(key, _JOB_TTL_SECONDS)
     pipe.lpush(QUEUE_KEY, job_id)
     pipe.execute()
     logger.info("VIDEO_JOB_REDIS_ENQUEUE jobId=%s", job_id)
+    logger.info("VIDEO_TIMING_STAGE_END stage=enqueue jobId=%s enqueued_ts=%s", job_id, now)
 
 
 def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
@@ -187,6 +189,7 @@ def video_job_mark_done(
     marketing_text: str,
     overlay_headline: str = "",
 ) -> None:
+    t0 = time.monotonic()
     r = get_redis()
     r.hset(
         job_key(job_id),
@@ -199,6 +202,11 @@ def video_job_mark_done(
             "error": "",
             "last_progress_ts": str(int(time.time())),
         },
+    )
+    logger.info(
+        "VIDEO_TIMING_STAGE_END stage=redis_mark_done jobId=%s elapsed_ms=%.1f",
+        job_id,
+        (time.monotonic() - t0) * 1000.0,
     )
 
 

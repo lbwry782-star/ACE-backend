@@ -662,6 +662,11 @@ def postprocess_video_headline(
             preview,
             elapsed_ms,
         )
+        logger.info(
+            "VIDEO_TIMING_STAGE_END stage=headline_overlay_ffmpeg jobId=%s elapsed_ms=%s",
+            (job_id or "").strip() or "(none)",
+            elapsed_ms,
+        )
         out_exists = bool(out_path.is_file())
         if not out_exists:
             logger.warning(

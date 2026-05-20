@@ -1268,6 +1268,11 @@ def fetch_video_plan_o3(
     logger.info("AD_PROMISE_MEMORY_SESSION_AGNOSTIC=true")
     logger.info("AD_PROMISE_MEMORY_SCOPE global_product_level=true")
     logger.info("AD_PROMISE_MEMORY_PERSISTENT_STORE=true")
+    logger.info(
+        "VIDEO_TIMING_STAGE_START stage=planning jobId=%s",
+        (session_id or "").strip() or "(none)",
+    )
+    t_plan_outer0 = time.monotonic()
     try:
         plan, fail_reason = _fetch_video_plan_o3_sync(
             product_name,
@@ -1284,6 +1289,12 @@ def fetch_video_plan_o3(
                 product_name=product_name,
                 product_description=product_description,
             )
+        logger.info(
+            "VIDEO_TIMING_STAGE_END stage=planning jobId=%s elapsed_ms=%.1f ok=%s",
+            (session_id or "").strip() or "(none)",
+            (time.monotonic() - t_plan_outer0) * 1000.0,
+            str(plan is not None).lower(),
+        )
         return plan, fail_reason
     except VideoPlanningTimeoutError:
         increment_promise_stat(
@@ -1300,6 +1311,11 @@ def fetch_video_plan_o3(
         )
         logger.info("VIDEO_PLAN_TIMEOUT_FINAL no_valid_plan_before_deadline=true")
         logger.info("VIDEO_JOB_STEP step=plan_video timeout")
+        logger.info(
+            "VIDEO_TIMING_STAGE_END stage=planning jobId=%s elapsed_ms=%.1f ok=false reason=timeout",
+            (session_id or "").strip() or "(none)",
+            (time.monotonic() - t_plan_outer0) * 1000.0,
+        )
         raise
 
 

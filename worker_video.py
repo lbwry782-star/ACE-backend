@@ -128,14 +128,12 @@ def main() -> None:
             logger.info("VIDEO_WORKER_EMPTY_QUEUE")
             continue
         logger.info("VIDEO_WORKER_DEQUEUED jobId=%s", job_id)
+        logger.info("VIDEO_TIMING_STAGE_START stage=worker_dequeued jobId=%s", job_id)
 
         logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
         _set_active_job_id(job_id)
+        t_worker_job0 = time.monotonic()
         try:
-            try:
-                video_job_touch_progress(job_id)
-            except Exception as e:
-                logger.warning("VIDEO_JOB_TOUCH_PROGRESS_FAIL jobId=%s err=%s", job_id, e)
             logger.info("VIDEO_JOB_STEP step=redis_get_client start jobId=%s", job_id)
             r = get_redis()
             logger.info("VIDEO_JOB_STEP step=redis_get_client done jobId=%s", job_id)
@@ -151,16 +149,42 @@ def main() -> None:
                 logger.warning("VIDEO_JOB_MISSING jobId=%s (no hash)", job_id)
                 continue
 
+            raw_enqueued = (data.get("enqueued_ts") or data.get("last_progress_ts") or "").strip()
+            if raw_enqueued:
+                try:
+                    queue_wait_ms = (time.time() - int(raw_enqueued)) * 1000.0
+                    if queue_wait_ms >= 0:
+                        logger.info(
+                            "VIDEO_TIMING_QUEUE_WAIT_MS=%.1f jobId=%s",
+                            queue_wait_ms,
+                            job_id,
+                        )
+                except ValueError:
+                    pass
+
+            try:
+                video_job_touch_progress(job_id)
+            except Exception as e:
+                logger.warning("VIDEO_JOB_TOUCH_PROGRESS_FAIL jobId=%s err=%s", job_id, e)
+
             product_name = data.get("product_name") or ""
             product_description = data.get("product_description") or ""
             public_base_url = data.get("public_base_url") or ""
 
+            logger.info("VIDEO_TIMING_STAGE_START stage=generate_mvp jobId=%s", job_id)
             logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp start jobId=%s", job_id)
+            t_mvp0 = time.monotonic()
             video_url, marketing_text, overlay_headline = generate_one_video_mvp(
                 product_name,
                 product_description,
                 public_base_url=public_base_url,
                 job_id=job_id,
+            )
+            mvp_ms = (time.monotonic() - t_mvp0) * 1000.0
+            logger.info(
+                "VIDEO_TIMING_STAGE_END stage=generate_mvp jobId=%s elapsed_ms=%.1f",
+                job_id,
+                mvp_ms,
             )
             logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp done jobId=%s", job_id)
 
@@ -170,6 +194,7 @@ def main() -> None:
                 job_id,
                 video_url,
             )
+            logger.info("VIDEO_TIMING_STAGE_START stage=redis_mark_done jobId=%s", job_id)
             logger.info("VIDEO_JOB_STEP step=redis_mark_done start jobId=%s", job_id)
             video_job_mark_done(job_id, video_url, marketing_text or "", overlay_headline or "")
             logger.info("VIDEO_JOB_STEP step=redis_mark_done done jobId=%s", job_id)
@@ -178,6 +203,11 @@ def main() -> None:
                 "VIDEO_JOB_RESULT jobId=%s video_url=%s redis_written=1",
                 job_id,
                 video_url,
+            )
+            logger.info(
+                "VIDEO_TIMING_STAGE_END stage=worker_job_total jobId=%s elapsed_ms=%.1f",
+                job_id,
+                (time.monotonic() - t_worker_job0) * 1000.0,
             )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
         except RunwayVideoMVPError as e:

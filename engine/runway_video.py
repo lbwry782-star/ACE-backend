@@ -808,6 +808,7 @@ def _generate_one_video_mvp_body(
                 e,
             )
 
+    logger.info("VIDEO_TIMING_STAGE_START stage=plan_video jobId=%s", job_id or "(none)")
     logger.info("VIDEO_JOB_STEP step=plan_video start")
     video_job_set_phase("planning")
     plan = None
@@ -836,6 +837,12 @@ def _generate_one_video_mvp_body(
         raise RunwayVideoMVPError("planning_timeout")
     plan_ms = (time.monotonic() - t_plan0) * 1000.0
     logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
+    logger.info(
+        "VIDEO_TIMING_STAGE_END stage=plan_video jobId=%s elapsed_ms=%.1f ok=%s",
+        job_id or "(none)",
+        plan_ms,
+        str(bool(plan)).lower(),
+    )
     logger.info("VIDEO_JOB_STEP step=plan_video done has_plan=%s", bool(plan))
 
     if not plan:
@@ -891,9 +898,15 @@ def _generate_one_video_mvp_body(
     logger.info("RUNWAY_MVP task_create_prompt_trim_to=%s", runway_trim_to)
     logger.info("RUNWAY_MVP task_create_prompt_len_final=%s", len(prompt))
 
+    logger.info("VIDEO_TIMING_STAGE_START stage=start_image jobId=%s", job_id or "(none)")
+    logger.info("VIDEO_TIMING_START_IMAGE_MS=0.0 skipped=true reason=text_only_gen4.5")
+    logger.info("VIDEO_TIMING_STAGE_END stage=start_image jobId=%s elapsed_ms=0.0", job_id or "(none)")
+
     session = requests.Session()
     t_runway0 = time.monotonic()
+    logger.info("VIDEO_TIMING_STAGE_START stage=runway_create jobId=%s", job_id or "(none)")
     logger.info("VIDEO_JOB_STEP step=runway_create_task start")
+    t_create0 = time.monotonic()
     task_id = _create_text_to_video_task(
         session,
         base,
@@ -903,9 +916,18 @@ def _generate_one_video_mvp_body(
         sanitize_text_policy_modified=bool(text_policy_sanitized),
         physics_suffix_appended=True,
     )
+    create_ms = (time.monotonic() - t_create0) * 1000.0
+    logger.info("VIDEO_TIMING_RUNWAY_CREATE_MS=%.1f", create_ms)
+    logger.info(
+        "VIDEO_TIMING_STAGE_END stage=runway_create jobId=%s elapsed_ms=%.1f task_id=%s",
+        job_id or "(none)",
+        create_ms,
+        task_id,
+    )
     logger.info("VIDEO_JOB_STEP step=runway_create_task done task_id=%s", task_id)
 
     poll_start = time.monotonic()
+    logger.info("VIDEO_TIMING_STAGE_START stage=runway_poll jobId=%s", job_id or "(none)")
     deadline = poll_start + _MAX_WAIT_SECONDS
     logger.info(
         "RUNWAY_MVP polling_started task_id=%s max_wait_s=%s poll_http_timeout_s=%s",
@@ -944,8 +966,21 @@ def _generate_one_video_mvp_body(
         if status in _SUCCESS_STATUSES:
             url = _extract_video_url(task)
             if url:
+                poll_ms = (time.monotonic() - poll_start) * 1000.0
                 runway_ms = (time.monotonic() - t_runway0) * 1000.0
+                logger.info("VIDEO_TIMING_RUNWAY_POLL_MS=%.1f", poll_ms)
                 logger.info("VIDEO_TIMING_RUNWAY_MS=%.1f", runway_ms)
+                logger.info(
+                    "VIDEO_TIMING_STAGE_END stage=runway_poll jobId=%s elapsed_ms=%.1f outcome=success",
+                    job_id or "(none)",
+                    poll_ms,
+                )
+                logger.info(
+                    "VIDEO_TIMING_STAGE_END stage=runway_success jobId=%s task_id=%s poll_attempts=%s",
+                    job_id or "(none)",
+                    task_id,
+                    poll_attempt,
+                )
                 logger.info("RUNWAY_MVP polling_done task_id=%s status=%s", task_id, status)
                 logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=success")
                 video_job_set_phase("postprocess")
@@ -955,6 +990,11 @@ def _generate_one_video_mvp_body(
                 headline_decision = (plan.get("headlineDecision") or "").strip()
                 try:
                     ad_goal = (plan.get("advertisingPromise") or "").strip()
+                    logger.info(
+                        "VIDEO_TIMING_STAGE_START stage=marketing_copy jobId=%s",
+                        job_id or "(none)",
+                    )
+                    t_copy0 = time.monotonic()
                     logger.info(
                         "VIDEO_COPY_INPUT_PRODUCT_NAME=%s",
                         json.dumps(canonical_name, ensure_ascii=False),
@@ -966,6 +1006,13 @@ def _generate_one_video_mvp_body(
                         ad_goal,
                         output_language=marketing_lang,
                         headline_text=headline_for_overlay,
+                    )
+                    copy_ms = (time.monotonic() - t_copy0) * 1000.0
+                    logger.info("VIDEO_TIMING_MARKETING_COPY_MS=%.1f", copy_ms)
+                    logger.info(
+                        "VIDEO_TIMING_STAGE_END stage=marketing_copy jobId=%s elapsed_ms=%.1f",
+                        job_id or "(none)",
+                        copy_ms,
                     )
                 except Exception as e:
                     logger.error("VIDEO_JOB_MARKETING_COPY_FAIL err=%s", e, exc_info=True)
@@ -1041,6 +1088,11 @@ def _generate_one_video_mvp_body(
                     )
                     logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
                     logger.info("VIDEO_JOB_STEP step=packaging_result done")
+                    logger.info(
+                        "VIDEO_TIMING_STAGE_START stage=headline_overlay jobId=%s",
+                        job_id or "(none)",
+                    )
+                    t_overlay0 = time.monotonic()
                     final_url = postprocess_video_headline(
                         url,
                         public_base_url or "",
@@ -1051,6 +1103,13 @@ def _generate_one_video_mvp_body(
                         overlay_dual_latin=overlay_prep.dual_latin,
                         overlay_dual_hebrew=overlay_prep.dual_hebrew,
                         overlay_canonical_name=canonical_name,
+                    )
+                    overlay_ms = (time.monotonic() - t_overlay0) * 1000.0
+                    logger.info("VIDEO_TIMING_HEADLINE_OVERLAY_MS=%.1f", overlay_ms)
+                    logger.info(
+                        "VIDEO_TIMING_STAGE_END stage=headline_overlay jobId=%s elapsed_ms=%.1f",
+                        job_id or "(none)",
+                        overlay_ms,
                     )
                     post_ms = (time.monotonic() - t_post0) * 1000.0
                     logger.info("VIDEO_TIMING_POSTPROCESS_MS=%.1f", post_ms)
@@ -1112,6 +1171,13 @@ def _generate_one_video_mvp_body(
         )
         _sleep_poll_interval(deadline)
 
+    poll_ms = (time.monotonic() - poll_start) * 1000.0
+    logger.info("VIDEO_TIMING_RUNWAY_POLL_MS=%.1f", poll_ms)
+    logger.info(
+        "VIDEO_TIMING_STAGE_END stage=runway_poll jobId=%s elapsed_ms=%.1f outcome=timeout",
+        job_id or "(none)",
+        poll_ms,
+    )
     logger.error("RUNWAY_MVP timeout task_id=%s max_wait_s=%s", task_id, _MAX_WAIT_SECONDS)
     logger.info("VIDEO_JOB_STEP step=runway_poll_loop done outcome=timeout")
     _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
@@ -1134,6 +1200,8 @@ def generate_one_video_mvp(
     """
     from engine.video_job_context import video_job_clear_phase
 
+    logger.info("VIDEO_TIMING_STAGE_START stage=generate_mvp_body jobId=%s", job_id or "(none)")
+    t_wrap0 = time.monotonic()
     try:
         return _generate_one_video_mvp_body(
             product_name,
@@ -1142,6 +1210,11 @@ def generate_one_video_mvp(
             job_id=job_id,
         )
     finally:
+        logger.info(
+            "VIDEO_TIMING_STAGE_END stage=generate_mvp_body jobId=%s elapsed_ms=%.1f",
+            job_id or "(none)",
+            (time.monotonic() - t_wrap0) * 1000.0,
+        )
         video_job_clear_phase()
 
 
