@@ -104,6 +104,106 @@ _VIDEO_PLAN_HARD_SECONDS = float(
     (os.environ.get("VIDEO_PLANNER_HARD_TIMEOUT_SECONDS") or str(_VIDEO_PLAN_TIMEOUT + 45.0)).strip()
     or str(_VIDEO_PLAN_TIMEOUT + 45.0)
 )
+_VIDEO_PLAN_MODEL_RETRY_BACKOFF_S = float(
+    (os.environ.get("VIDEO_PLAN_MODEL_RETRY_BACKOFF_S") or "3").strip() or "3"
+)
+_VIDEO_PLAN_MODEL_MAX_ATTEMPTS = 2
+
+
+def _video_plan_model_retry_backoff_s() -> float:
+    return max(2.0, min(_VIDEO_PLAN_MODEL_RETRY_BACKOFF_S, 5.0))
+
+
+def _is_transient_plan_model_call_error(exc: BaseException) -> bool:
+    """True for API/network timeouts where one immediate retry may succeed."""
+    err_type = type(exc).__name__
+    if err_type in (
+        "APITimeoutError",
+        "TimeoutError",
+        "ReadTimeout",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "ConnectError",
+        "RemoteProtocolError",
+    ):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError)):
+        return True
+    msg = str(exc).lower()
+    if "timed out" in msg or "timeout" in msg:
+        return True
+    return False
+
+
+def _can_retry_plan_model_call(deadline_monotonic: Optional[float], backoff_s: float) -> bool:
+    """Keep retry inside overall planning deadline with room for another call."""
+    if deadline_monotonic is None:
+        return True
+    remaining = deadline_monotonic - time.monotonic()
+    min_call_window = min(_VIDEO_PLAN_TIMEOUT, 60.0)
+    return remaining > backoff_s + min_call_window
+
+
+def _responses_create_with_plan_retry(
+    client: OpenAI,
+    *,
+    model: str,
+    input_text: str,
+    reasoning: dict,
+    deadline_monotonic: Optional[float] = None,
+):
+    """
+    Up to two identical planning model calls; one retry on transient timeout only.
+    Raises VideoPlanningTimeoutError if hard deadline is exceeded.
+    """
+    backoff_s = _video_plan_model_retry_backoff_s()
+    last_exc: Optional[BaseException] = None
+
+    for attempt in range(1, _VIDEO_PLAN_MODEL_MAX_ATTEMPTS + 1):
+        logger.info("VIDEO_PLAN_MODEL_CALL_ATTEMPT attempt=%s", attempt)
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise VideoPlanningTimeoutError()
+        try:
+            response = client.responses.create(
+                model=model,
+                input=input_text,
+                reasoning=reasoning,
+            )
+            logger.info("VIDEO_PLAN_MODEL_CALL_SUCCESS attempt=%s", attempt)
+            return response
+        except VideoPlanningTimeoutError:
+            raise
+        except Exception as e:
+            last_exc = e
+            transient = _is_transient_plan_model_call_error(e)
+            if not transient:
+                raise
+            logger.warning(
+                "VIDEO_PLAN_MODEL_CALL_TIMEOUT attempt=%s err_type=%s err=%s",
+                attempt,
+                type(e).__name__,
+                e,
+            )
+            if attempt >= _VIDEO_PLAN_MODEL_MAX_ATTEMPTS:
+                logger.warning(
+                    "VIDEO_PLAN_MODEL_CALL_FINAL_FAIL err_type=%s err=%s",
+                    type(e).__name__,
+                    e,
+                )
+                raise
+            if not _can_retry_plan_model_call(deadline_monotonic, backoff_s):
+                logger.warning(
+                    "VIDEO_PLAN_MODEL_CALL_FINAL_FAIL err_type=%s err=%s reason=deadline_insufficient_for_retry",
+                    type(e).__name__,
+                    e,
+                )
+                raise
+            logger.info("VIDEO_PLAN_MODEL_CALL_RETRY attempt=%s", attempt + 1)
+            time.sleep(backoff_s)
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("plan_model_call_no_response")
 
 
 def _video_plan_planner_description_limit() -> int:
@@ -981,11 +1081,15 @@ Language: {lang_name} ({lang}).
     )
     logger.info("VIDEO_PLAN_PROMPT_LEN=%s", len(attempt_input))
     try:
-        response = client.responses.create(
+        response = _responses_create_with_plan_retry(
+            client,
             model=model,
-            input=attempt_input,
+            input_text=attempt_input,
             reasoning={"effort": _reasoning_effort()},
+            deadline_monotonic=deadline_monotonic,
         )
+    except VideoPlanningTimeoutError:
+        raise
     except Exception as e:
         err_type = type(e).__name__
         logger.warning(
@@ -1055,11 +1159,15 @@ Language: {lang_name} ({lang}).
                         previous_plan=parsed,
                     )
                 try:
-                    repair_response = client.responses.create(
+                    repair_response = _responses_create_with_plan_retry(
+                        client,
                         model=model,
-                        input=repair_input,
+                        input_text=repair_input,
                         reasoning={"effort": _reasoning_effort()},
+                        deadline_monotonic=deadline_monotonic,
                     )
+                except VideoPlanningTimeoutError:
+                    raise
                 except Exception as e:
                     logger.warning(
                         "VIDEO_PLAN_REPAIR_FAILED reason=%s err_type=%s err=%s",
