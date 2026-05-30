@@ -15,6 +15,59 @@ from engine.ace_usage_memory import get_used_headlines, remember_headline
 
 logger = logging.getLogger(__name__)
 
+_MODE_SIDE_BY_SIDE = "SIDE_BY_SIDE"
+_MODE_REPLACEMENT = "REPLACEMENT"
+
+
+def _norm_object_name(value: str) -> str:
+    return " ".join((value or "").strip().lower().split())
+
+
+def _builder1_headline_rhyming_substitution_block() -> str:
+    return (
+        "HEADLINE (rhyming object substitution — mandatory for headlineText remainder):\n"
+        "1. First find an existing familiar expression, idiom, proverb, or well-known phrase that expresses the advertisingPromise.\n"
+        "2. The original expression must NOT already contain the name or core word of Object A or Object B.\n"
+        "3. Choose exactly one word inside that expression.\n"
+        "4. Replace that one word with the name of Object A or Object B (natural headline-language form).\n"
+        "5. The replacement is valid only if the inserted object name rhymes with, or is phonetically very close to, the replaced original word.\n"
+        "6. The result must still feel like a recognizable twist on the original expression.\n"
+        "7. Do not add extra words before, inside, or after the twisted expression.\n"
+        "8. headlineProductName must exactly match productNameResolved (backend-fixed). headlineText is the twisted expression remainder only — do not repeat the product name in headlineText.\n"
+        "9. headlineFull must be exactly headlineProductName, one ASCII space, then headlineText. ≤7 words total on headlineFull.\n"
+        "10. headlineText must express the advertisingPromise through the visual interaction — not by restating the promise literally.\n"
+        "11. If no strong rhyme / phonetic substitution exists, choose another expression. Do not force a weak rhyme.\n"
+        "12. Do NOT pick an expression that already contains the object word before substitution.\n"
+    )
+
+
+def _builder1_headline_mode_block(mode_decision: str) -> str:
+    mode = (mode_decision or "").strip().upper()
+    if mode == _MODE_REPLACEMENT:
+        return (
+            "Mode REPLACEMENT:\n"
+            "- The replacement object may be Object A or Object B only.\n"
+            "- Object A secondary is visual/context only — do NOT use it for headline substitution.\n"
+            "- Object A and Object B names must be distinct; if they are the same or normalize to the same name, this pair is invalid.\n"
+        )
+    return (
+        "Mode SIDE_BY_SIDE:\n"
+        "- The replacement object may be Object A or Object B.\n"
+    )
+
+
+def _log_headline_rhyme_diagnostics(data: dict[str, Any], *, final_remainder: str) -> None:
+    logger.info("BUILDER1_HEADLINE_RHYME final_headline_remainder=%s", final_remainder[:200])
+    for key, log_key in (
+        ("headlineOriginalExpression", "original_expression"),
+        ("headlineReplacedWord", "replaced_word"),
+        ("headlineReplacementObject", "replacement_object"),
+        ("headlineRhymeReason", "rhyme_reason"),
+    ):
+        value = (data.get(key) or "").strip()
+        if value:
+            logger.info("BUILDER1_HEADLINE_RHYME %s=%s", log_key, value[:300])
+
 
 def _parse_json_object(raw: str) -> dict[str, Any]:
     t = (raw or "").strip()
@@ -50,6 +103,12 @@ def generate_builder1_headline_o3(
     if not resolved:
         raise ValueError("missing_product_name_resolved")
 
+    mode = (mode_decision or "").strip().upper()
+    a_norm = _norm_object_name(object_a)
+    b_norm = _norm_object_name(object_b)
+    if mode == _MODE_REPLACEMENT and a_norm and b_norm and a_norm == b_norm:
+        raise ValueError("headline_replacement_object_a_b_identical")
+
     used_headlines_ace = get_used_headlines("builder1")
     recent_headlines_ace = used_headlines_ace[-10:]
     logger.info(
@@ -58,49 +117,43 @@ def generate_builder1_headline_o3(
         recent_headlines_ace,
     )
 
+    rhyme_block = _builder1_headline_rhyming_substitution_block()
+    mode_block = _builder1_headline_mode_block(mode)
     system = (
-        "Return exactly one JSON object, no markdown, no prose. Keys only:\n"
+        "Return exactly one JSON object, no markdown, no prose. Required keys only:\n"
         '{"headlineProductName":"...","headlineText":"...","headlineFull":"..."}\n'
+        "Optional diagnostic keys (may be omitted): headlineOriginalExpression, headlineReplacedWord, "
+        "headlineReplacementObject, headlineRhymeReason.\n"
         "Rules:\n"
         "- Write in the same language as detectedLanguage (he or en).\n"
-        "- The advertising promise is already resolved inside the visual. The headline must not create or restate it.\n"
-        "- Generate headlineText ONLY from the visual: objectA, objectB, their overlap/interaction, visualDescription, and visualPrompt.\n"
-        "- Search for an existing expression / familiar phrase / idiom / proverb that expresses the advertisingPromise.\n"
-        "- Visual content definition: in SIDE_BY_SIDE, visual content means Object A together with Object B.\n"
-        "- Visual content definition: in REPLACEMENT, visual content means Object B together with Object A secondary.\n"
-        "- Visual content means the visual part of the ad, not the written headline.\n"
-        "- Use inflections of words from the visual content.\n"
-        "- Do not ask for roots/meanings/double-meanings unless already implied by normal inflection.\n"
-        "- The expression should feel like something people already say.\n"
-        "- If using a known expression, preserve it exactly; do not add extra words that damage it.\n"
-        "- The correct headline should feel like the viewer recognizes a known expression that suddenly fits because of the visual content.\n"
-        "- The headline is not a literal visual description.\n"
+        "- The advertising promise is already resolved inside the visual. The headline must not create or restate it literally.\n"
+        "- Use objectA, objectB, visualDescription, and visualPrompt as context for how the twisted expression connects to the visual.\n"
+        f"{rhyme_block}"
+        f"{mode_block}"
         "- headlineProductName must exactly match the given productNameResolved string.\n"
         "- The model controls headlineText only; headlineProductName is fixed by backend.\n"
         "- Do not include product description inside headlineProductName.\n"
-        "- headlineText is the slogan/title phrase only (do not repeat the product name in headlineText).\n"
-        "- headlineFull must be exactly headlineProductName, one ASCII space, then headlineText.\n"
-        "- headlineFull must be at most 7 words total (count words on headlineFull).\n"
         "- Product name must stay as the first headline line and is visually larger; do not move/alter it.\n"
         "- Do not create a slogan that merely explains the product.\n"
         "- Do NOT write explanatory slogans or direct benefit statements such as: 'מכפיל את הווליום הדיגיטלי', 'מגביר את הקול', or any direct phrasing of the advertising promise.\n"
         "- Phrases like 'מסך מול מסך' are too descriptive and lack meaning.\n"
-        "- The headline should feel like a familiar expression that gains meaning from the visual, not just mirrors it.\n"
-        "- Prefer concise wordplay tied to the visual cues.\n"
+        "- The headline is not a literal visual description.\n"
         "- Headline memory excludes product names; compare only the slogan/title phrase part.\n"
         "- Do not reuse any previous headlineText from memory.\n"
         "- Do not reuse the same familiar expression; choose a fresh phrasing.\n"
         "Example:\n"
         "- Product name: אורי לב\n"
-        "- Product description: סוכן פרסום\n"
         "- Object A: empty vertical advertising sign\n"
         "- Object A secondary: sign pole\n"
         "- Object B: king of hearts card\n"
         "- Mode: REPLACEMENT\n"
         "- Visual: king-of-hearts-card sign on a pole\n"
+        "- Original expression (before substitution): כלב בפרסום\n"
+        "- Replaced word: כלב → replacement object: קלף (Object B, phonetically close)\n"
         "- Good headline:\n"
-        "  אורי לב\n"
-        "  קלף בפרסום\n"
+        "  headlineProductName: אורי לב\n"
+        "  headlineText: קלף בפרסום\n"
+        "  headlineFull: אורי לב קלף בפרסום\n"
     )
     user = (
         f"detectedLanguage: {detected_language}\n"
@@ -114,7 +167,7 @@ def generate_builder1_headline_o3(
         f"visualPrompt: {visual_prompt}\n"
         f"headlineTextMemoryToAvoidACE: {', '.join(used_headlines_ace)}\n"
     )
-    logger.info("BUILDER1_HEADLINE_RULE=known_expression_expresses_promise_from_visual_inflections")
+    logger.info("BUILDER1_HEADLINE_RULE=rhyming_object_substitution")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise ValueError("openai_unconfigured")
@@ -146,6 +199,7 @@ def generate_builder1_headline_o3(
         headline_without_product_name = hfull_norm[len(hpn_norm) + 1 :].strip()
     if (headline_without_product_name or "").strip():
         remember_headline("builder1", headline_without_product_name)
+    _log_headline_rhyme_diagnostics(data, final_remainder=headline_without_product_name)
     return {
         "headlineProductName": hpn,
         "headlineText": htt,
