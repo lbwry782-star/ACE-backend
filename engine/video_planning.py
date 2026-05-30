@@ -224,7 +224,7 @@ advertisingPromise, headlineText
 One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
 Objects must be simple physical items — never posters, printed graphics, readable books, signage, labels, or other text/graphic carriers (see OBJECTS block below).
 
-Headline: required non-empty headlineText. ≤7 words; interpret the interaction (meaning), not a literal description of the shot. headlineText format: productNameResolved + one normal space + remainder — no comma or other separator punctuation. Video overlay may render name and remainder as separate visuals; keep this field as plain text with no bidi control characters. Language-specific headline rules are in the user block below.
+Headline: required non-empty headlineText. ≤7 words; express the advertisingPromise and interpret the interaction (meaning), not a literal description of the shot. Build the remainder via rhyming object substitution per the HEADLINE block below. headlineText format: productNameResolved + one normal space + remainder — no comma or other separator punctuation. Video overlay may render name and remainder as separate visuals; keep this field as plain text with no bidi control characters. Language-specific headline rules are in the user block below.
 
 Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity, headline); output final JSON only — no explanations.
 
@@ -290,36 +290,44 @@ def _planner_object_selection_rules_block() -> str:
     )
 
 
+def _planner_headline_rhyming_substitution_block() -> str:
+    """Rhyming object-substitution headline rule (Builder2 video planning only)."""
+    return (
+        "HEADLINE (rhyming object substitution — mandatory for headlineText remainder):\n"
+        "1. First find an existing familiar expression, idiom, proverb, or well-known phrase that expresses the advertisingPromise.\n"
+        "2. The original expression must NOT already contain the name or core word of Object A or Object B.\n"
+        "3. Choose exactly one word inside that expression.\n"
+        "4. Replace that one word with the name of Object A or Object B (natural headline-language form).\n"
+        "5. The replacement is valid only if the inserted object name rhymes with, or is phonetically very close to, the replaced original word.\n"
+        "6. The result must still feel like a recognizable twist on the original expression.\n"
+        "7. Do not add extra words before, inside, or after the twisted expression except productNameResolved as the headlineText prefix.\n"
+        "8. headlineText format: productNameResolved + one normal space + final remainder.\n"
+        "9. ≤7 words total in headlineText.\n"
+        "10. headlineText must express the advertisingPromise and interpret the interaction — not a literal shot description.\n"
+        "11. If no strong rhyme / phonetic substitution exists, choose another expression. Do not force a weak rhyme.\n"
+        "12. Do NOT pick an expression that already contains the object word before substitution.\n\n"
+    )
+
+
 def _planner_headline_rules_user_block(lang_code: str) -> str:
     """Extra headline constraints appended to the planner user block (language-specific)."""
+    rhyme_block = _planner_headline_rhyming_substitution_block()
     if normalize_video_content_language(lang_code) != "he":
         return (
             "Headline (non-Hebrew request): headlineText is required. It must start with productNameResolved, "
             "then exactly one normal ASCII space, then the remainder phrase. "
             "Language should follow product language/context (English or mixed when context naturally requires it). "
-            "Prefer a familiar expression / idiom / proverb / well-known phrase with a contextual twist. "
-            "If using a known expression, preserve it exactly as-is: do not add extra words inside or after the expression, "
-            "and do not rewrite it to sound more advertising-like. "
-            "Only productNameResolved may be added before it, separated by one normal space. "
-            "The phrase should express the advertisingPromise and contain inflections of words from the visible interaction content. "
-            "The headline is not a shot description. "
-            "Avoid generic ad lines unless clearly grounded in a known expression. "
-            "No comma, colon, dash, dot, or semicolon between name and tail; ≤7 words total.\n\n"
+            f"{rhyme_block}"
+            "No comma, colon, dash, dot, or semicolon between name and tail.\n\n"
         )
     return (
         "Headline (Hebrew request): headlineText is required. It must start with productNameResolved, "
         "then exactly one normal space, then the rest of the headline. "
         "No comma, middle dot (·), bullet, colon, dash, or semicolon between the name and the tail — only that single space. "
         "Language may be Hebrew/English/mixed only as justified by product language/context (do not force one language). "
-        "Prefer an existing familiar expression, idiom, proverb, or well-known phrase with a contextual twist. "
-        "If using a known expression, preserve it exactly as-is: do not add extra words inside or after the expression, "
-        "and do not rewrite it to sound more advertising-like. "
-        "Only productNameResolved may be added before it, separated by one normal space. "
-        "The phrase should express the advertisingPromise and contain inflections of words from the visible interaction content. "
-        "The headline is not a shot-by-shot description. "
-        "Avoid generic benefit slogans unless clearly grounded in a known expression. "
+        f"{rhyme_block}"
         "Do not translate the product name. Works the same whether productNameResolved is English (Latin) or Hebrew script. "
-        "≤7 words total. Do not insert bidi control characters in JSON.\n\n"
+        "Do not insert bidi control characters in JSON.\n\n"
     )
 
 
@@ -1072,7 +1080,7 @@ Language: {lang_name} ({lang}).
         )
 
     logger.info("VIDEO_PLAN_PROMPT_PROFILE=short")
-    logger.info("VIDEO_HEADLINE_RULE=known_expression_expresses_promise")
+    logger.info("VIDEO_HEADLINE_RULE=rhyming_object_substitution")
     logger.info(
         "VIDEO_PLAN_PLANNER_DESC_CHARS original=%s planner_body=%s truncated=%s",
         len(desc_src),
@@ -1338,6 +1346,13 @@ Language: {lang_name} ({lang}).
             headline_without_product = headline_full[len(product_resolved) + 1 :].strip()
         if headline_without_product:
             remember_headline("builder2", headline_without_product)
+        logger.info(
+            "VIDEO_HEADLINE_RHYME final_headline_remainder=%s",
+            headline_without_product[:200],
+        )
+        hderiv = (plan.get("headlineDerivation") or "").strip()
+        if hderiv:
+            logger.info("VIDEO_HEADLINE_RHYME headlineDerivation=%s", hderiv[:300])
         return _return_plan_with_promise_persist(
             plan,
             product_name=product_name,
