@@ -186,10 +186,7 @@ def generate_builder1_composition_o3(
         layout = "headline_below_visual"
         square_note = ""
 
-    if fmt == "landscape":
-        visual_weight = 0.65
-        headline_weight = 0.35
-    elif layout == "headline_below_visual":
+    if layout == "headline_below_visual":
         visual_weight = 0.72
         headline_weight = 0.28
     else:
