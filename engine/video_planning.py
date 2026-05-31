@@ -513,6 +513,31 @@ def _build_invalid_objects_repair_input(
     )
 
 
+def _build_headline_hebrew_product_tail_repair_input(
+    *,
+    base_attempt_input: str,
+    product_name: str,
+    previous_plan: Dict[str, Any],
+) -> str:
+    pn = (previous_plan.get("productNameResolved") or product_name or "").strip()
+    bad_headline = (previous_plan.get("headlineText") or "").strip()
+    return (
+        f"{base_attempt_input}\n\n"
+        "REPAIR REQUEST (one retry): Fix headlineText format only.\n"
+        "Do NOT change objectA, objectB, objectAReason, objectBReason, interactionSummary, "
+        "interactionScript, advertisingPromise, promiseDerivation, or productNameResolved.\n"
+        "headlineText must start with productNameResolved, then exactly one normal ASCII space, then a non-empty Hebrew remainder.\n"
+        "The Hebrew remainder must contain at least one Hebrew letter, no comma, no bidi marks, "
+        "and no forbidden separator punctuation between the name and tail.\n"
+        "Preserve the creative headline meaning from the invalid headline when possible.\n"
+        "Return the same required JSON shape only.\n"
+        f"productNameResolved: {pn or '(empty)'}\n"
+        f"Invalid headlineText: {bad_headline or '(empty)'}\n"
+        "Previous plan (change headlineText only):\n"
+        f"{json.dumps(previous_plan, ensure_ascii=False)}\n"
+    )
+
+
 def _build_physics_safe_fallback_plan(
     *,
     product_name: str,
@@ -589,6 +614,82 @@ def _headline_prefix_ok(headline: str, product_resolved: str) -> bool:
 def _headline_word_count_ok(headline: str) -> bool:
     words = [w for w in (headline or "").strip().split() if w]
     return len(words) <= 7
+
+
+_HEADLINE_HEBREW_TAIL_FORBIDDEN = frozenset("•.:;-–—−\u2212\u00b7,")
+_HEADLINE_HEBREW_TAIL_BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+
+def _headline_hebrew_product_tail_would_fail(headline: str, product_name: str) -> bool:
+    h_norm = (headline or "").strip()
+    pn = (product_name or "").strip()
+    if not h_norm or not pn:
+        return True
+    if h_norm == pn:
+        return not hebrew_script_product_headline_tail_struct_ok("")
+    if not h_norm.startswith(pn + " "):
+        return True
+    tail_hs = h_norm[len(pn) :].lstrip()
+    return not hebrew_script_product_headline_tail_struct_ok(tail_hs)
+
+
+def _extract_headline_creative_remainder(headline: str, product_name: str) -> str:
+    h = (headline or "").strip()
+    pn = (product_name or "").strip()
+    if not h or not pn:
+        return ""
+    if h == pn:
+        return ""
+    if h.startswith(pn + " "):
+        return h[len(pn) + 1 :].strip()
+    if h.startswith(pn):
+        return h[len(pn) :].lstrip(" \t•.:;-–—−,")
+    idx = h.find(pn)
+    if idx >= 0:
+        before = h[:idx].strip()
+        after = h[idx + len(pn) :].strip().lstrip(" \t•.:;-–—−,")
+        merged = " ".join(p for p in (before, after) if p).strip()
+        if merged:
+            return merged
+    return h
+
+
+def _sanitize_hebrew_product_headline_tail(tail: str) -> str:
+    cleaned: list[str] = []
+    for ch in (tail or "").strip():
+        if ch in _HEADLINE_HEBREW_TAIL_FORBIDDEN or ch in _HEADLINE_HEBREW_TAIL_BIDI:
+            if ch == ",":
+                cleaned.append(" ")
+            continue
+        cleaned.append(ch)
+    return re.sub(r"\s+", " ", "".join(cleaned)).strip()
+
+
+def _repair_headline_hebrew_product_tail_struct(headline: str, product_name: str) -> Optional[str]:
+    pn = (product_name or "").strip()
+    if not pn:
+        return None
+    remainder = _sanitize_hebrew_product_headline_tail(
+        _extract_headline_creative_remainder(headline, pn)
+    )
+    if not remainder:
+        return None
+    repaired = " ".join(f"{pn} {remainder}".split())
+    if not _headline_prefix_ok(repaired, pn):
+        return None
+    tail = repaired[len(pn) :].lstrip()
+    if not hebrew_script_product_headline_tail_struct_ok(tail):
+        return None
+    if not _headline_word_count_ok(repaired):
+        words = repaired.split()
+        if len(words) > 7:
+            repaired = " ".join(words[:7])
+            tail = repaired[len(pn) :].lstrip()
+            if not hebrew_script_product_headline_tail_struct_ok(tail):
+                return None
+        else:
+            return None
+    return repaired
 
 
 # Mandatory smooth half-orbit camera around the two-object composition (ACE single interaction).
@@ -785,17 +886,17 @@ def validate_and_normalize_plan(
         and headline_product_includes_hebrew_letters(pn)
         and not product_name_is_latin_only_for_bilingual_headline(pn)
     ):
-        h_norm = headline.strip()
-        if h_norm == pn:
-            tail_hs = ""
-        else:
-            if not h_norm.startswith(pn + " "):
+        if _headline_hebrew_product_tail_would_fail(headline, pn):
+            logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_START reason=headline_hebrew_product_tail")
+            repaired_headline = _repair_headline_hebrew_product_tail_struct(headline, pn)
+            if repaired_headline:
+                headline = repaired_headline
+                data["headlineText"] = repaired_headline
+            if _headline_hebrew_product_tail_would_fail(headline, pn):
+                logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
                 logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_hebrew_product_tail")
-                return None, "planning_failed_incomplete_plan"
-            tail_hs = h_norm[len(pn) :].lstrip()
-        if not hebrew_script_product_headline_tail_struct_ok(tail_hs):
-            logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_hebrew_product_tail")
-            return None, "planning_failed_incomplete_plan"
+                return None, "headline_hebrew_product_tail"
+            logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_OK")
 
     if lang_norm == "en":
         h_norm = headline.strip()
@@ -1181,7 +1282,66 @@ Language: {lang_name} ({lang}).
         )
         if not plan:
             last_v_err = (v_err or "").strip() or "planning_failed_incomplete_plan"
-            if last_v_err in {
+            if last_v_err == "headline_hebrew_product_tail":
+                logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=%s", last_v_err)
+                repair_input = _build_headline_hebrew_product_tail_repair_input(
+                    base_attempt_input=attempt_input,
+                    product_name=product_name,
+                    previous_plan=parsed,
+                )
+                try:
+                    repair_response = _responses_create_with_plan_retry(
+                        client,
+                        model=model,
+                        input_text=repair_input,
+                        reasoning={"effort": _reasoning_effort()},
+                        deadline_monotonic=deadline_monotonic,
+                    )
+                except VideoPlanningTimeoutError:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "VIDEO_PLAN_REPAIR_FAILED reason=%s err_type=%s err=%s",
+                        "planning_failed_model_call",
+                        type(e).__name__,
+                        e,
+                    )
+                    logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
+                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
+                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                    return None, "planning_failed_incomplete_plan"
+
+                repair_raw = _extract_responses_output_text(repair_response)
+                repair_parsed = _parse_json_from_response(repair_raw or "")
+                if not repair_parsed:
+                    logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
+                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
+                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                    return None, "planning_failed_incomplete_plan"
+
+                merged = dict(parsed)
+                new_ht = (repair_parsed.get("headlineText") or "").strip()
+                if new_ht:
+                    merged["headlineText"] = new_ht
+                repaired_plan, repaired_err = validate_and_normalize_plan(
+                    merged,
+                    planner_deadline_monotonic=deadline_monotonic,
+                    product_name=product_name,
+                    product_description=product_description,
+                    content_language=content_language,
+                )
+                if repaired_plan:
+                    plan = repaired_plan
+                    logger.info("VIDEO_PLAN_REPAIR_OK reason=headline_hebrew_product_tail")
+                else:
+                    logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
+                    logger.error(
+                        "VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s",
+                        (repaired_err or last_v_err).strip(),
+                    )
+                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+                    return None, "planning_failed_incomplete_plan"
+            elif last_v_err in {
                 "planning_failed_unrealistic_physics",
                 "planning_failed_invalid_objects",
             }:
