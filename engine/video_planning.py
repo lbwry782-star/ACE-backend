@@ -613,8 +613,32 @@ def _runway_ace_half_orbit_focus() -> str:
     )
 
 
+_RUNWAY_STYLE_TAIL = (
+    "No logos, no packaging typography, no on-screen words. Single clean commercial look."
+)
+
+_RUNWAY_CONTACT_EXECUTION_CLAUSE = (
+    "CONTACT EXECUTION: The active object must maintain full visible contact with the main body/center of the passive object during the scripted action. "
+    "The action must happen across or over the passive object, not merely touch, tap, graze, or bump its edge or corner. "
+    "Show sustained pressure, resistance, and visible effect throughout the motion. "
+    "If the action is rolling, dragging, pushing, sweeping, pressing, or rubbing, the active object must travel across the passive object's central surface, not stop at the edge."
+)
+
+_RUNWAY_INTERACTION_TAIL_MARKERS: Tuple[str, ...] = (
+    "Physical interaction (follow exactly):",
+    "Physical interaction:",
+    "CONTACT EXECUTION:",
+)
+
 _PRECISE_ACTION_CAMERA_RULES: List[Tuple[str, re.Pattern]] = [
     ("press", re.compile(r"\bpress(?:es|ed|ing)?\b", re.I)),
+    ("roll", re.compile(r"\broll(?:s|ed|ing)?\b", re.I)),
+    ("drag", re.compile(r"\bdrag(?:s|ged|ging)?\b", re.I)),
+    ("push", re.compile(r"\bpush(?:es|ed|ing)?\b", re.I)),
+    ("sweep", re.compile(r"\bsweep(?:s|swept|ing)?\b", re.I)),
+    ("rub", re.compile(r"\brub(?:s|bed|bing)?\b", re.I)),
+    ("across", re.compile(r"\bacross\b", re.I)),
+    ("over", re.compile(r"\bover\b", re.I)),
     ("carve", re.compile(r"\bcarv(?:e|es|ed|ing)\b", re.I)),
     ("cut", re.compile(r"\bcut(?:s|ting)?\b", re.I)),
     ("imprint", re.compile(r"\bimprint(?:s|ed|ing)?\b", re.I)),
@@ -625,15 +649,21 @@ _PRECISE_ACTION_CAMERA_RULES: List[Tuple[str, re.Pattern]] = [
 ]
 
 
+def _interaction_text_for_camera_focus(plan: Dict[str, Any]) -> str:
+    summary = (plan.get("interactionSummary") or "").strip()
+    script = (plan.get("interactionScript") or "").strip()
+    return f"{summary} {script}".strip()
+
+
 def _runway_camera_motion_focus(plan: Dict[str, Any]) -> Tuple[str, str]:
     """
     Default: half-orbit.
     For single precise interactions that must read instantly, use stable visibility-first framing.
     Returns (motion_text, motion_mode_label).
     """
-    interaction_summary = (plan.get("interactionSummary") or "").strip()
+    interaction_blob = _interaction_text_for_camera_focus(plan)
     for _, rx in _PRECISE_ACTION_CAMERA_RULES:
-        if rx.search(interaction_summary):
+        if rx.search(interaction_blob):
             return (
                 "MANDATORY: stable locked camera framing focused on the exact contact/action point so the precise action reads instantly. "
                 "Keep both objects visible and readable throughout. No orbit, no sweeping camera path, no cuts.",
@@ -1455,6 +1485,7 @@ def _finalize_runway_prompt(headline_prefix: str, body: str) -> Tuple[str, bool]
     """
     Join optional prefix + body. If over max length, truncate body so a leading prefix survives when present.
     Runway prompts do not include headline burn-in (headline is applied server-side after generation).
+    Preserves Physical interaction + CONTACT EXECUTION tail before dropping style filler.
     Returns (final_string, was_truncated).
     """
     body = (body or "").strip()
@@ -1473,6 +1504,23 @@ def _finalize_runway_prompt(headline_prefix: str, body: str) -> Tuple[str, bool]
             return out, True
         trimmed_body = body[:room]
         return f"{hp}{sep}{trimmed_body}", True
+
+    tail_idx = -1
+    for marker in _RUNWAY_INTERACTION_TAIL_MARKERS:
+        j = body.find(marker)
+        if j >= 0 and (tail_idx < 0 or j < tail_idx):
+            tail_idx = j
+    if tail_idx >= 0:
+        pref, tail = body[:tail_idx], body[tail_idx:]
+        budget = _RUNWAY_PROMPT_MAX_CHARS
+        tail_work = tail
+        if _RUNWAY_STYLE_TAIL in tail_work and len(tail_work) > budget:
+            tail_work = tail_work.replace(_RUNWAY_STYLE_TAIL, "").strip()
+        if len(tail_work) <= budget:
+            room = budget - len(tail_work)
+            pref_keep = pref[-room:] if room > 0 else ""
+            return f"{pref_keep}{tail_work}".strip(), True
+        return tail_work[:budget].rstrip(), True
     return full[:_RUNWAY_PROMPT_MAX_CHARS], True
 
 
@@ -1598,7 +1646,8 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
         f"Single continuous shot. Two physical objects: {oa} and {ob}. "
         f"{motion}"
         f"Physical interaction (follow exactly): {script}. "
-        "No logos, no packaging typography, no on-screen words. Single clean commercial look."
+        f"{_RUNWAY_CONTACT_EXECUTION_CLAUSE} "
+        f"{_RUNWAY_STYLE_TAIL}"
     )
     out, trunc = _finalize_runway_prompt("", body)
     if not out.strip():
