@@ -1178,6 +1178,49 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
     )
 
 
+def _log_video_plan_post_ok_diagnostics(plan: Dict[str, Any]) -> None:
+    """Post-success creative diagnostics for retrospective ad-concept review (logging only)."""
+    product_resolved = (plan.get("productNameResolved") or "").strip()
+    headline_full = (plan.get("headlineText") or "").strip()
+    headline_remainder = headline_full
+    if product_resolved and headline_full.startswith(product_resolved + " "):
+        headline_remainder = headline_full[len(product_resolved) + 1 :].strip()
+
+    logger.info("VIDEO_PLAN_DIAG productNameResolved=%s", product_resolved[:200])
+    logger.info("VIDEO_PLAN_DIAG objectA=%s", (plan.get("objectA") or "")[:200])
+    logger.info("VIDEO_PLAN_DIAG objectB=%s", (plan.get("objectB") or "")[:200])
+    logger.info(
+        "VIDEO_PLAN_DIAG interactionSummary=%s",
+        (plan.get("interactionSummary") or "")[:300],
+    )
+    logger.info(
+        "VIDEO_PLAN_DIAG advertisingPromise=%s",
+        (plan.get("advertisingPromise") or "")[:300],
+    )
+    logger.info("VIDEO_PLAN_DIAG headlineText=%s", headline_full[:300])
+    logger.info("VIDEO_PLAN_DIAG headline_remainder=%s", headline_remainder[:300])
+
+    optional_fields = (
+        ("headlineOriginalExpression", "original_expression"),
+        ("headlineReplacedWord", "replaced_word"),
+        ("headlineReplacementObject", "replacement_object"),
+        ("headlineRhymeReason", "rhyme_reason"),
+        ("headline_original_expression", "original_expression"),
+        ("headline_replaced_word", "replaced_word"),
+        ("headline_replacement_object", "replacement_object"),
+        ("headline_rhyme_reason", "rhyme_reason"),
+        ("final_headline_remainder", "final_headline_remainder"),
+    )
+    logged_diag_keys: set[str] = set()
+    for plan_key, log_key in optional_fields:
+        if log_key in logged_diag_keys:
+            continue
+        value = (plan.get(plan_key) or "").strip()
+        if value:
+            logger.info("VIDEO_PLAN_DIAG %s=%s", log_key, value[:300])
+            logged_diag_keys.add(log_key)
+
+
 def _reasoning_effort() -> str:
     raw = (os.environ.get("VIDEO_PLANNER_REASONING_EFFORT") or "low").strip().lower()
     return raw if raw in ("low", "medium") else "low"
@@ -1691,6 +1734,7 @@ Language: {lang_name} ({lang}).
 
         log_plan_summary(plan)
         logger.info("VIDEO_PLAN_OK model=%s", model)
+        _log_video_plan_post_ok_diagnostics(plan)
         logger.info("VIDEO_PLAN_RESPONSE_OK=true")
         object_a_value = (plan.get("objectA") or "").strip()
         if object_a_value:
