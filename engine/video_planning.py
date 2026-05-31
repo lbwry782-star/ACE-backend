@@ -305,7 +305,13 @@ def _planner_headline_rhyming_substitution_block() -> str:
         "9. ≤7 words total in headlineText.\n"
         "10. headlineText must express the advertisingPromise and interpret the interaction — not a literal shot description.\n"
         "11. If no strong rhyme / phonetic substitution exists, choose another expression. Do not force a weak rhyme.\n"
-        "12. Do NOT pick an expression that already contains the object word before substitution.\n\n"
+        "12. Do NOT pick an expression that already contains the object word before substitution.\n"
+        "13. The final substituted headline must express the advertisingPromise.\n"
+        "14. Prefer the strongest case: the substitution itself should be the expression of the advertisingPromise.\n"
+        "15. The viewer should feel that replacing the original word with Object A or Object B is exactly what creates the advertising meaning.\n"
+        "16. It is not enough that the original expression expresses the promise, or that the final phrase sounds clever.\n"
+        "17. The best headline has all three: (a) the original expression is recognizable, (b) the object-word substitution is visible and phonetically strong, (c) the substitution itself makes the advertisingPromise understandable.\n"
+        "18. If the substitution is only a pun but does not carry the advertisingPromise, reject it and choose another expression/substitution.\n\n"
     )
 
 
