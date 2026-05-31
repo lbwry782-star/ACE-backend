@@ -44,11 +44,17 @@ def _builder1_headline_rhyming_substitution_block() -> str:
         "16. Do not replace a word with an object name that is already hidden inside the original expression or naturally contained across adjacent letters.\n"
         "17. The replacement must create a visible, readable twist, not only an internal spelling explanation.\n"
         "18. Invalid unchanged-substitution example: original_expression השלם גדול מסך חלקיו, replaced_word סך, replacement_object מסך, final_headline_remainder השלם גדול מסך חלקיו — the final phrase reads exactly like the original expression; no visible twist; forbidden.\n"
-        "19. Do not add extra words before, inside, or after the twisted expression.\n"
-        "20. headlineProductName must exactly match productNameResolved (backend-fixed). headlineText is the twisted expression remainder only — do not repeat the product name in headlineText.\n"
-        "21. headlineFull must be exactly headlineProductName, one ASCII space, then headlineText. ≤7 words total on headlineFull.\n"
-        "22. headlineText must express the advertisingPromise through the visual interaction — not by restating the promise literally.\n"
-        "23. Do NOT pick an expression that already contains the object word before substitution.\n"
+        "19. The final substituted headline must express the advertisingPromise.\n"
+        "20. Prefer the strongest case: the substitution itself should be the expression of the advertisingPromise.\n"
+        "21. The viewer should feel that replacing the original word with Object A or Object B is exactly what creates the advertising meaning.\n"
+        "22. It is not enough that the original expression expresses the promise, or that the final phrase sounds clever.\n"
+        "23. The best headline has all three: (a) the original expression is recognizable, (b) the object-word substitution is visible and phonetically strong, (c) the substitution itself makes the advertisingPromise understandable.\n"
+        "24. If the substitution is only a pun but does not carry the advertisingPromise, reject it and choose another expression/substitution.\n"
+        "25. Do not add extra words before, inside, or after the twisted expression.\n"
+        "26. headlineProductName must exactly match productNameResolved (backend-fixed). headlineText is the twisted expression remainder only — do not repeat the product name in headlineText.\n"
+        "27. headlineFull must be exactly headlineProductName, one ASCII space, then headlineText. ≤7 words total on headlineFull.\n"
+        "28. headlineText must express the advertisingPromise through the visual interaction — not by restating the promise literally.\n"
+        "29. Do NOT pick an expression that already contains the object word before substitution.\n"
     )
 
 
