@@ -19,18 +19,12 @@ import httpx
 from openai import OpenAI
 
 from engine.ace_usage_memory import (
-    get_used_headlines,
     get_used_object_a,
-    remember_headline,
     remember_object_a as remember_object_a_ace,
 )
+from engine.video_headline import VideoHeadlineError, generate_video_headline_o3
 from engine.video_language import (
-    bilingual_en_he_headline_tail_struct_ok,
-    english_headline_tail_after_product_no_separator_punct,
-    headline_product_includes_hebrew_letters,
-    hebrew_script_product_headline_tail_struct_ok,
     normalize_video_content_language,
-    product_name_is_latin_only_for_bilingual_headline,
     video_language_display_name,
 )
 from engine.video_plan_objects import video_plan_object_blob_implies_graphic_text_content
@@ -219,18 +213,18 @@ _JSON_KEYS = """
 Return one JSON object only (no markdown, no prose).
 
 Keys (all strings): productNameResolved, objectA, objectB, interactionSummary, interactionScript,
-advertisingPromise, headlineText
+advertisingPromise, language
 
 One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
 Objects must be simple physical items — never posters, printed graphics, readable books, signage, labels, or other text/graphic carriers (see OBJECTS block below).
 
-Headline: required non-empty headlineText. ≤7 words; express the advertisingPromise and interpret the interaction (meaning), not a literal description of the shot. Build the remainder via rhyming object substitution per the HEADLINE block below. headlineText format: productNameResolved + one normal space + remainder — no comma or other separator punctuation. Video overlay may render name and remainder as separate visuals; keep this field as plain text with no bidi control characters. Language-specific headline rules are in the user block below.
+Do NOT include headlineText — headline is generated in a separate step after planning.
 
-Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity, headline); output final JSON only — no explanations.
+Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity); output final JSON only — no explanations.
 
 Failure only: {"planningFailure":"planning_failed_no_valid_interaction"}
 
-Emit a complete plan only if: (i) object A is grounded in the product; (ii) object B was accepted only after a physically plausible, non-surreal A↔B interaction was identified; (iii) advertisingPromise emerged together with that interaction (not pre-decided, not reverse-engineered from a preset slogan); (iv) headline interprets the interaction per the headline rules; (v) object rules below are satisfied; (vi) interactionSummary + interactionScript (+ object reasons) describe grounded contact with resistance — no frictionless sliding/gliding/floating-style motion (see PHYSICAL REALISM block).
+Emit a complete plan only if: (i) object A is grounded in the product; (ii) object B was accepted only after a physically plausible, non-surreal A↔B interaction was identified; (iii) advertisingPromise emerged together with that interaction (not pre-decided, not reverse-engineered from a preset slogan); (iv) object rules below are satisfied; (v) interactionSummary + interactionScript (+ object reasons) describe grounded contact with resistance — no frictionless sliding/gliding/floating-style motion (see PHYSICAL REALISM block).
 """
 
 
@@ -290,71 +284,19 @@ def _planner_object_selection_rules_block() -> str:
     )
 
 
-def _planner_headline_rhyming_substitution_block() -> str:
-    """Rhyming object-substitution headline rule (Builder2 video planning only)."""
-    return (
-        "HEADLINE (rhyming object substitution — mandatory for headlineText remainder):\n"
-        "1. First find an existing familiar expression, idiom, proverb, or well-known phrase that expresses the advertisingPromise.\n"
-        "2. The original expression must NOT already contain the name or core word of Object A or Object B.\n"
-        "3. Choose exactly one word inside that expression.\n"
-        "4. Replace that one word with the name of Object A or Object B (natural headline-language form).\n"
-        "5. The replacement is valid only if the inserted object name rhymes with, or is phonetically very close to, the replaced original word.\n"
-        "6. The result must still feel like a recognizable twist on the original expression.\n"
-        "7. Do not add extra words before, inside, or after the twisted expression except productNameResolved as the headlineText prefix.\n"
-        "8. headlineText format: productNameResolved + one normal space + final remainder.\n"
-        "9. ≤7 words total in headlineText.\n"
-        "10. headlineText must express the advertisingPromise and interpret the interaction — not a literal shot description.\n"
-        "11. If no strong rhyme / phonetic substitution exists, choose another expression. Do not force a weak rhyme.\n"
-        "12. Do NOT pick an expression that already contains the object word before substitution.\n"
-        "13. The final substituted headline must express the advertisingPromise.\n"
-        "14. Prefer the strongest case: the substitution itself should be the expression of the advertisingPromise.\n"
-        "15. The viewer should feel that replacing the original word with Object A or Object B is exactly what creates the advertising meaning.\n"
-        "16. It is not enough that the original expression expresses the promise, or that the final phrase sounds clever.\n"
-        "17. The best headline has all three: (a) the original expression is recognizable, (b) the object-word substitution is visible and phonetically strong, (c) the substitution itself makes the advertisingPromise understandable.\n"
-        "18. If the substitution is only a pun but does not carry the advertisingPromise, reject it and choose another expression/substitution.\n\n"
-    )
-
-
-def _planner_headline_rules_user_block(lang_code: str) -> str:
-    """Extra headline constraints appended to the planner user block (language-specific)."""
-    rhyme_block = _planner_headline_rhyming_substitution_block()
-    if normalize_video_content_language(lang_code) != "he":
-        return (
-            "Headline (non-Hebrew request): headlineText is required. It must start with productNameResolved, "
-            "then exactly one normal ASCII space, then the remainder phrase. "
-            "Language should follow product language/context (English or mixed when context naturally requires it). "
-            f"{rhyme_block}"
-            "No comma, colon, dash, dot, or semicolon between name and tail.\n\n"
-        )
-    return (
-        "Headline (Hebrew request): headlineText is required. It must start with productNameResolved, "
-        "then exactly one normal space, then the rest of the headline. "
-        "No comma, middle dot (·), bullet, colon, dash, or semicolon between the name and the tail — only that single space. "
-        "Language may be Hebrew/English/mixed only as justified by product language/context (do not force one language). "
-        f"{rhyme_block}"
-        "Do not translate the product name. Works the same whether productNameResolved is English (Latin) or Hebrew script. "
-        "Do not insert bidi control characters in JSON.\n\n"
-    )
-
-
 def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
-    he_head = ""
-    if lang == "he":
-        he_head = (
-            "Hebrew headline: productNameResolved then one space then Hebrew tail (no punctuation separator); no bidi marks in JSON. "
-        )
     return (
         f"ACE video: one continuous shot; camera = smooth half-orbit around the two objects (path only). "
         f"Language {lang_name} ({lang}). "
-        f"{he_head}"
         "Everyday complementary objects grounded in the product; reject the first cliché default; "
         "objectA/objectB must never be graphic-communication items (posters, prints, readable media, signage with copy, etc.). "
         "Creative rule: advertisingPromise emerges together with the chosen A↔B interaction — never choose the promise before "
         "a valid physical interaction exists; never reverse-reason from a preset goal to objects. "
         "Physical realism: interaction motion must show contact, weight, and resistance — no frictionless sliding or floaty movement. "
         "Stay realistic. One A↔B interaction only (no alternate layouts). "
+        "Headline is NOT part of this JSON — it is generated separately after planning. "
         'Planner refusal: {"planningFailure":"planning_failed_no_valid_interaction"}'
     )
 
@@ -513,31 +455,6 @@ def _build_invalid_objects_repair_input(
     )
 
 
-def _build_headline_hebrew_product_tail_repair_input(
-    *,
-    base_attempt_input: str,
-    product_name: str,
-    previous_plan: Dict[str, Any],
-) -> str:
-    pn = (previous_plan.get("productNameResolved") or product_name or "").strip()
-    bad_headline = (previous_plan.get("headlineText") or "").strip()
-    return (
-        f"{base_attempt_input}\n\n"
-        "REPAIR REQUEST (one retry): Fix headlineText format only.\n"
-        "Do NOT change objectA, objectB, objectAReason, objectBReason, interactionSummary, "
-        "interactionScript, advertisingPromise, promiseDerivation, or productNameResolved.\n"
-        "headlineText must start with productNameResolved, then exactly one normal ASCII space, then a non-empty Hebrew remainder.\n"
-        "The Hebrew remainder must contain at least one Hebrew letter, no comma, no bidi marks, "
-        "and no forbidden separator punctuation between the name and tail.\n"
-        "Preserve the creative headline meaning from the invalid headline when possible.\n"
-        "Return the same required JSON shape only.\n"
-        f"productNameResolved: {pn or '(empty)'}\n"
-        f"Invalid headlineText: {bad_headline or '(empty)'}\n"
-        "Previous plan (change headlineText only):\n"
-        f"{json.dumps(previous_plan, ensure_ascii=False)}\n"
-    )
-
-
 def _build_physics_safe_fallback_plan(
     *,
     product_name: str,
@@ -556,10 +473,6 @@ def _build_physics_safe_fallback_plan(
         promise = (
             "תוצאה יציבה שנשארת לאורך זמן" if lang == "he" else "A stable result that lasts over time"
         )
-    if lang == "he":
-        headline = f"{pn} יציב לאורך זמן"
-    else:
-        headline = f"{pn} Built to last"
     return {
         "productNameResolved": pn,
         "objectA": "product item",
@@ -574,16 +487,9 @@ def _build_physics_safe_fallback_plan(
             if lang == "he"
             else "Derived from a stable physical action with clear contact, pressure, and settling."
         ),
-        "headlineText": _word_limit(headline, 7),
-        "headlineDerivation": (
-            "הכותרת מבטאת תוצאה מתמשכת שנובעת ממגע יציב."
-            if lang == "he"
-            else "Headline expresses an enduring outcome emerging from stable contact."
-        ),
         "language": lang,
         "objectInferenceMode": "deterministic_physics_fallback",
         "literalObjectCount": 2,
-        "headlineDecision": "include_product_name",
     }
 
 
@@ -599,208 +505,6 @@ def _runway_language_visual_constraints(plan: Dict[str, Any]) -> str:
         "LANGUAGE-CONSISTENT VISUALS: If a setting appears, keep backgrounds generic; "
         "do not foreground non-English street or storefront lettering as the hero element."
     )
-
-
-def _headline_prefix_ok(headline: str, product_resolved: str) -> bool:
-    p = (product_resolved or "").strip()
-    h = (headline or "").strip()
-    if not p or not h:
-        return False
-    if h == p:
-        return True
-    return h.startswith(p + " ")
-
-
-def _headline_word_count_ok(headline: str) -> bool:
-    words = [w for w in (headline or "").strip().split() if w]
-    return len(words) <= 7
-
-
-_HEADLINE_HEBREW_TAIL_FORBIDDEN = frozenset("•.:;-–—−\u2212\u00b7,")
-_HEADLINE_HEBREW_TAIL_BIDI = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
-
-
-def _headline_hebrew_product_tail_would_fail(headline: str, product_name: str) -> bool:
-    h_norm = (headline or "").strip()
-    pn = (product_name or "").strip()
-    if not h_norm or not pn:
-        return True
-    if h_norm == pn:
-        return not hebrew_script_product_headline_tail_struct_ok("")
-    if not h_norm.startswith(pn + " "):
-        return True
-    tail_hs = h_norm[len(pn) :].lstrip()
-    return not hebrew_script_product_headline_tail_struct_ok(tail_hs)
-
-
-def _extract_headline_creative_remainder(headline: str, product_name: str) -> str:
-    h = (headline or "").strip()
-    pn = (product_name or "").strip()
-    if not h or not pn:
-        return ""
-    if h == pn:
-        return ""
-    if h.startswith(pn + " "):
-        return h[len(pn) + 1 :].strip()
-    if h.startswith(pn):
-        return h[len(pn) :].lstrip(" \t•.:;-–—−,")
-    idx = h.find(pn)
-    if idx >= 0:
-        before = h[:idx].strip()
-        after = h[idx + len(pn) :].strip().lstrip(" \t•.:;-–—−,")
-        merged = " ".join(p for p in (before, after) if p).strip()
-        if merged:
-            return merged
-    return h
-
-
-def _sanitize_hebrew_product_headline_tail(tail: str) -> str:
-    cleaned: list[str] = []
-    for ch in (tail or "").strip():
-        if ch in _HEADLINE_HEBREW_TAIL_FORBIDDEN or ch in _HEADLINE_HEBREW_TAIL_BIDI:
-            if ch == ",":
-                cleaned.append(" ")
-            continue
-        cleaned.append(ch)
-    return re.sub(r"\s+", " ", "".join(cleaned)).strip()
-
-
-def _repair_headline_hebrew_product_tail_struct(headline: str, product_name: str) -> Optional[str]:
-    pn = (product_name or "").strip()
-    if not pn:
-        return None
-    remainder = _sanitize_hebrew_product_headline_tail(
-        _extract_headline_creative_remainder(headline, pn)
-    )
-    if not remainder:
-        return None
-    repaired = " ".join(f"{pn} {remainder}".split())
-    if not _headline_prefix_ok(repaired, pn):
-        return None
-    tail = repaired[len(pn) :].lstrip()
-    if not hebrew_script_product_headline_tail_struct_ok(tail):
-        return None
-    if not _headline_word_count_ok(repaired):
-        words = repaired.split()
-        if len(words) > 7:
-            repaired = " ".join(words[:7])
-            tail = repaired[len(pn) :].lstrip()
-            if not hebrew_script_product_headline_tail_struct_ok(tail):
-                return None
-        else:
-            return None
-    return repaired
-
-
-_HEADLINE_HEBREW_GENERIC_FALLBACK_TAIL = "פותח הזדמנות חדשה"
-
-
-def _tail_contains_product_name(tail: str, product_name: str) -> bool:
-    t = " ".join((tail or "").strip().lower().split())
-    pn = " ".join((product_name or "").strip().lower().split())
-    if not t or not pn:
-        return False
-    return pn in t
-
-
-def _safe_hebrew_product_headline_tail(tail: str, product_name: str) -> str:
-    t = _sanitize_hebrew_product_headline_tail(tail)
-    if not t or _tail_contains_product_name(t, product_name):
-        return ""
-    if not hebrew_script_product_headline_tail_struct_ok(t):
-        return ""
-    return t
-
-
-def _hebrew_tail_from_advertising_promise(advertising_promise: str, product_name: str) -> str:
-    raw = _sanitize_hebrew_product_headline_tail(advertising_promise or "")
-    if not raw:
-        return ""
-    hebrew_words: list[str] = []
-    for word in raw.split():
-        if re.search(r"[\u0590-\u05FF]", word) and not re.search(r"[A-Za-z]", word):
-            hebrew_words.append(word)
-    candidate = " ".join(hebrew_words[:4]).strip()
-    return _safe_hebrew_product_headline_tail(candidate, product_name)
-
-
-def _fit_hebrew_product_headline_to_word_limit(headline: str, product_name: str) -> Optional[str]:
-    pn = (product_name or "").strip()
-    h = (headline or "").strip()
-    if not pn or not h or not _headline_prefix_ok(h, pn):
-        return None
-    words = h.split()
-    if len(words) <= 7:
-        return h
-    pn_words = pn.split()
-    tail_budget = max(1, 7 - len(pn_words))
-    tail_words = h[len(pn) :].lstrip().split()[:tail_budget]
-    rebuilt = " ".join(f"{pn} {' '.join(tail_words)}".split())
-    tail = rebuilt[len(pn) :].lstrip()
-    if not hebrew_script_product_headline_tail_struct_ok(tail):
-        return None
-    return rebuilt
-
-
-def _build_headline_hebrew_product_tail_final_fallback(
-    *,
-    headline: str,
-    product_name: str,
-    advertising_promise: str,
-) -> Optional[str]:
-    pn = (product_name or "").strip()
-    if not pn:
-        logger.info("VIDEO_HEADLINE_STRUCT_FINAL_FALLBACK_FAIL")
-        return None
-
-    logger.info("VIDEO_HEADLINE_STRUCT_FINAL_FALLBACK_START")
-    remainder_sources = (
-        _sanitize_hebrew_product_headline_tail(
-            _extract_headline_creative_remainder(headline, pn)
-        ),
-        _hebrew_tail_from_advertising_promise(advertising_promise, pn),
-        _HEADLINE_HEBREW_GENERIC_FALLBACK_TAIL,
-    )
-    for raw_tail in remainder_sources:
-        safe_tail = _safe_hebrew_product_headline_tail(raw_tail, pn)
-        if not safe_tail:
-            continue
-        rebuilt = " ".join(f"{pn} {safe_tail}".split())
-        fitted = _fit_hebrew_product_headline_to_word_limit(rebuilt, pn)
-        if not fitted or _headline_hebrew_product_tail_would_fail(fitted, pn):
-            continue
-        logger.info("VIDEO_HEADLINE_STRUCT_FINAL_FALLBACK_OK headlineText=%s", fitted[:200])
-        return fitted
-
-    logger.info("VIDEO_HEADLINE_STRUCT_FINAL_FALLBACK_FAIL")
-    return None
-
-
-def _rescue_plan_headline_hebrew_product_tail(
-    plan_data: Dict[str, Any],
-    *,
-    planner_deadline_monotonic: Optional[float],
-    product_name: str,
-    product_description: str,
-    content_language: str,
-) -> Optional[Dict[str, Any]]:
-    merged = dict(plan_data)
-    fallback_headline = _build_headline_hebrew_product_tail_final_fallback(
-        headline=(merged.get("headlineText") or "").strip(),
-        product_name=(merged.get("productNameResolved") or product_name).strip(),
-        advertising_promise=(merged.get("advertisingPromise") or "").strip(),
-    )
-    if not fallback_headline:
-        return None
-    merged["headlineText"] = fallback_headline
-    rescued, _ = validate_and_normalize_plan(
-        merged,
-        planner_deadline_monotonic=planner_deadline_monotonic,
-        product_name=product_name,
-        product_description=product_description,
-        content_language=content_language,
-    )
-    return rescued
 
 
 # Mandatory smooth half-orbit camera around the two-object composition (ACE single interaction).
@@ -915,6 +619,41 @@ def _coerce_plan_keys(data: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _apply_separate_video_headline_to_plan(
+    plan: Dict[str, Any],
+    *,
+    product_description: str,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Separate o3 headline call after planning; no generic fallback."""
+    last_err = ""
+    for attempt in (1, 2):
+        try:
+            headline = generate_video_headline_o3(
+                plan=plan,
+                product_description=product_description,
+            )
+            updated = dict(plan)
+            updated["headlineText"] = headline["headlineFull"]
+            updated["headlineTextRemainder"] = headline["headlineText"]
+            updated["headlineDecision"] = "include_product_name"
+            return updated, ""
+        except VideoHeadlineError as e:
+            last_err = str(e)
+            logger.warning(
+                "VIDEO_HEADLINE_SEPARATE_CALL_FAILED attempt=%s err=%s",
+                attempt,
+                last_err,
+            )
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+            logger.warning(
+                "VIDEO_HEADLINE_SEPARATE_CALL_FAILED attempt=%s err=%s",
+                attempt,
+                last_err,
+            )
+    return None, "headline_failed"
+
+
 def validate_and_normalize_plan(
     data: Dict[str, Any],
     *,
@@ -925,10 +664,11 @@ def validate_and_normalize_plan(
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     ACE video engine v3 — server: structural validation (required fields, JSON shape via coerce,
-    headline prefix + word-count, no graphic/text-display objects in A/B/interaction fields).
+    no graphic/text-display objects in A/B/interaction fields).
+    Headline is generated separately after planning (see video_headline.py).
     Causal ordering and goal emergence are specified in planner prompts only; the server does not
     score or rewrite creative choices. o3-pro is the sole creative authority for object choice,
-    interaction, promise, and headline wording.
+    interaction, and promise wording.
     Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
     logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
@@ -951,8 +691,6 @@ def validate_and_normalize_plan(
     int_script = (data.get("interactionScript") or "").strip()
     apromise = (data.get("advertisingPromise") or "").strip()
     pderiv = (data.get("promiseDerivation") or "").strip()
-    headline = (data.get("headlineText") or "").strip()
-    hderiv = (data.get("headlineDerivation") or "").strip()
     lang_raw = str(data.get("language") or "").strip()
     if not lang_raw:
         lang_raw = normalize_video_content_language(content_language)
@@ -966,70 +704,10 @@ def validate_and_normalize_plan(
     if not apromise:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_advertising_promise")
         return None, "planning_failed_incomplete_plan"
-    if not headline:
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_headline_text")
-        return None, "planning_failed_incomplete_plan"
 
     if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
         logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
         raise VideoPlanningTimeoutError()
-
-    if not _headline_prefix_ok(headline, pn):
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_prefix_format")
-        return None, "planning_failed_incomplete_plan"
-
-    lang_norm = normalize_video_content_language(lang_raw)
-    if lang_norm == "he" and product_name_is_latin_only_for_bilingual_headline(pn):
-        h_norm = headline.strip()
-        if h_norm == pn:
-            tail_he = ""
-        else:
-            if not h_norm.startswith(pn + " "):
-                logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_en_he_tail")
-                return None, "planning_failed_incomplete_plan"
-            tail_he = h_norm[len(pn) :].lstrip()
-        if not bilingual_en_he_headline_tail_struct_ok(tail_he):
-            logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_bilingual_en_he_tail")
-            return None, "planning_failed_incomplete_plan"
-
-    if (
-        lang_norm == "he"
-        and headline_product_includes_hebrew_letters(pn)
-        and not product_name_is_latin_only_for_bilingual_headline(pn)
-    ):
-        if _headline_hebrew_product_tail_would_fail(headline, pn):
-            logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_START reason=headline_hebrew_product_tail")
-            repaired_headline = _repair_headline_hebrew_product_tail_struct(headline, pn)
-            if repaired_headline:
-                headline = repaired_headline
-                data["headlineText"] = repaired_headline
-            if not _headline_hebrew_product_tail_would_fail(headline, pn):
-                logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_OK")
-            else:
-                logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
-                fallback_headline = _build_headline_hebrew_product_tail_final_fallback(
-                    headline=headline,
-                    product_name=pn,
-                    advertising_promise=apromise,
-                )
-                if fallback_headline:
-                    headline = fallback_headline
-                    data["headlineText"] = fallback_headline
-                if _headline_hebrew_product_tail_would_fail(headline, pn):
-                    logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_hebrew_product_tail")
-                    return None, "headline_hebrew_product_tail"
-
-    if lang_norm == "en":
-        h_norm = headline.strip()
-        if h_norm != pn and h_norm.startswith(pn + " "):
-            tail_en = h_norm[len(pn) :].lstrip()
-            if not english_headline_tail_after_product_no_separator_punct(tail_en):
-                logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_en_tail_separator_punct")
-                return None, "planning_failed_incomplete_plan"
-
-    if not _headline_word_count_ok(headline):
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_word_count")
-        return None, "planning_failed_incomplete_plan"
 
     _object_blob = "\n".join([oa, ob, oa_r, ob_r, int_sum, int_script])
     _bad_obj = video_plan_object_blob_implies_graphic_text_content(_object_blob)
@@ -1069,7 +747,6 @@ def validate_and_normalize_plan(
 
     logger.info('VIDEO_PLAN_INTERACTION_SUMMARY="%s"', int_sum[:260])
     logger.info('VIDEO_PLAN_PROMISE="%s"', apromise[:260])
-    logger.info('VIDEO_PLAN_HEADLINE="%s"', headline[:200])
 
     return {
         "productNameResolved": pn,
@@ -1081,8 +758,8 @@ def validate_and_normalize_plan(
         "interactionScript": int_script,
         "advertisingPromise": apromise,
         "promiseDerivation": pderiv or "",
-        "headlineText": headline,
-        "headlineDerivation": hderiv or "",
+        "headlineText": "",
+        "headlineDerivation": "",
         "language": lang_raw,
         "objectInferenceMode": str(data.get("objectInferenceMode") or "").strip(),
         "literalObjectCount": literal_pass,
@@ -1182,8 +859,8 @@ def _log_video_plan_post_ok_diagnostics(plan: Dict[str, Any]) -> None:
     """Post-success creative diagnostics for retrospective ad-concept review (logging only)."""
     product_resolved = (plan.get("productNameResolved") or "").strip()
     headline_full = (plan.get("headlineText") or "").strip()
-    headline_remainder = headline_full
-    if product_resolved and headline_full.startswith(product_resolved + " "):
+    headline_remainder = (plan.get("headlineTextRemainder") or "").strip()
+    if not headline_remainder and product_resolved and headline_full.startswith(product_resolved + " "):
         headline_remainder = headline_full[len(product_resolved) + 1 :].strip()
 
     logger.info("VIDEO_PLAN_DIAG productNameResolved=%s", product_resolved[:200])
@@ -1308,7 +985,6 @@ Language: {lang_name} ({lang}).
 {_planner_object_selection_rules_block()}
 {_planner_causal_reasoning_block()}
 {_planner_physical_realism_block()}
-{_planner_headline_rules_user_block(lang)}
 {_JSON_KEYS}
 """
     instructions = _build_video_planner_instructions(lang)
@@ -1323,14 +999,9 @@ Language: {lang_name} ({lang}).
     logger.info("AD_PROMISE_MEMORY_LOAD_BEFORE_GENERATION hash=%s", ph)
     history = load_ad_promise_history(product_name, product_description)
     used_object_a = get_used_object_a("builder2")
-    used_headlines = get_used_headlines("builder2")
     logger.info(
         "VIDEO_PLAN_MEMORY_OBJECT_A_USED engine=builder2 count=%s",
         len(used_object_a),
-    )
-    logger.info(
-        "VIDEO_PLAN_MEMORY_HEADLINES_USED engine=builder2 count=%s",
-        len(used_headlines),
     )
     logger.info(
         "VIDEO_PLAN_MEMORY_USED_FOR_DIVERSITY=%s",
@@ -1350,20 +1021,12 @@ Language: {lang_name} ({lang}).
             f"- {', '.join(used_object_a)}\n"
             "- Avoid reusing any Object A listed above.\n"
         )
-    headline_memory_addon = ""
-    if used_headlines:
-        headline_memory_addon = (
-            "\n\nHeadline idea memory for Builder2 (avoid reusing these headline ideas):\n"
-            f"- {', '.join(used_headlines)}\n"
-            "- Avoid reusing headline ideas listed above.\n"
-        )
     attempt_input = (
         instructions
         + "\n\n"
         + user_block
         + promise_addon
         + object_a_memory_addon
-        + headline_memory_addon
     )
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
@@ -1381,7 +1044,6 @@ Language: {lang_name} ({lang}).
         )
 
     logger.info("VIDEO_PLAN_PROMPT_PROFILE=short")
-    logger.info("VIDEO_HEADLINE_RULE=rhyming_object_substitution")
     logger.info(
         "VIDEO_PLAN_PLANNER_DESC_CHARS original=%s planner_body=%s truncated=%s",
         len(desc_src),
@@ -1446,105 +1108,7 @@ Language: {lang_name} ({lang}).
         )
         if not plan:
             last_v_err = (v_err or "").strip() or "planning_failed_incomplete_plan"
-            if last_v_err == "headline_hebrew_product_tail":
-                logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=%s", last_v_err)
-                repair_input = _build_headline_hebrew_product_tail_repair_input(
-                    base_attempt_input=attempt_input,
-                    product_name=product_name,
-                    previous_plan=parsed,
-                )
-                try:
-                    repair_response = _responses_create_with_plan_retry(
-                        client,
-                        model=model,
-                        input_text=repair_input,
-                        reasoning={"effort": _reasoning_effort()},
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                except VideoPlanningTimeoutError:
-                    raise
-                except Exception as e:
-                    logger.warning(
-                        "VIDEO_PLAN_REPAIR_FAILED reason=%s err_type=%s err=%s",
-                        "planning_failed_model_call",
-                        type(e).__name__,
-                        e,
-                    )
-                    logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
-                    rescued = _rescue_plan_headline_hebrew_product_tail(
-                        parsed,
-                        planner_deadline_monotonic=deadline_monotonic,
-                        product_name=product_name,
-                        product_description=product_description,
-                        content_language=content_language,
-                    )
-                    if rescued:
-                        plan = rescued
-                        logger.info(
-                            "VIDEO_PLAN_REPAIR_OK reason=headline_hebrew_product_tail_final_fallback"
-                        )
-                    else:
-                        logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
-                        logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                        return None, "planning_failed_incomplete_plan"
-                else:
-                    repair_raw = _extract_responses_output_text(repair_response)
-                    repair_parsed = _parse_json_from_response(repair_raw or "")
-                    if not repair_parsed:
-                        logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
-                        rescued = _rescue_plan_headline_hebrew_product_tail(
-                            parsed,
-                            planner_deadline_monotonic=deadline_monotonic,
-                            product_name=product_name,
-                            product_description=product_description,
-                            content_language=content_language,
-                        )
-                        if rescued:
-                            plan = rescued
-                            logger.info(
-                                "VIDEO_PLAN_REPAIR_OK reason=headline_hebrew_product_tail_final_fallback"
-                            )
-                        else:
-                            logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
-                            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                            return None, "planning_failed_incomplete_plan"
-                    else:
-                        merged = dict(parsed)
-                        new_ht = (repair_parsed.get("headlineText") or "").strip()
-                        if new_ht:
-                            merged["headlineText"] = new_ht
-                        repaired_plan, repaired_err = validate_and_normalize_plan(
-                            merged,
-                            planner_deadline_monotonic=deadline_monotonic,
-                            product_name=product_name,
-                            product_description=product_description,
-                            content_language=content_language,
-                        )
-                        if repaired_plan:
-                            plan = repaired_plan
-                            logger.info("VIDEO_PLAN_REPAIR_OK reason=headline_hebrew_product_tail")
-                        else:
-                            logger.info("VIDEO_HEADLINE_STRUCT_REPAIR_FAIL")
-                            rescued = _rescue_plan_headline_hebrew_product_tail(
-                                merged,
-                                planner_deadline_monotonic=deadline_monotonic,
-                                product_name=product_name,
-                                product_description=product_description,
-                                content_language=content_language,
-                            )
-                            if rescued:
-                                plan = rescued
-                                logger.info(
-                                    "VIDEO_PLAN_REPAIR_OK reason=headline_hebrew_product_tail_final_fallback"
-                                )
-                            else:
-                                logger.error(
-                                    "VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s",
-                                    (repaired_err or last_v_err).strip(),
-                                )
-                                logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                                return None, "planning_failed_incomplete_plan"
-            elif last_v_err in {
+            if last_v_err in {
                 "planning_failed_unrealistic_physics",
                 "planning_failed_invalid_objects",
             }:
@@ -1732,6 +1296,15 @@ Language: {lang_name} ({lang}).
                 logger.info("VIDEO_PLAN_RESPONSE_OK=false")
                 return None, last_v_err
 
+        plan, headline_err = _apply_separate_video_headline_to_plan(
+            plan,
+            product_description=product_description,
+        )
+        if not plan:
+            logger.error("VIDEO_PLAN_FAIL_HEADLINE reason=%s", headline_err)
+            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
+            return None, headline_err or "headline_failed"
+
         log_plan_summary(plan)
         logger.info("VIDEO_PLAN_OK model=%s", model)
         _log_video_plan_post_ok_diagnostics(plan)
@@ -1739,20 +1312,6 @@ Language: {lang_name} ({lang}).
         object_a_value = (plan.get("objectA") or "").strip()
         if object_a_value:
             remember_object_a_ace("builder2", object_a_value)
-        headline_full = (plan.get("headlineText") or "").strip()
-        product_resolved = (plan.get("productNameResolved") or "").strip()
-        headline_without_product = headline_full
-        if product_resolved and headline_full.startswith(product_resolved + " "):
-            headline_without_product = headline_full[len(product_resolved) + 1 :].strip()
-        if headline_without_product:
-            remember_headline("builder2", headline_without_product)
-        logger.info(
-            "VIDEO_HEADLINE_RHYME final_headline_remainder=%s",
-            headline_without_product[:200],
-        )
-        hderiv = (plan.get("headlineDerivation") or "").strip()
-        if hderiv:
-            logger.info("VIDEO_HEADLINE_RHYME headlineDerivation=%s", hderiv[:300])
         return _return_plan_with_promise_persist(
             plan,
             product_name=product_name,
