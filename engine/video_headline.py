@@ -15,6 +15,266 @@ from engine.ace_usage_memory import get_used_headlines, remember_headline
 
 logger = logging.getLogger(__name__)
 
+_MAX_HEADLINE_WORDS = 7
+
+_HE_FILLER_WORDS = frozenset(
+    {
+        "את",
+        "של",
+        "על",
+        "עם",
+        "אל",
+        "מן",
+        "מה",
+        "אם",
+        "כי",
+        "גם",
+        "רק",
+        "עוד",
+        "כבר",
+        "מאוד",
+        "הרבה",
+        "יותר",
+        "פחות",
+        "כמו",
+        "כדי",
+        "אצל",
+        "בין",
+        "אחרי",
+        "לפני",
+        "תוך",
+        "כש",
+        "כאשר",
+        "שיש",
+        "שאין",
+        "שלא",
+    }
+)
+_EN_FILLER_WORDS = frozenset(
+    {
+        "the",
+        "a",
+        "an",
+        "of",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "and",
+        "with",
+        "from",
+        "by",
+        "as",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "your",
+        "my",
+        "our",
+        "their",
+        "that",
+        "this",
+        "just",
+        "also",
+        "even",
+        "very",
+        "really",
+        "so",
+        "too",
+        "when",
+        "while",
+        "who",
+        "whom",
+        "which",
+        "into",
+        "upon",
+    }
+)
+
+
+def _headline_word_count(text: str) -> int:
+    return len([w for w in (text or "").strip().split() if w])
+
+
+def _assemble_headline_full(product_name: str, remainder: str) -> str:
+    return " ".join(f"{product_name} {remainder}".split())
+
+
+def _normalize_headline_word(word: str) -> str:
+    return (word or "").strip().strip(".,!?;:\"'()[]").lower()
+
+
+def _find_replacement_object_indices(
+    remainder: str,
+    *,
+    replacement_object: str,
+    object_a: str,
+    object_b: str,
+) -> set[int]:
+    """Indices of remainder words that carry the substituted object (must be preserved)."""
+    words = [w for w in remainder.split() if w]
+    protected: set[int] = set()
+    candidates: list[str] = []
+    for raw in (replacement_object, object_a, object_b):
+        c = (raw or "").strip()
+        if c and c not in candidates:
+            candidates.append(c)
+
+    for cand in candidates:
+        cand_words = [w for w in cand.split() if w]
+        if not cand_words:
+            continue
+        if len(cand_words) == 1:
+            cand_norm = _normalize_headline_word(cand_words[0])
+            for i, word in enumerate(words):
+                word_norm = _normalize_headline_word(word)
+                if word_norm == cand_norm or cand_norm in word_norm or word_norm in cand_norm:
+                    protected.add(i)
+        else:
+            cand_norm = " ".join(_normalize_headline_word(w) for w in cand_words)
+            for start in range(len(words) - len(cand_words) + 1):
+                window = " ".join(_normalize_headline_word(w) for w in words[start : start + len(cand_words)])
+                if window == cand_norm:
+                    protected.update(range(start, start + len(cand_words)))
+    return protected
+
+
+def _filler_words_for_language(language: str) -> frozenset[str]:
+    return _EN_FILLER_WORDS if (language or "").strip().lower() == "en" else _HE_FILLER_WORDS
+
+
+def _shorten_remainder_to_word_budget(
+    remainder: str,
+    *,
+    max_words: int,
+    protected_indices: set[int],
+    original_expression: str,
+    language: str,
+) -> str | None:
+    """Deterministically shorten remainder; preserve substituted object word(s)."""
+    words = [w for w in remainder.split() if w]
+    if max_words < 1:
+        return None
+    if len(words) <= max_words:
+        return " ".join(words)
+
+    fillers = _filler_words_for_language(language)
+    original_norm = {
+        _normalize_headline_word(w) for w in (original_expression or "").split() if w
+    }
+
+    def removal_rank(index: int, word: str) -> tuple[int, int, int]:
+        if index in protected_indices:
+            return (99, 0, index)
+        word_norm = _normalize_headline_word(word)
+        if word_norm in fillers:
+            tier = 0
+        elif original_norm and word_norm not in original_norm:
+            tier = 1
+        else:
+            tier = 2
+        if protected_indices:
+            dist = min(abs(index - p) for p in protected_indices)
+        else:
+            dist = min(index, len(words) - 1 - index)
+        return (tier, dist, index)
+
+    current = list(words)
+    current_protected = set(protected_indices)
+
+    while len(current) > max_words:
+        removable = [i for i in range(len(current)) if i not in current_protected]
+        if not removable:
+            break
+        remove_at = min(removable, key=lambda i: removal_rank(i, current[i]))
+        current.pop(remove_at)
+        current_protected = {
+            (i if i < remove_at else i - 1)
+            for i in current_protected
+            if i != remove_at
+        }
+
+    if len(current) <= max_words and current:
+        return " ".join(current)
+
+    if not protected_indices:
+        return " ".join(words[:max_words]) if len(words) >= max_words else None
+
+    best: str | None = None
+    best_score = -1
+    for start in range(len(words) - max_words + 1):
+        window_indices = set(range(start, start + max_words))
+        if not protected_indices & window_indices:
+            continue
+        window_words = words[start : start + max_words]
+        overlap = (
+            sum(1 for w in window_words if _normalize_headline_word(w) in original_norm)
+            if original_norm
+            else max_words
+        )
+        score = overlap * 100 - start
+        if score > best_score:
+            best_score = score
+            best = " ".join(window_words)
+    return best
+
+
+def _fit_headline_to_word_limit(
+    *,
+    product_name: str,
+    remainder: str,
+    data: dict[str, Any],
+    object_a: str,
+    object_b: str,
+    language: str,
+) -> tuple[str, str] | None:
+    """Return (shortened_remainder, headline_full) within 7 words, or None."""
+    pn = " ".join(product_name.split())
+    rem = " ".join(remainder.split())
+    hfull = _assemble_headline_full(pn, rem)
+    if _headline_word_count(hfull) <= _MAX_HEADLINE_WORDS:
+        return rem, hfull
+
+    logger.info("VIDEO_HEADLINE_TOO_LONG_SHORTEN_START")
+    old_full = hfull
+    remainder_budget = _MAX_HEADLINE_WORDS - _headline_word_count(pn)
+    if remainder_budget < 1:
+        logger.info("VIDEO_HEADLINE_TOO_LONG_SHORTEN_FAIL")
+        return None
+
+    protected = _find_replacement_object_indices(
+        rem,
+        replacement_object=(data.get("headlineReplacementObject") or "").strip(),
+        object_a=object_a,
+        object_b=object_b,
+    )
+    shortened = _shorten_remainder_to_word_budget(
+        rem,
+        max_words=remainder_budget,
+        protected_indices=protected,
+        original_expression=(data.get("headlineOriginalExpression") or "").strip(),
+        language=language,
+    )
+    if not shortened:
+        logger.info("VIDEO_HEADLINE_TOO_LONG_SHORTEN_FAIL")
+        return None
+
+    new_full = _assemble_headline_full(pn, shortened)
+    if _headline_word_count(new_full) > _MAX_HEADLINE_WORDS:
+        logger.info("VIDEO_HEADLINE_TOO_LONG_SHORTEN_FAIL")
+        return None
+
+    logger.info(
+        "VIDEO_HEADLINE_TOO_LONG_SHORTEN_OK old=%s new=%s",
+        old_full[:300],
+        new_full[:300],
+    )
+    return shortened, new_full
+
 
 def _video_headline_rhyming_substitution_block() -> str:
     """Same creative rule set as Builder1 headline (remainder-only output)."""
@@ -168,9 +428,18 @@ def generate_video_headline_o3(
     htt = (data.get("headlineText") or "").strip()
     if not hpn or not htt:
         raise VideoHeadlineError("headline_empty_field")
-    hfull = " ".join(f"{hpn} {htt}".split())
-    if len(hfull.split()) > 7:
+
+    fitted = _fit_headline_to_word_limit(
+        product_name=hpn,
+        remainder=htt,
+        data=data,
+        object_a=object_a,
+        object_b=object_b,
+        language=language,
+    )
+    if not fitted:
         raise VideoHeadlineError("headline_too_long")
+    htt, hfull = fitted
 
     headline_without_product_name = htt
     hfull_norm = " ".join((hfull or "").split())
