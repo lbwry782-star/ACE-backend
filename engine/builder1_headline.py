@@ -15,8 +15,14 @@ from engine.ace_usage_memory import get_used_headlines, remember_headline
 
 logger = logging.getLogger(__name__)
 
+_MAX_HEADLINE_REMAINDER_WORDS = 7
+
 _MODE_SIDE_BY_SIDE = "SIDE_BY_SIDE"
 _MODE_REPLACEMENT = "REPLACEMENT"
+
+
+def _headline_remainder_word_count(remainder: str) -> int:
+    return len([w for w in (remainder or "").strip().split() if w])
 
 
 def _norm_object_name(value: str) -> str:
@@ -52,7 +58,7 @@ def _builder1_headline_rhyming_substitution_block() -> str:
         "24. If the substitution is only a pun but does not carry the advertisingPromise, reject it and choose another expression/substitution.\n"
         "25. Do not add extra words before, inside, or after the twisted expression.\n"
         "26. headlineProductName must exactly match productNameResolved (backend-fixed). headlineText is the twisted expression remainder only — do not repeat the product name in headlineText.\n"
-        "27. headlineFull must be exactly headlineProductName, one ASCII space, then headlineText. ≤7 words total on headlineFull.\n"
+        "27. headlineText (remainder only) may contain up to 7 words. productNameResolved is separate and does not count toward that limit. headlineFull = headlineProductName + one ASCII space + headlineText.\n"
         "28. headlineText must express the advertisingPromise through the visual interaction — not by restating the promise literally.\n"
         "29. Do NOT pick an expression that already contains the object word before substitution.\n"
     )
@@ -208,8 +214,7 @@ def generate_builder1_headline_o3(
     if not hpn or not htt:
         raise ValueError("headline_empty_field")
     hfull = " ".join(f"{hpn} {htt}".split())
-    norm_full = hfull
-    if len(norm_full.split()) > 7:
+    if _headline_remainder_word_count(htt) > _MAX_HEADLINE_REMAINDER_WORDS:
         raise ValueError("headline_too_long")
     headline_without_product_name = htt
     hfull_norm = " ".join((hfull or "").split())
