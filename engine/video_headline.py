@@ -15,7 +15,7 @@ from engine.ace_usage_memory import get_used_headlines, remember_headline
 
 logger = logging.getLogger(__name__)
 
-_MAX_HEADLINE_WORDS = 7
+_MAX_HEADLINE_REMAINDER_WORDS = 7
 
 _HE_FILLER_WORDS = frozenset(
     {
@@ -223,7 +223,7 @@ def _shorten_remainder_to_word_budget(
     return best
 
 
-def _fit_headline_to_word_limit(
+def _fit_headline_remainder_to_word_limit(
     *,
     product_name: str,
     remainder: str,
@@ -232,19 +232,15 @@ def _fit_headline_to_word_limit(
     object_b: str,
     language: str,
 ) -> tuple[str, str] | None:
-    """Return (shortened_remainder, headline_full) within 7 words, or None."""
+    """Return (remainder, headline_full). The 7-word cap applies to remainder only."""
     pn = " ".join(product_name.split())
     rem = " ".join(remainder.split())
     hfull = _assemble_headline_full(pn, rem)
-    if _headline_word_count(hfull) <= _MAX_HEADLINE_WORDS:
+    if _headline_word_count(rem) <= _MAX_HEADLINE_REMAINDER_WORDS:
         return rem, hfull
 
     logger.info("VIDEO_HEADLINE_TOO_LONG_SHORTEN_START")
-    old_full = hfull
-    remainder_budget = _MAX_HEADLINE_WORDS - _headline_word_count(pn)
-    if remainder_budget < 1:
-        logger.info("VIDEO_HEADLINE_TOO_LONG_SHORTEN_FAIL")
-        return None
+    old_rem = rem
 
     protected = _find_replacement_object_indices(
         rem,
@@ -254,7 +250,7 @@ def _fit_headline_to_word_limit(
     )
     shortened = _shorten_remainder_to_word_budget(
         rem,
-        max_words=remainder_budget,
+        max_words=_MAX_HEADLINE_REMAINDER_WORDS,
         protected_indices=protected,
         original_expression=(data.get("headlineOriginalExpression") or "").strip(),
         language=language,
@@ -264,14 +260,14 @@ def _fit_headline_to_word_limit(
         return None
 
     new_full = _assemble_headline_full(pn, shortened)
-    if _headline_word_count(new_full) > _MAX_HEADLINE_WORDS:
+    if _headline_word_count(shortened) > _MAX_HEADLINE_REMAINDER_WORDS:
         logger.info("VIDEO_HEADLINE_TOO_LONG_SHORTEN_FAIL")
         return None
 
     logger.info(
         "VIDEO_HEADLINE_TOO_LONG_SHORTEN_OK old=%s new=%s",
-        old_full[:300],
-        new_full[:300],
+        old_rem[:300],
+        shortened[:300],
     )
     return shortened, new_full
 
@@ -306,7 +302,7 @@ def _video_headline_rhyming_substitution_block() -> str:
         "24. If the substitution is only a pun but does not carry the advertisingPromise, reject it and choose another expression/substitution.\n"
         "25. Do not add extra words before, inside, or after the twisted expression.\n"
         "26. headlineProductName must exactly match productNameResolved (backend-fixed). headlineText is the twisted expression remainder only — do not repeat the product name in headlineText.\n"
-        "27. headlineFull must be exactly headlineProductName, one ASCII space, then headlineText. ≤7 words total on headlineFull.\n"
+        "27. headlineText (remainder only) may contain up to 7 words. productNameResolved is separate and does not count toward that limit. headlineFull = headlineProductName + one ASCII space + headlineText.\n"
         "28. headlineText must express the advertisingPromise through the video interaction — not by restating the promise literally.\n"
         "29. Do NOT pick an expression that already contains the object word before substitution.\n"
         "30. The replacement object may be Object A or Object B.\n"
@@ -429,7 +425,7 @@ def generate_video_headline_o3(
     if not hpn or not htt:
         raise VideoHeadlineError("headline_empty_field")
 
-    fitted = _fit_headline_to_word_limit(
+    fitted = _fit_headline_remainder_to_word_limit(
         product_name=hpn,
         remainder=htt,
         data=data,
