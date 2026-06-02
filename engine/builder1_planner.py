@@ -81,6 +81,27 @@ _FLAT_CARD_PAPER_OBJECT_HINTS: tuple[str, ...] = (
     "page",
     "postcard",
 )
+_REPLACEMENT_VISUAL_TRANSITION_HINTS: tuple[str, ...] = (
+    "in the replacement",
+    "replacement vision",
+    "replacement version",
+    "instead of",
+    "used to be",
+    "where object a",
+    "object a is shown",
+    "then object b",
+    "then the same",
+    "becomes an",
+    "becomes a",
+    "turns into",
+    "replaces the",
+    "replaces it",
+    "replaced by",
+    "switches from",
+    "changes from",
+    "before replacement",
+    "after replacement",
+)
 
 
 def _norm_text(value: str) -> str:
@@ -118,6 +139,20 @@ def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]
         reasons.append("object_a_secondary_missing")
     elif any(h in secondary for h in _NON_PHYSICAL_SECONDARY_HINTS):
         reasons.append("object_a_secondary_not_concrete_physical")
+    if plan.mode_decision == "REPLACEMENT":
+        if any(h in visual_desc for h in _REPLACEMENT_VISUAL_TRANSITION_HINTS):
+            reasons.append("replacement_visual_description_narrates_a_to_b_transition")
+        object_a_norm = _norm_text(plan.object_a)
+        if object_a_norm and len(object_a_norm) >= 4 and object_a_norm in visual_desc:
+            negated = (
+                "do not show" in visual_desc
+                or "don't show" in visual_desc
+                or "never show" in visual_desc
+                or f"no {object_a_norm}" in visual_desc
+                or f"without {object_a_norm}" in visual_desc
+            )
+            if not negated:
+                reasons.append("replacement_visual_description_describes_object_a_visible")
     if plan.mode_decision == "REPLACEMENT" and any(h in visual_desc for h in _SCENE_CHANGE_HINTS):
         reasons.append("replacement_visual_description_indicates_scene_or_grip_change")
     if plan.mode_decision == "REPLACEMENT":
@@ -174,6 +209,9 @@ def _build_repair_user_prompt(
         f"- Object A must be fresh and not in memory: {memory_list}\n"
         "- Object A secondary must be a classic physical companion/context object of Object A.\n"
         "- REPLACEMENT only if Object B can replace Object A without changing pose/context/secondary interaction.\n"
+        "- REPLACEMENT visualDescription: final frame only — describe Object B + objectASecondary; never narrate A-to-B transition; Object A must not appear as visible (only negative 'do not show Object A' allowed).\n"
+        "- Forbidden REPLACEMENT visualDescription: 'In the replacement vision...', 'Instead of Object A...', 'Where Object A used to be...', describing Object A then Object B as replacement.\n"
+        "- Correct REPLACEMENT visualDescription example: 'A human hand naturally grips a vanilla ice cream cone...' (final state only; no microphone narrative).\n"
         "- visualSimilarityScore is physical form only; conceptual/function/language/advertising similarity must NOT inflate the score.\n"
         "- Before scoring 90+, judge each object as a silent white sculpture; if score would be below 90, REPLACEMENT is forbidden.\n"
         "- INVALID 90+ examples: computer keyboard ↔ piano keys; computer mouse ↔ real mouse; newspaper ↔ website; camera ↔ eye.\n"

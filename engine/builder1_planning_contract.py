@@ -75,6 +75,20 @@ INVALID HIGH-SIMILARITY / FORBIDDEN 90+ EXAMPLES (similarity driven mainly by fu
 - For REPLACEMENT planning, explicitly plan a final visual where objectA is absent, objectB replaces objectA in objectA's position/context, and objectASecondary remains visible interacting with objectB.
 - In REPLACEMENT, objectB must keep objectA's background/context while appearing in objectA's original position.
 - In REPLACEMENT, objectASecondary must remain visible and interact with objectB in a way that demonstrates objectB's nature, as if objectASecondary were naturally paired with objectB.
+
+REPLACEMENT visualDescription (mandatory when modeDecision is REPLACEMENT):
+- visualDescription must describe the final rendered image only — written as if Object A no longer exists.
+- Describe only the final state: Object B, objectASecondary, and final pose, position, scale, lighting, and composition.
+- A reader of visualDescription must be unable to tell that Object A was ever present.
+- Object A must not be visually described as present in the scene.
+- Object A may appear only in negative instructions (for example: "Do not show Object A") — never as a visible object.
+- Forbidden: describing Object A positively, then describing Object B as a replacement.
+- Forbidden phrases/patterns: "Object A is shown... then Object B replaces it..."; "In the replacement vision..."; "In the replacement version..."; "Instead of Object A..."; "Where Object A used to be..."; any narrative transition from A to B.
+- Forbidden: "becomes", "turns into", "replaces the", "replaced by", "switches from", or any before/after story between A and B.
+- Required: describe only what is visible in the final frame (Object B + objectASecondary + scene physics).
+- Wrong example: "A hand holds a microphone. In the replacement version the microphone becomes an ice cream cone."
+- Correct example: "A human hand naturally grips a vanilla ice cream cone against a clean neutral background. The grip, scale, position, lighting, and composition are realistic and physically natural."
+
 - REPLACEMENT requires replacement-grade similarity, not just general silhouette similarity.
 - Score 90+ only when objectB can literally occupy objectA's exact physical role, pose, position, and objectASecondary interaction without reconfiguring the scene.
 - objectASecondary interaction must still make physical sense as originally paired with objectA.
@@ -140,7 +154,14 @@ BUILDER1_PLANNING_JSON_SCHEMA: dict = {
                 "if unsure or any reconfiguration is required, choose SIDE_BY_SIDE."
             ),
         },
-        "visualDescription": {"type": "string"},
+        "visualDescription": {
+            "type": "string",
+            "description": (
+                "For REPLACEMENT: final-frame description only — Object B + objectASecondary visible; "
+                "never narrate A-to-B transition or describe Object A as visible. "
+                "For SIDE_BY_SIDE: both Object A and Object B visible with overlap."
+            ),
+        },
     },
 }
 
