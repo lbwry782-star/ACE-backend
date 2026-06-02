@@ -18,9 +18,53 @@ Output must contain exactly these fields:
 
 Rules:
 - Choose Object A from product name + product description.
-- Grasp overall form like a painter, not only technical contour.
+- Choose Object A and Object B the way a painter perceives them: grasp overall form like a painter, not only technical contour or silhouette.
 - Find Object B with strong morphological similarity to Object A.
-- Stop when Object B also expresses the advertising promise.
+- A painter should perceive Object A and Object B as nearly the same physical form before any conceptual meaning is considered.
+- Among morphologically valid candidates, the advertising promise may help choose Object B — but advertising promise must NEVER increase visualSimilarityScore.
+
+VISUAL SIMILARITY MUST BE BASED ON (only these factors may raise visualSimilarityScore):
+- overall form
+- mass distribution
+- proportions
+- volume
+- dominant shapes
+- physical structure
+- physical occupation of space
+- physical role in the scene
+- whether Object B can physically replace Object A in the exact same position and interaction
+
+DO NOT COUNT toward visualSimilarityScore (forbidden score inflation):
+- shared function
+- shared purpose
+- shared category
+- shared user interaction
+- shared verb
+- shared action
+- shared name
+- shared word root
+- rhyme
+- metaphor
+- advertising promise
+- headline potential
+- conceptual similarity
+
+Before assigning visualSimilarityScore above 90:
+- Ignore all meaning, function, branding, language, and advertising context.
+- Judge only each object as a silent white sculpture.
+- If the score would fall below 90 under that sculpture-only test, REPLACEMENT is forbidden and modeDecision must be SIDE_BY_SIDE.
+
+VALID HIGH REPLACEMENT-GRADE SIMILARITY EXAMPLES (only when physical replacement continuity is plausible):
+- road cone ↔ carrot
+- dart ↔ nail
+- microphone ↔ ice cream cone
+
+INVALID HIGH-SIMILARITY / FORBIDDEN 90+ EXAMPLES (similarity driven mainly by function, language, symbolism, or concept — must be SIDE_BY_SIDE or a new pair):
+- computer keyboard ↔ piano keys
+- computer mouse ↔ real mouse
+- newspaper ↔ website
+- camera ↔ eye
+
 - Filter out text, logos, brands, generic environments, and unclear/non-physical situations.
 - All objects must be classic, defined, physical objects.
 - objectASecondary must be the classic physical companion/context object of objectA only (for example: can+straw, dog+bone, bee+flower, sign+pole).
@@ -43,9 +87,9 @@ Rules:
 - Score bands: 90-100 => REPLACEMENT, 70-89 => SIDE_BY_SIDE, below 70 => invalid pair (must choose a new pair).
 - SIDE_BY_SIDE reasoning flow: first choose Object A from product name + product description.
 - For SIDE_BY_SIDE, grasp Object A's whole general form like a painter, not only technical contour/silhouette.
-- Then search for Object B by morphological similarity to Object A.
-- In SIDE_BY_SIDE, stop only when Object B is also a result of the advertising promise.
-- The advertising promise is not merely a justification for the move; the moment it is discovered is what makes the move possible.
+- Then search for Object B by morphological similarity to Object A (painter perception; sculpture-only form comparison).
+- Among candidates that already pass morphological similarity, stop only when Object B also expresses the advertising promise.
+- The advertising promise is not merely a justification for the move; the moment it is discovered is what makes the move possible — but it must not raise visualSimilarityScore.
 - In SIDE_BY_SIDE, Object A and Object B must be shown with partial overlap, one over the other.
 - SIDE_BY_SIDE is valid only for visualSimilarityScore 70-89.
 - Below 70, choose a new pair.
@@ -82,9 +126,10 @@ BUILDER1_PLANNING_JSON_SCHEMA: dict = {
             "minimum": 0,
             "maximum": 100,
             "description": (
-                "Conservative replacement-grade score. Use 90+ only if objectB can literally replace objectA "
-                "in the same role/pose/position with objectASecondary interaction unchanged. "
-                "Score band policy: 90-100 REPLACEMENT, 70-89 SIDE_BY_SIDE, below 70 invalid (choose a new pair)."
+                "Physical form only (painter/sculpture perception). Conceptual, functional, linguistic, "
+                "or advertising associations must NOT inflate this score. Use 90+ only if objectB can "
+                "literally replace objectA in the same role/pose/position with objectASecondary interaction "
+                "unchanged. Score bands: 90-100 REPLACEMENT, 70-89 SIDE_BY_SIDE, below 70 invalid."
             ),
         },
         "modeDecision": {
