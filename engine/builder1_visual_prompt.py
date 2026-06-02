@@ -85,8 +85,6 @@ _ENVIRONMENT_WORD_HINTS: tuple[str, ...] = (
     "prop",
     "props",
     "furniture",
-    "hand",
-    "hands",
     "person",
     "people",
     "surface",
@@ -120,6 +118,28 @@ _ENVIRONMENT_WORD_HINTS: tuple[str, ...] = (
     "יד",
 )
 
+# Phrases stripped from planner visualDescription before image prompt (objects/pose kept).
+_BACKGROUND_PHRASE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"\bagainst\s+a\s+clean\s+[\w\s-]+\bbackground\b",
+        r"\bwith\s+a\s+clean\s+[\w\s-]+\bbackground\b",
+        r"\bclean\s+studio\s+backdrop\b",
+        r"\bstudio\s+backdrop\b",
+        r"\bclean\s+neutral\s+background\b",
+        r"\bclean\s+[\w\s-]*\bbackground\b",
+        r"\bneutral\s+background\b",
+        r"\bcontext\s+and\s+depth\b",
+        r"\bgently\s+cast\s+shadows?\b",
+        r"\bcast\s+shadows?\b",
+        r"\bsoft\s+key\s+light\b",
+        r"\bkey\s+light\b",
+        r",?\s*\band\s+depth\b",
+        r",?\s*\bwith\s+depth\b",
+        r"\bagainst\s+a\s*\.?",
+    )
+)
+
 
 def _base_constraints_text() -> str:
     return ", ".join(_NEGATIVE_CONSTRAINTS)
@@ -143,9 +163,25 @@ def _sentence_has_environment_hint(sentence: str) -> bool:
     return False
 
 
+def _strip_background_phrases(text: str) -> str:
+    """Remove background/lighting/scenery phrases; keep object and pose wording."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    for pattern in _BACKGROUND_PHRASE_PATTERNS:
+        t = pattern.sub(" ", t)
+    t = re.sub(r"\s+", " ", t)
+    t = re.sub(r"\s*,\s*,", ", ", t)
+    t = re.sub(r",\s*\.", ".", t)
+    t = re.sub(r"\band\s+add\b", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s+\band\b\s*$", "", t, flags=re.IGNORECASE)
+    return t.strip(" ,.;-")
+
+
 def _sanitize_visual_description_for_image(visual_description: str) -> str:
     """
-    Keep only pose/overlap/placement/interaction cues; drop environment/scenery/props language.
+    Strip background/scenery phrases; drop sentences that are only environment language.
+    Keep pose/overlap/placement/interaction cues.
     """
     raw = (visual_description or "").strip()
     if not raw:
@@ -154,10 +190,14 @@ def _sanitize_visual_description_for_image(visual_description: str) -> str:
     kept: list[str] = []
     dropped: list[str] = []
     for sentence in _split_visual_description_sentences(raw):
-        if _sentence_has_environment_hint(sentence):
+        stripped = _strip_background_phrases(sentence)
+        if not stripped or len(stripped.split()) < 3:
+            dropped.append(sentence)
+            continue
+        if _sentence_has_environment_hint(stripped):
             dropped.append(sentence)
         else:
-            kept.append(sentence)
+            kept.append(stripped)
 
     sanitized = ". ".join(kept).strip()
     if dropped:
