@@ -39,7 +39,49 @@ _SCENE_FORBIDDEN_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ("levitat", re.compile(r"\blevitat\w*\b", re.I)),
     ("teleport", re.compile(r"\bteleport\w*\b", re.I)),
     ("morph", re.compile(r"\bmorph(?:s|ed|ing)?\b", re.I)),
+    ("symbolic_object", re.compile(r"\bsymbolic\s+(object|objects|float|floating)\b", re.I)),
 ]
+
+# Literal industry / category words — forbidden as headlineCoreKeyword (headline may still mention them).
+_WEAK_INDUSTRY_KEYWORDS: FrozenSet[str] = frozenset(
+    {
+        "advertising",
+        "marketing",
+        "digital",
+        "campaign",
+        "story",
+        "service",
+        "strategy",
+        "agency",
+        "brand",
+        "branding",
+        "social",
+        "media",
+        "content",
+        "promotion",
+        "promo",
+        "creative",
+        "copy",
+        "copywriting",
+        "seo",
+        "ads",
+        "ad",
+        "פרסום",
+        "שיווק",
+        "דיגיטלי",
+        "דיגיטל",
+        "קמפיין",
+        "סטורי",
+        "שירות",
+        "אסטרטגיה",
+        "פרסומת",
+        "פרסומות",
+        "מדיה",
+        "תוכן",
+        "קידום",
+        "קידוםמכירות",
+    }
+)
 
 _KEYWORD_FILLER_WORDS: FrozenSet[str] = frozenset(
     {
@@ -236,6 +278,10 @@ RUNWAY_PHYSICS_REALISM_CONSTRAINT = (
 )
 
 
+def _is_weak_industry_keyword(keyword: str) -> bool:
+    return _normalize_keyword_token(keyword) in _WEAK_INDUSTRY_KEYWORDS
+
+
 def scene_fields_imply_forbidden_surrealism(blob: str) -> Optional[str]:
     """Return a rule label if scene/video prose matches forbidden surreal semantics; else None."""
     if not (blob or "").strip():
@@ -421,41 +467,57 @@ def _video_plan_planner_description_limit() -> int:
 _JSON_KEYS = """
 Return one JSON object only (no markdown, no prose).
 
-Keys (all strings): productNameResolved, advertisingGoal, headline, headlineCoreKeyword, sceneConcept, videoPrompt, language
+Keys (all strings): productNameResolved, headline, headlineCoreKeyword, sceneConcept, videoPrompt, language
 
 Flow (mandatory order — internal only; output final JSON only):
-1) Read product name + description → advertisingGoal (primary benefit/promise/positioning).
-2) From advertisingGoal → headline (Hebrew, English, or mixed). headline is the twisted phrase remainder ONLY — do NOT include productNameResolved inside headline.
-3) headlineCoreKeyword: exactly ONE word — the most important semantic word in headline; must stand alone if all other headline words are removed; never articles/prepositions/conjunctions/fillers.
-4) sceneConcept: a realistic everyday human situation that is ONLY a metaphor for headlineCoreKeyword — NOT for the full headline and NOT for advertisingGoal.
-5) videoPrompt: English cinematic direction for Runway — completely realistic, physical, everyday; describes sceneConcept only; no fantasy/surrealism/impossible events; no readable on-screen text.
+1) Read product name + product description.
+2) headline: direct expression of the primary advertising advantage implied by the product; remainder ONLY — do NOT include productNameResolved inside headline. Hebrew, English, or mixed. Up to 7 words. Prefer one strong metaphorical word; avoid literal industry/category words when possible.
+3) headlineCoreKeyword: exactly ONE word — the strongest metaphorical word in headline; must appear in headline; must be capable of generating a realistic everyday human scene; never articles/prepositions/conjunctions/fillers; never literal industry words (e.g. advertising, marketing, digital, campaign, story, service, strategy).
+4) sceneConcept: the literal real-world interpretation of headlineCoreKeyword in everyday human life — NOT a metaphor for the full headline.
+5) videoPrompt: English cinematic direction for Runway — completely realistic, physical, everyday; describes sceneConcept only; no fantasy/surrealism/symbolic objects/impossible events; no readable on-screen text.
 
 Empty product name → invent productNameResolved.
 
-Before the JSON: one silent internal revision pass (goal → headline → keyword → scene → prompt); output final JSON only.
+Before the JSON: one silent internal revision pass (headline → keyword → scene → prompt); output final JSON only.
 
 Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
 
 
+def _planner_headline_rules_block() -> str:
+    return (
+        "HEADLINE RULES:\n"
+        "- The headline is the direct expression of the primary advertising advantage implied by product name + description.\n"
+        "- Prefer headlines that contain a single strong metaphorical word (e.g. close, bridge, door, path, heart, home, key, step, light, connection).\n"
+        "- Avoid literal industry/category words whenever possible (e.g. advertising, marketing, digital, campaign, story, service, strategy).\n"
+        "- Remainder only — no product name inside headline. Up to 7 words.\n\n"
+        "headlineCoreKeyword RULES:\n"
+        "- Exactly one word from the headline.\n"
+        "- The strongest metaphorical word — capable of generating a realistic everyday scene.\n"
+        "- FORBIDDEN as keyword: advertising, marketing, digital, campaign, story, service, strategy (and Hebrew equivalents).\n"
+        "- STRONGER examples: close/קרוב, bridge, door/דלת, path/דרך, heart, home, key, step, light, connection.\n\n"
+    )
+
+
 def _planner_keyword_scene_flow_block() -> str:
     return (
-        "BUILDER2 KEYWORD-SCENE FLOW (mandatory; do not narrate in JSON):\n"
+        "BUILDER2 KEYWORD-SCENE FLOW v2 (mandatory; do not narrate in JSON):\n"
         "STEP 1 — Read product_name and product_description.\n"
-        "STEP 2 — advertisingGoal: the primary advertising advantage, benefit, promise, or positioning.\n"
-        "STEP 3 — headline: derived from advertisingGoal; may be Hebrew, English, or mixed Hebrew/English. "
-        "Remainder only (no product name inside headline). Up to 7 words in headline.\n"
-        "STEP 4 — headlineCoreKeyword: exactly one critical semantic word from headline (see examples in schema).\n"
-        "STEP 5 — sceneConcept: realistic everyday human situation; metaphor ONLY for headlineCoreKeyword.\n"
-        "STEP 6 — videoPrompt: Runway-ready realistic scene description from sceneConcept.\n\n"
+        "STEP 2 — headline: direct advertising advantage expression (see HEADLINE RULES).\n"
+        "STEP 3 — headlineCoreKeyword: strongest metaphorical word in headline.\n"
+        "STEP 4 — sceneConcept: literal real-world interpretation of headlineCoreKeyword only.\n"
+        "STEP 5 — videoPrompt: Runway-ready realistic scene from sceneConcept.\n\n"
+        + _planner_headline_rules_block()
+        + "SCENE EXAMPLES:\n"
+        '- Headline "הכי קרוב למשרד פרסום" → keyword "קרוב" → scene: two people warmly embracing after meeting.\n'
+        '- Headline "פותחים לך דלת להזדמנויות" → keyword "דלת" → scene: a person opening a front door and welcoming someone inside.\n'
+        '- Headline "קיצור הדרך ליותר לקוחות" → keyword "דרך" → scene: a person choosing a shorter walking path in a park.\n\n'
         "SCENE RULES (sceneConcept + videoPrompt):\n"
-        "- Completely realistic, physical, everyday, simple, emotionally understandable, possible in the real world.\n"
+        "- Realistic, everyday, simple, human, physically possible.\n"
+        "- Literal real-world interpretation of the keyword — not surreal symbolism.\n"
         "- A viewer who has NOT seen the headline should see a normal realistic human situation.\n"
-        "- The scene is NOT a metaphor for the entire headline or for advertisingGoal — ONLY for headlineCoreKeyword.\n"
-        "ALLOWED: couple hugging, person eating, friends laughing, people running together, child helping parent, "
-        "coworkers shaking hands, family at a table, opening a door, waiting in line, arriving somewhere.\n"
-        "FORBIDDEN: surreal, dreamlike, fantasy, magic, impossible physics, talking/animated/floating objects, "
-        "symbolic impossible events, science fiction, abstract visual concepts.\n"
+        "FORBIDDEN: surreal, dreamlike, fantasy, magic, impossible physics, talking/animated/floating/symbolic objects, "
+        "impossible events, science fiction, abstract visual concepts.\n"
         "HEADLINE DISPLAY (downstream): scene plays first; headline overlay appears at the end — do NOT burn headline into videoPrompt.\n\n"
     )
 
@@ -464,9 +526,9 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
     return (
-        f"ACE Builder2 video planning — keyword-scene model (no objects, no A↔B interactions). "
+        f"ACE Builder2 video planning — keyword-scene v2 (no advertisingGoal stage). "
         f"Language {lang_name} ({lang}). "
-        "advertisingGoal → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
+        "product → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
         "Scene realism is mandatory. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
@@ -570,7 +632,7 @@ def _word_limit(s: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
-_VIDEO_PLAN_SCHEMA_VERSION = "keyword_scene_v1"
+_VIDEO_PLAN_SCHEMA_VERSION = "keyword_scene_v2"
 
 _PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset(
     {"planning_failed_invalid_plan", "planning_failed_no_valid_scene"}
@@ -582,19 +644,17 @@ def _build_scene_plan_repair_input(
     base_attempt_input: str,
     product_name: str,
     product_description: str,
-    advertising_goal: str,
     previous_plan: Dict[str, Any],
     reason: str,
 ) -> str:
     return (
         f"{base_attempt_input}\n\n"
         f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
-        "Keep the same product name, product description, and advertisingGoal.\n"
+        "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
-        f"Advertising goal to keep: {advertising_goal}\n"
         "Previous invalid plan (for correction):\n"
         f"{json.dumps(previous_plan, ensure_ascii=False)}\n"
     )
@@ -604,33 +664,24 @@ def _build_keyword_scene_fallback_plan(
     *,
     product_name: str,
     content_language: str,
-    advertising_goal: str,
 ) -> Dict[str, Any]:
     """Deterministic realistic human-scene fallback when planner repair fails."""
     lang = normalize_video_content_language(content_language)
     pn = (product_name or "").strip() or "ACE Product"
-    goal = (advertising_goal or "").strip()
-    if not goal:
-        goal = (
-            "היתרון של קרבה וזמינות דיגיטלית"
-            if lang == "he"
-            else "The advantage of closeness and digital availability"
-        )
     headline = "הכי קרוב למשרד פרסום" if lang == "he" else "Always One Step Ahead"
     keyword = "קרוב" if lang == "he" else "Ahead"
     scene = (
-        "זוג מתחבק לאחר תקופה ארוכה של ריחוק"
+        "שני אנשים מתחבקים בחום לאחר שנפגשו שוב"
         if lang == "he"
         else "Two people warmly embracing after finally meeting again"
     )
     video_prompt = (
         "A completely realistic everyday scene of two people warmly embracing after finally meeting again. "
         "Natural human behavior. Real-world environment. Stable cinematic camera. "
-        "No fantasy. No surrealism. No impossible events. No readable text in-frame."
+        "No fantasy. No surrealism. No symbolic objects. No impossible events. No readable text in-frame."
     )
     return {
         "productNameResolved": pn,
-        "advertisingGoal": goal,
         "headline": headline,
         "headlineCoreKeyword": keyword,
         "sceneConcept": scene,
@@ -677,8 +728,6 @@ def _runway_human_scene_camera_focus() -> Tuple[str, str]:
 # snake_case / alternate keys from some models → camelCase
 _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("product_name_resolved", "productNameResolved"),
-    ("advertising_goal", "advertisingGoal"),
-    ("advertising_promise", "advertisingGoal"),
     ("headline_core_keyword", "headlineCoreKeyword"),
     ("scene_concept", "sceneConcept"),
     ("video_prompt", "videoPrompt"),
@@ -723,7 +772,6 @@ def validate_and_normalize_plan(
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
 
     pn = (data.get("productNameResolved") or "").strip()
-    ad_goal = (data.get("advertisingGoal") or "").strip()
     headline_rem = (data.get("headline") or "").strip()
     core_kw = (data.get("headlineCoreKeyword") or "").strip()
     scene = (data.get("sceneConcept") or "").strip()
@@ -734,9 +782,6 @@ def validate_and_normalize_plan(
 
     if not pn:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_product_name")
-        return None, "planning_failed_incomplete_plan"
-    if not ad_goal:
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_advertising_goal")
         return None, "planning_failed_incomplete_plan"
     if not headline_rem:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_headline")
@@ -766,6 +811,9 @@ def validate_and_normalize_plan(
     if _normalize_keyword_token(kw_tokens[0]) in _KEYWORD_FILLER_WORDS:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_is_filler")
         return None, "planning_failed_invalid_keyword"
+    if _is_weak_industry_keyword(kw_tokens[0]):
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_is_weak_industry")
+        return None, "planning_failed_weak_industry_keyword"
     if not _headline_contains_core_keyword(headline_rem, core_kw):
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_not_in_headline")
         return None, "planning_failed_invalid_keyword"
@@ -783,15 +831,13 @@ def validate_and_normalize_plan(
     headline_full = _assemble_headline_full(pn_for_headline, headline_rem)
     opening_fd = scene[:400]
 
-    logger.info('VIDEO_PLAN_ADVERTISING_GOAL="%s"', ad_goal[:260])
     logger.info('VIDEO_PLAN_HEADLINE="%s"', headline_rem[:260])
     logger.info('VIDEO_PLAN_CORE_KEYWORD="%s"', core_kw[:120])
     logger.info('VIDEO_PLAN_SCENE_CONCEPT="%s"', scene[:260])
 
     return {
         "productNameResolved": pn,
-        "advertisingGoal": ad_goal,
-        "advertisingPromise": ad_goal,
+        "advertisingPromise": headline_rem,
         "headline": headline_rem,
         "headlineText": headline_full,
         "headlineTextRemainder": headline_rem,
@@ -815,8 +861,8 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
     """Structured keyword-scene + headline fields for every validated plan (video job trace)."""
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
     logger.info(
-        'VIDEO_PLAN_INTEGRITY advertisingGoal="%s"',
-        (plan.get("advertisingGoal") or plan.get("advertisingPromise") or "")[:260],
+        'VIDEO_PLAN_INTEGRITY headline="%s"',
+        (plan.get("headline") or plan.get("headlineTextRemainder") or "")[:260],
     )
     logger.info(
         'VIDEO_PLAN_INTEGRITY headlineCoreKeyword="%s"',
@@ -892,16 +938,15 @@ def _log_video_plan_post_ok_diagnostics(plan: Dict[str, Any]) -> None:
 
     logger.info("VIDEO_PLAN_DIAG productNameResolved=%s", product_resolved[:200])
     logger.info(
-        "VIDEO_PLAN_DIAG advertisingGoal=%s",
-        (plan.get("advertisingGoal") or plan.get("advertisingPromise") or "")[:300],
-    )
-    logger.info(
         "VIDEO_PLAN_DIAG headlineCoreKeyword=%s",
         (plan.get("headlineCoreKeyword") or "")[:120],
     )
     logger.info("VIDEO_PLAN_DIAG sceneConcept=%s", (plan.get("sceneConcept") or "")[:300])
     logger.info("VIDEO_PLAN_DIAG headlineText=%s", headline_full[:300])
-    logger.info("VIDEO_PLAN_DIAG headline_remainder=%s", headline_remainder[:300])
+    logger.info(
+        "VIDEO_PLAN_DIAG headline_remainder=%s",
+        (plan.get("headline") or headline_remainder)[:300],
+    )
     logger.info(
         "VIDEO_PLAN_DIAG videoPrompt=%s",
         (plan.get("videoPrompt") or plan.get("videoPromptCore") or "")[:400],
@@ -963,7 +1008,7 @@ def _fetch_video_plan_o3_sync(
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
-    logger.info("VIDEO_PLAN_SEARCH_ORDER=keyword_scene_v1")
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=keyword_scene_v2")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
@@ -1099,14 +1144,10 @@ Language: {lang_name} ({lang}).
         if not plan:
             last_v_err = (v_err or "").strip() or "planning_failed_incomplete_plan"
             logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=%s", last_v_err)
-            ad_goal_keep = (
-                (parsed.get("advertisingGoal") or parsed.get("advertisingPromise") or "").strip()
-            )
             repair_input = _build_scene_plan_repair_input(
                 base_attempt_input=attempt_input,
                 product_name=product_name,
                 product_description=product_description,
-                advertising_goal=ad_goal_keep,
                 previous_plan=parsed,
                 reason=last_v_err,
             )
@@ -1146,7 +1187,6 @@ Language: {lang_name} ({lang}).
                 fallback_raw = _build_keyword_scene_fallback_plan(
                     product_name=(parsed.get("productNameResolved") or product_name),
                     content_language=content_language,
-                    advertising_goal=ad_goal_keep,
                 )
                 fallback_plan, fallback_err = validate_and_normalize_plan(
                     fallback_raw,
