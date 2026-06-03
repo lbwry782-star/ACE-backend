@@ -18,34 +18,216 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 import httpx
 from openai import OpenAI
 
-from engine.ace_usage_memory import (
-    get_used_object_a,
-    remember_object_a as remember_object_a_ace,
-)
-from engine.video_headline import VideoHeadlineError, generate_video_headline_o3
 from engine.video_language import (
     normalize_video_content_language,
     video_language_display_name,
 )
-from engine.video_plan_objects import video_plan_object_blob_implies_graphic_text_content
 
-# Semantic (regex) gate: interaction prose must not imply frictionless / floaty motion between objects.
-# Word-boundary + stem patterns — not a single substring match.
-_PHYSICAL_INTERACTION_MOTION_FORBIDDEN: List[Tuple[str, re.Pattern]] = [
-    ("slide", re.compile(r"\b(slides?|sliding|slid)\b", re.I)),
-    ("glide", re.compile(r"\b(glides?|gliding|glided)\b", re.I)),
-    ("drift", re.compile(r"\b(drifts?|drifting|drifted)\b", re.I)),
-    ("frictionless", re.compile(r"\bfrictionless\w*\b", re.I)),
-    ("zero_no_friction", re.compile(r"\b(zero|no)\s+friction\b", re.I)),
-    ("weightless", re.compile(r"\bweightless\w*\b", re.I)),
-    ("effortless_motion", re.compile(r"\beffortless(ly)?\s+(motion|movement|contact|touch|sliding|gliding|push|pull|drag)\b", re.I)),
-    ("float_motion", re.compile(r"\b(floats?|floating)\b.*\b(motion|movement|together|apart|contact)\b", re.I)),
-    ("hover", re.compile(r"\b(hover|hovers|hovering)\b", re.I)),
-    ("levitate", re.compile(r"\blevitat\w*\b", re.I)),
-    ("glide_slide_across", re.compile(r"\b(glides?|slides?)\s+(across|along)\b", re.I)),
-    ("silky_smooth", re.compile(r"\b(silky|buttery)\s+smooth\b", re.I)),
-    ("ice_smooth", re.compile(r"\b(like\s+)?ice\b.*\b(smooth|slide|glide)\b", re.I)),
+_MAX_HEADLINE_REMAINDER_WORDS = 7
+
+# Scene / video_prompt must not imply surreal or impossible visuals.
+_SCENE_FORBIDDEN_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    ("surreal", re.compile(r"\bsurreal\w*\b", re.I)),
+    ("dreamlike", re.compile(r"\bdream[\s-]?like\b", re.I)),
+    ("fantasy", re.compile(r"\bfantas(y|ical)\b", re.I)),
+    ("magic", re.compile(r"\bmagic(al)?\b", re.I)),
+    ("impossible_physics", re.compile(r"\bimpossible\s+physics\b", re.I)),
+    ("talking_object", re.compile(r"\btalking\s+(object|objects|item|items)\b", re.I)),
+    ("animated_object", re.compile(r"\banimated\s+(object|objects|item|items)\b", re.I)),
+    ("floating_object", re.compile(r"\bfloating\s+(object|objects|symbol|symbols)\b", re.I)),
+    ("science_fiction", re.compile(r"\bscience[\s-]?fiction\b|\bsci[\s-]?fi\b", re.I)),
+    ("levitat", re.compile(r"\blevitat\w*\b", re.I)),
+    ("teleport", re.compile(r"\bteleport\w*\b", re.I)),
+    ("morph", re.compile(r"\bmorph(?:s|ed|ing)?\b", re.I)),
 ]
+
+_KEYWORD_FILLER_WORDS: FrozenSet[str] = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "to",
+        "of",
+        "in",
+        "on",
+        "at",
+        "for",
+        "with",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "as",
+        "by",
+        "from",
+        "that",
+        "this",
+        "these",
+        "those",
+        "it",
+        "its",
+        "very",
+        "most",
+        "more",
+        "less",
+        "so",
+        "too",
+        "also",
+        "just",
+        "only",
+        "even",
+        "still",
+        "already",
+        "yet",
+        "than",
+        "then",
+        "there",
+        "here",
+        "when",
+        "where",
+        "how",
+        "why",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "if",
+        "not",
+        "no",
+        "yes",
+        "can",
+        "could",
+        "will",
+        "would",
+        "should",
+        "may",
+        "might",
+        "must",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "about",
+        "into",
+        "onto",
+        "upon",
+        "over",
+        "under",
+        "between",
+        "among",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "up",
+        "down",
+        "out",
+        "off",
+        "again",
+        "once",
+        "ever",
+        "never",
+        "always",
+        "often",
+        "sometimes",
+        "usually",
+        "really",
+        "quite",
+        "rather",
+        "such",
+        "same",
+        "other",
+        "another",
+        "each",
+        "every",
+        "all",
+        "any",
+        "some",
+        "many",
+        "much",
+        "few",
+        "little",
+        "own",
+        "new",
+        "old",
+        "good",
+        "best",
+        "better",
+        "well",
+        "one",
+        "two",
+        "first",
+        "last",
+        "next",
+        "ה",
+        "ו",
+        "ש",
+        "כ",
+        "ל",
+        "מ",
+        "ב",
+        "ע",
+        "על",
+        "אל",
+        "את",
+        "עם",
+        "של",
+        "זה",
+        "זו",
+        "זאת",
+        "הוא",
+        "היא",
+        "הם",
+        "הן",
+        "אני",
+        "אתה",
+        "את",
+        "אנחנו",
+        "אתם",
+        "אתן",
+        "כי",
+        "אם",
+        "או",
+        "גם",
+        "רק",
+        "עוד",
+        "כבר",
+        "לא",
+        "כן",
+        "מאוד",
+        "הכי",
+        "יותר",
+        "פחות",
+        "כל",
+        "כמה",
+        "איזה",
+        "איזו",
+        "מה",
+        "מי",
+        "איך",
+        "למה",
+        "מתי",
+        "איפה",
+        "כאן",
+        "שם",
+        "עכשיו",
+        "תמיד",
+        "לעולם",
+        "אף",
+        "פעם",
+    }
+)
 
 # Appended to Runway promptText in runway_video after text-policy sanitize (hard constraint).
 RUNWAY_PHYSICS_REALISM_CONSTRAINT = (
@@ -54,17 +236,44 @@ RUNWAY_PHYSICS_REALISM_CONSTRAINT = (
 )
 
 
-def interaction_fields_imply_frictionless_or_floaty_motion(blob: str) -> Optional[str]:
-    """
-    Return a rule label if interaction-related prose matches forbidden motion semantics; else None.
-    Scans interactionSummary, interactionScript, objectAReason, objectBReason only (not headline, not promise).
-    """
+def scene_fields_imply_forbidden_surrealism(blob: str) -> Optional[str]:
+    """Return a rule label if scene/video prose matches forbidden surreal semantics; else None."""
     if not (blob or "").strip():
         return None
-    for label, rx in _PHYSICAL_INTERACTION_MOTION_FORBIDDEN:
+    for label, rx in _SCENE_FORBIDDEN_PATTERNS:
         if rx.search(blob):
             return label
     return None
+
+
+def _headline_remainder_word_count(text: str) -> int:
+    return len([w for w in (text or "").split() if w])
+
+
+def _assemble_headline_full(product_name: str, remainder: str) -> str:
+    pn = (product_name or "").strip()
+    rem = " ".join((remainder or "").split())
+    if not pn:
+        return rem
+    if not rem:
+        return pn
+    return f"{pn} {rem}"
+
+
+def _normalize_keyword_token(word: str) -> str:
+    return (word or "").strip().strip(".,!?;:\"'()[]").lower()
+
+
+def _headline_contains_core_keyword(headline: str, keyword: str) -> bool:
+    kw = _normalize_keyword_token(keyword)
+    if not kw:
+        return False
+    for word in (headline or "").split():
+        wn = _normalize_keyword_token(word)
+        if wn == kw or kw in wn or wn in kw:
+            return True
+    return kw in _normalize_keyword_token(headline)
+
 
 from engine.ad_promise_memory import (
     angle_seed_for_attempt,
@@ -212,75 +421,42 @@ def _video_plan_planner_description_limit() -> int:
 _JSON_KEYS = """
 Return one JSON object only (no markdown, no prose).
 
-Keys (all strings): productNameResolved, objectA, objectB, interactionSummary, interactionScript,
-advertisingPromise, language
+Keys (all strings): productNameResolved, advertisingGoal, headline, headlineCoreKeyword, sceneConcept, videoPrompt, language
 
-One physical A↔B interaction in a single shot. objectA/B + interaction*: short English; other fields: request language. Empty product name → invent productNameResolved.
-Objects must be simple physical items — never posters, printed graphics, readable books, signage, labels, or other text/graphic carriers (see OBJECTS block below).
+Flow (mandatory order — internal only; output final JSON only):
+1) Read product name + description → advertisingGoal (primary benefit/promise/positioning).
+2) From advertisingGoal → headline (Hebrew, English, or mixed). headline is the twisted phrase remainder ONLY — do NOT include productNameResolved inside headline.
+3) headlineCoreKeyword: exactly ONE word — the most important semantic word in headline; must stand alone if all other headline words are removed; never articles/prepositions/conjunctions/fillers.
+4) sceneConcept: a realistic everyday human situation that is ONLY a metaphor for headlineCoreKeyword — NOT for the full headline and NOT for advertisingGoal.
+5) videoPrompt: English cinematic direction for Runway — completely realistic, physical, everyday; describes sceneConcept only; no fantasy/surrealism/impossible events; no readable on-screen text.
 
-Do NOT include headlineText — headline is generated in a separate step after planning.
+Empty product name → invent productNameResolved.
 
-Before the JSON: one silent internal revision pass only (pair, realism, cliché default, physics, motion clarity); output final JSON only — no explanations.
+Before the JSON: one silent internal revision pass (goal → headline → keyword → scene → prompt); output final JSON only.
 
-Failure only: {"planningFailure":"planning_failed_no_valid_interaction"}
-
-Emit a complete plan only if: (i) object A is grounded in the product; (ii) object B was accepted only after a physically plausible, non-surreal A↔B interaction was identified; (iii) advertisingPromise emerged together with that interaction (not pre-decided, not reverse-engineered from a preset slogan); (iv) object rules below are satisfied; (v) interactionSummary + interactionScript (+ object reasons) describe grounded contact with resistance — no frictionless sliding/gliding/floating-style motion (see PHYSICAL REALISM block).
+Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
 
 
-def _planner_causal_reasoning_block() -> str:
-    """
-    Planner-only: causal order with simultaneous discovery — goal emerges when a valid interaction is found.
-    Server does not score or rewrite creative content; this steers the model.
-    """
+def _planner_keyword_scene_flow_block() -> str:
     return (
-        "CAUSAL CREATIVE FLOW (mandatory internal reasoning; do not narrate it in the JSON):\n"
-        "1. Read product name and description. Select object A from them (grounded, simple, physical).\n"
-        "2. Explore candidate objects B. For each candidate, check whether a REALISTIC, PHYSICAL, NON-SURREAL "
-        "interaction between A and B is possible in the real world (theoretically possible; not fantasy, not dream-logic).\n"
-        "3. The advertising goal is NOT known in advance. At the exact moment you recognize a valid A↔B interaction, "
-        "an advertisingPromise MUST emerge from that interaction — it justifies and belongs to that pair. "
-        "Causality is preserved (the promise is why B is the right second object), but discovery is simultaneous: "
-        "interaction recognition and goal emergence happen together.\n"
-        "4. Accept B ONLY if such a goal emerges. If no valid interaction or no emerging goal, reject that B and continue searching. "
-        "Do NOT pick a goal first and then force objects to fit. Do NOT invent conceptual matches without a real physical interaction.\n"
-        "5. interactionSummary and interactionScript must describe only that single plausible interaction. advertisingPromise must align with it.\n"
-        "6. Interactions may be unusual but must remain physically plausible — not impossible, not surreal.\n"
-        "7. Motion between A and B must show contact, weight, and resistance — never frictionless sliding, gliding, drifting, "
-        "floating/hovering movement, or zero-friction motion.\n\n"
-    )
-
-
-def _planner_physical_realism_block() -> str:
-    """Planner: forbid floaty / frictionless interaction language (server also validates interaction fields)."""
-    return (
-        "PHYSICAL REALISM (interactionScript, interactionSummary, objectAReason, objectBReason):\n"
-        "The shot must look physically grounded. The A↔B interaction must involve clear contact, grip, pressure, or resisted motion — "
-        "weight and surface resistance visible.\n"
-        "FORBIDDEN interaction language: frictionless motion; smooth sliding or gliding between objects; drifting; "
-        "floating or hovering movement; zero friction; weightless contact; effortless physical motion between A and B; "
-        "ice-like glide.\n"
-        "PREFER verbs like: pressing, pushing, pulling, gripping, placing, bracing, tightening, turning, steady sliding only when "
-        "resistance is obvious (e.g. dragged with friction), not frictionless.\n"
-        "Do not describe motion that would read as floating, gliding on air, or sliding with no drag.\n\n"
-    )
-
-
-def _planner_object_selection_rules_block() -> str:
-    """Hard rules for objectA/objectB: no graphic-communication objects (planner + server validation)."""
-    return (
-        "OBJECTS (strict): Choose two simple, physical, everyday items. They must not be communicative media.\n"
-        "HARD FORBIDDEN — any object whose primary purpose is to hold or show graphics or text, including: "
-        "posters; printed images/graphics; photographs with visible imagery; paintings with visible imagery; "
-        "magazines; newspapers; books that are open, readable, or text-bearing; screens or monitors if visible content is described; "
-        "signs; labels; packaging described with visible design/text/logos; flyers; brochures; infographics; charts/diagrams as displays; "
-        "scoreboards; LED message boards; greeting cards; certificates; barcodes; branded packaging.\n"
-        "ALLOWED examples (physical only, no described on-surface content): empty picture/photo frame; blank paper; "
-        "screen/monitor/TV/phone as a device only with NO visible content described; empty billboard structure; billboard with no ad/copy described; "
-        "closed book with no readable text described.\n"
-        "Critical: a poster is always forbidden; an empty frame is allowed. A screen is allowed only if you do NOT describe what is on the screen.\n"
-        "Do not pick objects that imply readable text or illustrative content anywhere in objectA, objectB, objectAReason, objectBReason, "
-        "interactionSummary, or interactionScript.\n\n"
+        "BUILDER2 KEYWORD-SCENE FLOW (mandatory; do not narrate in JSON):\n"
+        "STEP 1 — Read product_name and product_description.\n"
+        "STEP 2 — advertisingGoal: the primary advertising advantage, benefit, promise, or positioning.\n"
+        "STEP 3 — headline: derived from advertisingGoal; may be Hebrew, English, or mixed Hebrew/English. "
+        "Remainder only (no product name inside headline). Up to 7 words in headline.\n"
+        "STEP 4 — headlineCoreKeyword: exactly one critical semantic word from headline (see examples in schema).\n"
+        "STEP 5 — sceneConcept: realistic everyday human situation; metaphor ONLY for headlineCoreKeyword.\n"
+        "STEP 6 — videoPrompt: Runway-ready realistic scene description from sceneConcept.\n\n"
+        "SCENE RULES (sceneConcept + videoPrompt):\n"
+        "- Completely realistic, physical, everyday, simple, emotionally understandable, possible in the real world.\n"
+        "- A viewer who has NOT seen the headline should see a normal realistic human situation.\n"
+        "- The scene is NOT a metaphor for the entire headline or for advertisingGoal — ONLY for headlineCoreKeyword.\n"
+        "ALLOWED: couple hugging, person eating, friends laughing, people running together, child helping parent, "
+        "coworkers shaking hands, family at a table, opening a door, waiting in line, arriving somewhere.\n"
+        "FORBIDDEN: surreal, dreamlike, fantasy, magic, impossible physics, talking/animated/floating objects, "
+        "symbolic impossible events, science fiction, abstract visual concepts.\n"
+        "HEADLINE DISPLAY (downstream): scene plays first; headline overlay appears at the end — do NOT burn headline into videoPrompt.\n\n"
     )
 
 
@@ -288,16 +464,11 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
     return (
-        f"ACE video: one continuous shot; camera = smooth half-orbit around the two objects (path only). "
+        f"ACE Builder2 video planning — keyword-scene model (no objects, no A↔B interactions). "
         f"Language {lang_name} ({lang}). "
-        "Everyday complementary objects grounded in the product; reject the first cliché default; "
-        "objectA/objectB must never be graphic-communication items (posters, prints, readable media, signage with copy, etc.). "
-        "Creative rule: advertisingPromise emerges together with the chosen A↔B interaction — never choose the promise before "
-        "a valid physical interaction exists; never reverse-reason from a preset goal to objects. "
-        "Physical realism: interaction motion must show contact, weight, and resistance — no frictionless sliding or floaty movement. "
-        "Stay realistic. One A↔B interaction only (no alternate layouts). "
-        "Headline is NOT part of this JSON — it is generated separately after planning. "
-        'Planner refusal: {"planningFailure":"planning_failed_no_valid_interaction"}'
+        "advertisingGoal → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
+        "Scene realism is mandatory. "
+        'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
 
@@ -399,97 +570,73 @@ def _word_limit(s: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
-_VIDEO_PLAN_SCHEMA_VERSION = "single_interaction_v3"
+_VIDEO_PLAN_SCHEMA_VERSION = "keyword_scene_v1"
 
-_PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset({"planning_failed_no_valid_interaction"})
+_PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset(
+    {"planning_failed_invalid_plan", "planning_failed_no_valid_scene"}
+)
 
 
-def _build_unrealistic_physics_repair_input(
+def _build_scene_plan_repair_input(
     *,
     base_attempt_input: str,
     product_name: str,
     product_description: str,
-    advertising_promise: str,
+    advertising_goal: str,
     previous_plan: Dict[str, Any],
+    reason: str,
 ) -> str:
     return (
         f"{base_attempt_input}\n\n"
-        "REPAIR REQUEST (one retry): The previous plan violated physical realism.\n"
-        "Keep the same product name, product description, and advertising goal/promise.\n"
-        "Remove any sliding/gliding/drifting/floating/frictionless/weightless/hovering motion.\n"
-        "Create grounded physical contact and use resistance, weight, friction, support, impact, or contact-based motion.\n"
+        f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
+        "Keep the same product name, product description, and advertisingGoal.\n"
+        "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
-        f"Advertising goal/promise to keep: {advertising_promise}\n"
+        f"Advertising goal to keep: {advertising_goal}\n"
         "Previous invalid plan (for correction):\n"
         f"{json.dumps(previous_plan, ensure_ascii=False)}\n"
     )
 
 
-def _build_invalid_objects_repair_input(
-    *,
-    base_attempt_input: str,
-    product_name: str,
-    product_description: str,
-    advertising_promise: str,
-    previous_plan: Dict[str, Any],
-) -> str:
-    return (
-        f"{base_attempt_input}\n\n"
-        "REPAIR REQUEST (one retry): The previous plan used invalid objects.\n"
-        "Keep the same product name, product description, and advertising goal/promise.\n"
-        "Objects must be concrete, defined, classic physical everyday objects.\n"
-        "Forbidden object families: lump, blob, foam, clay, modeling clay, dough, putty, slime, gel, mud, paste, powder, sand pile, raw material, amorphous mass, undefined material.\n"
-        "Do not use soft material whose purpose is only to receive an imprint.\n"
-        "Do not solve the interaction by pressing Object A into a soft material.\n"
-        "Choose two defined everyday objects that can interact physically without relying on deformation of an amorphous material.\n"
-        "Failed examples (forbidden): sneaker -> lump of modeling clay; sneaker -> foam.\n"
-        "Replace any invalid object with a clear everyday object while preserving one single-interaction video structure.\n"
-        "Return the same required JSON shape only.\n"
-        f"Product name: {product_name or '(empty)'}\n"
-        f"Product description: {product_description}\n"
-        f"Advertising goal/promise to keep: {advertising_promise}\n"
-        "Previous invalid plan (for correction):\n"
-        f"{json.dumps(previous_plan, ensure_ascii=False)}\n"
-    )
-
-
-def _build_physics_safe_fallback_plan(
+def _build_keyword_scene_fallback_plan(
     *,
     product_name: str,
-    product_description: str,
     content_language: str,
-    advertising_promise: str,
+    advertising_goal: str,
 ) -> Dict[str, Any]:
-    """
-    Deterministic, physically grounded fallback plan used only when physics validation + repair fail.
-    Keeps one simple contact interaction with gravity-consistent motion.
-    """
+    """Deterministic realistic human-scene fallback when planner repair fails."""
     lang = normalize_video_content_language(content_language)
     pn = (product_name or "").strip() or "ACE Product"
-    promise = (advertising_promise or "").strip()
-    if not promise:
-        promise = (
-            "תוצאה יציבה שנשארת לאורך זמן" if lang == "he" else "A stable result that lasts over time"
+    goal = (advertising_goal or "").strip()
+    if not goal:
+        goal = (
+            "היתרון של קרבה וזמינות דיגיטלית"
+            if lang == "he"
+            else "The advantage of closeness and digital availability"
         )
+    headline = "הכי קרוב למשרד פרסום" if lang == "he" else "Always One Step Ahead"
+    keyword = "קרוב" if lang == "he" else "Ahead"
+    scene = (
+        "זוג מתחבק לאחר תקופה ארוכה של ריחוק"
+        if lang == "he"
+        else "Two people warmly embracing after finally meeting again"
+    )
+    video_prompt = (
+        "A completely realistic everyday scene of two people warmly embracing after finally meeting again. "
+        "Natural human behavior. Real-world environment. Stable cinematic camera. "
+        "No fantasy. No surrealism. No impossible events. No readable text in-frame."
+    )
     return {
         "productNameResolved": pn,
-        "objectA": "product item",
-        "objectB": "wooden shelf",
-        "objectAReason": "Directly represents the marketed product in a simple physical form.",
-        "objectBReason": "Stable everyday support object that creates clear, realistic contact.",
-        "interactionSummary": "A hand places the product item on a wooden shelf and presses down to seat it firmly.",
-        "interactionScript": "Single continuous shot. The product item is placed on a wooden shelf, then a hand presses it down and releases while both objects remain in stable contact with visible resistance.",
-        "advertisingPromise": promise,
-        "promiseDerivation": (
-            "נגזר מפעולה פיזית יציבה וברורה של מגע, לחץ והתייצבות."
-            if lang == "he"
-            else "Derived from a stable physical action with clear contact, pressure, and settling."
-        ),
+        "advertisingGoal": goal,
+        "headline": headline,
+        "headlineCoreKeyword": keyword,
+        "sceneConcept": scene,
+        "videoPrompt": video_prompt,
         "language": lang,
-        "objectInferenceMode": "deterministic_physics_fallback",
-        "literalObjectCount": 2,
+        "planInferenceMode": "deterministic_keyword_scene_fallback",
     }
 
 
@@ -507,103 +654,36 @@ def _runway_language_visual_constraints(plan: Dict[str, Any]) -> str:
     )
 
 
-# Mandatory smooth half-orbit camera around the two-object composition (ACE single interaction).
-_ACE_HALF_ORBIT_RUNWAY_APPEND = (
-    " MANDATORY CAMERA (NOT OPTIONAL): The two physical objects form one paired composition in frame. "
-    "The camera MUST perform a smooth half-orbit—a controlled half-circle path around that pair—so the viewer sees the interaction "
-    "from continuously changing angles across the entire shot (calm advertising reveal in 3D). "
-    "FORBIDDEN: static camera; nearly static camera; relying only on micro-flicker or tiny object motion without this orbit; "
-    "dramatic fast moves; chaotic spin; full 360; handheld shaky cam; losing either object out of frame; cuts; scene changes. "
-    "Small object/subject motion may appear as minor motion only—it must NOT replace the mandatory half-orbit. "
-    "Half-orbit is smooth, medium-slow, stable, centered on the pair; both objects stay visible and readable throughout."
-)
-
-
-def _runway_ace_half_orbit_focus() -> str:
-    """Mandatory half-orbit camera around the two-object composition (ACE single interaction)."""
-    return (
-        "MANDATORY: the camera performs a smooth half-orbit (half-circle path) around the two physical objects as one composition—"
-        "continuously changing viewing angle; both stay fully in frame and readable. "
-        "Tiny subject motion is optional minor motion only; do not substitute it for the orbit. "
-        "No static camera, no morph, no swap, no cuts. "
-    )
-
-
 _RUNWAY_STYLE_TAIL = (
-    "No logos, no packaging typography, no on-screen words. Single clean commercial look."
+    "No logos, no packaging typography, no on-screen words, no headline burn-in. Single clean commercial look."
 )
 
-_RUNWAY_CONTACT_EXECUTION_CLAUSE = (
-    "CONTACT EXECUTION: The active object must maintain full visible contact with the main body/center of the passive object during the scripted action. "
-    "The action must happen across or over the passive object, not merely touch, tap, graze, or bump its edge or corner. "
-    "Show sustained pressure, resistance, and visible effect throughout the motion. "
-    "If the action is rolling, dragging, pushing, sweeping, pressing, or rubbing, the active object must travel across the passive object's central surface, not stop at the edge."
+_RUNWAY_SCENE_TAIL_MARKERS: Tuple[str, ...] = (
+    "Scene (follow exactly):",
+    "Scene continuation (follow exactly):",
+    "Scene:",
 )
 
-_RUNWAY_INTERACTION_TAIL_MARKERS: Tuple[str, ...] = (
-    "Physical interaction (follow exactly):",
-    "Physical interaction:",
-    "CONTACT EXECUTION:",
-)
 
-_PRECISE_ACTION_CAMERA_RULES: List[Tuple[str, re.Pattern]] = [
-    ("press", re.compile(r"\bpress(?:es|ed|ing)?\b", re.I)),
-    ("roll", re.compile(r"\broll(?:s|ed|ing)?\b", re.I)),
-    ("drag", re.compile(r"\bdrag(?:s|ged|ging)?\b", re.I)),
-    ("push", re.compile(r"\bpush(?:es|ed|ing)?\b", re.I)),
-    ("sweep", re.compile(r"\bsweep(?:s|swept|ing)?\b", re.I)),
-    ("rub", re.compile(r"\brub(?:s|bed|bing)?\b", re.I)),
-    ("across", re.compile(r"\bacross\b", re.I)),
-    ("over", re.compile(r"\bover\b", re.I)),
-    ("carve", re.compile(r"\bcarv(?:e|es|ed|ing)\b", re.I)),
-    ("cut", re.compile(r"\bcut(?:s|ting)?\b", re.I)),
-    ("imprint", re.compile(r"\bimprint(?:s|ed|ing)?\b", re.I)),
-    ("insert", re.compile(r"\binsert(?:s|ed|ing)?\b", re.I)),
-    ("align", re.compile(r"\balign(?:s|ed|ing)?\b", re.I)),
-    ("stamp", re.compile(r"\bstamp(?:s|ed|ing)?\b", re.I)),
-    ("squeeze", re.compile(r"\bsqueez(?:e|es|ed|ing)\b", re.I)),
-]
-
-
-def _interaction_text_for_camera_focus(plan: Dict[str, Any]) -> str:
-    summary = (plan.get("interactionSummary") or "").strip()
-    script = (plan.get("interactionScript") or "").strip()
-    return f"{summary} {script}".strip()
-
-
-def _runway_camera_motion_focus(plan: Dict[str, Any]) -> Tuple[str, str]:
-    """
-    Default: half-orbit.
-    For single precise interactions that must read instantly, use stable visibility-first framing.
-    Returns (motion_text, motion_mode_label).
-    """
-    interaction_blob = _interaction_text_for_camera_focus(plan)
-    for _, rx in _PRECISE_ACTION_CAMERA_RULES:
-        if rx.search(interaction_blob):
-            return (
-                "MANDATORY: stable locked camera framing focused on the exact contact/action point so the precise action reads instantly. "
-                "Keep both objects visible and readable throughout. No orbit, no sweeping camera path, no cuts.",
-                "stable_precise_action",
-            )
-    return _runway_ace_half_orbit_focus(), "half_orbit"
+def _runway_human_scene_camera_focus() -> Tuple[str, str]:
+    """Stable cinematic framing for realistic human scenes."""
+    return (
+        "MANDATORY: single continuous realistic human scene. Stable cinematic camera with gentle natural movement; "
+        "subjects stay readable. No surreal motion, no morphing, no impossible physics, no cuts.",
+        "human_scene_stable",
+    )
 
 
 # snake_case / alternate keys from some models → camelCase
 _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("product_name_resolved", "productNameResolved"),
-    ("advertising_promise", "advertisingPromise"),
-    ("object_a", "objectA"),
-    ("object_b", "objectB"),
-    ("object_a_reason", "objectAReason"),
-    ("object_b_reason", "objectBReason"),
-    ("interaction_summary", "interactionSummary"),
-    ("interaction_script", "interactionScript"),
-    ("object_inference_mode", "objectInferenceMode"),
-    ("literal_object_count", "literalObjectCount"),
-    ("promise_derivation", "promiseDerivation"),
-    ("headline_text", "headlineText"),
-    ("headline_derivation", "headlineDerivation"),
-    ("video_prompt_core", "videoPromptCore"),
+    ("advertising_goal", "advertisingGoal"),
+    ("advertising_promise", "advertisingGoal"),
+    ("headline_core_keyword", "headlineCoreKeyword"),
+    ("scene_concept", "sceneConcept"),
+    ("video_prompt", "videoPrompt"),
+    ("headline_text", "headline"),
+    ("video_prompt_core", "videoPrompt"),
 )
 
 
@@ -619,41 +699,6 @@ def _coerce_plan_keys(data: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def _apply_separate_video_headline_to_plan(
-    plan: Dict[str, Any],
-    *,
-    product_description: str,
-) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Separate o3 headline call after planning; no generic fallback."""
-    last_err = ""
-    for attempt in (1, 2):
-        try:
-            headline = generate_video_headline_o3(
-                plan=plan,
-                product_description=product_description,
-            )
-            updated = dict(plan)
-            updated["headlineText"] = headline["headlineFull"]
-            updated["headlineTextRemainder"] = headline["headlineText"]
-            updated["headlineDecision"] = "include_product_name"
-            return updated, ""
-        except VideoHeadlineError as e:
-            last_err = str(e)
-            logger.warning(
-                "VIDEO_HEADLINE_SEPARATE_CALL_FAILED attempt=%s err=%s",
-                attempt,
-                last_err,
-            )
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
-            logger.warning(
-                "VIDEO_HEADLINE_SEPARATE_CALL_FAILED attempt=%s err=%s",
-                attempt,
-                last_err,
-            )
-    return None, "headline_failed"
-
-
 def validate_and_normalize_plan(
     data: Dict[str, Any],
     *,
@@ -663,16 +708,11 @@ def validate_and_normalize_plan(
     content_language: str = "he",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    ACE video engine v3 — server: structural validation (required fields, JSON shape via coerce,
-    no graphic/text-display objects in A/B/interaction fields).
-    Headline is generated separately after planning (see video_headline.py).
-    Causal ordering and goal emergence are specified in planner prompts only; the server does not
-    score or rewrite creative choices. o3-pro is the sole creative authority for object choice,
-    interaction, and promise wording.
+    Builder2 keyword-scene planning — structural validation only.
     Returns (plan, None) or (None, reason_code) for fail-fast logging.
     """
     logger.info("VIDEO_PLAN_SERVER_CREATIVE_GATE=disabled")
-    logger.info("VIDEO_PLAN_SERVER_VALIDATION_SCOPE=structural_plus_no_graphic_media_objects")
+    logger.info("VIDEO_PLAN_SERVER_VALIDATION_SCOPE=keyword_scene_structural")
 
     if not data:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=no_payload")
@@ -683,122 +723,108 @@ def validate_and_normalize_plan(
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
 
     pn = (data.get("productNameResolved") or "").strip()
-    oa = (data.get("objectA") or "").strip()
-    ob = (data.get("objectB") or "").strip()
-    oa_r = (data.get("objectAReason") or "").strip()
-    ob_r = (data.get("objectBReason") or "").strip()
-    int_sum = (data.get("interactionSummary") or "").strip()
-    int_script = (data.get("interactionScript") or "").strip()
-    apromise = (data.get("advertisingPromise") or "").strip()
-    pderiv = (data.get("promiseDerivation") or "").strip()
+    ad_goal = (data.get("advertisingGoal") or "").strip()
+    headline_rem = (data.get("headline") or "").strip()
+    core_kw = (data.get("headlineCoreKeyword") or "").strip()
+    scene = (data.get("sceneConcept") or "").strip()
+    video_prompt = (data.get("videoPrompt") or "").strip()
     lang_raw = str(data.get("language") or "").strip()
     if not lang_raw:
         lang_raw = normalize_video_content_language(content_language)
 
-    if not pn or not oa or not ob:
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_objects_or_product_name")
+    if not pn:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_product_name")
         return None, "planning_failed_incomplete_plan"
-    if not int_sum or not int_script:
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_interaction_fields")
+    if not ad_goal:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_advertising_goal")
         return None, "planning_failed_incomplete_plan"
-    if not apromise:
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_advertising_promise")
+    if not headline_rem:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_headline")
+        return None, "planning_failed_incomplete_plan"
+    if not core_kw:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_headline_core_keyword")
+        return None, "planning_failed_incomplete_plan"
+    if not scene:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_scene_concept")
+        return None, "planning_failed_incomplete_plan"
+    if not video_prompt:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_video_prompt")
         return None, "planning_failed_incomplete_plan"
 
     if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
         logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
         raise VideoPlanningTimeoutError()
 
-    _object_blob = "\n".join([oa, ob, oa_r, ob_r, int_sum, int_script])
-    _bad_obj = video_plan_object_blob_implies_graphic_text_content(_object_blob)
-    if _bad_obj:
+    if _headline_remainder_word_count(headline_rem) > _MAX_HEADLINE_REMAINDER_WORDS:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_too_long")
+        return None, "planning_failed_headline_too_long"
+
+    kw_tokens = [t for t in core_kw.split() if t]
+    if len(kw_tokens) != 1:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=invalid_headline_core_keyword_count")
+        return None, "planning_failed_invalid_keyword"
+    if _normalize_keyword_token(kw_tokens[0]) in _KEYWORD_FILLER_WORDS:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_is_filler")
+        return None, "planning_failed_invalid_keyword"
+    if not _headline_contains_core_keyword(headline_rem, core_kw):
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_not_in_headline")
+        return None, "planning_failed_invalid_keyword"
+
+    scene_blob = "\n".join([scene, video_prompt])
+    bad_scene = scene_fields_imply_forbidden_surrealism(scene_blob)
+    if bad_scene:
         logger.info(
-            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=invalid_graphic_content_objects rule=%s",
-            _bad_obj,
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=forbidden_surreal_scene rule=%s",
+            bad_scene,
         )
-        return None, "planning_failed_invalid_objects"
+        return None, "planning_failed_surreal_scene"
 
-    _physics_blob = "\n".join([int_sum, int_script, oa_r, ob_r])
-    _bad_physics = interaction_fields_imply_frictionless_or_floaty_motion(_physics_blob)
-    if _bad_physics:
-        logger.info(
-            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=unrealistic_interaction_motion rule=%s",
-            _bad_physics,
-        )
-        return None, "planning_failed_unrealistic_physics"
+    pn_for_headline = (product_name or "").strip() or pn
+    headline_full = _assemble_headline_full(pn_for_headline, headline_rem)
+    opening_fd = scene[:400]
 
-    _lit_raw = data.get("literalObjectCount")
-    if isinstance(_lit_raw, bool):
-        literal_pass = int(_lit_raw)
-    elif isinstance(_lit_raw, int):
-        literal_pass = _lit_raw
-    elif isinstance(_lit_raw, float):
-        literal_pass = int(_lit_raw)
-    elif isinstance(_lit_raw, str) and _lit_raw.strip().lstrip("-").isdigit():
-        literal_pass = int(_lit_raw.strip())
-    else:
-        literal_pass = 0
-
-    opening_fd = (
-        f"Single continuous shot: {oa} and {ob} are both visible together in one stable composition; "
-        "the camera performs a smooth half-orbit around the pair."
-    )
-    core = f"{int_script}{_ACE_HALF_ORBIT_RUNWAY_APPEND}".strip()
-
-    logger.info('VIDEO_PLAN_INTERACTION_SUMMARY="%s"', int_sum[:260])
-    logger.info('VIDEO_PLAN_PROMISE="%s"', apromise[:260])
+    logger.info('VIDEO_PLAN_ADVERTISING_GOAL="%s"', ad_goal[:260])
+    logger.info('VIDEO_PLAN_HEADLINE="%s"', headline_rem[:260])
+    logger.info('VIDEO_PLAN_CORE_KEYWORD="%s"', core_kw[:120])
+    logger.info('VIDEO_PLAN_SCENE_CONCEPT="%s"', scene[:260])
 
     return {
         "productNameResolved": pn,
-        "objectA": oa,
-        "objectB": ob,
-        "objectAReason": oa_r or "",
-        "objectBReason": ob_r or "",
-        "interactionSummary": int_sum,
-        "interactionScript": int_script,
-        "advertisingPromise": apromise,
-        "promiseDerivation": pderiv or "",
-        "headlineText": "",
-        "headlineDerivation": "",
+        "advertisingGoal": ad_goal,
+        "advertisingPromise": ad_goal,
+        "headline": headline_rem,
+        "headlineText": headline_full,
+        "headlineTextRemainder": headline_rem,
+        "headlineCoreKeyword": core_kw,
+        "sceneConcept": scene,
+        "videoPrompt": video_prompt,
+        "videoPromptCore": video_prompt.strip(),
         "language": lang_raw,
-        "objectInferenceMode": str(data.get("objectInferenceMode") or "").strip(),
-        "literalObjectCount": literal_pass,
-        "objectGroundednessOk": True,
-        "headlineDecision": (
-            str(data.get("headlineDecision") or "").strip() or "include_product_name"
-        ),
-        "videoPromptCore": core,
+        "headlineDecision": "include_product_name",
+        "planInferenceMode": str(data.get("planInferenceMode") or "").strip(),
         "openingFrameDescription": opening_fd,
     }, None
 
 
-def _object_pair_digest(oa: str, ob: str) -> str:
-    """Short stable hash for diversity debugging (not cryptographic)."""
-    raw = f"{(oa or '').strip()}\n{(ob or '').strip()}".encode("utf-8")
+def _scene_plan_digest(scene: str, keyword: str) -> str:
+    raw = f"{(scene or '').strip()}\n{(keyword or '').strip()}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:12]
 
 
 def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
-    """Structured A/B + interaction + promise + headline fields for every validated plan (video job trace)."""
+    """Structured keyword-scene + headline fields for every validated plan (video job trace)."""
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
     logger.info(
-        'VIDEO_PLAN_INTEGRITY advertisingPromise="%s"',
-        (plan.get("advertisingPromise") or "")[:260],
+        'VIDEO_PLAN_INTEGRITY advertisingGoal="%s"',
+        (plan.get("advertisingGoal") or plan.get("advertisingPromise") or "")[:260],
     )
     logger.info(
-        'VIDEO_PLAN_INTEGRITY interactionSummary="%s"',
-        (plan.get("interactionSummary") or "")[:260],
+        'VIDEO_PLAN_INTEGRITY headlineCoreKeyword="%s"',
+        (plan.get("headlineCoreKeyword") or "")[:120],
     )
     logger.info(
-        'VIDEO_PLAN_INTEGRITY objectA="%s" objectB="%s"',
-        plan.get("objectA"),
-        plan.get("objectB"),
-    )
-    logger.info(
-        "VIDEO_PLAN_INTEGRITY objectInferenceMode=%s literalObjectCount=%s objectGroundednessOk=%s",
-        plan.get("objectInferenceMode"),
-        plan.get("literalObjectCount"),
-        plan.get("objectGroundednessOk"),
+        'VIDEO_PLAN_INTEGRITY sceneConcept="%s"',
+        (plan.get("sceneConcept") or "")[:260],
     )
     logger.info(
         'VIDEO_PLAN_INTEGRITY headlineDecision=%s headlineText="%s"',
@@ -813,11 +839,10 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
 
 _RUNWAY_STRUCT_REQUIRED_KEYS: Tuple[str, ...] = (
     "productNameResolved",
-    "objectA",
-    "objectB",
-    "interactionScript",
     "advertisingPromise",
     "headlineText",
+    "headlineCoreKeyword",
+    "sceneConcept",
     "videoPromptCore",
     "openingFrameDescription",
 )
@@ -840,18 +865,20 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
         (plan.get("productNameResolved") or "")[:120],
     )
     logger.info(
-        "VIDEO_PLAN_SUMMARY objectA=%s objectB=%s language=%s",
-        plan.get("objectA"),
-        plan.get("objectB"),
+        "VIDEO_PLAN_SUMMARY headlineCoreKeyword=%s language=%s",
+        plan.get("headlineCoreKeyword"),
         plan.get("language"),
     )
     logger.info(
-        'VIDEO_PLAN_INTERACTION_SUMMARY="%s"',
-        (plan.get("interactionSummary") or "")[:260],
+        'VIDEO_PLAN_SCENE_CONCEPT="%s"',
+        (plan.get("sceneConcept") or "")[:260],
     )
     logger.info(
-        "VIDEO_PLAN pair_digest=%s",
-        _object_pair_digest(str(plan.get("objectA") or ""), str(plan.get("objectB") or "")),
+        "VIDEO_PLAN scene_digest=%s",
+        _scene_plan_digest(
+            str(plan.get("sceneConcept") or ""),
+            str(plan.get("headlineCoreKeyword") or ""),
+        ),
     )
 
 
@@ -864,38 +891,21 @@ def _log_video_plan_post_ok_diagnostics(plan: Dict[str, Any]) -> None:
         headline_remainder = headline_full[len(product_resolved) + 1 :].strip()
 
     logger.info("VIDEO_PLAN_DIAG productNameResolved=%s", product_resolved[:200])
-    logger.info("VIDEO_PLAN_DIAG objectA=%s", (plan.get("objectA") or "")[:200])
-    logger.info("VIDEO_PLAN_DIAG objectB=%s", (plan.get("objectB") or "")[:200])
     logger.info(
-        "VIDEO_PLAN_DIAG interactionSummary=%s",
-        (plan.get("interactionSummary") or "")[:300],
+        "VIDEO_PLAN_DIAG advertisingGoal=%s",
+        (plan.get("advertisingGoal") or plan.get("advertisingPromise") or "")[:300],
     )
     logger.info(
-        "VIDEO_PLAN_DIAG advertisingPromise=%s",
-        (plan.get("advertisingPromise") or "")[:300],
+        "VIDEO_PLAN_DIAG headlineCoreKeyword=%s",
+        (plan.get("headlineCoreKeyword") or "")[:120],
     )
+    logger.info("VIDEO_PLAN_DIAG sceneConcept=%s", (plan.get("sceneConcept") or "")[:300])
     logger.info("VIDEO_PLAN_DIAG headlineText=%s", headline_full[:300])
     logger.info("VIDEO_PLAN_DIAG headline_remainder=%s", headline_remainder[:300])
-
-    optional_fields = (
-        ("headlineOriginalExpression", "original_expression"),
-        ("headlineReplacedWord", "replaced_word"),
-        ("headlineReplacementObject", "replacement_object"),
-        ("headlineRhymeReason", "rhyme_reason"),
-        ("headline_original_expression", "original_expression"),
-        ("headline_replaced_word", "replaced_word"),
-        ("headline_replacement_object", "replacement_object"),
-        ("headline_rhyme_reason", "rhyme_reason"),
-        ("final_headline_remainder", "final_headline_remainder"),
+    logger.info(
+        "VIDEO_PLAN_DIAG videoPrompt=%s",
+        (plan.get("videoPrompt") or plan.get("videoPromptCore") or "")[:400],
     )
-    logged_diag_keys: set[str] = set()
-    for plan_key, log_key in optional_fields:
-        if log_key in logged_diag_keys:
-            continue
-        value = (plan.get(plan_key) or "").strip()
-        if value:
-            logger.info("VIDEO_PLAN_DIAG %s=%s", log_key, value[:300])
-            logged_diag_keys.add(log_key)
 
 
 def _reasoning_effort() -> str:
@@ -953,7 +963,7 @@ def _fetch_video_plan_o3_sync(
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
-    logger.info("VIDEO_PLAN_SEARCH_ORDER=single_interaction_v3")
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=keyword_scene_v1")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
@@ -982,9 +992,7 @@ Product description:
 
 Language: {lang_name} ({lang}).
 
-{_planner_object_selection_rules_block()}
-{_planner_causal_reasoning_block()}
-{_planner_physical_realism_block()}
+{_planner_keyword_scene_flow_block()}
 {_JSON_KEYS}
 """
     instructions = _build_video_planner_instructions(lang)
@@ -998,11 +1006,6 @@ Language: {lang_name} ({lang}).
     )
     logger.info("AD_PROMISE_MEMORY_LOAD_BEFORE_GENERATION hash=%s", ph)
     history = load_ad_promise_history(product_name, product_description)
-    used_object_a = get_used_object_a("builder2")
-    logger.info(
-        "VIDEO_PLAN_MEMORY_OBJECT_A_USED engine=builder2 count=%s",
-        len(used_object_a),
-    )
     logger.info(
         "VIDEO_PLAN_MEMORY_USED_FOR_DIVERSITY=%s",
         str(bool(history)).lower(),
@@ -1014,20 +1017,7 @@ Language: {lang_name} ({lang}).
     )
     if len(promise_addon) > 1200:
         promise_addon = promise_addon[:1200].rstrip() + "\n…"
-    object_a_memory_addon = ""
-    if used_object_a:
-        object_a_memory_addon = (
-            "\n\nObject A memory for Builder2 (avoid reusing these Object A values):\n"
-            f"- {', '.join(used_object_a)}\n"
-            "- Avoid reusing any Object A listed above.\n"
-        )
-    attempt_input = (
-        instructions
-        + "\n\n"
-        + user_block
-        + promise_addon
-        + object_a_memory_addon
-    )
+    attempt_input = instructions + "\n\n" + user_block + promise_addon
     _t = min(30.0, _VIDEO_PLAN_TIMEOUT)
     client = OpenAI(
         api_key=api_key,
@@ -1093,7 +1083,7 @@ Language: {lang_name} ({lang}).
             code = (
                 pf_raw
                 if pf_raw in _PLANNER_SELF_FAILURE_CODES
-                else "planning_failed_no_valid_interaction"
+                else "planning_failed_invalid_plan"
             )
             logger.info('VIDEO_PLAN_PLANNER_SELF_REJECT code=%s detail="%s"', code, detail or "(none)")
             logger.info("VIDEO_PLAN_RESPONSE_OK=false")
@@ -1108,210 +1098,79 @@ Language: {lang_name} ({lang}).
         )
         if not plan:
             last_v_err = (v_err or "").strip() or "planning_failed_incomplete_plan"
-            if last_v_err in {
-                "planning_failed_unrealistic_physics",
-                "planning_failed_invalid_objects",
-            }:
-                logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=%s", last_v_err)
-                if last_v_err == "planning_failed_unrealistic_physics":
-                    repair_input = _build_unrealistic_physics_repair_input(
-                        base_attempt_input=attempt_input,
-                        product_name=product_name,
-                        product_description=product_description,
-                        advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
-                        previous_plan=parsed,
-                    )
-                else:
-                    repair_input = _build_invalid_objects_repair_input(
-                        base_attempt_input=attempt_input,
-                        product_name=product_name,
-                        product_description=product_description,
-                        advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
-                        previous_plan=parsed,
-                    )
-                try:
-                    repair_response = _responses_create_with_plan_retry(
-                        client,
-                        model=model,
-                        input_text=repair_input,
-                        reasoning={"effort": _reasoning_effort()},
-                        deadline_monotonic=deadline_monotonic,
-                    )
-                except VideoPlanningTimeoutError:
-                    raise
-                except Exception as e:
-                    logger.warning(
-                        "VIDEO_PLAN_REPAIR_FAILED reason=%s err_type=%s err=%s",
-                        "planning_failed_model_call",
-                        type(e).__name__,
-                        e,
-                    )
-                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
-                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    if last_v_err == "planning_failed_unrealistic_physics":
-                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
-                        fallback_raw = _build_physics_safe_fallback_plan(
-                            product_name=(parsed.get("productNameResolved") or product_name),
-                            product_description=product_description,
-                            content_language=content_language,
-                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
-                        )
-                        fallback_plan, fallback_err = validate_and_normalize_plan(
-                            fallback_raw,
-                            planner_deadline_monotonic=deadline_monotonic,
-                            product_name=product_name,
-                            product_description=product_description,
-                            content_language=content_language,
-                        )
-                        if fallback_plan:
-                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
-                            plan = fallback_plan
-                        else:
-                            logger.error(
-                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
-                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
-                            )
-                            return None, last_v_err
-                    else:
-                        return None, last_v_err
-
+            logger.info("VIDEO_PLAN_REPAIR_REQUESTED reason=%s", last_v_err)
+            ad_goal_keep = (
+                (parsed.get("advertisingGoal") or parsed.get("advertisingPromise") or "").strip()
+            )
+            repair_input = _build_scene_plan_repair_input(
+                base_attempt_input=attempt_input,
+                product_name=product_name,
+                product_description=product_description,
+                advertising_goal=ad_goal_keep,
+                previous_plan=parsed,
+                reason=last_v_err,
+            )
+            try:
+                repair_response = _responses_create_with_plan_retry(
+                    client,
+                    model=model,
+                    input_text=repair_input,
+                    reasoning={"effort": _reasoning_effort()},
+                    deadline_monotonic=deadline_monotonic,
+                )
                 repair_raw = _extract_responses_output_text(repair_response)
                 repair_parsed = _parse_json_from_response(repair_raw or "")
-                if not repair_parsed:
-                    logger.warning(
-                        "VIDEO_PLAN_REPAIR_FAILED reason=%s",
-                        "planning_failed_malformed_response",
+                if repair_parsed and not str(repair_parsed.get("planningFailure") or "").strip():
+                    repaired_plan, repaired_err = validate_and_normalize_plan(
+                        repair_parsed,
+                        planner_deadline_monotonic=deadline_monotonic,
+                        product_name=product_name,
+                        product_description=product_description,
+                        content_language=content_language,
                     )
-                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
-                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    if last_v_err == "planning_failed_unrealistic_physics":
-                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
-                        fallback_raw = _build_physics_safe_fallback_plan(
-                            product_name=(parsed.get("productNameResolved") or product_name),
-                            product_description=product_description,
-                            content_language=content_language,
-                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
-                        )
-                        fallback_plan, fallback_err = validate_and_normalize_plan(
-                            fallback_raw,
-                            planner_deadline_monotonic=deadline_monotonic,
-                            product_name=product_name,
-                            product_description=product_description,
-                            content_language=content_language,
-                        )
-                        if fallback_plan:
-                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
-                            plan = fallback_plan
-                        else:
-                            logger.error(
-                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
-                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
-                            )
-                            return None, last_v_err
-                    else:
-                        return None, last_v_err
+                    if repaired_plan:
+                        plan = repaired_plan
+                        logger.info("VIDEO_PLAN_REPAIR_OK reason=%s", last_v_err)
+            except VideoPlanningTimeoutError:
+                raise
+            except Exception as e:
+                logger.warning(
+                    "VIDEO_PLAN_REPAIR_FAILED reason=%s err_type=%s err=%s",
+                    last_v_err,
+                    type(e).__name__,
+                    e,
+                )
 
-                repair_pf_raw = str(repair_parsed.get("planningFailure") or "").strip()
-                if repair_pf_raw:
-                    repair_code = (
-                        repair_pf_raw
-                        if repair_pf_raw in _PLANNER_SELF_FAILURE_CODES
-                        else "planning_failed_no_valid_interaction"
-                    )
-                    logger.warning("VIDEO_PLAN_REPAIR_FAILED reason=%s", repair_code)
-                    logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
-                    logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    if last_v_err == "planning_failed_unrealistic_physics":
-                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
-                        fallback_raw = _build_physics_safe_fallback_plan(
-                            product_name=(parsed.get("productNameResolved") or product_name),
-                            product_description=product_description,
-                            content_language=content_language,
-                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
-                        )
-                        fallback_plan, fallback_err = validate_and_normalize_plan(
-                            fallback_raw,
-                            planner_deadline_monotonic=deadline_monotonic,
-                            product_name=product_name,
-                            product_description=product_description,
-                            content_language=content_language,
-                        )
-                        if fallback_plan:
-                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
-                            plan = fallback_plan
-                        else:
-                            logger.error(
-                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
-                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
-                            )
-                            return None, last_v_err
-                    else:
-                        return None, last_v_err
-
-                repaired_plan, repaired_err = validate_and_normalize_plan(
-                    repair_parsed,
+            if not plan:
+                logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=%s", last_v_err)
+                fallback_raw = _build_keyword_scene_fallback_plan(
+                    product_name=(parsed.get("productNameResolved") or product_name),
+                    content_language=content_language,
+                    advertising_goal=ad_goal_keep,
+                )
+                fallback_plan, fallback_err = validate_and_normalize_plan(
+                    fallback_raw,
                     planner_deadline_monotonic=deadline_monotonic,
                     product_name=product_name,
                     product_description=product_description,
                     content_language=content_language,
                 )
-                if repaired_plan:
-                    plan = repaired_plan
-                    logger.info("VIDEO_PLAN_REPAIR_OK reason=%s", last_v_err)
+                if fallback_plan:
+                    logger.info("VIDEO_PLAN_FALLBACK_USED=true")
+                    plan = fallback_plan
                 else:
-                    logger.warning(
-                        "VIDEO_PLAN_REPAIR_FAILED reason=%s",
-                        (repaired_err or "").strip() or "planning_failed_incomplete_plan",
+                    logger.error(
+                        "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
+                        (fallback_err or "").strip() or "planning_failed_incomplete_plan",
                     )
                     logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
                     logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                    if last_v_err == "planning_failed_unrealistic_physics":
-                        logger.warning("VIDEO_PLAN_FALLBACK_TRIGGERED reason=physics_failed")
-                        fallback_raw = _build_physics_safe_fallback_plan(
-                            product_name=(parsed.get("productNameResolved") or product_name),
-                            product_description=product_description,
-                            content_language=content_language,
-                            advertising_promise=(parsed.get("advertisingPromise") or "").strip(),
-                        )
-                        fallback_plan, fallback_err = validate_and_normalize_plan(
-                            fallback_raw,
-                            planner_deadline_monotonic=deadline_monotonic,
-                            product_name=product_name,
-                            product_description=product_description,
-                            content_language=content_language,
-                        )
-                        if fallback_plan:
-                            logger.info("VIDEO_PLAN_FALLBACK_USED=true")
-                            plan = fallback_plan
-                        else:
-                            logger.error(
-                                "VIDEO_PLAN_FALLBACK_USED=false reason=%s",
-                                (fallback_err or "").strip() or "planning_failed_incomplete_plan",
-                            )
-                            return None, last_v_err
-                    else:
-                        return None, last_v_err
-            else:
-                logger.error("VIDEO_PLAN_FAIL_STRUCT_NORMALIZE reason=%s", last_v_err)
-                logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-                return None, last_v_err
-
-        plan, headline_err = _apply_separate_video_headline_to_plan(
-            plan,
-            product_description=product_description,
-        )
-        if not plan:
-            logger.error("VIDEO_PLAN_FAIL_HEADLINE reason=%s", headline_err)
-            logger.info("VIDEO_PLAN_RESPONSE_OK=false")
-            return None, headline_err or "headline_failed"
+                    return None, last_v_err
 
         log_plan_summary(plan)
         logger.info("VIDEO_PLAN_OK model=%s", model)
         _log_video_plan_post_ok_diagnostics(plan)
         logger.info("VIDEO_PLAN_RESPONSE_OK=true")
-        object_a_value = (plan.get("objectA") or "").strip()
-        if object_a_value:
-            remember_object_a_ace("builder2", object_a_value)
         return _return_plan_with_promise_persist(
             plan,
             product_name=product_name,
@@ -1429,7 +1288,7 @@ def _finalize_runway_prompt(headline_prefix: str, body: str) -> Tuple[str, bool]
         return f"{hp}{sep}{trimmed_body}", True
 
     tail_idx = -1
-    for marker in _RUNWAY_INTERACTION_TAIL_MARKERS:
+    for marker in _RUNWAY_SCENE_TAIL_MARKERS:
         j = body.find(marker)
         if j >= 0 and (tail_idx < 0 or j < tail_idx):
             tail_idx = j
@@ -1533,43 +1392,44 @@ def sanitize_runway_prompt_for_video_text_policy(prompt: str) -> Tuple[str, bool
     return out, out != original
 
 
+def _plan_video_prompt_text(plan: Dict[str, Any]) -> str:
+    return (plan.get("videoPrompt") or plan.get("videoPromptCore") or "").strip()
+
+
 def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """Shorter ACE→Runway bridge if the detailed builder fails."""
-    oa = (plan.get("objectA") or "").strip()
-    ob = (plan.get("objectB") or "").strip()
-    script = (plan.get("interactionScript") or "").strip()
-    motion, _ = _runway_camera_motion_focus(plan)
+    scene_prompt = _plan_video_prompt_text(plan)
+    if not scene_prompt:
+        raise ValueError("missing videoPrompt")
+    motion, _ = _runway_human_scene_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
     parts = [
         "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
         lang_vis,
-        f"Single continuous shot: {oa} and {ob}. {motion}",
-        f"Physical interaction: {script}" if script else "",
+        motion,
+        scene_prompt,
+        _RUNWAY_STYLE_TAIL,
     ]
     return _finalize_runway_prompt("", " ".join(p for p in parts if p))
 
 
 def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Runway prompt from the validated v3 plan only: objectA, objectB, interactionScript, half-orbit camera.
-    No planning prose, promise text, or alternate interaction modes in the model prompt.
+    Runway prompt from keyword-scene plan: videoPrompt + realistic human-scene camera rules.
+    No headline burn-in; advertising goal is not injected into Runway promptText.
     """
-    oa = (plan.get("objectA") or "").strip()
-    ob = (plan.get("objectB") or "").strip()
-    script = (plan.get("interactionScript") or "").strip()
-    if not oa or not ob or not script:
-        raise ValueError("missing objectA/objectB/interactionScript")
+    scene_prompt = _plan_video_prompt_text(plan)
+    if not scene_prompt:
+        raise ValueError("missing videoPrompt")
 
-    motion, _ = _runway_camera_motion_focus(plan)
+    motion, _ = _runway_human_scene_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
     body = (
         "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
         "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
         f"{lang_vis} "
-        f"Single continuous shot. Two physical objects: {oa} and {ob}. "
-        f"{motion}"
-        f"Physical interaction (follow exactly): {script}. "
-        f"{_RUNWAY_CONTACT_EXECUTION_CLAUSE} "
+        f"{motion} "
+        f"Scene (follow exactly): {scene_prompt}. "
         f"{_RUNWAY_STYLE_TAIL}"
     )
     out, trunc = _finalize_runway_prompt("", body)
@@ -1604,28 +1464,24 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    _, motion_mode = _runway_camera_motion_focus(plan)
+    _, motion_mode = _runway_human_scene_camera_focus()
     logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=%s", motion_mode)
     return out
 
 
 def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
-    """
-    Runway promptText when promptImage is a pre-generated ACE start frame: motion / interaction only.
-    """
-    oa = (plan.get("objectA") or "").strip()
-    ob = (plan.get("objectB") or "").strip()
-    script = (plan.get("interactionScript") or "").strip()
-    if not oa or not ob or not script:
-        raise ValueError("missing objectA/objectB/interactionScript")
+    """Runway prompt when a start frame is supplied — motion continues the realistic human scene."""
+    scene_prompt = _plan_video_prompt_text(plan)
+    if not scene_prompt:
+        raise ValueError("missing videoPrompt")
 
-    motion_focus, _ = _runway_camera_motion_focus(plan)
+    motion_focus, _ = _runway_human_scene_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
     scene = (
         f"{lang_vis} "
-        f"The first frame is supplied as the start image; it already shows {oa} and {ob} together, "
-        f"both clearly visible and balanced. {motion_focus}"
-        f"Physical interaction (follow exactly): {script}"
+        "The first frame is supplied as the start image; continue the same realistic human scene. "
+        f"{motion_focus} "
+        f"Scene continuation (follow exactly): {scene_prompt}"
     )
     scene += " No logos or packaging type. Single clean commercial look."
 
@@ -1641,17 +1497,17 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
 
 
 def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bool]:
-    """Shorter interaction-only bridge if the detailed interaction builder fails."""
-    oa = (plan.get("objectA") or "").strip()
-    ob = (plan.get("objectB") or "").strip()
-    script = (plan.get("interactionScript") or "").strip()
+    """Shorter start-frame bridge if the detailed interaction builder fails."""
+    scene_prompt = _plan_video_prompt_text(plan)
+    if not scene_prompt:
+        raise ValueError("missing videoPrompt")
     lang_vis = _runway_language_visual_constraints(plan)
-    motion_focus, _ = _runway_camera_motion_focus(plan)
+    motion_focus, _ = _runway_human_scene_camera_focus()
     motion = (
         f"{lang_vis} "
-        f"Start frame supplied; {oa} and {ob} already visible together. "
-        f"{motion_focus}"
-        f"Physical interaction: {script}."
+        "Start frame supplied; continue the realistic human scene. "
+        f"{motion_focus} "
+        f"Scene: {scene_prompt}."
     )
     parts = [
         "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
@@ -1685,7 +1541,7 @@ def build_runway_interaction_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    _, motion_mode = _runway_camera_motion_focus(plan)
+    _, motion_mode = _runway_human_scene_camera_focus()
     logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=%s", motion_mode)
     out = f"{out.rstrip()} {RUNWAY_PHYSICS_REALISM_CONSTRAINT}".strip()
     return out
