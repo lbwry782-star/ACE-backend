@@ -661,13 +661,13 @@ Keys (all strings): productNameResolved, headline, headlineCoreKeyword, sceneCon
 Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
 2) headline: direct expression of the primary advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; REJECT headlines whose meaning depends on a fixed phrase/idiom/collocation — keyword must carry the core idea independently; if rejected, write a new headline.
-3) headlineCoreKeyword: exactly ONE standalone semantic word from headline — must preserve intended meaning when completely isolated; if not, reject headline and rewrite; must support a strong universal everyday human association scene; never fillers or literal industry words.
-4) sceneConcept: universal human association of headlineCoreKeyword ONLY — ignore every other headline word; one clear action; visually provable muted.
-5) videoPrompt: simplest 5-second stock-video scene from sceneConcept only — gender-neutral subject unless product/headline clearly requires gender; no other headline words' meaning.
+3) headlineCoreKeyword: exactly ONE standalone semantic word — defines semantic TERRITORY for scene search (not a literal scene prescription); must preserve meaning when isolated; if not, rewrite headline.
+4) sceneConcept: search inside keyword territory for the most INTERESTING valid realistic scene — keyword-isolated; one clear action; visually provable muted; prefer memorable over literal.
+5) videoPrompt: simplest 5-second stock-video execution of sceneConcept — one subject, one action, one location; interesting but not complex; gender-neutral unless required; no other headline words' meaning.
 
 Empty product name → invent productNameResolved.
 
-Before the JSON: one silent internal revision pass (headline → standalone keyword self-check → scene → simplest videoPrompt); output final JSON only.
+Before the JSON: one silent internal revision pass (headline → keyword → interest-first scene pick → simplest videoPrompt); output final JSON only.
 
 Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
@@ -714,7 +714,7 @@ def _planner_headline_phrase_dependency_block() -> str:
 def _planner_standalone_keyword_block() -> str:
     return (
         "STANDALONE KEYWORD RULE (mandatory for headlineCoreKeyword + sceneConcept):\n"
-        "- headlineCoreKeyword must be a single standalone semantic word.\n"
+        "- headlineCoreKeyword must be a single standalone semantic word that defines semantic territory for scene search.\n"
         "- The scene must be generated from the standalone keyword itself — NEVER from a phrase containing the keyword.\n"
         "- Reject any candidate keyword whose meaning only works inside a larger phrase, expression, idiom, or collocation.\n\n"
         "ACCEPT / REJECT EXAMPLES:\n"
@@ -735,11 +735,13 @@ def _planner_strict_keyword_isolation_block() -> str:
         "- FORBIDDEN: building the scene from two headline words or from a headline phrase containing the keyword.\n"
         "- SELF-CHECK: remove the full headline; look only at headlineCoreKeyword; ask: "
         '"Would I choose the same scene from this single word alone?" If not → reject scene and recreate from keyword only.\n\n'
-        "EXAMPLES:\n"
-        '- Keyword "מוביל" — BAD: person leading someone on a path (uses "מוביל בדרך"). '
+        "EXAMPLES (keyword territory — stay isolated from other headline words):\n"
+        '- Keyword "מוביל" — BAD: person leading someone on a path (uses another headline word). '
         "GOOD: one person confidently walking first in front of others, visibly leading.\n"
-        '- Keyword "דרך" — GOOD: a person walking along a path.\n'
-        '- Keyword "גשר" — GOOD: a person crossing a small bridge.\n\n'
+        '- Keyword "דרך" — WEAK/literal fallback: person walking on a path. '
+        "STRONGER: brisk fitness walk in stylish everyday clothes (not sportswear) — still movement/דרך territory.\n"
+        '- Keyword "גשר" — WEAK/literal: person crosses bridge. '
+        "STRONGER: same action in an unexpectedly elegant memorable everyday setting.\n\n"
     )
 
 
@@ -762,62 +764,91 @@ def _planner_final_checklist_block() -> str:
     return (
         "FINAL CHECKLIST (before returning JSON):\n"
         "1) headlineCoreKeyword is exactly one standalone word.\n"
-        "2) sceneConcept comes from that word only.\n"
+        "2) sceneConcept stays inside keyword territory only (keyword-isolated).\n"
         "3) sceneConcept does not use another word from the headline.\n"
         "4) videoPrompt does not add phrase meaning from the headline.\n"
         "5) main subject gender does not contradict product/headline.\n"
-        "6) if gender is not essential, subject is neutral.\n\n"
+        "6) if gender is not essential, subject is neutral.\n"
+        "7) among valid options, scene is the most interesting — not merely the most literal.\n\n"
+    )
+
+
+def _planner_interest_first_block() -> str:
+    return (
+        "INTEREST FIRST (primary scene selection rule — mandatory):\n"
+        "- Ad quality is measured primarily by viewer interest. Among multiple valid scenes, prefer the most interesting.\n"
+        "- NOT the most literal, obvious, or mechanical — unless no better valid option exists.\n"
+        "- Scene must still be: realistic, everyday, simple, visually understandable, physically possible, silent-video compatible.\n"
+        "- Valid scene should make a viewer think: \"Interesting.\"\n\n"
+        "KEYWORD ROLE:\n"
+        "- headlineCoreKeyword does NOT directly prescribe the final scene.\n"
+        "- headlineCoreKeyword defines the SEMANTIC TERRITORY.\n"
+        "- Search inside that territory for the most interesting realistic scene.\n"
+        "- Stay keyword-isolated: territory comes from the keyword alone, never from other headline words.\n\n"
+        "NOT LITERALITY:\n"
+        "- Do not reward literality. Literality is only a fallback when no stronger valid scene exists.\n"
+        '- "דלת" — literal: opens door. Potentially better: arrives at a welcoming home and enters.\n'
+        '- "גשר" — literal: crosses bridge. Potentially better: crosses a small footbridge in an elegant memorable everyday context.\n'
+        '- "דרך" — literal: walks on path. Potentially better: movement/progress/personal style — e.g. brisk walk in stylish everyday clothes instead of sportswear.\n\n'
+        "INTEREST TEST: If two valid scenes exist, which would a human viewer remember longer? Prefer that one.\n"
+        "CURIOSITY TEST: Would the viewer feel curiosity, surprise, or delight? If not, search for a more interesting scene in the same keyword territory.\n\n"
+        "IMPORTANT LIMIT — interest must NOT come from:\n"
+        "fantasy, surrealism, impossible events, dream logic, visual tricks, symbolism requiring explanation.\n"
+        "Interest MUST come from: unusual but realistic combinations, unexpected everyday situations, human behavior, contrast, style, context.\n\n"
+        "EXAMPLE (walking shoes, keyword \"דרך\"):\n"
+        "- WEAK: person walking along a park path.\n"
+        "- STRONG: person confidently doing a fitness walk in stylish everyday clothes instead of sportswear — realistic, simple, connected to דרך, more interesting.\n\n"
+        "FINAL PRIORITY ORDER (when several valid scenes exist):\n"
+        "1) Interesting  2) Realistic  3) Silent-video verifiable  4) Keyword-isolated  5) Simple  6) Everyday.\n\n"
     )
 
 
 def _planner_scene_association_block() -> str:
     return (
         "SCENE ASSOCIATION RULE (mandatory for sceneConcept + videoPrompt):\n"
-        "- Generate the scene ONLY from the standalone headlineCoreKeyword — never from a multi-word phrase in the headline.\n"
-        "- Do NOT generate the scene from the literal dictionary/object meaning of headlineCoreKeyword.\n"
-        "- Find the strongest, simplest, most universal everyday human association of the keyword.\n"
-        "- Generate the scene from that association — the first natural human meaning that comes to mind.\n"
-        "- Not merely logically correct; instantly recognizable and emotionally understandable within 5 seconds.\n\n"
-        "BAD vs GOOD (keyword → scene):\n"
+        "- headlineCoreKeyword defines semantic territory — search inside it for the most interesting valid scene (see INTEREST FIRST).\n"
+        "- Generate the scene ONLY from keyword territory — never from a multi-word phrase in the headline.\n"
+        "- Do NOT default to literal dictionary/object meaning when a more interesting human association exists in the same territory.\n"
+        "- Find strong everyday human associations of the keyword; pick the most memorable valid one.\n"
+        "- Instantly recognizable and emotionally understandable within 5 seconds.\n\n"
+        "BAD vs GOOD (keyword territory → scene):\n"
         '- "קרוב" — BAD: two people standing near each other. GOOD: two people warmly embracing.\n'
         '- "מפתח" — BAD: person inserts key into lock. GOOD: person opens a door and enters.\n'
-        '- "דרך" — BAD: person looking at a map. GOOD: person walking confidently along a path.\n'
+        '- "דרך" — WEAK: generic path walk. BETTER: confident brisk walk with distinctive everyday style.\n'
         '- "לב" — BAD: heart-shaped object. GOOD: warm human embrace.\n'
         '- "בית" — BAD: exterior house shot. GOOD: family arriving home and entering together.\n'
-        '- "גשר" — BAD sceneConcept: crossing a bridge to meet someone on the other side. GOOD: a person crossing a small footbridge.\n'
-        '- "דלת" — GOOD: person opening a front door and entering (single subject when possible).\n\n'
-        "SCENE PRIORITY (when multiple associations are possible, pick the one that is most):\n"
-        "1) Immediately recognizable  2) Emotionally understandable  3) Simple  "
-        "4) Human-centered  5) Visually clear within 5 seconds.\n"
+        '- "גשר" — BAD: crossing bridge to meet someone (extra plot). BETTER: crossing a small footbridge in a memorable everyday setting.\n'
+        '- "דלת" — WEAK: opens door only. BETTER: arrives and enters a welcoming home.\n\n'
+        "When multiple valid scenes exist, apply INTEREST FIRST — not first-to-mind literal.\n"
         "Prefer human actions over object manipulation.\n"
         "PREFER: hugging, greeting, opening a door, arriving, entering, helping, walking, running, "
-        "sitting together, welcoming.\n"
-        "AVOID: technical object usage, symbolic props, static proximity, map-reading, lock-and-key close-ups, "
-        "exterior architecture shots without human arrival/entry.\n\n"
+        "sitting together, welcoming — with an interesting everyday twist when possible.\n"
+        "AVOID: boring literal defaults when a more interesting valid scene exists; technical object usage; "
+        "symbolic props; map-reading; lock-and-key close-ups.\n\n"
     )
 
 
 def _planner_video_prompt_simplicity_block() -> str:
     return (
         "VIDEO PROMPT SIMPLICITY RULE (mandatory for videoPrompt only):\n"
-        "- After headlineCoreKeyword and sceneConcept are set, write the SIMPLEST possible 5-second visual scene.\n"
+        "- Execute sceneConcept as the SIMPLEST possible 5-second stock-video moment — interesting but not complex.\n"
         "- Feel like clean stock footage — NOT a short film, NOT a plot, NOT an ad storyboard.\n"
-        "- One main human subject whenever possible.\n"
-        "- One clear action. One location. Single continuous moment.\n"
+        "- One main human subject whenever possible. One clear action. One location. Single continuous moment.\n"
+        "- Interest comes from style, context, or human detail — NOT from extra story beats or choreography.\n"
         "- NO secondary story beat, NO plot resolution, NO complex choreography.\n"
         "- NO meeting another person unless the keyword absolutely requires it (e.g. hugging needs two people).\n"
         "- NO handshake unless the keyword itself requires it.\n"
         "- NO added business symbolism, NO \"they continue together\", NO \"and then\" sequences.\n\n"
-        "PREFER (videoPrompt patterns):\n"
-        "- A person crosses a bridge.\n"
-        "- A person opens a door.\n"
-        "- A person walks along a path.\n"
-        "- Two people hug.\n"
-        "- A person enters a home.\n\n"
+        "PREFER (videoPrompt patterns — choose interesting variant when valid):\n"
+        "- A person crosses a bridge in an elegant everyday setting.\n"
+        "- A person opens a door and enters a welcoming home.\n"
+        "- A person does a confident brisk walk in stylish everyday clothes.\n"
+        "- Two people hug.\n\n"
         "KEYWORD \"גשר\" / bridge — videoPrompt examples:\n"
-        '- GOOD: "A person crosses a small bridge on a sunny spring day. Natural realistic movement. Simple cinematic shot. No text."\n'
-        '- BAD: "A woman crosses a bridge, meets a man halfway, shakes hands, and they walk together."\n\n'
-        "Strip sceneConcept down to its single visual essence before writing videoPrompt.\n\n"
+        '- GOOD: "A person crosses a small footbridge in soft morning light. Natural movement. Simple cinematic shot. No text."\n'
+        '- WEAK/literal: "A person crosses a bridge."\n'
+        '- BAD: "A person crosses a bridge, meets someone halfway, shakes hands, and they walk together."\n\n'
+        "Strip sceneConcept to one visual essence — maximize interest within one simple moment.\n\n"
     )
 
 
@@ -849,12 +880,13 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 1 — Read product_name and product_description.\n"
         "STEP 2 — headline: direct advertising advantage expression (see HEADLINE RULES).\n"
         "STEP 3 — headlineCoreKeyword: standalone semantic word in headline (see STANDALONE KEYWORD RULE).\n"
-        "STEP 4 — sceneConcept: universal everyday human association of the standalone keyword (see SCENE ASSOCIATION RULE).\n"
-        "STEP 5 — videoPrompt: simplest 5-second stock-video scene from sceneConcept (see VIDEO PROMPT SIMPLICITY RULE).\n\n"
+        "STEP 4 — sceneConcept: most interesting valid scene inside keyword territory (see INTEREST FIRST + SCENE ASSOCIATION).\n"
+        "STEP 5 — videoPrompt: simplest 5-second stock-video execution of sceneConcept (see VIDEO PROMPT SIMPLICITY RULE).\n\n"
         + _planner_headline_rules_block()
         + _planner_headline_phrase_dependency_block()
         + _planner_standalone_keyword_block()
         + _planner_strict_keyword_isolation_block()
+        + _planner_interest_first_block()
         + _planner_scene_association_block()
         + _planner_video_prompt_simplicity_block()
         + _planner_silent_video_verifiability_block()
@@ -876,7 +908,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"ACE Builder2 video planning — keyword-scene v2 (no advertisingGoal stage). "
         f"Language {lang_name} ({lang}). "
         "product → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
-        "Scene keyword isolation, gender consistency, stock-video simplicity, and silent visual verifiability are mandatory. "
+        "Scene selection is INTEREST FIRST within keyword territory; all existing rules (isolation, silent, gender, simplicity) still apply. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -1003,8 +1035,8 @@ def _build_scene_plan_repair_input(
         "sceneConcept and videoPrompt must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
         "Use gender-neutral subject (a person) unless product/headline clearly requires gender; no gender contradiction.\n"
         "For sceneConcept + videoPrompt: visually provable without sound; muted viewer must understand the action.\n"
-        "For sceneConcept: one clear action; strongest universal human association of the standalone keyword.\n"
-        "For videoPrompt: SIMPLEST 5-second stock-video scene — one subject, one action, one location; "
+        "For sceneConcept: pick the most INTERESTING valid scene inside keyword territory — not the most literal; one clear action.\n"
+        "For videoPrompt: SIMPLEST 5-second stock-video execution — one subject, one action, one location; interesting but not complex; "
         "no meetings/handshakes/plot beats unless keyword requires it; no \"walk together\" endings.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
