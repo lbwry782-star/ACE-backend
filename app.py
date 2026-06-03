@@ -474,7 +474,14 @@ def _builder1_gpt_image_size_for_format(format_value: str) -> str:
     return "1024x1536"
 
 
-def _gpt_image_15_caller(prompt: str, format_value: str) -> bytes:
+def _builder1_image_caller(prompt: str, format_value: str) -> bytes:
+    if (os.environ.get("BUILDER1_IMAGE_MODEL") or "").strip():
+        model = os.environ["BUILDER1_IMAGE_MODEL"].strip()
+        source = "env"
+    else:
+        model = os.getenv("BUILDER1_IMAGE_MODEL", "gpt-image-1.5")
+        source = "default"
+    logger.info("BUILDER1_IMAGE_MODEL_SELECTED model=%s source=%s", model, source)
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise ValueError("openai_unconfigured")
@@ -484,7 +491,7 @@ def _gpt_image_15_caller(prompt: str, format_value: str) -> bytes:
         max_retries=0,
     )
     r = client.images.generate(
-        model="gpt-image-1.5",
+        model=model,
         prompt=prompt,
         size=_builder1_gpt_image_size_for_format(format_value),
         quality="low",
@@ -556,7 +563,7 @@ def _builder1_json_real_generate(
         err_message = str(last_error) if last_error is not None else "planning_failed"
         return {"ok": False, "error": "planning_failed", "message": err_message}
     try:
-        image_result = generate_builder1_image(p, _gpt_image_15_caller)
+        image_result = generate_builder1_image(p, _builder1_image_caller)
     except Exception as e:
         return {
             "ok": False,
@@ -756,7 +763,7 @@ def builder1_real_image_demo():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 200
     try:
-        image_result = generate_builder1_image(p, _gpt_image_15_caller)
+        image_result = generate_builder1_image(p, _builder1_image_caller)
     except Exception as e:
         return (
             jsonify(
