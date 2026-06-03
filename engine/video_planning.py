@@ -499,12 +499,12 @@ Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
 2) headline: direct expression of the primary advertising advantage implied by the product; remainder ONLY — do NOT include productNameResolved inside headline. Hebrew, English, or mixed. Up to 7 words. Prefer one strong metaphorical word; avoid literal industry/category words when possible.
 3) headlineCoreKeyword: exactly ONE standalone semantic word from headline — must preserve its intended meaning when completely isolated from all other headline words; reject if meaning depends on surrounding words, idioms, or collocations; if no word qualifies, choose a different headline first; must support a strong universal everyday human association scene; never fillers or literal industry words.
-4) sceneConcept: from headlineCoreKeyword, choose the strongest, simplest, most universal everyday HUMAN ASSOCIATION of that word — NOT the literal dictionary/object meaning. NOT a metaphor for the full headline.
-5) videoPrompt: English cinematic direction for Runway — completely realistic, physical, everyday; describes sceneConcept only; no fantasy/surrealism/symbolic objects/impossible events; no readable on-screen text.
+4) sceneConcept: from headlineCoreKeyword, choose the strongest, simplest, most universal everyday HUMAN ASSOCIATION — one clear action, one subject when possible; NOT a multi-beat story.
+5) videoPrompt: the simplest possible 5-second stock-video scene from sceneConcept — English; one main human subject, one clear action, one location; no secondary story beats; no fantasy/surrealism/symbolic objects; no readable on-screen text.
 
 Empty product name → invent productNameResolved.
 
-Before the JSON: one silent internal revision pass (headline → standalone keyword self-check → scene → prompt); output final JSON only.
+Before the JSON: one silent internal revision pass (headline → standalone keyword self-check → scene → simplest videoPrompt); output final JSON only.
 
 Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
@@ -559,7 +559,8 @@ def _planner_scene_association_block() -> str:
         '- "דרך" — BAD: person looking at a map. GOOD: person walking confidently along a path.\n'
         '- "לב" — BAD: heart-shaped object. GOOD: warm human embrace.\n'
         '- "בית" — BAD: exterior house shot. GOOD: family arriving home and entering together.\n'
-        '- "דלת" — GOOD: person opening a front door and welcoming someone inside.\n\n'
+        '- "גשר" — BAD sceneConcept: crossing a bridge to meet someone on the other side. GOOD: a person crossing a small footbridge.\n'
+        '- "דלת" — GOOD: person opening a front door and entering (single subject when possible).\n\n'
         "SCENE PRIORITY (when multiple associations are possible, pick the one that is most):\n"
         "1) Immediately recognizable  2) Emotionally understandable  3) Simple  "
         "4) Human-centered  5) Visually clear within 5 seconds.\n"
@@ -571,6 +572,30 @@ def _planner_scene_association_block() -> str:
     )
 
 
+def _planner_video_prompt_simplicity_block() -> str:
+    return (
+        "VIDEO PROMPT SIMPLICITY RULE (mandatory for videoPrompt only):\n"
+        "- After headlineCoreKeyword and sceneConcept are set, write the SIMPLEST possible 5-second visual scene.\n"
+        "- Feel like clean stock footage — NOT a short film, NOT a plot, NOT an ad storyboard.\n"
+        "- One main human subject whenever possible.\n"
+        "- One clear action. One location. Single continuous moment.\n"
+        "- NO secondary story beat, NO plot resolution, NO complex choreography.\n"
+        "- NO meeting another person unless the keyword absolutely requires it (e.g. hugging needs two people).\n"
+        "- NO handshake unless the keyword itself requires it.\n"
+        "- NO added business symbolism, NO \"they continue together\", NO \"and then\" sequences.\n\n"
+        "PREFER (videoPrompt patterns):\n"
+        "- A person crosses a bridge.\n"
+        "- A person opens a door.\n"
+        "- A person walks along a path.\n"
+        "- Two people hug.\n"
+        "- A person enters a home.\n\n"
+        "KEYWORD \"גשר\" / bridge — videoPrompt examples:\n"
+        '- GOOD: "A beautiful woman crosses a small bridge on a sunny spring day. Natural realistic movement. Simple cinematic shot. No text."\n'
+        '- BAD: "A woman crosses a bridge, meets a man halfway, shakes hands, and they walk together."\n\n'
+        "Strip sceneConcept down to its single visual essence before writing videoPrompt.\n\n"
+    )
+
+
 def _planner_keyword_scene_flow_block() -> str:
     return (
         "BUILDER2 KEYWORD-SCENE FLOW v2 (mandatory; do not narrate in JSON):\n"
@@ -578,10 +603,11 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 2 — headline: direct advertising advantage expression (see HEADLINE RULES).\n"
         "STEP 3 — headlineCoreKeyword: standalone semantic word in headline (see STANDALONE KEYWORD RULE).\n"
         "STEP 4 — sceneConcept: universal everyday human association of the standalone keyword (see SCENE ASSOCIATION RULE).\n"
-        "STEP 5 — videoPrompt: Runway-ready realistic scene from sceneConcept.\n\n"
+        "STEP 5 — videoPrompt: simplest 5-second stock-video scene from sceneConcept (see VIDEO PROMPT SIMPLICITY RULE).\n\n"
         + _planner_headline_rules_block()
         + _planner_standalone_keyword_block()
         + _planner_scene_association_block()
+        + _planner_video_prompt_simplicity_block()
         + "SCENE RULES (sceneConcept + videoPrompt):\n"
         "- Realistic, everyday, simple, human, physically possible.\n"
         "- A viewer who has NOT seen the headline should instantly understand a normal human situation.\n"
@@ -598,7 +624,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"ACE Builder2 video planning — keyword-scene v2 (no advertisingGoal stage). "
         f"Language {lang_name} ({lang}). "
         "product → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
-        "Scene realism and universal human association are mandatory. "
+        "Scene realism, universal human association, and stock-video simplicity for videoPrompt are mandatory. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -722,7 +748,9 @@ def _build_scene_plan_repair_input(
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
         "headlineCoreKeyword must be standalone — reject phrase-dependent keywords; rewrite headline if needed.\n"
-        "For sceneConcept: use the strongest universal everyday human association of the standalone keyword — NOT literal dictionary/object meaning.\n"
+        "For sceneConcept: one clear action; strongest universal human association of the standalone keyword.\n"
+        "For videoPrompt: SIMPLEST 5-second stock-video scene — one subject, one action, one location; "
+        "no meetings/handshakes/plot beats unless keyword requires it; no \"walk together\" endings.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
@@ -742,15 +770,13 @@ def _build_keyword_scene_fallback_plan(
     headline = "הכי קרוב למשרד פרסום" if lang == "he" else "Always One Step Ahead"
     keyword = "קרוב" if lang == "he" else "Ahead"
     scene = (
-        "שני אנשים מתחבקים בחום לאחר שנפגשו שוב"
+        "שני אנשים מתחבקים"
         if lang == "he"
-        else "Two people warmly embracing after finally meeting again"
+        else "Two people warmly hugging"
     )
     video_prompt = (
-        "A completely realistic everyday scene of two people warmly embracing — natural human closeness, "
-        "not merely standing near each other. Natural human behavior. Real-world environment. "
-        "Stable cinematic camera. No fantasy. No surrealism. No symbolic objects. "
-        "No impossible events. No readable text in-frame."
+        "Two people share a warm hug in a simple everyday setting. "
+        "Natural realistic movement. Simple cinematic shot. No text."
     )
     return {
         "productNameResolved": pn,
