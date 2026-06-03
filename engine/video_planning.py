@@ -283,6 +283,31 @@ def _is_weak_industry_keyword(keyword: str) -> bool:
     return _normalize_keyword_token(keyword) in _WEAK_INDUSTRY_KEYWORDS
 
 
+# Headline phrase + keyword pairs where the keyword meaning depends on the collocation (not standalone).
+_HEADLINE_KEYWORD_COLLOCATION_REJECT: List[Tuple[re.Pattern, FrozenSet[str], str]] = [
+    (re.compile(r"שופכ\w*\s+אור", re.I), frozenset({"אור"}), "hebrew_shafach_or"),
+    (re.compile(r"זורק\w*\s+אור", re.I), frozenset({"אור"}), "hebrew_zorek_or"),
+    (re.compile(r"\bshed\s+light\b", re.I), frozenset({"light"}), "english_shed_light"),
+    (re.compile(r"\bcast(s|ing)?\s+light\b", re.I), frozenset({"light"}), "english_cast_light"),
+    (re.compile(r"\bthrow(s|ing)?\s+light\b", re.I), frozenset({"light"}), "english_throw_light"),
+    (re.compile(r"\bbring(s|ing)?\s+.+\s+light\b", re.I), frozenset({"light"}), "english_bring_light"),
+    (re.compile(r"\bshines?\s+a\s+light\b", re.I), frozenset({"light"}), "english_shine_a_light"),
+]
+
+
+def _keyword_depends_on_headline_phrase(headline: str, keyword: str) -> Optional[str]:
+    """Return rule label when keyword meaning likely depends on headline collocation; else None."""
+    kw_norm = _normalize_keyword_token(keyword)
+    if not kw_norm:
+        return None
+    for rx, forbidden_kws, label in _HEADLINE_KEYWORD_COLLOCATION_REJECT:
+        if not rx.search(headline or ""):
+            continue
+        if kw_norm in {_normalize_keyword_token(k) for k in forbidden_kws}:
+            return label
+    return None
+
+
 def scene_fields_imply_forbidden_surrealism(blob: str) -> Optional[str]:
     """Return a rule label if scene/video prose matches forbidden surreal semantics; else None."""
     if not (blob or "").strip():
@@ -473,13 +498,13 @@ Keys (all strings): productNameResolved, headline, headlineCoreKeyword, sceneCon
 Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
 2) headline: direct expression of the primary advertising advantage implied by the product; remainder ONLY — do NOT include productNameResolved inside headline. Hebrew, English, or mixed. Up to 7 words. Prefer one strong metaphorical word; avoid literal industry/category words when possible.
-3) headlineCoreKeyword: exactly ONE word — the strongest metaphorical word in headline; must appear in headline; must support a strong universal everyday human association scene; never articles/prepositions/conjunctions/fillers; never literal industry words (e.g. advertising, marketing, digital, campaign, story, service, strategy).
+3) headlineCoreKeyword: exactly ONE standalone semantic word from headline — must preserve its intended meaning when completely isolated from all other headline words; reject if meaning depends on surrounding words, idioms, or collocations; if no word qualifies, choose a different headline first; must support a strong universal everyday human association scene; never fillers or literal industry words.
 4) sceneConcept: from headlineCoreKeyword, choose the strongest, simplest, most universal everyday HUMAN ASSOCIATION of that word — NOT the literal dictionary/object meaning. NOT a metaphor for the full headline.
 5) videoPrompt: English cinematic direction for Runway — completely realistic, physical, everyday; describes sceneConcept only; no fantasy/surrealism/symbolic objects/impossible events; no readable on-screen text.
 
 Empty product name → invent productNameResolved.
 
-Before the JSON: one silent internal revision pass (headline → keyword → scene → prompt); output final JSON only.
+Before the JSON: one silent internal revision pass (headline → standalone keyword self-check → scene → prompt); output final JSON only.
 
 Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
@@ -493,16 +518,37 @@ def _planner_headline_rules_block() -> str:
         "- Avoid literal industry/category words whenever possible (e.g. advertising, marketing, digital, campaign, story, service, strategy).\n"
         "- Remainder only — no product name inside headline. Up to 7 words.\n\n"
         "headlineCoreKeyword RULES:\n"
-        "- Exactly one word from the headline.\n"
-        "- The strongest metaphorical word — must support a vivid universal everyday human association scene.\n"
+        "- Exactly one word from the headline — a single standalone semantic word.\n"
+        "- The keyword MUST preserve its intended meaning when completely isolated from the rest of the headline.\n"
+        "- REJECT if meaning depends on surrounding words, idioms, collocations, or multi-word expressions.\n"
+        "- SELF-CHECK: remove all other headline words; keep only the keyword; ask: "
+        '"Would this keyword still express the same core idea?" If not → reject keyword and generate a different headline.\n'
+        "- Must support a vivid universal everyday human association scene.\n"
         "- FORBIDDEN as keyword: advertising, marketing, digital, campaign, story, service, strategy (and Hebrew equivalents).\n"
-        "- STRONGER examples: close/קרוב, bridge, door/דלת, path/דרך, heart, home, key, step, light, connection.\n\n"
+        "- ACCEPT examples: קרוב, דלת, דרך (standalone meaningful).\n"
+        '- REJECT example: headline "שופך אור על המסר שלך" → keyword "אור" (meaning comes from phrase "שופך אור", not standalone "אור").\n\n'
+    )
+
+
+def _planner_standalone_keyword_block() -> str:
+    return (
+        "STANDALONE KEYWORD RULE (mandatory for headlineCoreKeyword + sceneConcept):\n"
+        "- headlineCoreKeyword must be a single standalone semantic word.\n"
+        "- The scene must be generated from the standalone keyword itself — NEVER from a phrase containing the keyword.\n"
+        "- Reject any candidate keyword whose meaning only works inside a larger phrase, expression, idiom, or collocation.\n\n"
+        "ACCEPT / REJECT EXAMPLES:\n"
+        '- "הכי קרוב למשרד פרסום" → ACCEPT "קרוב" (isolated meaning preserved).\n'
+        '- "פותח לך דלת לקהל הנכון" → ACCEPT "דלת" (isolated meaning preserved).\n'
+        '- "הדרך הקצרה לקהל שלך" → ACCEPT "דרך" (isolated meaning preserved).\n'
+        '- "שופך אור על המסר שלך" → REJECT "אור" (intended meaning is phrase "שופך אור", not standalone "אור").\n\n'
+        "If no headline word passes the standalone self-check, rewrite the headline — do not force a phrase-dependent keyword.\n\n"
     )
 
 
 def _planner_scene_association_block() -> str:
     return (
         "SCENE ASSOCIATION RULE (mandatory for sceneConcept + videoPrompt):\n"
+        "- Generate the scene ONLY from the standalone headlineCoreKeyword — never from a multi-word phrase in the headline.\n"
         "- Do NOT generate the scene from the literal dictionary/object meaning of headlineCoreKeyword.\n"
         "- Find the strongest, simplest, most universal everyday human association of the keyword.\n"
         "- Generate the scene from that association — the first natural human meaning that comes to mind.\n"
@@ -530,10 +576,11 @@ def _planner_keyword_scene_flow_block() -> str:
         "BUILDER2 KEYWORD-SCENE FLOW v2 (mandatory; do not narrate in JSON):\n"
         "STEP 1 — Read product_name and product_description.\n"
         "STEP 2 — headline: direct advertising advantage expression (see HEADLINE RULES).\n"
-        "STEP 3 — headlineCoreKeyword: strongest metaphorical word in headline.\n"
-        "STEP 4 — sceneConcept: universal everyday human association of headlineCoreKeyword (see SCENE ASSOCIATION RULE).\n"
+        "STEP 3 — headlineCoreKeyword: standalone semantic word in headline (see STANDALONE KEYWORD RULE).\n"
+        "STEP 4 — sceneConcept: universal everyday human association of the standalone keyword (see SCENE ASSOCIATION RULE).\n"
         "STEP 5 — videoPrompt: Runway-ready realistic scene from sceneConcept.\n\n"
         + _planner_headline_rules_block()
+        + _planner_standalone_keyword_block()
         + _planner_scene_association_block()
         + "SCENE RULES (sceneConcept + videoPrompt):\n"
         "- Realistic, everyday, simple, human, physically possible.\n"
@@ -674,7 +721,8 @@ def _build_scene_plan_repair_input(
         f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
-        "For sceneConcept: use the strongest universal everyday human association of the keyword — NOT literal dictionary/object meaning.\n"
+        "headlineCoreKeyword must be standalone — reject phrase-dependent keywords; rewrite headline if needed.\n"
+        "For sceneConcept: use the strongest universal everyday human association of the standalone keyword — NOT literal dictionary/object meaning.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
@@ -838,6 +886,13 @@ def validate_and_normalize_plan(
     if _is_weak_industry_keyword(kw_tokens[0]):
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_is_weak_industry")
         return None, "planning_failed_weak_industry_keyword"
+    phrase_rule = _keyword_depends_on_headline_phrase(headline_rem, core_kw)
+    if phrase_rule:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=phrase_dependent_keyword rule=%s",
+            phrase_rule,
+        )
+        return None, "planning_failed_phrase_dependent_keyword"
     if not _headline_contains_core_keyword(headline_rem, core_kw):
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_not_in_headline")
         return None, "planning_failed_invalid_keyword"
