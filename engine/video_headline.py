@@ -272,11 +272,35 @@ def _fit_headline_remainder_to_word_limit(
     return shortened, new_full
 
 
+def _video_headline_expression_popularity_block() -> str:
+    return (
+        "EXPRESSION POPULARITY (mandatory when choosing the original expression):\n"
+        "PRIMARY OBJECTIVE: Among all valid candidates, choose the most popular and commonly used expression available.\n"
+        "The ideal original expression is one the average speaker immediately recognizes from everyday conversation.\n"
+        "Strong preference for: everyday speech; common idioms; common proverbs; frequently used expressions; "
+        "expressions widely recognized across generations.\n"
+        "Avoid when valid alternatives exist: literary expressions; archaic expressions; formal expressions; "
+        "bookish expressions; rare expressions; expressions mainly known from writing rather than speech.\n"
+        "Tie-break: If multiple valid expressions fit the advertisingPromise, video interaction, and allow a strong "
+        "phonetic substitution, choose the expression that is more common in everyday language.\n"
+        "Popularity does NOT override: immediate recognizability after substitution, strong phonetic substitution, "
+        "advertising-promise fit through the substitution, or relevance to the video interaction.\n"
+        "Preferred popularity examples (when they fit promise, interaction, and substitution): לכל שאלה תשובה; לשים קץ; "
+        "אור בקצה המנהרה; לחשוב מחוץ לקופסה; על קצה הלשון.\n"
+        "Less preferred (deprioritize when a more everyday alternative exists): קול קורא במדבר; "
+        "literary/bookish phrasing; rare idioms; expressions primarily recognized from literature.\n"
+    )
+
+
 def _video_headline_rhyming_substitution_block() -> str:
-    """Same creative rule set as Builder1 headline (remainder-only output)."""
+    """Builder2 headline rules (remainder-only); aligned with Builder1 popularity preference."""
+    popularity_block = _video_headline_expression_popularity_block()
     return (
         "HEADLINE (rhyming object substitution — mandatory for headlineText remainder):\n"
-        "1. First find an existing familiar expression, idiom, proverb, or well-known phrase that expresses the advertisingPromise.\n"
+        "1. First find valid candidate expressions (existing idiom, proverb, or well-known phrase) that express the "
+        "advertisingPromise, fit the video interaction, and allow a strong object substitution — then apply "
+        "EXPRESSION POPULARITY to select one.\n"
+        f"{popularity_block}"
         "2. The original expression must NOT already contain the name or core word of Object A or Object B.\n"
         "3. Choose exactly one word inside that expression.\n"
         "4. Replace that one word with the name of Object A or Object B (natural headline-language form).\n"
@@ -368,6 +392,7 @@ def generate_video_headline_o3(
         used_headlines[-10:],
     )
     logger.info("VIDEO_HEADLINE_RULE=rhyming_object_substitution")
+    logger.info("BUILDER2_HEADLINE_POPULARITY_PREFERENCE=everyday_common")
 
     rhyme_block = _video_headline_rhyming_substitution_block()
     system = (
@@ -389,7 +414,7 @@ def generate_video_headline_o3(
         "- The headline is not a literal shot description.\n"
         "- Headline memory excludes product names; compare only the slogan/title phrase part.\n"
         "- Do not reuse any previous headlineText from memory.\n"
-        "- Do not reuse the same familiar expression; choose a fresh phrasing.\n"
+        "- Do not reuse the same familiar expression; choose a fresh phrasing that is still highly popular in everyday speech.\n"
     )
     user = (
         f"language: {language}\n"
