@@ -283,16 +283,63 @@ def _is_weak_industry_keyword(keyword: str) -> bool:
     return _normalize_keyword_token(keyword) in _WEAK_INDUSTRY_KEYWORDS
 
 
+# Entire headline rejected when meaning depends on a fixed phrase/idiom (not only the keyword token).
+_HEADLINE_PHRASE_DEPENDENT_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"שופכ\w*\s+אור", re.I), "hebrew_shafach_or"),
+    (re.compile(r"זורק\w*\s+אור", re.I), "hebrew_zorek_or"),
+    (re.compile(r"ישר\s+לב", re.I), "hebrew_yashar_lev"),
+    (re.compile(r"על\s+המפה", re.I), "hebrew_al_hamapa"),
+    (re.compile(r"פותח\w*\s+דלת\s+להזדמנ", re.I), "hebrew_opens_door_opportunities"),
+    (re.compile(r"\bshed\s+light\b", re.I), "english_shed_light"),
+    (re.compile(r"\bcast(s|ing)?\s+light\b", re.I), "english_cast_light"),
+    (re.compile(r"\bon\s+the\s+map\b", re.I), "english_on_the_map"),
+    (re.compile(r"\bstraight\s+to\s+the\s+heart\b", re.I), "english_straight_to_heart"),
+    (re.compile(r"\bopens?\s+(a\s+)?door\s+to\s+opportunit", re.I), "english_door_to_opportunities"),
+]
+
 # Headline phrase + keyword pairs where the keyword meaning depends on the collocation (not standalone).
 _HEADLINE_KEYWORD_COLLOCATION_REJECT: List[Tuple[re.Pattern, FrozenSet[str], str]] = [
     (re.compile(r"שופכ\w*\s+אור", re.I), frozenset({"אור"}), "hebrew_shafach_or"),
     (re.compile(r"זורק\w*\s+אור", re.I), frozenset({"אור"}), "hebrew_zorek_or"),
+    (re.compile(r"ישר\s+לב", re.I), frozenset({"לב"}), "hebrew_yashar_lev"),
+    (re.compile(r"על\s+המפה", re.I), frozenset({"מפה"}), "hebrew_al_hamapa"),
     (re.compile(r"\bshed\s+light\b", re.I), frozenset({"light"}), "english_shed_light"),
     (re.compile(r"\bcast(s|ing)?\s+light\b", re.I), frozenset({"light"}), "english_cast_light"),
     (re.compile(r"\bthrow(s|ing)?\s+light\b", re.I), frozenset({"light"}), "english_throw_light"),
     (re.compile(r"\bbring(s|ing)?\s+.+\s+light\b", re.I), frozenset({"light"}), "english_bring_light"),
     (re.compile(r"\bshines?\s+a\s+light\b", re.I), frozenset({"light"}), "english_shine_a_light"),
+    (re.compile(r"\bon\s+the\s+map\b", re.I), frozenset({"map"}), "english_on_the_map"),
 ]
+
+# Builder2 videos are silent — scene/video prose must not depend on audio to be understood.
+_SCENE_REQUIRES_SOUND_PATTERNS: List[Tuple[str, re.Pattern]] = [
+    ("shouting", re.compile(r"\bshout(s|ing|ed)?\b", re.I)),
+    ("screaming", re.compile(r"\bscream(s|ing|ed)?\b", re.I)),
+    ("whispering", re.compile(r"\bwhisper(s|ing|ed)?\b", re.I)),
+    ("singing", re.compile(r"\bsing(s|ing|s)?\b", re.I)),
+    ("loudspeaker", re.compile(r"\bloudspeaker\b|\bpa\s+system\b", re.I)),
+    ("music_playing", re.compile(r"\bmusic\s+playing\b|\bloud\s+music\b", re.I)),
+    ("alarm_sound", re.compile(r"\balarm\s+(sound|ring|sounding|goes\s+off)\b", re.I)),
+    ("bell_ringing", re.compile(r"\bbell(s)?\s+(ring|ringing)\b", re.I)),
+    ("crowd_cheering", re.compile(r"\bcheer(s|ing|ed)?\b", re.I)),
+    ("engine_roaring", re.compile(r"\b(roar|roaring)\b", re.I)),
+    ("loudly", re.compile(r"\bloudly\b", re.I)),
+    ("broadcasting", re.compile(r"\bbroadcast(ing|s)?\b", re.I)),
+    ("hebrew_shouting", re.compile(r"צועק|צורח|צריח", re.I)),
+    ("hebrew_whispering", re.compile(r"לוחש|לחש", re.I)),
+    ("hebrew_singing", re.compile(r"\bשר(ים|ה)?\b|שירה", re.I)),
+    ("hebrew_alarm", re.compile(r"אזעקה|צלצול", re.I)),
+    ("hebrew_barking", re.compile(r"נביח", re.I)),
+    ("hebrew_loud", re.compile(r"בקול\s+רם|רועש", re.I)),
+]
+
+
+def _headline_depends_on_fixed_phrase(headline: str) -> Optional[str]:
+    """Return rule label when headline meaning depends on a fixed phrase/idiom; else None."""
+    for rx, label in _HEADLINE_PHRASE_DEPENDENT_PATTERNS:
+        if rx.search(headline or ""):
+            return label
+    return None
 
 
 def _keyword_depends_on_headline_phrase(headline: str, keyword: str) -> Optional[str]:
@@ -313,6 +360,16 @@ def scene_fields_imply_forbidden_surrealism(blob: str) -> Optional[str]:
     if not (blob or "").strip():
         return None
     for label, rx in _SCENE_FORBIDDEN_PATTERNS:
+        if rx.search(blob):
+            return label
+    return None
+
+
+def scene_fields_require_sound_to_verify(blob: str) -> Optional[str]:
+    """Return a rule label if scene/video meaning depends on audio (Builder2 is silent); else None."""
+    if not (blob or "").strip():
+        return None
+    for label, rx in _SCENE_REQUIRES_SOUND_PATTERNS:
         if rx.search(blob):
             return label
     return None
@@ -497,10 +554,10 @@ Keys (all strings): productNameResolved, headline, headlineCoreKeyword, sceneCon
 
 Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
-2) headline: direct expression of the primary advertising advantage implied by the product; remainder ONLY — do NOT include productNameResolved inside headline. Hebrew, English, or mixed. Up to 7 words. Prefer one strong metaphorical word; avoid literal industry/category words when possible.
-3) headlineCoreKeyword: exactly ONE standalone semantic word from headline — must preserve its intended meaning when completely isolated from all other headline words; reject if meaning depends on surrounding words, idioms, or collocations; if no word qualifies, choose a different headline first; must support a strong universal everyday human association scene; never fillers or literal industry words.
-4) sceneConcept: from headlineCoreKeyword, choose the strongest, simplest, most universal everyday HUMAN ASSOCIATION — one clear action, one subject when possible; NOT a multi-beat story.
-5) videoPrompt: the simplest possible 5-second stock-video scene from sceneConcept — English; one main human subject, one clear action, one location; no secondary story beats; no fantasy/surrealism/symbolic objects; no readable on-screen text.
+2) headline: direct expression of the primary advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; REJECT headlines whose meaning depends on a fixed phrase/idiom/collocation — keyword must carry the core idea independently; if rejected, write a new headline.
+3) headlineCoreKeyword: exactly ONE standalone semantic word from headline — must preserve intended meaning when completely isolated; if not, reject headline and rewrite; must support a strong universal everyday human association scene; never fillers or literal industry words.
+4) sceneConcept: strongest simplest universal everyday HUMAN ASSOCIATION of the standalone keyword — one clear action; visually provable with NO sound (Builder2 is silent).
+5) videoPrompt: simplest 5-second stock-video scene from sceneConcept — English; one subject, one action, one location; visually verifiable muted; no audio-dependent meaning; no readable on-screen text.
 
 Empty product name → invent productNameResolved.
 
@@ -520,13 +577,31 @@ def _planner_headline_rules_block() -> str:
         "headlineCoreKeyword RULES:\n"
         "- Exactly one word from the headline — a single standalone semantic word.\n"
         "- The keyword MUST preserve its intended meaning when completely isolated from the rest of the headline.\n"
-        "- REJECT if meaning depends on surrounding words, idioms, collocations, or multi-word expressions.\n"
-        "- SELF-CHECK: remove all other headline words; keep only the keyword; ask: "
-        '"Would this keyword still express the same core idea?" If not → reject keyword and generate a different headline.\n'
+        "- REJECT entire headline if meaning depends on a fixed phrase, idiom, or collocation — even when a keyword token looks valid.\n"
+        "- SELF-CHECK after keyword selection: remove every other word; ask: "
+        '"Does the same core advertising idea still exist?" If not → reject headline and generate a new one.\n'
         "- Must support a vivid universal everyday human association scene.\n"
         "- FORBIDDEN as keyword: advertising, marketing, digital, campaign, story, service, strategy (and Hebrew equivalents).\n"
         "- ACCEPT examples: קרוב, דלת, דרך (standalone meaningful).\n"
-        '- REJECT example: headline "שופך אור על המסר שלך" → keyword "אור" (meaning comes from phrase "שופך אור", not standalone "אור").\n\n'
+        '- REJECT headline "שופך אור על המסר שלך" (phrase "שופך אור").\n'
+        '- REJECT headline "מגיע ישר ללב" (phrase "ישר ללב", not standalone "לב").\n'
+        '- REJECT headline "שם אותך על המפה" (phrase "על המפה").\n'
+        '- REJECT headline "פותח דלת להזדמנויות" (idiomatic phrase, not standalone "דלת").\n\n'
+    )
+
+
+def _planner_headline_phrase_dependency_block() -> str:
+    return (
+        "HEADLINE PHRASE DEPENDENCY RULE (mandatory):\n"
+        "- Reject headlines where the intended meaning depends on a fixed phrase, collocation, idiom, or expression.\n"
+        "- The keyword must carry the core advertising idea independently — not smuggled in via a multi-word phrase.\n"
+        "- After selecting headlineCoreKeyword, remove every other word and verify the same core idea remains.\n"
+        "- If not, reject the headline and generate a new headline.\n\n"
+        "REJECT HEADLINE EXAMPLES:\n"
+        '- "שופך אור על המסר שלך" — meaning from "שופך אור".\n'
+        '- "מגיע ישר ללב" — meaning from "ישר ללב", not standalone "לב".\n'
+        '- "שם אותך על המפה" — meaning from "על המפה".\n'
+        '- "פותח דלת להזדמנויות" — meaning primarily from the idiomatic phrase.\n\n'
     )
 
 
@@ -540,8 +615,9 @@ def _planner_standalone_keyword_block() -> str:
         '- "הכי קרוב למשרד פרסום" → ACCEPT "קרוב" (isolated meaning preserved).\n'
         '- "פותח לך דלת לקהל הנכון" → ACCEPT "דלת" (isolated meaning preserved).\n'
         '- "הדרך הקצרה לקהל שלך" → ACCEPT "דרך" (isolated meaning preserved).\n'
-        '- "שופך אור על המסר שלך" → REJECT "אור" (intended meaning is phrase "שופך אור", not standalone "אור").\n\n'
-        "If no headline word passes the standalone self-check, rewrite the headline — do not force a phrase-dependent keyword.\n\n"
+        '- "שופך אור על המסר שלך" → REJECT headline (phrase "שופך אור").\n'
+        '- "מגיע ישר ללב" → REJECT headline (phrase "ישר ללב").\n\n'
+        "If no headline passes phrase + standalone checks, rewrite the headline — do not force a phrase-dependent keyword.\n\n"
     )
 
 
@@ -596,6 +672,28 @@ def _planner_video_prompt_simplicity_block() -> str:
     )
 
 
+def _planner_silent_video_verifiability_block() -> str:
+    return (
+        "SILENT VIDEO VERIFIABILITY RULE (mandatory for sceneConcept + videoPrompt):\n"
+        "- Builder2 videos are SILENT. Every scene must be visually verifiable with NO sound.\n"
+        "- If a muted viewer cannot tell the action occurred, reject the scene and choose a visual alternative.\n"
+        "- A muted viewer must reach the same interpretation as a hearing viewer.\n\n"
+        "REJECT (audio-dependent):\n"
+        "- shouting, screaming, whispering, singing, loudspeaker/PA, music playing loudly, alarms, bell ringing, "
+        "crowd cheering, barking as the key event, engine roaring, any event whose meaning depends on audio.\n\n"
+        "ALLOW (visually provable):\n"
+        "- opening a door, crossing a bridge, hugging, handshake, entering a home, walking a path, "
+        "turning a volume knob, turning on a light, moving a lever, raising a flag, lifting an object, helping another person.\n\n"
+        "KEYWORD \"מגביר\" / amplify example:\n"
+        "- BAD: woman shouting loudly (loudness is not visible).\n"
+        "- GOOD: a hand rotates a volume knob from low to high (increase is visually observable).\n\n"
+        "FINAL CHECK — scene is valid only if:\n"
+        "1) keyword stands independently  2) headline does not depend on a fixed phrase  "
+        "3) scene comes from the keyword itself  4) action is visually understandable  "
+        "5) action is visually provable without sound  6) muted viewer reaches the same interpretation.\n\n"
+    )
+
+
 def _planner_keyword_scene_flow_block() -> str:
     return (
         "BUILDER2 KEYWORD-SCENE FLOW v2 (mandatory; do not narrate in JSON):\n"
@@ -605,11 +703,13 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 4 — sceneConcept: universal everyday human association of the standalone keyword (see SCENE ASSOCIATION RULE).\n"
         "STEP 5 — videoPrompt: simplest 5-second stock-video scene from sceneConcept (see VIDEO PROMPT SIMPLICITY RULE).\n\n"
         + _planner_headline_rules_block()
+        + _planner_headline_phrase_dependency_block()
         + _planner_standalone_keyword_block()
         + _planner_scene_association_block()
         + _planner_video_prompt_simplicity_block()
+        + _planner_silent_video_verifiability_block()
         + "SCENE RULES (sceneConcept + videoPrompt):\n"
-        "- Realistic, everyday, simple, human, physically possible.\n"
+        "- Realistic, everyday, simple, human, physically possible; visually verifiable without sound.\n"
         "- A viewer who has NOT seen the headline should instantly understand a normal human situation.\n"
         "FORBIDDEN: surreal, dreamlike, fantasy, magic, impossible physics, talking/animated/floating/symbolic objects, "
         "heart-shaped props, impossible events, science fiction, abstract visual concepts.\n"
@@ -624,7 +724,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"ACE Builder2 video planning — keyword-scene v2 (no advertisingGoal stage). "
         f"Language {lang_name} ({lang}). "
         "product → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
-        "Scene realism, universal human association, and stock-video simplicity for videoPrompt are mandatory. "
+        "Scene realism, universal human association, stock-video simplicity, and silent visual verifiability are mandatory. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -747,7 +847,8 @@ def _build_scene_plan_repair_input(
         f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
-        "headlineCoreKeyword must be standalone — reject phrase-dependent keywords; rewrite headline if needed.\n"
+        "headlineCoreKeyword must be standalone — reject phrase-dependent headlines/keywords; rewrite headline if needed.\n"
+        "For sceneConcept + videoPrompt: visually provable without sound; muted viewer must understand the action.\n"
         "For sceneConcept: one clear action; strongest universal human association of the standalone keyword.\n"
         "For videoPrompt: SIMPLEST 5-second stock-video scene — one subject, one action, one location; "
         "no meetings/handshakes/plot beats unless keyword requires it; no \"walk together\" endings.\n"
@@ -902,6 +1003,14 @@ def validate_and_normalize_plan(
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_too_long")
         return None, "planning_failed_headline_too_long"
 
+    headline_phrase_rule = _headline_depends_on_fixed_phrase(headline_rem)
+    if headline_phrase_rule:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=phrase_dependent_headline rule=%s",
+            headline_phrase_rule,
+        )
+        return None, "planning_failed_phrase_dependent_headline"
+
     kw_tokens = [t for t in core_kw.split() if t]
     if len(kw_tokens) != 1:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=invalid_headline_core_keyword_count")
@@ -931,6 +1040,14 @@ def validate_and_normalize_plan(
             bad_scene,
         )
         return None, "planning_failed_surreal_scene"
+
+    bad_sound = scene_fields_require_sound_to_verify(scene_blob)
+    if bad_sound:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=sound_dependent_scene rule=%s",
+            bad_sound,
+        )
+        return None, "planning_failed_sound_dependent_scene"
 
     pn_for_headline = (product_name or "").strip() or pn
     headline_full = _assemble_headline_full(pn_for_headline, headline_rem)
