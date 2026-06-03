@@ -404,6 +404,112 @@ def _headline_contains_core_keyword(headline: str, keyword: str) -> bool:
     return kw in _normalize_keyword_token(headline)
 
 
+# Light English glosses for non-keyword headline words that leak into English videoPrompt.
+_HEADLINE_WORD_EN_GLOSS: Dict[str, FrozenSet[str]] = {
+    "דרך": frozenset({"path", "road", "route", "walkway", "trail"}),
+    "גשר": frozenset({"bridge"}),
+    "דלת": frozenset({"door"}),
+    "לב": frozenset({"heart"}),
+    "בית": frozenset({"home", "house"}),
+    "מפתח": frozenset({"key", "lock"}),
+    "מפה": frozenset({"map"}),
+    "אור": frozenset({"light", "lighting"}),
+}
+
+_SCENE_FEMININE_SUBJECT = re.compile(
+    r"\b(woman|women|girl|girls|female|lady|ladies|beautiful\s+woman)\b|(?:^|\s)(אישה|בחורה|נערה)(?:\s|$)",
+    re.I,
+)
+_SCENE_MASCULINE_SUBJECT = re.compile(
+    r"\b(man|men|boy|boys|male|guy|guys)\b|(?:^|\s)(גבר|בחור)(?:\s|$)",
+    re.I,
+)
+_MASCULINE_CONTEXT_HINT = re.compile(
+    r"\b(man|men|male|guy|גבר|בחור)\b"
+    r"|(?:^|\s)(מגיע|פותח|מוביל|מביא|בונה|יוצר|נותן)(?:\s|$)"
+    r"|(?:^|\s)(אורי|דני|מאיר|יוסי|רועי|גיא|נועם|איתי|עומר)(?:\s|$)",
+    re.I,
+)
+_FEMININE_CONTEXT_HINT = re.compile(
+    r"\b(woman|women|female|girl|lady|אישה|בחורה|נערה|גברת)\b"
+    r"|(?:^|\s)(מגיעה|פותחת|מובילה|מביאה|בונה|יוצרת|נותנת)(?:\s|$)"
+    r"|(?:^|\s)(שרה|רונית|דנה|מיכל|נועה|יעל|הילה)(?:\s|$)",
+    re.I,
+)
+
+
+def _hebrew_lemma_light(word: str) -> str:
+    w = (word or "").strip()
+    while len(w) > 2 and w[0] in "בלמכשהו":
+        w = w[1:]
+    return _normalize_keyword_token(w)
+
+
+def _headline_words_excluding_keyword(headline: str, keyword: str) -> List[str]:
+    kw_norm = _normalize_keyword_token(keyword)
+    lemmas: List[str] = []
+    seen: set[str] = set()
+    for raw in (headline or "").split():
+        wn = _normalize_keyword_token(raw)
+        lemma = _hebrew_lemma_light(raw)
+        if not wn or wn == kw_norm or lemma == kw_norm:
+            continue
+        if wn in _KEYWORD_FILLER_WORDS or lemma in _KEYWORD_FILLER_WORDS:
+            continue
+        for candidate in (wn, lemma):
+            if len(candidate) <= 1:
+                continue
+            if candidate not in seen:
+                seen.add(candidate)
+                lemmas.append(candidate)
+    return lemmas
+
+
+def _scene_leaks_non_keyword_headline_word(
+    headline: str, keyword: str, scene_blob: str
+) -> Optional[str]:
+    """Light check: scene/video must not import other headline words beyond the keyword."""
+    other_words = _headline_words_excluding_keyword(headline, keyword)
+    if not other_words:
+        return None
+    blob = (scene_blob or "").lower()
+    for w in other_words:
+        if re.search(rf"(?:^|\s){re.escape(w)}(?:\s|$)", blob, re.I):
+            return f"headline_word_in_scene:{w}"
+        for gloss in _HEADLINE_WORD_EN_GLOSS.get(w, ()):
+            if re.search(rf"\b{re.escape(gloss)}\b", blob, re.I):
+                return f"headline_gloss_in_scene:{w}->{gloss}"
+    return None
+
+
+def _implied_subject_gender(product_name: str, product_description: str, headline: str) -> Optional[str]:
+    """Return m/f when product or copy lightly implies subject gender; else None."""
+    combined = f"{product_name or ''} {product_description or ''} {headline or ''}"
+    fem = bool(_FEMININE_CONTEXT_HINT.search(combined))
+    masc = bool(_MASCULINE_CONTEXT_HINT.search(combined))
+    if fem and not masc:
+        return "f"
+    if masc and not fem:
+        return "m"
+    return None
+
+
+def _scene_gender_mismatch(
+    product_name: str,
+    product_description: str,
+    headline: str,
+    scene_blob: str,
+) -> Optional[str]:
+    implied = _implied_subject_gender(product_name, product_description, headline)
+    if not implied:
+        return None
+    if implied == "m" and _SCENE_FEMININE_SUBJECT.search(scene_blob or ""):
+        return "masculine_context_feminine_subject"
+    if implied == "f" and _SCENE_MASCULINE_SUBJECT.search(scene_blob or ""):
+        return "feminine_context_masculine_subject"
+    return None
+
+
 from engine.ad_promise_memory import (
     angle_seed_for_attempt,
     build_promise_diversity_addon,
@@ -556,8 +662,8 @@ Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
 2) headline: direct expression of the primary advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; REJECT headlines whose meaning depends on a fixed phrase/idiom/collocation — keyword must carry the core idea independently; if rejected, write a new headline.
 3) headlineCoreKeyword: exactly ONE standalone semantic word from headline — must preserve intended meaning when completely isolated; if not, reject headline and rewrite; must support a strong universal everyday human association scene; never fillers or literal industry words.
-4) sceneConcept: strongest simplest universal everyday HUMAN ASSOCIATION of the standalone keyword — one clear action; visually provable with NO sound (Builder2 is silent).
-5) videoPrompt: simplest 5-second stock-video scene from sceneConcept — English; one subject, one action, one location; visually verifiable muted; no audio-dependent meaning; no readable on-screen text.
+4) sceneConcept: universal human association of headlineCoreKeyword ONLY — ignore every other headline word; one clear action; visually provable muted.
+5) videoPrompt: simplest 5-second stock-video scene from sceneConcept only — gender-neutral subject unless product/headline clearly requires gender; no other headline words' meaning.
 
 Empty product name → invent productNameResolved.
 
@@ -621,6 +727,49 @@ def _planner_standalone_keyword_block() -> str:
     )
 
 
+def _planner_strict_keyword_isolation_block() -> str:
+    return (
+        "STRICT KEYWORD ISOLATION RULE (mandatory for sceneConcept + videoPrompt):\n"
+        "- After headlineCoreKeyword is selected, generate sceneConcept and videoPrompt from headlineCoreKeyword ONLY.\n"
+        "- IGNORE every other word in the headline when creating the scene.\n"
+        "- FORBIDDEN: building the scene from two headline words or from a headline phrase containing the keyword.\n"
+        "- SELF-CHECK: remove the full headline; look only at headlineCoreKeyword; ask: "
+        '"Would I choose the same scene from this single word alone?" If not → reject scene and recreate from keyword only.\n\n'
+        "EXAMPLES:\n"
+        '- Keyword "מוביל" — BAD: person leading someone on a path (uses "מוביל בדרך"). '
+        "GOOD: one person confidently walking first in front of others, visibly leading.\n"
+        '- Keyword "דרך" — GOOD: a person walking along a path.\n'
+        '- Keyword "גשר" — GOOD: a person crossing a small bridge.\n\n'
+    )
+
+
+def _planner_gender_consistency_block() -> str:
+    return (
+        "GENDER CONSISTENCY RULE (mandatory for sceneConcept + videoPrompt):\n"
+        "- Main human subject must NOT contradict grammatical gender implied by product_name, product_description, or headline.\n"
+        "- When gender is unclear or not essential: use neutral wording — a person, an adult, someone, a human figure.\n"
+        "- Do NOT randomly choose woman/man unless clearly required.\n"
+        "- Hebrew: if product/headline implies masculine → use אדם, גבר, or neutral English \"a person\"; "
+        "do NOT use woman/girl/female/אישה/בחורה.\n"
+        "- Hebrew: if product/headline implies feminine → use אישה or neutral English \"a person\"; "
+        "do NOT use man/male/גבר.\n"
+        "- Preferred default: neutral subject unless gender is clearly required.\n"
+        '- Example product "אורי לב" + masculine headline → BAD: woman as main subject representing the product.\n\n'
+    )
+
+
+def _planner_final_checklist_block() -> str:
+    return (
+        "FINAL CHECKLIST (before returning JSON):\n"
+        "1) headlineCoreKeyword is exactly one standalone word.\n"
+        "2) sceneConcept comes from that word only.\n"
+        "3) sceneConcept does not use another word from the headline.\n"
+        "4) videoPrompt does not add phrase meaning from the headline.\n"
+        "5) main subject gender does not contradict product/headline.\n"
+        "6) if gender is not essential, subject is neutral.\n\n"
+    )
+
+
 def _planner_scene_association_block() -> str:
     return (
         "SCENE ASSOCIATION RULE (mandatory for sceneConcept + videoPrompt):\n"
@@ -666,7 +815,7 @@ def _planner_video_prompt_simplicity_block() -> str:
         "- Two people hug.\n"
         "- A person enters a home.\n\n"
         "KEYWORD \"גשר\" / bridge — videoPrompt examples:\n"
-        '- GOOD: "A beautiful woman crosses a small bridge on a sunny spring day. Natural realistic movement. Simple cinematic shot. No text."\n'
+        '- GOOD: "A person crosses a small bridge on a sunny spring day. Natural realistic movement. Simple cinematic shot. No text."\n'
         '- BAD: "A woman crosses a bridge, meets a man halfway, shakes hands, and they walk together."\n\n'
         "Strip sceneConcept down to its single visual essence before writing videoPrompt.\n\n"
     )
@@ -705,9 +854,12 @@ def _planner_keyword_scene_flow_block() -> str:
         + _planner_headline_rules_block()
         + _planner_headline_phrase_dependency_block()
         + _planner_standalone_keyword_block()
+        + _planner_strict_keyword_isolation_block()
         + _planner_scene_association_block()
         + _planner_video_prompt_simplicity_block()
         + _planner_silent_video_verifiability_block()
+        + _planner_gender_consistency_block()
+        + _planner_final_checklist_block()
         + "SCENE RULES (sceneConcept + videoPrompt):\n"
         "- Realistic, everyday, simple, human, physically possible; visually verifiable without sound.\n"
         "- A viewer who has NOT seen the headline should instantly understand a normal human situation.\n"
@@ -724,7 +876,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"ACE Builder2 video planning — keyword-scene v2 (no advertisingGoal stage). "
         f"Language {lang_name} ({lang}). "
         "product → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
-        "Scene realism, universal human association, stock-video simplicity, and silent visual verifiability are mandatory. "
+        "Scene keyword isolation, gender consistency, stock-video simplicity, and silent visual verifiability are mandatory. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -848,6 +1000,8 @@ def _build_scene_plan_repair_input(
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
         "headlineCoreKeyword must be standalone — reject phrase-dependent headlines/keywords; rewrite headline if needed.\n"
+        "sceneConcept and videoPrompt must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
+        "Use gender-neutral subject (a person) unless product/headline clearly requires gender; no gender contradiction.\n"
         "For sceneConcept + videoPrompt: visually provable without sound; muted viewer must understand the action.\n"
         "For sceneConcept: one clear action; strongest universal human association of the standalone keyword.\n"
         "For videoPrompt: SIMPLEST 5-second stock-video scene — one subject, one action, one location; "
@@ -1048,6 +1202,25 @@ def validate_and_normalize_plan(
             bad_sound,
         )
         return None, "planning_failed_sound_dependent_scene"
+
+    gender_ctx_name = (product_name or "").strip() or pn
+    leak_rule = _scene_leaks_non_keyword_headline_word(headline_rem, core_kw, scene_blob)
+    if leak_rule:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=keyword_not_isolated rule=%s",
+            leak_rule,
+        )
+        return None, "planning_failed_keyword_not_isolated"
+
+    gender_rule = _scene_gender_mismatch(
+        gender_ctx_name, (product_description or "").strip(), headline_rem, scene_blob
+    )
+    if gender_rule:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=gender_mismatch rule=%s",
+            gender_rule,
+        )
+        return None, "planning_failed_gender_mismatch"
 
     pn_for_headline = (product_name or "").strip() or pn
     headline_full = _assemble_headline_full(pn_for_headline, headline_rem)
