@@ -40,6 +40,7 @@ _SCENE_FORBIDDEN_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ("teleport", re.compile(r"\bteleport\w*\b", re.I)),
     ("morph", re.compile(r"\bmorph(?:s|ed|ing)?\b", re.I)),
     ("symbolic_object", re.compile(r"\bsymbolic\s+(object|objects|float|floating)\b", re.I)),
+    ("heart_shaped", re.compile(r"\bheart[\s-]?shaped\b", re.I)),
 ]
 
 # Literal industry / category words — forbidden as headlineCoreKeyword (headline may still mention them).
@@ -472,8 +473,8 @@ Keys (all strings): productNameResolved, headline, headlineCoreKeyword, sceneCon
 Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
 2) headline: direct expression of the primary advertising advantage implied by the product; remainder ONLY — do NOT include productNameResolved inside headline. Hebrew, English, or mixed. Up to 7 words. Prefer one strong metaphorical word; avoid literal industry/category words when possible.
-3) headlineCoreKeyword: exactly ONE word — the strongest metaphorical word in headline; must appear in headline; must be capable of generating a realistic everyday human scene; never articles/prepositions/conjunctions/fillers; never literal industry words (e.g. advertising, marketing, digital, campaign, story, service, strategy).
-4) sceneConcept: the literal real-world interpretation of headlineCoreKeyword in everyday human life — NOT a metaphor for the full headline.
+3) headlineCoreKeyword: exactly ONE word — the strongest metaphorical word in headline; must appear in headline; must support a strong universal everyday human association scene; never articles/prepositions/conjunctions/fillers; never literal industry words (e.g. advertising, marketing, digital, campaign, story, service, strategy).
+4) sceneConcept: from headlineCoreKeyword, choose the strongest, simplest, most universal everyday HUMAN ASSOCIATION of that word — NOT the literal dictionary/object meaning. NOT a metaphor for the full headline.
 5) videoPrompt: English cinematic direction for Runway — completely realistic, physical, everyday; describes sceneConcept only; no fantasy/surrealism/symbolic objects/impossible events; no readable on-screen text.
 
 Empty product name → invent productNameResolved.
@@ -493,9 +494,34 @@ def _planner_headline_rules_block() -> str:
         "- Remainder only — no product name inside headline. Up to 7 words.\n\n"
         "headlineCoreKeyword RULES:\n"
         "- Exactly one word from the headline.\n"
-        "- The strongest metaphorical word — capable of generating a realistic everyday scene.\n"
+        "- The strongest metaphorical word — must support a vivid universal everyday human association scene.\n"
         "- FORBIDDEN as keyword: advertising, marketing, digital, campaign, story, service, strategy (and Hebrew equivalents).\n"
         "- STRONGER examples: close/קרוב, bridge, door/דלת, path/דרך, heart, home, key, step, light, connection.\n\n"
+    )
+
+
+def _planner_scene_association_block() -> str:
+    return (
+        "SCENE ASSOCIATION RULE (mandatory for sceneConcept + videoPrompt):\n"
+        "- Do NOT generate the scene from the literal dictionary/object meaning of headlineCoreKeyword.\n"
+        "- Find the strongest, simplest, most universal everyday human association of the keyword.\n"
+        "- Generate the scene from that association — the first natural human meaning that comes to mind.\n"
+        "- Not merely logically correct; instantly recognizable and emotionally understandable within 5 seconds.\n\n"
+        "BAD vs GOOD (keyword → scene):\n"
+        '- "קרוב" — BAD: two people standing near each other. GOOD: two people warmly embracing.\n'
+        '- "מפתח" — BAD: person inserts key into lock. GOOD: person opens a door and enters.\n'
+        '- "דרך" — BAD: person looking at a map. GOOD: person walking confidently along a path.\n'
+        '- "לב" — BAD: heart-shaped object. GOOD: warm human embrace.\n'
+        '- "בית" — BAD: exterior house shot. GOOD: family arriving home and entering together.\n'
+        '- "דלת" — GOOD: person opening a front door and welcoming someone inside.\n\n'
+        "SCENE PRIORITY (when multiple associations are possible, pick the one that is most):\n"
+        "1) Immediately recognizable  2) Emotionally understandable  3) Simple  "
+        "4) Human-centered  5) Visually clear within 5 seconds.\n"
+        "Prefer human actions over object manipulation.\n"
+        "PREFER: hugging, greeting, opening a door, arriving, entering, helping, walking, running, "
+        "sitting together, welcoming.\n"
+        "AVOID: technical object usage, symbolic props, static proximity, map-reading, lock-and-key close-ups, "
+        "exterior architecture shots without human arrival/entry.\n\n"
     )
 
 
@@ -505,19 +531,15 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 1 — Read product_name and product_description.\n"
         "STEP 2 — headline: direct advertising advantage expression (see HEADLINE RULES).\n"
         "STEP 3 — headlineCoreKeyword: strongest metaphorical word in headline.\n"
-        "STEP 4 — sceneConcept: literal real-world interpretation of headlineCoreKeyword only.\n"
+        "STEP 4 — sceneConcept: universal everyday human association of headlineCoreKeyword (see SCENE ASSOCIATION RULE).\n"
         "STEP 5 — videoPrompt: Runway-ready realistic scene from sceneConcept.\n\n"
         + _planner_headline_rules_block()
-        + "SCENE EXAMPLES:\n"
-        '- Headline "הכי קרוב למשרד פרסום" → keyword "קרוב" → scene: two people warmly embracing after meeting.\n'
-        '- Headline "פותחים לך דלת להזדמנויות" → keyword "דלת" → scene: a person opening a front door and welcoming someone inside.\n'
-        '- Headline "קיצור הדרך ליותר לקוחות" → keyword "דרך" → scene: a person choosing a shorter walking path in a park.\n\n'
-        "SCENE RULES (sceneConcept + videoPrompt):\n"
+        + _planner_scene_association_block()
+        + "SCENE RULES (sceneConcept + videoPrompt):\n"
         "- Realistic, everyday, simple, human, physically possible.\n"
-        "- Literal real-world interpretation of the keyword — not surreal symbolism.\n"
-        "- A viewer who has NOT seen the headline should see a normal realistic human situation.\n"
+        "- A viewer who has NOT seen the headline should instantly understand a normal human situation.\n"
         "FORBIDDEN: surreal, dreamlike, fantasy, magic, impossible physics, talking/animated/floating/symbolic objects, "
-        "impossible events, science fiction, abstract visual concepts.\n"
+        "heart-shaped props, impossible events, science fiction, abstract visual concepts.\n"
         "HEADLINE DISPLAY (downstream): scene plays first; headline overlay appears at the end — do NOT burn headline into videoPrompt.\n\n"
     )
 
@@ -529,7 +551,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"ACE Builder2 video planning — keyword-scene v2 (no advertisingGoal stage). "
         f"Language {lang_name} ({lang}). "
         "product → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
-        "Scene realism is mandatory. "
+        "Scene realism and universal human association are mandatory. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -652,6 +674,7 @@ def _build_scene_plan_repair_input(
         f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
+        "For sceneConcept: use the strongest universal everyday human association of the keyword — NOT literal dictionary/object meaning.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
@@ -676,9 +699,10 @@ def _build_keyword_scene_fallback_plan(
         else "Two people warmly embracing after finally meeting again"
     )
     video_prompt = (
-        "A completely realistic everyday scene of two people warmly embracing after finally meeting again. "
-        "Natural human behavior. Real-world environment. Stable cinematic camera. "
-        "No fantasy. No surrealism. No symbolic objects. No impossible events. No readable text in-frame."
+        "A completely realistic everyday scene of two people warmly embracing — natural human closeness, "
+        "not merely standing near each other. Natural human behavior. Real-world environment. "
+        "Stable cinematic camera. No fantasy. No surrealism. No symbolic objects. "
+        "No impossible events. No readable text in-frame."
     )
     return {
         "productNameResolved": pn,
