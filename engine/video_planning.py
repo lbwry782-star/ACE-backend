@@ -510,6 +510,92 @@ def _scene_gender_mismatch(
     return None
 
 
+_BARE_OBJECT_CORE_VISUAL_TERMS: FrozenSet[str] = frozenset(
+    {
+        "compass",
+        "bridge",
+        "key",
+        "keys",
+        "house",
+        "door",
+        "map",
+        "nest",
+        "מצפן",
+        "גשר",
+        "מפתח",
+        "בית",
+        "דלת",
+        "מפה",
+        "קן",
+    }
+)
+
+_KEYWORD_LITERAL_OBJECT_TOKENS: Dict[str, Tuple[str, ...]] = {
+    "מצפן": ("compass", "מצפן"),
+    "compass": ("compass",),
+    "מפתח": ("key", "keys", "lock", "מפתח", "מנעול"),
+    "key": ("key", "keys", "lock"),
+    "גשר": ("bridge", "גשר", "footbridge"),
+    "bridge": ("bridge", "footbridge"),
+    "בית": ("house", "building exterior", "house exterior", "בית"),
+    "house": ("house", "building exterior", "house exterior"),
+    "home": ("house", "building exterior", "house exterior"),
+    "דלת": ("door", "דלת"),
+    "door": ("door",),
+    "מפה": ("map", "מפה"),
+    "map": ("map",),
+}
+
+
+def _core_visual_is_bare_object(core_visual: str) -> Optional[str]:
+    """Reject coreVisualIdea that names only the physical object, not the underlying idea."""
+    normalized = re.sub(r"\s+", " ", (core_visual or "").strip().lower())
+    if not normalized:
+        return None
+    if normalized in _BARE_OBJECT_CORE_VISUAL_TERMS:
+        return f"bare_object:{normalized}"
+    tokens = re.sub(r"[^\w\s\u0590-\u05ff-]", " ", normalized).split()
+    if len(tokens) == 1 and tokens[0] in _BARE_OBJECT_CORE_VISUAL_TERMS:
+        return f"bare_object:{tokens[0]}"
+    return None
+
+
+def _literal_object_tokens_for_keyword(keyword: str) -> Tuple[str, ...]:
+    kw = _normalize_keyword_token(keyword)
+    for key, tokens in _KEYWORD_LITERAL_OBJECT_TOKENS.items():
+        if _normalize_keyword_token(key) == kw:
+            return tokens
+    if kw in _BARE_OBJECT_CORE_VISUAL_TERMS:
+        return (kw,)
+    return ()
+
+
+def _variation_mentions_object_token(variation: str, token: str) -> bool:
+    blob = (variation or "").lower()
+    token = (token or "").lower()
+    if not token:
+        return False
+    if re.search(r"[\u0590-\u05ff]", token):
+        return token in blob
+    return bool(re.search(rf"\b{re.escape(token)}\b", blob, re.I))
+
+
+def _variations_object_repetition_violation(keyword: str, variations: List[str]) -> Optional[str]:
+    """Same physical object may appear in at most one variation."""
+    tokens = _literal_object_tokens_for_keyword(keyword)
+    if not tokens:
+        return None
+    hits = 0
+    for var in variations:
+        if any(_variation_mentions_object_token(var, t) for t in tokens):
+            hits += 1
+    if hits > 1:
+        return f"object_in_{hits}_variations:max_1"
+    if hits == len(variations) and len(variations) >= 2:
+        return "object_in_every_variation"
+    return None
+
+
 from engine.ad_promise_memory import (
     angle_seed_for_attempt,
     build_promise_diversity_addon,
@@ -664,8 +750,8 @@ Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
 2) headline: direct advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; reject phrase-dependent headlines.
 3) headlineCoreKeyword: exactly ONE standalone semantic word from headline.
-4) coreVisualIdea: strongest simple visual image representing the keyword alone (realistic, silent-video compatible).
-5) sceneVariations: 2-4 brief independent variations of coreVisualIdea — NOT a story, NOT plot, NOT cause-and-effect.
+4) coreVisualIdea: underlying visual IDEA behind the keyword — NOT the physical object (realistic, silent-video compatible).
+5) sceneVariations: 2-4 brief independent expressions of that idea — NOT repeated object shots.
 6) videoPrompt: English 5-second montage of those 2-4 related moments; short, clear, realistic, visually distinct; no headline burn-in.
 
 Empty product name → invent productNameResolved.
@@ -676,29 +762,68 @@ Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
 
 
+def _planner_idea_before_object_block() -> str:
+    return (
+        "IDEA BEFORE OBJECT (mandatory — variation_montage_v2):\n"
+        "- headlineCoreKeyword must first become a deeper visual IDEA — do NOT stop at the physical object.\n"
+        "- Ask: \"What is the strongest visual expression of the idea BEHIND the keyword?\" "
+        "NOT: \"What object matches the keyword?\"\n"
+        "- coreVisualIdea must describe the underlying idea, not the object itself.\n"
+        "- REJECT coreVisualIdea values that are only: compass, bridge, key, house, door, map, nest.\n"
+        "- PREFER: finding direction, connection, access, belonging, embrace, support, forward movement.\n\n"
+        "KEYWORD → IDEA (not object):\n"
+        "- מצפן — BAD: compass. GOOD: guidance / direction / finding the way.\n"
+        "- מפתח — BAD: key. GOOD: access / opening possibilities / entry.\n"
+        "- גשר — BAD: bridge. GOOD: connection / bringing sides together.\n"
+        "- בית — BAD: house. GOOD: belonging / shelter / home.\n"
+        "- קרוב — BAD: proximity. GOOD: embrace / closeness.\n\n"
+        "SCENE VARIATIONS must express the IDEA — not show the same object repeatedly.\n"
+        "- BAD: compass, compass, compass, compass.\n"
+        "- BAD: bridge, bridge, bridge, bridge.\n"
+        "- GOOD direction: person choosing a path at a fork; traveler checking surroundings; "
+        "boat changing course; person reaching destination.\n"
+        "- GOOD connection: helping hand across a gap; two groups meeting; people joining a shared table; "
+        "person welcomed into a circle.\n\n"
+        "OBJECT REPETITION LIMIT:\n"
+        "- The same physical object may appear in at most ONE variation.\n"
+        "- Example מצפן: variation 1 may show a brief compass shot; variations 2-4 express direction WITHOUT compass.\n\n"
+        "PLANNER SELF-CHECK (before returning JSON — rewrite if any answer is NO):\n"
+        "1) Did I choose an idea or only an object?\n"
+        "2) If I remove the object, does the idea still exist?\n"
+        "3) Are the variations expressions of the idea?\n"
+        "4) Would the montage still make sense if the object appears only once?\n\n"
+        "EXAMPLE keyword מצפן / direction:\n"
+        "1) compass needle settling north  2) traveler choosing between two paths  "
+        "3) sailboat changing direction  4) person arriving at destination — only #1 uses a compass.\n\n"
+    )
+
+
 def _planner_variation_montage_block() -> str:
     return (
-        "VARIATION MONTAGE MODE (mandatory — Builder2 experiment):\n"
-        "- Do NOT generate a single scene. Generate 2-4 very short variations of the same core visual idea.\n"
+        "VARIATION MONTAGE MODE (mandatory — Builder2 variation_montage_v2):\n"
+        "- Do NOT generate a single scene. Generate 2-4 very short variations of the same core visual IDEA.\n"
         "- Total video duration remains 5 seconds — montage of quick related moments.\n"
-        "- Flow: headline → headlineCoreKeyword → coreVisualIdea → sceneVariations → videoPrompt.\n\n"
+        "- Flow: headline → headlineCoreKeyword → coreVisualIdea (idea) → sceneVariations → videoPrompt.\n\n"
         "CORE VISUAL IDEA:\n"
-        "- After headlineCoreKeyword, find the strongest visual image representing the keyword ALONE.\n"
+        "- After headlineCoreKeyword, find the strongest underlying visual IDEA — not the literal object.\n"
         "- Must be: realistic, simple, visually understandable, silent-video compatible.\n"
-        "- Examples: קרוב→embrace; בית→nest with eggs; עזרה→support; דרך→forward movement; גשר→connection.\n\n"
+        "- Examples: קרוב→embrace/closeness; בית→belonging; עזרה→support; דרך→forward movement; "
+        "גשר→connection; מצפן→finding direction.\n\n"
         "SCENE VARIATIONS (sceneVariations array, 2-4 items):\n"
-        "- Each item is a brief independent expression of coreVisualIdea.\n"
+        "- Each item is a brief independent expression of coreVisualIdea — expressions of an idea, not object repetitions.\n"
         "- NO story, NO beginning-middle-end, NO cause-and-effect, NO plot progression.\n"
         "- All variations must belong to the SAME idea — do NOT switch to unrelated ideas.\n"
-        "- BAD: bridge + road + airplane + handshake. GOOD: 2-4 bridge/connection variations.\n\n"
+        "- Same physical object in at most ONE variation.\n\n"
         "EXAMPLE keyword קרוב / embrace variations:\n"
         "1) elderly friends hugging  2) young couple hugging  3) parent and child hugging  4) friends greeting with a hug\n\n"
-        "EXAMPLE keyword בית / nest variations:\n"
-        "1) small nest with eggs  2) bird returning to nest  3) parent bird beside nest  4) nest protected among branches\n\n"
+        "EXAMPLE keyword מצפן / direction variations:\n"
+        "1) compass needle settling north  2) traveler choosing between two paths  "
+        "3) sailboat changing direction  4) person arriving at destination\n\n"
         "VIDEO PROMPT:\n"
-        "- Describe a short 5-second montage of the 2-4 variations.\n"
+        "- Describe a short 5-second montage of the 2-4 idea-expressions.\n"
         "- Each moment: short, clear, realistic, visually distinct.\n"
-        "- Goal: viewer feels \"I keep seeing the same idea expressed in different ways.\"\n"
+        "- Goal: viewer remembers the IDEA; object is only a tool; "
+        "viewer feels \"I keep seeing the same idea expressed in different ways.\"\n"
         "- Headline overlay appears at the end (downstream) — do NOT burn headline into videoPrompt.\n\n"
     )
 
@@ -770,8 +895,8 @@ def _planner_strict_keyword_isolation_block() -> str:
         "GOOD: one person confidently walking first in front of others, visibly leading.\n"
         '- Keyword "דרך" — WEAK/literal fallback: person walking on a path. '
         "STRONGER: brisk fitness walk in stylish everyday clothes (not sportswear) — still movement/דרך territory.\n"
-        '- Keyword "גשר" — WEAK/literal: person crosses bridge. '
-        "STRONGER: same action in an unexpectedly elegant memorable everyday setting.\n\n"
+        '- Keyword "גשר" — WEAK/object: person crosses bridge repeatedly. '
+        "STRONG: connection → helping hand across gap, groups meeting, shared table — bridge object at most once.\n\n"
     )
 
 
@@ -794,12 +919,14 @@ def _planner_final_checklist_block() -> str:
     return (
         "FINAL CHECKLIST (before returning JSON):\n"
         "1) headlineCoreKeyword is exactly one standalone word.\n"
-        "2) coreVisualIdea comes from keyword only (keyword-isolated).\n"
+        "2) coreVisualIdea is an underlying IDEA — not a bare object noun.\n"
         "3) sceneVariations has 2-4 items, all expressing coreVisualIdea — not other headline words.\n"
-        "4) variations are independent — no story arc or plot progression.\n"
-        "5) videoPrompt is a 5-second montage of those variations; no headline phrase leakage.\n"
-        "6) main subject gender does not contradict product/headline when gendered subjects appear.\n"
-        "7) silent-video verifiable; realistic; same core idea across variations.\n\n"
+        "4) variations express the idea — same physical object in at most one variation.\n"
+        "5) variations are independent — no story arc or plot progression.\n"
+        "6) videoPrompt is a 5-second montage of those idea-expressions; no headline phrase leakage.\n"
+        "7) main subject gender does not contradict product/headline when gendered subjects appear.\n"
+        "8) silent-video verifiable; realistic; same core idea across variations.\n"
+        "9) IDEA BEFORE OBJECT self-check passed (idea not object; idea survives without object; object ≤ once).\n\n"
     )
 
 
@@ -816,11 +943,17 @@ def _planner_interest_first_block() -> str:
         "- headlineCoreKeyword defines the SEMANTIC TERRITORY for coreVisualIdea search.\n"
         "- Search inside that territory for the strongest simple visual image, then 2-4 interesting variations of it.\n"
         "- Stay keyword-isolated: territory comes from the keyword alone, never from other headline words.\n\n"
-        "NOT LITERALITY:\n"
-        "- Do not reward literality. Literality is only a fallback when no stronger valid scene exists.\n"
+        "INTEREST AMPLIFICATION:\n"
+        "- Ask: \"What is the strongest visual expression of the idea BEHIND the keyword?\"\n"
+        "- NOT: \"What object matches the keyword?\"\n"
+        "- Prefer idea-first montages like קרוב→embrace (multiple closeness expressions), "
+        "not object-first montages like מצפן→compass repeated four times.\n\n"
+        "NOT LITERALITY / NOT OBJECT-ONLY:\n"
+        "- Do not reward literality or object repetition. Object is at most one variation.\n"
         '- "קרוב" — literal: standing near. STRONG: embrace → elderly friends hugging, young couple, parent/child.\n'
-        '- "בית" — literal: house exterior. STRONG: nest → nest with eggs, bird returning, parent bird beside nest.\n'
-        '- "גשר" — literal: crossing bridge. STRONG: connection → 2-4 distinct connection moments, not unrelated objects.\n\n'
+        '- "מצפן" — literal/object: compass in every shot. STRONG: direction → compass needle once; path choice; boat turning; arrival.\n'
+        '- "בית" — literal: house exterior. STRONG: belonging → family welcomed inside, cozy shared meal, person relaxing safely at home.\n'
+        '- "גשר" — literal: bridge repeated. STRONG: connection → helping hand across gap, groups meeting, shared table, welcome into circle.\n\n'
         "INTEREST TEST: If two valid core ideas exist, which would a human viewer remember longer? Prefer that one.\n"
         "CURIOSITY TEST: Would the viewer feel curiosity across the variations? "
         "If not, search for a more interesting core idea in the same keyword territory.\n\n"
@@ -835,16 +968,17 @@ def _planner_interest_first_block() -> str:
 def _planner_scene_association_block() -> str:
     return (
         "SCENE ASSOCIATION RULE (mandatory for coreVisualIdea + sceneVariations + videoPrompt):\n"
-        "- headlineCoreKeyword defines semantic territory — search inside it for the strongest simple visual image.\n"
+        "- headlineCoreKeyword defines semantic territory — convert it to an underlying IDEA first (see IDEA BEFORE OBJECT).\n"
         "- coreVisualIdea comes ONLY from keyword territory — never from a multi-word phrase in the headline.\n"
-        "- Do NOT default to literal dictionary/object meaning when a stronger human association exists.\n"
-        "- Then generate 2-4 brief independent variations of that same coreVisualIdea.\n"
+        "- Do NOT default to literal dictionary/object meaning — find the human idea the keyword evokes.\n"
+        "- Then generate 2-4 brief independent expressions of that idea — not repeated object shots.\n"
         "- Instantly recognizable and emotionally understandable within 5 seconds.\n\n"
         "BAD vs GOOD (keyword territory → coreVisualIdea → variations):\n"
         '- "קרוב" — BAD: two people standing near. GOOD: embrace → elderly friends hugging, young couple, parent/child.\n'
-        '- "בית" — BAD: exterior house shot. GOOD: nest → nest with eggs, bird returning, parent bird beside nest.\n'
-        '- "גשר" — BAD: bridge + road + airplane + handshake (unrelated). GOOD: 2-4 connection variations only.\n'
-        '- "לב" — BAD: heart-shaped object. GOOD: warm embrace variations.\n\n'
+        '- "מצפן" — BAD: hand with compass, hiker with compass, compass on map. GOOD: direction → needle settling; path fork; boat turning; arrival.\n'
+        '- "בית" — BAD: house, house, house. GOOD: belonging → welcomed inside, shared meal, safe rest at home.\n'
+        '- "גשר" — BAD: bridge + road + airplane (unrelated). GOOD: connection → helping hand, groups meeting, shared table, welcome into circle.\n'
+        '- "מפתח" — BAD: key, lock, key. GOOD: access → door opening to light, person entering opportunity, gate opening, welcome entry.\n\n'
         "When multiple valid core ideas exist, apply INTEREST FIRST — not first-to-mind literal.\n"
         "Each variation is an independent expression — NO story arc, NO plot progression.\n\n"
     )
@@ -902,10 +1036,11 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 1 — Read product_name and product_description.\n"
         "STEP 2 — headline (see HEADLINE RULES).\n"
         "STEP 3 — headlineCoreKeyword (see STANDALONE KEYWORD RULE).\n"
-        "STEP 4 — coreVisualIdea from keyword alone.\n"
-        "STEP 5 — sceneVariations: 2-4 independent variations of coreVisualIdea.\n"
-        "STEP 6 — videoPrompt: 5-second montage of those variations.\n\n"
+        "STEP 4 — coreVisualIdea: underlying IDEA from keyword alone (not the physical object).\n"
+        "STEP 5 — sceneVariations: 2-4 independent expressions of that idea (object ≤ once).\n"
+        "STEP 6 — videoPrompt: 5-second montage of those idea-expressions.\n\n"
         + _planner_variation_montage_block()
+        + _planner_idea_before_object_block()
         + _planner_headline_rules_block()
         + _planner_headline_phrase_dependency_block()
         + _planner_standalone_keyword_block()
@@ -918,7 +1053,8 @@ def _planner_keyword_scene_flow_block() -> str:
         + "MONTAGE RULES (sceneVariations + videoPrompt):\n"
         "- Realistic, everyday, simple, physically possible; visually verifiable without sound.\n"
         "- Same coreVisualIdea across all variations; no unrelated idea mixing.\n"
-        "FORBIDDEN: surreal, fantasy, story arcs, plot progression, cause-and-effect chains, headline burn-in.\n\n"
+        "- Variations express the idea — not repeated appearances of the same object.\n"
+        "FORBIDDEN: surreal, fantasy, story arcs, plot progression, cause-and-effect chains, headline burn-in, object-only montages.\n\n"
     )
 
 
@@ -926,10 +1062,10 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
     return (
-        f"ACE Builder2 video planning — variation montage experiment ({_VIDEO_PLAN_SCHEMA_VERSION}). "
+        f"ACE Builder2 video planning — variation montage ({_VIDEO_PLAN_SCHEMA_VERSION}). "
         f"Language {lang_name} ({lang}). "
-        "product → headline → headlineCoreKeyword → coreVisualIdea → sceneVariations → videoPrompt. "
-        "5-second montage of 2-4 related variations; all existing keyword/silent/gender rules apply. "
+        "product → headline → headlineCoreKeyword → coreVisualIdea (idea, not object) → sceneVariations → videoPrompt. "
+        "5-second montage of 2-4 idea-expressions; object may appear at most once; all existing keyword/silent/gender rules apply. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -1032,7 +1168,7 @@ def _word_limit(s: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
-_VIDEO_PLAN_SCHEMA_VERSION = "variation_montage_v1"
+_VIDEO_PLAN_SCHEMA_VERSION = "variation_montage_v2"
 _SCENE_VARIATIONS_MIN = 2
 _SCENE_VARIATIONS_MAX = 4
 
@@ -1054,7 +1190,8 @@ def _build_scene_plan_repair_input(
         f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, coreVisualIdea, sceneVariations, and videoPrompt to satisfy all rules.\n"
-        "sceneVariations must be 2-4 independent expressions of coreVisualIdea — same idea, no story arc.\n"
+        "coreVisualIdea must be an underlying IDEA — not a bare object (compass, bridge, key, house).\n"
+        "sceneVariations must be 2-4 independent expressions of that idea — same physical object in at most ONE variation.\n"
         "headlineCoreKeyword must be standalone — reject phrase-dependent headlines/keywords; rewrite headline if needed.\n"
         "coreVisualIdea and all variations must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
         "Use gender-neutral subject (a person) unless product/headline clearly requires gender; no gender contradiction.\n"
@@ -1107,7 +1244,7 @@ def _build_keyword_scene_fallback_plan(
         "sceneConcept": scene_joined,
         "videoPrompt": video_prompt,
         "language": lang,
-        "planInferenceMode": "deterministic_variation_montage_fallback",
+        "planInferenceMode": "deterministic_variation_montage_v2_fallback",
     }
 
 
@@ -1141,7 +1278,8 @@ _RUNWAY_SCENE_TAIL_MARKERS: Tuple[str, ...] = (
 def _runway_variation_montage_camera_focus() -> Tuple[str, str]:
     """5-second montage of related visual variations (Builder2 experiment)."""
     return (
-        "MANDATORY: one 5-second realistic montage of 2-4 very short related visual moments expressing the same core idea. "
+        "MANDATORY: one 5-second realistic montage of 2-4 very short related visual moments expressing the same core IDEA. "
+        "Each moment expresses the idea — not repeated appearances of the same object. "
         "Quick cuts between visually distinct variations. Each moment clear and readable. "
         "NO story arc, NO cause-and-effect, NO plot progression — independent expressions of the same idea. "
         "No surreal motion, no fantasy, no impossible physics.",
@@ -1352,6 +1490,22 @@ def validate_and_normalize_plan(
             gender_rule,
         )
         return None, "planning_failed_gender_mismatch"
+
+    bare_object_rule = _core_visual_is_bare_object(core_visual)
+    if bare_object_rule:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=object_not_idea rule=%s",
+            bare_object_rule,
+        )
+        return None, "planning_failed_object_not_idea"
+
+    object_rep_rule = _variations_object_repetition_violation(core_kw, variations)
+    if object_rep_rule:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=object_repetition rule=%s",
+            object_rep_rule,
+        )
+        return None, "planning_failed_object_repetition"
 
     pn_for_headline = (product_name or "").strip() or pn
     headline_full = _assemble_headline_full(pn_for_headline, headline_rem)
@@ -1566,7 +1720,7 @@ def _fetch_video_plan_o3_sync(
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
-    logger.info("VIDEO_PLAN_SEARCH_ORDER=variation_montage_v1")
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=variation_montage_v2")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
