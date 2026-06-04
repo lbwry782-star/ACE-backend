@@ -656,21 +656,51 @@ def _video_plan_planner_description_limit() -> int:
 _JSON_KEYS = """
 Return one JSON object only (no markdown, no prose).
 
-Keys (all strings): productNameResolved, headline, headlineCoreKeyword, sceneConcept, videoPrompt, language
+Keys:
+- productNameResolved, headline, headlineCoreKeyword, coreVisualIdea, sceneVariations, videoPrompt, language (all strings except sceneVariations)
+- sceneVariations: JSON array of 2-4 strings — brief independent variations of the same coreVisualIdea
 
 Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
-2) headline: direct expression of the primary advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; REJECT headlines whose meaning depends on a fixed phrase/idiom/collocation — keyword must carry the core idea independently; if rejected, write a new headline.
-3) headlineCoreKeyword: exactly ONE standalone semantic word — defines semantic TERRITORY for scene search (not a literal scene prescription); must preserve meaning when isolated; if not, rewrite headline.
-4) sceneConcept: search inside keyword territory for the most INTERESTING valid realistic scene — keyword-isolated; one clear action; visually provable muted; prefer memorable over literal.
-5) videoPrompt: simplest 5-second stock-video execution of sceneConcept — one subject, one action, one location; interesting but not complex; gender-neutral unless required; no other headline words' meaning.
+2) headline: direct advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; reject phrase-dependent headlines.
+3) headlineCoreKeyword: exactly ONE standalone semantic word from headline.
+4) coreVisualIdea: strongest simple visual image representing the keyword alone (realistic, silent-video compatible).
+5) sceneVariations: 2-4 brief independent variations of coreVisualIdea — NOT a story, NOT plot, NOT cause-and-effect.
+6) videoPrompt: English 5-second montage of those 2-4 related moments; short, clear, realistic, visually distinct; no headline burn-in.
 
 Empty product name → invent productNameResolved.
 
-Before the JSON: one silent internal revision pass (headline → keyword → interest-first scene pick → simplest videoPrompt); output final JSON only.
+Before the JSON: revision pass (headline → keyword → coreVisualIdea → variations → montage videoPrompt).
 
 Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
+
+
+def _planner_variation_montage_block() -> str:
+    return (
+        "VARIATION MONTAGE MODE (mandatory — Builder2 experiment):\n"
+        "- Do NOT generate a single scene. Generate 2-4 very short variations of the same core visual idea.\n"
+        "- Total video duration remains 5 seconds — montage of quick related moments.\n"
+        "- Flow: headline → headlineCoreKeyword → coreVisualIdea → sceneVariations → videoPrompt.\n\n"
+        "CORE VISUAL IDEA:\n"
+        "- After headlineCoreKeyword, find the strongest visual image representing the keyword ALONE.\n"
+        "- Must be: realistic, simple, visually understandable, silent-video compatible.\n"
+        "- Examples: קרוב→embrace; בית→nest with eggs; עזרה→support; דרך→forward movement; גשר→connection.\n\n"
+        "SCENE VARIATIONS (sceneVariations array, 2-4 items):\n"
+        "- Each item is a brief independent expression of coreVisualIdea.\n"
+        "- NO story, NO beginning-middle-end, NO cause-and-effect, NO plot progression.\n"
+        "- All variations must belong to the SAME idea — do NOT switch to unrelated ideas.\n"
+        "- BAD: bridge + road + airplane + handshake. GOOD: 2-4 bridge/connection variations.\n\n"
+        "EXAMPLE keyword קרוב / embrace variations:\n"
+        "1) elderly friends hugging  2) young couple hugging  3) parent and child hugging  4) friends greeting with a hug\n\n"
+        "EXAMPLE keyword בית / nest variations:\n"
+        "1) small nest with eggs  2) bird returning to nest  3) parent bird beside nest  4) nest protected among branches\n\n"
+        "VIDEO PROMPT:\n"
+        "- Describe a short 5-second montage of the 2-4 variations.\n"
+        "- Each moment: short, clear, realistic, visually distinct.\n"
+        "- Goal: viewer feels \"I keep seeing the same idea expressed in different ways.\"\n"
+        "- Headline overlay appears at the end (downstream) — do NOT burn headline into videoPrompt.\n\n"
+    )
 
 
 def _planner_headline_rules_block() -> str:
@@ -713,7 +743,7 @@ def _planner_headline_phrase_dependency_block() -> str:
 
 def _planner_standalone_keyword_block() -> str:
     return (
-        "STANDALONE KEYWORD RULE (mandatory for headlineCoreKeyword + sceneConcept):\n"
+        "STANDALONE KEYWORD RULE (mandatory for coreVisualIdea + sceneVariations):\n"
         "- headlineCoreKeyword must be a single standalone semantic word that defines semantic territory for scene search.\n"
         "- The scene must be generated from the standalone keyword itself — NEVER from a phrase containing the keyword.\n"
         "- Reject any candidate keyword whose meaning only works inside a larger phrase, expression, idiom, or collocation.\n\n"
@@ -729,8 +759,8 @@ def _planner_standalone_keyword_block() -> str:
 
 def _planner_strict_keyword_isolation_block() -> str:
     return (
-        "STRICT KEYWORD ISOLATION RULE (mandatory for sceneConcept + videoPrompt):\n"
-        "- After headlineCoreKeyword is selected, generate sceneConcept and videoPrompt from headlineCoreKeyword ONLY.\n"
+        "STRICT KEYWORD ISOLATION RULE (mandatory for coreVisualIdea + sceneVariations + videoPrompt):\n"
+        "- coreVisualIdea and every sceneVariation must come from headlineCoreKeyword ONLY.\n"
         "- IGNORE every other word in the headline when creating the scene.\n"
         "- FORBIDDEN: building the scene from two headline words or from a headline phrase containing the keyword.\n"
         "- SELF-CHECK: remove the full headline; look only at headlineCoreKeyword; ask: "
@@ -747,7 +777,7 @@ def _planner_strict_keyword_isolation_block() -> str:
 
 def _planner_gender_consistency_block() -> str:
     return (
-        "GENDER CONSISTENCY RULE (mandatory for sceneConcept + videoPrompt):\n"
+        "GENDER CONSISTENCY RULE (mandatory for sceneVariations + videoPrompt):\n"
         "- Main human subject must NOT contradict grammatical gender implied by product_name, product_description, or headline.\n"
         "- When gender is unclear or not essential: use neutral wording — a person, an adult, someone, a human figure.\n"
         "- Do NOT randomly choose woman/man unless clearly required.\n"
@@ -764,67 +794,59 @@ def _planner_final_checklist_block() -> str:
     return (
         "FINAL CHECKLIST (before returning JSON):\n"
         "1) headlineCoreKeyword is exactly one standalone word.\n"
-        "2) sceneConcept stays inside keyword territory only (keyword-isolated).\n"
-        "3) sceneConcept does not use another word from the headline.\n"
-        "4) videoPrompt does not add phrase meaning from the headline.\n"
-        "5) main subject gender does not contradict product/headline.\n"
-        "6) if gender is not essential, subject is neutral.\n"
-        "7) among valid options, scene is the most interesting — not merely the most literal.\n\n"
+        "2) coreVisualIdea comes from keyword only (keyword-isolated).\n"
+        "3) sceneVariations has 2-4 items, all expressing coreVisualIdea — not other headline words.\n"
+        "4) variations are independent — no story arc or plot progression.\n"
+        "5) videoPrompt is a 5-second montage of those variations; no headline phrase leakage.\n"
+        "6) main subject gender does not contradict product/headline when gendered subjects appear.\n"
+        "7) silent-video verifiable; realistic; same core idea across variations.\n\n"
     )
 
 
 def _planner_interest_first_block() -> str:
     return (
-        "INTEREST FIRST (primary scene selection rule — mandatory):\n"
-        "- Ad quality is measured primarily by viewer interest. Among multiple valid scenes, prefer the most interesting.\n"
+        "INTEREST FIRST (primary coreVisualIdea + variation selection rule — mandatory):\n"
+        "- Ad quality is measured primarily by viewer interest. Among multiple valid core ideas, prefer the most interesting.\n"
         "- NOT the most literal, obvious, or mechanical — unless no better valid option exists.\n"
-        "- Scene must still be: realistic, everyday, simple, visually understandable, physically possible, silent-video compatible.\n"
-        "- Valid scene should make a viewer think: \"Interesting.\"\n\n"
+        "- coreVisualIdea and every variation must still be: realistic, everyday, simple, visually understandable, "
+        "physically possible, silent-video compatible.\n"
+        "- Valid montage should make a viewer think: \"Interesting — same idea, different ways.\"\n\n"
         "KEYWORD ROLE:\n"
-        "- headlineCoreKeyword does NOT directly prescribe the final scene.\n"
-        "- headlineCoreKeyword defines the SEMANTIC TERRITORY.\n"
-        "- Search inside that territory for the most interesting realistic scene.\n"
+        "- headlineCoreKeyword does NOT directly prescribe one scene.\n"
+        "- headlineCoreKeyword defines the SEMANTIC TERRITORY for coreVisualIdea search.\n"
+        "- Search inside that territory for the strongest simple visual image, then 2-4 interesting variations of it.\n"
         "- Stay keyword-isolated: territory comes from the keyword alone, never from other headline words.\n\n"
         "NOT LITERALITY:\n"
         "- Do not reward literality. Literality is only a fallback when no stronger valid scene exists.\n"
-        '- "דלת" — literal: opens door. Potentially better: arrives at a welcoming home and enters.\n'
-        '- "גשר" — literal: crosses bridge. Potentially better: crosses a small footbridge in an elegant memorable everyday context.\n'
-        '- "דרך" — literal: walks on path. Potentially better: movement/progress/personal style — e.g. brisk walk in stylish everyday clothes instead of sportswear.\n\n'
-        "INTEREST TEST: If two valid scenes exist, which would a human viewer remember longer? Prefer that one.\n"
-        "CURIOSITY TEST: Would the viewer feel curiosity, surprise, or delight? If not, search for a more interesting scene in the same keyword territory.\n\n"
+        '- "קרוב" — literal: standing near. STRONG: embrace → elderly friends hugging, young couple, parent/child.\n'
+        '- "בית" — literal: house exterior. STRONG: nest → nest with eggs, bird returning, parent bird beside nest.\n'
+        '- "גשר" — literal: crossing bridge. STRONG: connection → 2-4 distinct connection moments, not unrelated objects.\n\n'
+        "INTEREST TEST: If two valid core ideas exist, which would a human viewer remember longer? Prefer that one.\n"
+        "CURIOSITY TEST: Would the viewer feel curiosity across the variations? "
+        "If not, search for a more interesting core idea in the same keyword territory.\n\n"
         "IMPORTANT LIMIT — interest must NOT come from:\n"
         "fantasy, surrealism, impossible events, dream logic, visual tricks, symbolism requiring explanation.\n"
         "Interest MUST come from: unusual but realistic combinations, unexpected everyday situations, human behavior, contrast, style, context.\n\n"
-        "EXAMPLE (walking shoes, keyword \"דרך\"):\n"
-        "- WEAK: person walking along a park path.\n"
-        "- STRONG: person confidently doing a fitness walk in stylish everyday clothes instead of sportswear — realistic, simple, connected to דרך, more interesting.\n\n"
-        "FINAL PRIORITY ORDER (when several valid scenes exist):\n"
+        "FINAL PRIORITY ORDER (when several valid core ideas exist):\n"
         "1) Interesting  2) Realistic  3) Silent-video verifiable  4) Keyword-isolated  5) Simple  6) Everyday.\n\n"
     )
 
 
 def _planner_scene_association_block() -> str:
     return (
-        "SCENE ASSOCIATION RULE (mandatory for sceneConcept + videoPrompt):\n"
-        "- headlineCoreKeyword defines semantic territory — search inside it for the most interesting valid scene (see INTEREST FIRST).\n"
-        "- Generate the scene ONLY from keyword territory — never from a multi-word phrase in the headline.\n"
-        "- Do NOT default to literal dictionary/object meaning when a more interesting human association exists in the same territory.\n"
-        "- Find strong everyday human associations of the keyword; pick the most memorable valid one.\n"
+        "SCENE ASSOCIATION RULE (mandatory for coreVisualIdea + sceneVariations + videoPrompt):\n"
+        "- headlineCoreKeyword defines semantic territory — search inside it for the strongest simple visual image.\n"
+        "- coreVisualIdea comes ONLY from keyword territory — never from a multi-word phrase in the headline.\n"
+        "- Do NOT default to literal dictionary/object meaning when a stronger human association exists.\n"
+        "- Then generate 2-4 brief independent variations of that same coreVisualIdea.\n"
         "- Instantly recognizable and emotionally understandable within 5 seconds.\n\n"
-        "BAD vs GOOD (keyword territory → scene):\n"
-        '- "קרוב" — BAD: two people standing near each other. GOOD: two people warmly embracing.\n'
-        '- "מפתח" — BAD: person inserts key into lock. GOOD: person opens a door and enters.\n'
-        '- "דרך" — WEAK: generic path walk. BETTER: confident brisk walk with distinctive everyday style.\n'
-        '- "לב" — BAD: heart-shaped object. GOOD: warm human embrace.\n'
-        '- "בית" — BAD: exterior house shot. GOOD: family arriving home and entering together.\n'
-        '- "גשר" — BAD: crossing bridge to meet someone (extra plot). BETTER: crossing a small footbridge in a memorable everyday setting.\n'
-        '- "דלת" — WEAK: opens door only. BETTER: arrives and enters a welcoming home.\n\n'
-        "When multiple valid scenes exist, apply INTEREST FIRST — not first-to-mind literal.\n"
-        "Prefer human actions over object manipulation.\n"
-        "PREFER: hugging, greeting, opening a door, arriving, entering, helping, walking, running, "
-        "sitting together, welcoming — with an interesting everyday twist when possible.\n"
-        "AVOID: boring literal defaults when a more interesting valid scene exists; technical object usage; "
-        "symbolic props; map-reading; lock-and-key close-ups.\n\n"
+        "BAD vs GOOD (keyword territory → coreVisualIdea → variations):\n"
+        '- "קרוב" — BAD: two people standing near. GOOD: embrace → elderly friends hugging, young couple, parent/child.\n'
+        '- "בית" — BAD: exterior house shot. GOOD: nest → nest with eggs, bird returning, parent bird beside nest.\n'
+        '- "גשר" — BAD: bridge + road + airplane + handshake (unrelated). GOOD: 2-4 connection variations only.\n'
+        '- "לב" — BAD: heart-shaped object. GOOD: warm embrace variations.\n\n'
+        "When multiple valid core ideas exist, apply INTEREST FIRST — not first-to-mind literal.\n"
+        "Each variation is an independent expression — NO story arc, NO plot progression.\n\n"
     )
 
 
@@ -854,10 +876,10 @@ def _planner_video_prompt_simplicity_block() -> str:
 
 def _planner_silent_video_verifiability_block() -> str:
     return (
-        "SILENT VIDEO VERIFIABILITY RULE (mandatory for sceneConcept + videoPrompt):\n"
-        "- Builder2 videos are SILENT. Every scene must be visually verifiable with NO sound.\n"
-        "- If a muted viewer cannot tell the action occurred, reject the scene and choose a visual alternative.\n"
-        "- A muted viewer must reach the same interpretation as a hearing viewer.\n\n"
+        "SILENT VIDEO VERIFIABILITY RULE (mandatory for coreVisualIdea + sceneVariations + videoPrompt):\n"
+        "- Builder2 videos are SILENT. Every variation moment must be visually verifiable with NO sound.\n"
+        "- If a muted viewer cannot tell the action occurred, reject that variation and choose a visual alternative.\n"
+        "- A muted viewer must reach the same interpretation as a hearing viewer for each moment.\n\n"
         "REJECT (audio-dependent):\n"
         "- shouting, screaming, whispering, singing, loudspeaker/PA, music playing loudly, alarms, bell ringing, "
         "crowd cheering, barking as the key event, engine roaring, any event whose meaning depends on audio.\n\n"
@@ -867,37 +889,36 @@ def _planner_silent_video_verifiability_block() -> str:
         "KEYWORD \"מגביר\" / amplify example:\n"
         "- BAD: woman shouting loudly (loudness is not visible).\n"
         "- GOOD: a hand rotates a volume knob from low to high (increase is visually observable).\n\n"
-        "FINAL CHECK — scene is valid only if:\n"
+        "FINAL CHECK — plan is valid only if:\n"
         "1) keyword stands independently  2) headline does not depend on a fixed phrase  "
-        "3) scene comes from the keyword itself  4) action is visually understandable  "
-        "5) action is visually provable without sound  6) muted viewer reaches the same interpretation.\n\n"
+        "3) coreVisualIdea comes from the keyword itself  4) each variation is visually understandable  "
+        "5) each variation is visually provable without sound  6) muted viewer reaches the same interpretation.\n\n"
     )
 
 
 def _planner_keyword_scene_flow_block() -> str:
     return (
-        "BUILDER2 KEYWORD-SCENE FLOW v2 (mandatory; do not narrate in JSON):\n"
+        "BUILDER2 VARIATION MONTAGE FLOW (mandatory; do not narrate in JSON):\n"
         "STEP 1 — Read product_name and product_description.\n"
-        "STEP 2 — headline: direct advertising advantage expression (see HEADLINE RULES).\n"
-        "STEP 3 — headlineCoreKeyword: standalone semantic word in headline (see STANDALONE KEYWORD RULE).\n"
-        "STEP 4 — sceneConcept: most interesting valid scene inside keyword territory (see INTEREST FIRST + SCENE ASSOCIATION).\n"
-        "STEP 5 — videoPrompt: simplest 5-second stock-video execution of sceneConcept (see VIDEO PROMPT SIMPLICITY RULE).\n\n"
+        "STEP 2 — headline (see HEADLINE RULES).\n"
+        "STEP 3 — headlineCoreKeyword (see STANDALONE KEYWORD RULE).\n"
+        "STEP 4 — coreVisualIdea from keyword alone.\n"
+        "STEP 5 — sceneVariations: 2-4 independent variations of coreVisualIdea.\n"
+        "STEP 6 — videoPrompt: 5-second montage of those variations.\n\n"
+        + _planner_variation_montage_block()
         + _planner_headline_rules_block()
         + _planner_headline_phrase_dependency_block()
         + _planner_standalone_keyword_block()
         + _planner_strict_keyword_isolation_block()
         + _planner_interest_first_block()
         + _planner_scene_association_block()
-        + _planner_video_prompt_simplicity_block()
         + _planner_silent_video_verifiability_block()
         + _planner_gender_consistency_block()
         + _planner_final_checklist_block()
-        + "SCENE RULES (sceneConcept + videoPrompt):\n"
-        "- Realistic, everyday, simple, human, physically possible; visually verifiable without sound.\n"
-        "- A viewer who has NOT seen the headline should instantly understand a normal human situation.\n"
-        "FORBIDDEN: surreal, dreamlike, fantasy, magic, impossible physics, talking/animated/floating/symbolic objects, "
-        "heart-shaped props, impossible events, science fiction, abstract visual concepts.\n"
-        "HEADLINE DISPLAY (downstream): scene plays first; headline overlay appears at the end — do NOT burn headline into videoPrompt.\n\n"
+        + "MONTAGE RULES (sceneVariations + videoPrompt):\n"
+        "- Realistic, everyday, simple, physically possible; visually verifiable without sound.\n"
+        "- Same coreVisualIdea across all variations; no unrelated idea mixing.\n"
+        "FORBIDDEN: surreal, fantasy, story arcs, plot progression, cause-and-effect chains, headline burn-in.\n\n"
     )
 
 
@@ -905,10 +926,10 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
     return (
-        f"ACE Builder2 video planning — keyword-scene v2 (no advertisingGoal stage). "
+        f"ACE Builder2 video planning — variation montage experiment ({_VIDEO_PLAN_SCHEMA_VERSION}). "
         f"Language {lang_name} ({lang}). "
-        "product → headline → headlineCoreKeyword → sceneConcept → videoPrompt. "
-        "Scene selection is INTEREST FIRST within keyword territory; all existing rules (isolation, silent, gender, simplicity) still apply. "
+        "product → headline → headlineCoreKeyword → coreVisualIdea → sceneVariations → videoPrompt. "
+        "5-second montage of 2-4 related variations; all existing keyword/silent/gender rules apply. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -1011,7 +1032,9 @@ def _word_limit(s: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
-_VIDEO_PLAN_SCHEMA_VERSION = "keyword_scene_v2"
+_VIDEO_PLAN_SCHEMA_VERSION = "variation_montage_v1"
+_SCENE_VARIATIONS_MIN = 2
+_SCENE_VARIATIONS_MAX = 4
 
 _PLANNER_SELF_FAILURE_CODES: FrozenSet[str] = frozenset(
     {"planning_failed_invalid_plan", "planning_failed_no_valid_scene"}
@@ -1030,14 +1053,13 @@ def _build_scene_plan_repair_input(
         f"{base_attempt_input}\n\n"
         f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
         "Keep the same product name and product description.\n"
-        "Fix headline, headlineCoreKeyword, sceneConcept, and videoPrompt to satisfy all rules.\n"
+        "Fix headline, headlineCoreKeyword, coreVisualIdea, sceneVariations, and videoPrompt to satisfy all rules.\n"
+        "sceneVariations must be 2-4 independent expressions of coreVisualIdea — same idea, no story arc.\n"
         "headlineCoreKeyword must be standalone — reject phrase-dependent headlines/keywords; rewrite headline if needed.\n"
-        "sceneConcept and videoPrompt must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
+        "coreVisualIdea and all variations must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
         "Use gender-neutral subject (a person) unless product/headline clearly requires gender; no gender contradiction.\n"
-        "For sceneConcept + videoPrompt: visually provable without sound; muted viewer must understand the action.\n"
-        "For sceneConcept: pick the most INTERESTING valid scene inside keyword territory — not the most literal; one clear action.\n"
-        "For videoPrompt: SIMPLEST 5-second stock-video execution — one subject, one action, one location; interesting but not complex; "
-        "no meetings/handshakes/plot beats unless keyword requires it; no \"walk together\" endings.\n"
+        "For sceneVariations + videoPrompt: visually provable without sound; muted viewer must understand each moment.\n"
+        "For videoPrompt: 5-second montage of the variations — short, clear, realistic, visually distinct moments.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
@@ -1056,23 +1078,36 @@ def _build_keyword_scene_fallback_plan(
     pn = (product_name or "").strip() or "ACE Product"
     headline = "הכי קרוב למשרד פרסום" if lang == "he" else "Always One Step Ahead"
     keyword = "קרוב" if lang == "he" else "Ahead"
-    scene = (
-        "שני אנשים מתחבקים"
-        if lang == "he"
-        else "Two people warmly hugging"
+    core_visual = "embrace" if lang == "en" else "חיבוק"
+    variations = (
+        [
+            "elderly friends hugging",
+            "young couple hugging",
+            "parent and child hugging",
+        ]
+        if lang == "en"
+        else [
+            "חברים מבוגרים מתחבקים",
+            "זוג צעיר מתחבק",
+            "הורה וילד מתחבקים",
+        ]
     )
     video_prompt = (
-        "Two people share a warm hug in a simple everyday setting. "
-        "Natural realistic movement. Simple cinematic shot. No text."
+        "A 5-second realistic montage of three short hug moments: elderly friends hugging; "
+        "a young couple hugging; a parent and child hugging. Quick cuts, same embrace idea, "
+        "natural movement. Simple cinematic shots. No text."
     )
+    scene_joined = " | ".join(variations)
     return {
         "productNameResolved": pn,
         "headline": headline,
         "headlineCoreKeyword": keyword,
-        "sceneConcept": scene,
+        "coreVisualIdea": core_visual,
+        "sceneVariations": variations,
+        "sceneConcept": scene_joined,
         "videoPrompt": video_prompt,
         "language": lang,
-        "planInferenceMode": "deterministic_keyword_scene_fallback",
+        "planInferenceMode": "deterministic_variation_montage_fallback",
     }
 
 
@@ -1097,8 +1132,21 @@ _RUNWAY_STYLE_TAIL = (
 _RUNWAY_SCENE_TAIL_MARKERS: Tuple[str, ...] = (
     "Scene (follow exactly):",
     "Scene continuation (follow exactly):",
+    "Montage (follow exactly):",
+    "Montage continuation (follow exactly):",
     "Scene:",
 )
+
+
+def _runway_variation_montage_camera_focus() -> Tuple[str, str]:
+    """5-second montage of related visual variations (Builder2 experiment)."""
+    return (
+        "MANDATORY: one 5-second realistic montage of 2-4 very short related visual moments expressing the same core idea. "
+        "Quick cuts between visually distinct variations. Each moment clear and readable. "
+        "NO story arc, NO cause-and-effect, NO plot progression — independent expressions of the same idea. "
+        "No surreal motion, no fantasy, no impossible physics.",
+        "variation_montage_5s",
+    )
 
 
 def _runway_human_scene_camera_focus() -> Tuple[str, str]:
@@ -1114,11 +1162,35 @@ def _runway_human_scene_camera_focus() -> Tuple[str, str]:
 _PLAN_KEY_ALIASES: Tuple[Tuple[str, str], ...] = (
     ("product_name_resolved", "productNameResolved"),
     ("headline_core_keyword", "headlineCoreKeyword"),
+    ("core_visual_idea", "coreVisualIdea"),
     ("scene_concept", "sceneConcept"),
     ("video_prompt", "videoPrompt"),
     ("headline_text", "headline"),
     ("video_prompt_core", "videoPrompt"),
 )
+
+
+def _coerce_scene_variations(raw: Any) -> List[str]:
+    """Normalize sceneVariations to 0..N non-empty strings."""
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, str) and raw.strip():
+        text = raw.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            except json.JSONDecodeError:
+                pass
+        lines = re.split(r"\n+|\s*;\s*", text)
+        cleaned: List[str] = []
+        for line in lines:
+            line = re.sub(r"^\s*\d+[\).\:-]\s*", "", line.strip())
+            if line:
+                cleaned.append(line)
+        return cleaned
+    return []
 
 
 def _coerce_plan_keys(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1130,7 +1202,25 @@ def _coerce_plan_keys(data: Dict[str, Any]) -> Dict[str, Any]:
         alt_val = out.get(alt)
         if empty and alt_val is not None and str(alt_val).strip():
             out[canon] = alt_val
+    if not out.get("sceneVariations"):
+        coerced = _coerce_scene_variations(out.get("sceneVariations"))
+        if not coerced:
+            coerced = _coerce_scene_variations(out.get("scene_variations"))
+        if coerced:
+            out["sceneVariations"] = coerced
     return out
+
+
+def _plan_scene_variations_list(plan: Dict[str, Any]) -> List[str]:
+    variations = _coerce_scene_variations(plan.get("sceneVariations"))
+    if variations:
+        return variations
+    scene = (plan.get("sceneConcept") or "").strip()
+    if not scene:
+        return []
+    if " | " in scene:
+        return [part.strip() for part in scene.split(" | ") if part.strip()]
+    return [scene]
 
 
 def validate_and_normalize_plan(
@@ -1159,7 +1249,8 @@ def validate_and_normalize_plan(
     pn = (data.get("productNameResolved") or "").strip()
     headline_rem = (data.get("headline") or "").strip()
     core_kw = (data.get("headlineCoreKeyword") or "").strip()
-    scene = (data.get("sceneConcept") or "").strip()
+    core_visual = (data.get("coreVisualIdea") or "").strip()
+    variations = _coerce_scene_variations(data.get("sceneVariations"))
     video_prompt = (data.get("videoPrompt") or "").strip()
     lang_raw = str(data.get("language") or "").strip()
     if not lang_raw:
@@ -1174,12 +1265,20 @@ def validate_and_normalize_plan(
     if not core_kw:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_headline_core_keyword")
         return None, "planning_failed_incomplete_plan"
-    if not scene:
-        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_scene_concept")
+    if not core_visual:
+        logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_core_visual_idea")
         return None, "planning_failed_incomplete_plan"
+    if len(variations) < _SCENE_VARIATIONS_MIN or len(variations) > _SCENE_VARIATIONS_MAX:
+        logger.info(
+            "VIDEO_PLAN_STRUCT_INCOMPLETE reason=invalid_scene_variations_count count=%s",
+            len(variations),
+        )
+        return None, "planning_failed_invalid_variations"
     if not video_prompt:
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=missing_video_prompt")
         return None, "planning_failed_incomplete_plan"
+
+    scene = " | ".join(variations)
 
     if planner_deadline_monotonic is not None and time.monotonic() >= planner_deadline_monotonic:
         logger.error("VIDEO_PLAN_DEADLINE_EXCEEDED stage=validate")
@@ -1218,7 +1317,7 @@ def validate_and_normalize_plan(
         logger.info("VIDEO_PLAN_STRUCT_INCOMPLETE reason=headline_core_keyword_not_in_headline")
         return None, "planning_failed_invalid_keyword"
 
-    scene_blob = "\n".join([scene, video_prompt])
+    scene_blob = "\n".join([core_visual, scene, video_prompt, *variations])
     bad_scene = scene_fields_imply_forbidden_surrealism(scene_blob)
     if bad_scene:
         logger.info(
@@ -1256,10 +1355,12 @@ def validate_and_normalize_plan(
 
     pn_for_headline = (product_name or "").strip() or pn
     headline_full = _assemble_headline_full(pn_for_headline, headline_rem)
-    opening_fd = scene[:400]
+    opening_fd = (variations[0] if variations else core_visual)[:400]
 
     logger.info('VIDEO_PLAN_HEADLINE="%s"', headline_rem[:260])
     logger.info('VIDEO_PLAN_CORE_KEYWORD="%s"', core_kw[:120])
+    logger.info('VIDEO_PLAN_CORE_VISUAL_IDEA="%s"', core_visual[:200])
+    logger.info("VIDEO_PLAN_SCENE_VARIATIONS count=%s", len(variations))
     logger.info('VIDEO_PLAN_SCENE_CONCEPT="%s"', scene[:260])
 
     return {
@@ -1269,6 +1370,8 @@ def validate_and_normalize_plan(
         "headlineText": headline_full,
         "headlineTextRemainder": headline_rem,
         "headlineCoreKeyword": core_kw,
+        "coreVisualIdea": core_visual,
+        "sceneVariations": variations,
         "sceneConcept": scene,
         "videoPrompt": video_prompt,
         "videoPromptCore": video_prompt.strip(),
@@ -1296,6 +1399,14 @@ def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
         (plan.get("headlineCoreKeyword") or "")[:120],
     )
     logger.info(
+        'VIDEO_PLAN_INTEGRITY coreVisualIdea="%s"',
+        (plan.get("coreVisualIdea") or "")[:200],
+    )
+    logger.info(
+        "VIDEO_PLAN_INTEGRITY sceneVariations_count=%s",
+        len(_plan_scene_variations_list(plan)),
+    )
+    logger.info(
         'VIDEO_PLAN_INTEGRITY sceneConcept="%s"',
         (plan.get("sceneConcept") or "")[:260],
     )
@@ -1315,6 +1426,7 @@ _RUNWAY_STRUCT_REQUIRED_KEYS: Tuple[str, ...] = (
     "advertisingPromise",
     "headlineText",
     "headlineCoreKeyword",
+    "coreVisualIdea",
     "sceneConcept",
     "videoPromptCore",
     "openingFrameDescription",
@@ -1328,6 +1440,9 @@ def video_plan_struct_ok_for_runway(plan: Optional[Dict[str, Any]]) -> Tuple[boo
     for k in _RUNWAY_STRUCT_REQUIRED_KEYS:
         if not str(plan.get(k) or "").strip():
             return False, f"missing_{k}"
+    variations = _plan_scene_variations_list(plan)
+    if len(variations) < _SCENE_VARIATIONS_MIN or len(variations) > _SCENE_VARIATIONS_MAX:
+        return False, "invalid_sceneVariations"
     return True, ""
 
 
@@ -1341,6 +1456,14 @@ def log_plan_summary(plan: Dict[str, Any]) -> None:
         "VIDEO_PLAN_SUMMARY headlineCoreKeyword=%s language=%s",
         plan.get("headlineCoreKeyword"),
         plan.get("language"),
+    )
+    logger.info(
+        'VIDEO_PLAN_CORE_VISUAL_IDEA="%s"',
+        (plan.get("coreVisualIdea") or "")[:200],
+    )
+    logger.info(
+        "VIDEO_PLAN_SCENE_VARIATIONS count=%s",
+        len(_plan_scene_variations_list(plan)),
     )
     logger.info(
         'VIDEO_PLAN_SCENE_CONCEPT="%s"',
@@ -1367,6 +1490,14 @@ def _log_video_plan_post_ok_diagnostics(plan: Dict[str, Any]) -> None:
     logger.info(
         "VIDEO_PLAN_DIAG headlineCoreKeyword=%s",
         (plan.get("headlineCoreKeyword") or "")[:120],
+    )
+    logger.info(
+        "VIDEO_PLAN_DIAG coreVisualIdea=%s",
+        (plan.get("coreVisualIdea") or "")[:200],
+    )
+    logger.info(
+        "VIDEO_PLAN_DIAG sceneVariations_count=%s",
+        len(_plan_scene_variations_list(plan)),
     )
     logger.info("VIDEO_PLAN_DIAG sceneConcept=%s", (plan.get("sceneConcept") or "")[:300])
     logger.info("VIDEO_PLAN_DIAG headlineText=%s", headline_full[:300])
@@ -1435,7 +1566,7 @@ def _fetch_video_plan_o3_sync(
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
-    logger.info("VIDEO_PLAN_SEARCH_ORDER=keyword_scene_v2")
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=variation_montage_v1")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
@@ -1868,35 +1999,49 @@ def _build_runway_prompt_compact_fallback(plan: Dict[str, Any]) -> Tuple[str, bo
     scene_prompt = _plan_video_prompt_text(plan)
     if not scene_prompt:
         raise ValueError("missing videoPrompt")
-    motion, _ = _runway_human_scene_camera_focus()
+    motion, _ = _runway_variation_montage_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
     parts = [
         "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
         lang_vis,
         motion,
-        scene_prompt,
+        f"Montage (follow exactly): {scene_prompt}",
         _RUNWAY_STYLE_TAIL,
     ]
     return _finalize_runway_prompt("", " ".join(p for p in parts if p))
 
 
+def _format_variation_montage_prompt(plan: Dict[str, Any], scene_prompt: str) -> str:
+    core_visual = (plan.get("coreVisualIdea") or "").strip()
+    variations = _plan_scene_variations_list(plan)
+    chunks: List[str] = []
+    if core_visual:
+        chunks.append(f"Core visual idea: {core_visual}.")
+    if variations:
+        numbered = "; ".join(f"({i + 1}) {v}" for i, v in enumerate(variations))
+        chunks.append(f"Variation moments: {numbered}.")
+    chunks.append(f"Montage direction: {scene_prompt}")
+    return " ".join(chunks)
+
+
 def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Runway prompt from keyword-scene plan: videoPrompt + realistic human-scene camera rules.
-    No headline burn-in; advertising goal is not injected into Runway promptText.
+    Runway prompt from variation-montage plan: 5-second montage of related moments.
+    No headline burn-in.
     """
     scene_prompt = _plan_video_prompt_text(plan)
     if not scene_prompt:
         raise ValueError("missing videoPrompt")
 
-    motion, _ = _runway_human_scene_camera_focus()
+    motion, _ = _runway_variation_montage_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
+    montage_body = _format_variation_montage_prompt(plan, scene_prompt)
     body = (
         "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
         "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
         f"{lang_vis} "
         f"{motion} "
-        f"Scene (follow exactly): {scene_prompt}. "
+        f"Montage (follow exactly): {montage_body}. "
         f"{_RUNWAY_STYLE_TAIL}"
     )
     out, trunc = _finalize_runway_prompt("", body)
@@ -1931,24 +2076,25 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    _, motion_mode = _runway_human_scene_camera_focus()
+    _, motion_mode = _runway_variation_montage_camera_focus()
     logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=%s", motion_mode)
     return out
 
 
 def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
-    """Runway prompt when a start frame is supplied — motion continues the realistic human scene."""
+    """Runway prompt when a start frame is supplied — continue the variation montage."""
     scene_prompt = _plan_video_prompt_text(plan)
     if not scene_prompt:
         raise ValueError("missing videoPrompt")
 
-    motion_focus, _ = _runway_human_scene_camera_focus()
+    motion_focus, _ = _runway_variation_montage_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
+    montage_body = _format_variation_montage_prompt(plan, scene_prompt)
     scene = (
         f"{lang_vis} "
-        "The first frame is supplied as the start image; continue the same realistic human scene. "
+        "The first frame is supplied as the start image; continue the same 5-second variation montage. "
         f"{motion_focus} "
-        f"Scene continuation (follow exactly): {scene_prompt}"
+        f"Montage continuation (follow exactly): {montage_body}"
     )
     scene += " No logos or packaging type. Single clean commercial look."
 
@@ -1969,12 +2115,12 @@ def _build_runway_interaction_prompt_compact_fallback(plan: Dict[str, Any]) -> T
     if not scene_prompt:
         raise ValueError("missing videoPrompt")
     lang_vis = _runway_language_visual_constraints(plan)
-    motion_focus, _ = _runway_human_scene_camera_focus()
+    motion_focus, _ = _runway_variation_montage_camera_focus()
     motion = (
         f"{lang_vis} "
-        "Start frame supplied; continue the realistic human scene. "
+        "Start frame supplied; continue the variation montage. "
         f"{motion_focus} "
-        f"Scene: {scene_prompt}."
+        f"Montage: {scene_prompt}."
     )
     parts = [
         "VISUAL POLICY: No readable text, letters, words, logos, captions, labels, signage, or title cards in-frame.",
@@ -2008,7 +2154,7 @@ def build_runway_interaction_prompt_from_plan(plan: Dict[str, Any]) -> str:
         (headline_text[:120] + "…") if len(headline_text) > 120 else headline_text,
         path,
     )
-    _, motion_mode = _runway_human_scene_camera_focus()
+    _, motion_mode = _runway_variation_montage_camera_focus()
     logger.info("VIDEO_PROMPT_CAMERA_MOTION motion=%s", motion_mode)
     out = f"{out.rstrip()} {RUNWAY_PHYSICS_REALISM_CONSTRAINT}".strip()
     return out
