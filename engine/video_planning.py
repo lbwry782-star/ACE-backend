@@ -750,81 +750,91 @@ Flow (mandatory order — internal only; output final JSON only):
 1) Read product name + product description.
 2) headline: direct advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; reject phrase-dependent headlines.
 3) headlineCoreKeyword: exactly ONE standalone semantic word from headline.
-4) coreVisualIdea: underlying visual IDEA behind the keyword — NOT the physical object (realistic, silent-video compatible).
-5) sceneVariations: 2-4 brief independent expressions of that idea — NOT repeated object shots.
-6) videoPrompt: English 5-second montage of those 2-4 related moments; short, clear, realistic, visually distinct; no headline burn-in.
+4) coreVisualIdea: the ESSENCE of the keyword — then its strongest extreme visual embodiment (not literal meaning, not bare object).
+5) sceneVariations: 2-4 brief independent expressions of that extreme essence — NOT repeated object shots.
+6) videoPrompt: English 5-second montage of those 2-4 essence-expressions; short, clear, realistic, visually distinct; no headline burn-in.
 
 Empty product name → invent productNameResolved.
 
-Before the JSON: revision pass (headline → keyword → coreVisualIdea → variations → montage videoPrompt).
+Before the JSON: revision pass (headline → keyword → essence → extreme embodiment → variations → montage videoPrompt).
 
 Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
 
 
-def _planner_idea_before_object_block() -> str:
+def _planner_essence_extreme_block() -> str:
     return (
-        "IDEA BEFORE OBJECT (mandatory — variation_montage_v2):\n"
-        "- headlineCoreKeyword must first become a deeper visual IDEA — do NOT stop at the physical object.\n"
-        "- Ask: \"What is the strongest visual expression of the idea BEHIND the keyword?\" "
-        "NOT: \"What object matches the keyword?\"\n"
-        "- coreVisualIdea must describe the underlying idea, not the object itself.\n"
-        "- REJECT coreVisualIdea values that are only: compass, bridge, key, house, door, map, nest.\n"
-        "- PREFER: finding direction, connection, access, belonging, embrace, support, forward movement.\n\n"
-        "KEYWORD → IDEA (not object):\n"
-        "- מצפן — BAD: compass. GOOD: guidance / direction / finding the way.\n"
-        "- מפתח — BAD: key. GOOD: access / opening possibilities / entry.\n"
-        "- גשר — BAD: bridge. GOOD: connection / bringing sides together.\n"
-        "- בית — BAD: house. GOOD: belonging / shelter / home.\n"
-        "- קרוב — BAD: proximity. GOOD: embrace / closeness.\n\n"
-        "SCENE VARIATIONS must express the IDEA — not show the same object repeatedly.\n"
-        "- BAD: compass, compass, compass, compass.\n"
-        "- BAD: bridge, bridge, bridge, bridge.\n"
-        "- GOOD direction: person choosing a path at a fork; traveler checking surroundings; "
-        "boat changing course; person reaching destination.\n"
-        "- GOOD connection: helping hand across a gap; two groups meeting; people joining a shared table; "
-        "person welcomed into a circle.\n\n"
-        "OBJECT REPETITION LIMIT:\n"
-        "- The same physical object may appear in at most ONE variation.\n"
-        "- Example מצפן: variation 1 may show a brief compass shot; variations 2-4 express direction WITHOUT compass.\n\n"
-        "PLANNER SELF-CHECK (before returning JSON — rewrite if any answer is NO):\n"
-        "1) Did I choose an idea or only an object?\n"
-        "2) If I remove the object, does the idea still exist?\n"
-        "3) Are the variations expressions of the idea?\n"
-        "4) Would the montage still make sense if the object appears only once?\n\n"
-        "EXAMPLE keyword מצפן / direction:\n"
-        "1) compass needle settling north  2) traveler choosing between two paths  "
-        "3) sailboat changing direction  4) person arriving at destination — only #1 uses a compass.\n\n"
+        "ESSENCE EXTREME RULE (mandatory — variation_montage_v3):\n"
+        "- Do NOT ask: \"What does this keyword mean?\"\n"
+        "- DO ask: \"What is the most extreme visual expression of the ESSENCE of this keyword?\"\n"
+        "- Goal is NOT literal meaning — goal is the purest visual embodiment of the keyword's essence.\n\n"
+        "PROCESS:\n"
+        "STEP A — Find the essence (not the object, not literal definition).\n"
+        "STEP B — Ask: \"What is the strongest visual image that expresses this essence in the most extreme form?\"\n"
+        "STEP C — coreVisualIdea names that extreme visual embodiment.\n"
+        "STEP D — sceneVariations are 2-4 independent expressions of that same extreme essence.\n\n"
+        "ESSENCE EXAMPLES (keyword → essence — NOT object):\n"
+        "- דלת — NOT door. Essence: opening / passage / transition.\n"
+        "- קרוב — NOT standing nearby. Essence: maximum connection.\n"
+        "- עזרה — NOT helping generically. Essence: small support preventing collapse.\n"
+        "- בית — NOT house. Essence: protected belonging.\n\n"
+        "EXTREME EMBODIMENT EXAMPLES:\n"
+        "- קרוב — WEAK: two people standing near. BETTER: hug (strongest visual of closeness).\n"
+        "- דלת — WEAK: wooden door opening. BETTER: clear opening beyond dense leaves; bright sky through cave opening; "
+        "sunlight through gap in clouds — the opening itself is more \"door\" than the physical object.\n"
+        "- עזרה — WEAK: person helping another. BETTER: small support holding an enormous weight.\n"
+        "- בית — WEAK: house exterior. BETTER: bird nest containing eggs (purest visual of home).\n\n"
+        "MONTAGE RULE:\n"
+        "- sceneVariations must be variations of the extreme visual ESSENCE — not variations of an object.\n"
+        "- BAD: door, door, door, door. GOOD: different forms of openings.\n"
+        "- BAD: bridge, bridge, bridge, bridge. GOOD: different forms of connection.\n\n"
+        "ESSENCE EXTREME SELF-CHECK (rewrite if any answer is NO):\n"
+        "1) Did I identify the essence?\n"
+        "2) Did I find the strongest visual embodiment of the essence?\n"
+        "3) Is the embodiment stronger than showing the object itself?\n"
+        "4) If the object disappeared completely, would the idea still be understood?\n"
+        "5) Are the variations expressions of the essence rather than the object?\n\n"
+        "GOAL: viewer should not think \"I saw a door\" — viewer should think \"I felt what a door means.\"\n\n"
+    )
+
+
+def _planner_essence_before_object_block() -> str:
+    return (
+        "ESSENCE BEFORE OBJECT (mandatory — variation_montage_v3):\n"
+        "- Physical objects are optional. If essence can be expressed more powerfully WITHOUT the object, prefer non-object.\n"
+        "- Do NOT automatically show door, key, bridge, compass, house if the essence shows better without them.\n"
+        "- coreVisualIdea must name essence embodiment — REJECT bare object nouns: compass, bridge, key, house, door.\n"
+        "- Same physical object in at most ONE variation (when an object appears at all).\n\n"
+        "VARIATION EXAMPLES:\n"
+        "- דלת / opening: opening beyond leaves; sky through cave mouth; sunlight through cloud gap — no wooden door needed.\n"
+        "- מצפן / direction: compass needle once OR none; path fork; boat changing course; arrival at destination.\n"
+        "- גשר / connection: helping hand across gap; groups meeting; shared table — not four bridge shots.\n\n"
     )
 
 
 def _planner_variation_montage_block() -> str:
     return (
-        "VARIATION MONTAGE MODE (mandatory — Builder2 variation_montage_v2):\n"
-        "- Do NOT generate a single scene. Generate 2-4 very short variations of the same core visual IDEA.\n"
+        "VARIATION MONTAGE MODE (mandatory — Builder2 variation_montage_v3):\n"
+        "- Do NOT generate a single scene. Generate 2-4 very short variations of the same extreme visual ESSENCE.\n"
         "- Total video duration remains 5 seconds — montage of quick related moments.\n"
-        "- Flow: headline → headlineCoreKeyword → coreVisualIdea (idea) → sceneVariations → videoPrompt.\n\n"
+        "- Flow: headline → headlineCoreKeyword → essence → coreVisualIdea (extreme embodiment) → sceneVariations → videoPrompt.\n\n"
         "CORE VISUAL IDEA:\n"
-        "- After headlineCoreKeyword, find the strongest underlying visual IDEA — not the literal object.\n"
-        "- Must be: realistic, simple, visually understandable, silent-video compatible.\n"
-        "- Examples: קרוב→embrace/closeness; בית→belonging; עזרה→support; דרך→forward movement; "
-        "גשר→connection; מצפן→finding direction.\n\n"
+        "- coreVisualIdea = strongest extreme visual embodiment of the keyword's essence (realistic, silent-video compatible).\n"
+        "- Examples: קרוב→maximum connection/hug; דלת→opening/passage; עזרה→small support under enormous weight; "
+        "בית→protected belonging/nest; גשר→connection; מצפן→finding direction.\n\n"
         "SCENE VARIATIONS (sceneVariations array, 2-4 items):\n"
-        "- Each item is a brief independent expression of coreVisualIdea — expressions of an idea, not object repetitions.\n"
-        "- NO story, NO beginning-middle-end, NO cause-and-effect, NO plot progression.\n"
-        "- All variations must belong to the SAME idea — do NOT switch to unrelated ideas.\n"
+        "- Each item independently expresses the same extreme essence — not object permutations.\n"
+        "- NO story, NO plot progression, NO cause-and-effect chains.\n"
         "- Same physical object in at most ONE variation.\n\n"
-        "EXAMPLE keyword קרוב / embrace variations:\n"
+        "EXAMPLE keyword קרוב / maximum connection:\n"
         "1) elderly friends hugging  2) young couple hugging  3) parent and child hugging  4) friends greeting with a hug\n\n"
-        "EXAMPLE keyword מצפן / direction variations:\n"
-        "1) compass needle settling north  2) traveler choosing between two paths  "
-        "3) sailboat changing direction  4) person arriving at destination\n\n"
+        "EXAMPLE keyword דלת / opening:\n"
+        "1) clear opening visible beyond dense leaves  2) bright sky through cave opening  "
+        "3) sunlight visible through gap in clouds  4) light flooding through a dark passage\n\n"
         "VIDEO PROMPT:\n"
-        "- Describe a short 5-second montage of the 2-4 idea-expressions.\n"
-        "- Each moment: short, clear, realistic, visually distinct.\n"
-        "- Goal: viewer remembers the IDEA; object is only a tool; "
-        "viewer feels \"I keep seeing the same idea expressed in different ways.\"\n"
-        "- Headline overlay appears at the end (downstream) — do NOT burn headline into videoPrompt.\n\n"
+        "- Describe a 5-second montage of 2-4 extreme essence-expressions.\n"
+        "- Goal: communicate what the keyword MEANS through its strongest visual form — not \"I saw a door.\"\n"
+        "- Headline overlay at end (downstream) — do NOT burn headline into videoPrompt.\n\n"
     )
 
 
@@ -919,67 +929,61 @@ def _planner_final_checklist_block() -> str:
     return (
         "FINAL CHECKLIST (before returning JSON):\n"
         "1) headlineCoreKeyword is exactly one standalone word.\n"
-        "2) coreVisualIdea is an underlying IDEA — not a bare object noun.\n"
-        "3) sceneVariations has 2-4 items, all expressing coreVisualIdea — not other headline words.\n"
-        "4) variations express the idea — same physical object in at most one variation.\n"
+        "2) coreVisualIdea is the extreme visual embodiment of the keyword's essence — not literal meaning, not bare object.\n"
+        "3) sceneVariations has 2-4 items, all expressing that essence — not other headline words.\n"
+        "4) variations are essence-expressions — not object repetitions; same object ≤ once.\n"
         "5) variations are independent — no story arc or plot progression.\n"
-        "6) videoPrompt is a 5-second montage of those idea-expressions; no headline phrase leakage.\n"
+        "6) videoPrompt is a 5-second montage of extreme essence-expressions; no headline phrase leakage.\n"
         "7) main subject gender does not contradict product/headline when gendered subjects appear.\n"
-        "8) silent-video verifiable; realistic; same core idea across variations.\n"
-        "9) IDEA BEFORE OBJECT self-check passed (idea not object; idea survives without object; object ≤ once).\n\n"
+        "8) silent-video verifiable; realistic; same essence across variations.\n"
+        "9) ESSENCE EXTREME self-check passed (all 5 questions in ESSENCE EXTREME RULE).\n\n"
     )
 
 
 def _planner_interest_first_block() -> str:
     return (
-        "INTEREST FIRST (primary coreVisualIdea + variation selection rule — mandatory):\n"
-        "- Ad quality is measured primarily by viewer interest. Among multiple valid core ideas, prefer the most interesting.\n"
-        "- NOT the most literal, obvious, or mechanical — unless no better valid option exists.\n"
-        "- coreVisualIdea and every variation must still be: realistic, everyday, simple, visually understandable, "
+        "INTEREST FIRST + ESSENCE EXTREME (primary coreVisualIdea + variation selection — mandatory):\n"
+        "- Among valid essence embodiments, prefer the most extreme, memorable, visually powerful form.\n"
+        "- NOT literal meaning, NOT obvious object shots, NOT mechanical keyword illustration.\n"
+        "- coreVisualIdea and every variation must still be: realistic, simple, visually understandable, "
         "physically possible, silent-video compatible.\n"
-        "- Valid montage should make a viewer think: \"Interesting — same idea, different ways.\"\n\n"
+        "- Valid montage: viewer feels the MEANING of the keyword — not \"I saw an object.\"\n\n"
         "KEYWORD ROLE:\n"
-        "- headlineCoreKeyword does NOT directly prescribe one scene.\n"
-        "- headlineCoreKeyword defines the SEMANTIC TERRITORY for coreVisualIdea search.\n"
-        "- Search inside that territory for the strongest simple visual image, then 2-4 interesting variations of it.\n"
-        "- Stay keyword-isolated: territory comes from the keyword alone, never from other headline words.\n\n"
-        "INTEREST AMPLIFICATION:\n"
-        "- Ask: \"What is the strongest visual expression of the idea BEHIND the keyword?\"\n"
-        "- NOT: \"What object matches the keyword?\"\n"
-        "- Prefer idea-first montages like קרוב→embrace (multiple closeness expressions), "
-        "not object-first montages like מצפן→compass repeated four times.\n\n"
-        "NOT LITERALITY / NOT OBJECT-ONLY:\n"
-        "- Do not reward literality or object repetition. Object is at most one variation.\n"
-        '- "קרוב" — literal: standing near. STRONG: embrace → elderly friends hugging, young couple, parent/child.\n'
-        '- "מצפן" — literal/object: compass in every shot. STRONG: direction → compass needle once; path choice; boat turning; arrival.\n'
-        '- "בית" — literal: house exterior. STRONG: belonging → family welcomed inside, cozy shared meal, person relaxing safely at home.\n'
-        '- "גשר" — literal: bridge repeated. STRONG: connection → helping hand across gap, groups meeting, shared table, welcome into circle.\n\n'
-        "INTEREST TEST: If two valid core ideas exist, which would a human viewer remember longer? Prefer that one.\n"
-        "CURIOSITY TEST: Would the viewer feel curiosity across the variations? "
-        "If not, search for a more interesting core idea in the same keyword territory.\n\n"
-        "IMPORTANT LIMIT — interest must NOT come from:\n"
+        "- headlineCoreKeyword defines territory — find ESSENCE first, then extreme embodiment.\n"
+        "- Ask: \"What is the most extreme visual expression of this essence?\" — NOT \"What does the word mean?\"\n"
+        "- Stay keyword-isolated: essence comes from the keyword alone, never from other headline words.\n\n"
+        "ESSENCE EXTREME (not literal / not object-only):\n"
+        '- "קרוב" — literal: standing near. EXTREME: hug / maximum connection.\n'
+        '- "דלת" — literal: wooden door. EXTREME: openings — light beyond leaves, sky through cave, sun through cloud gap.\n'
+        '- "עזרה" — literal: person helping. EXTREME: small support holding enormous weight.\n'
+        '- "בית" — literal: house exterior. EXTREME: nest with eggs / protected belonging.\n'
+        '- "גשר" — literal: bridge repeated. EXTREME: connection — helping hand, groups meeting, shared table.\n\n'
+        "INTEREST TEST: Which embodiment would a viewer remember longer — the object or the extreme essence form? Prefer essence.\n"
+        "CURIOSITY TEST: Would the viewer feel the keyword meaning without naming the object? If not, push more extreme.\n\n"
+        "IMPORTANT LIMIT — extreme must NOT come from:\n"
         "fantasy, surrealism, impossible events, dream logic, visual tricks, symbolism requiring explanation.\n"
-        "Interest MUST come from: unusual but realistic combinations, unexpected everyday situations, human behavior, contrast, style, context.\n\n"
-        "FINAL PRIORITY ORDER (when several valid core ideas exist):\n"
-        "1) Interesting  2) Realistic  3) Silent-video verifiable  4) Keyword-isolated  5) Simple  6) Everyday.\n\n"
+        "Extreme MUST come from: strongest realistic visual form of the essence — contrast, scale, opening, connection, shelter.\n\n"
+        "FINAL PRIORITY ORDER (when several valid essence embodiments exist):\n"
+        "1) Extreme visual power  2) Interesting  3) Realistic  4) Silent-video verifiable  "
+        "5) Keyword-isolated  6) Simple  7) Non-object preferred when stronger.\n\n"
     )
 
 
 def _planner_scene_association_block() -> str:
     return (
         "SCENE ASSOCIATION RULE (mandatory for coreVisualIdea + sceneVariations + videoPrompt):\n"
-        "- headlineCoreKeyword defines semantic territory — convert it to an underlying IDEA first (see IDEA BEFORE OBJECT).\n"
+        "- Convert headlineCoreKeyword to ESSENCE first, then extreme visual embodiment (see ESSENCE EXTREME RULE).\n"
         "- coreVisualIdea comes ONLY from keyword territory — never from a multi-word phrase in the headline.\n"
-        "- Do NOT default to literal dictionary/object meaning — find the human idea the keyword evokes.\n"
-        "- Then generate 2-4 brief independent expressions of that idea — not repeated object shots.\n"
+        "- Do NOT default to literal dictionary meaning or the physical object.\n"
+        "- sceneVariations = different extreme expressions of the same essence — not object permutations.\n"
         "- Instantly recognizable and emotionally understandable within 5 seconds.\n\n"
-        "BAD vs GOOD (keyword territory → coreVisualIdea → variations):\n"
-        '- "קרוב" — BAD: two people standing near. GOOD: embrace → elderly friends hugging, young couple, parent/child.\n'
-        '- "מצפן" — BAD: hand with compass, hiker with compass, compass on map. GOOD: direction → needle settling; path fork; boat turning; arrival.\n'
-        '- "בית" — BAD: house, house, house. GOOD: belonging → welcomed inside, shared meal, safe rest at home.\n'
-        '- "גשר" — BAD: bridge + road + airplane (unrelated). GOOD: connection → helping hand, groups meeting, shared table, welcome into circle.\n'
-        '- "מפתח" — BAD: key, lock, key. GOOD: access → door opening to light, person entering opportunity, gate opening, welcome entry.\n\n'
-        "When multiple valid core ideas exist, apply INTEREST FIRST — not first-to-mind literal.\n"
+        "BAD vs GOOD (keyword → essence → extreme embodiment → variations):\n"
+        '- "קרוב" — BAD: standing near. GOOD: maximum connection → hug variations.\n'
+        '- "דלת" — BAD: wooden door ×4. GOOD: opening → leaves parting to light, cave mouth to sky, cloud gap to sun.\n'
+        '- "עזרה" — BAD: generic helping. GOOD: small support under enormous weight; hand steadying heavy load.\n'
+        '- "בית" — BAD: house exterior ×4. GOOD: protected belonging → nest with eggs, bird returning, sheltered young.\n'
+        '- "גשר" — BAD: bridge ×4. GOOD: connection → helping hand across gap, groups meeting, shared table.\n\n'
+        "When multiple valid embodiments exist, apply ESSENCE EXTREME — not first-to-mind literal or object.\n"
         "Each variation is an independent expression — NO story arc, NO plot progression.\n\n"
     )
 
@@ -1036,11 +1040,12 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 1 — Read product_name and product_description.\n"
         "STEP 2 — headline (see HEADLINE RULES).\n"
         "STEP 3 — headlineCoreKeyword (see STANDALONE KEYWORD RULE).\n"
-        "STEP 4 — coreVisualIdea: underlying IDEA from keyword alone (not the physical object).\n"
-        "STEP 5 — sceneVariations: 2-4 independent expressions of that idea (object ≤ once).\n"
-        "STEP 6 — videoPrompt: 5-second montage of those idea-expressions.\n\n"
+        "STEP 4 — Find essence of headlineCoreKeyword; set coreVisualIdea to its strongest extreme visual embodiment.\n"
+        "STEP 5 — sceneVariations: 2-4 independent extreme expressions of that essence (object ≤ once).\n"
+        "STEP 6 — videoPrompt: 5-second montage of those essence-expressions.\n\n"
         + _planner_variation_montage_block()
-        + _planner_idea_before_object_block()
+        + _planner_essence_extreme_block()
+        + _planner_essence_before_object_block()
         + _planner_headline_rules_block()
         + _planner_headline_phrase_dependency_block()
         + _planner_standalone_keyword_block()
@@ -1051,10 +1056,10 @@ def _planner_keyword_scene_flow_block() -> str:
         + _planner_gender_consistency_block()
         + _planner_final_checklist_block()
         + "MONTAGE RULES (sceneVariations + videoPrompt):\n"
-        "- Realistic, everyday, simple, physically possible; visually verifiable without sound.\n"
-        "- Same coreVisualIdea across all variations; no unrelated idea mixing.\n"
-        "- Variations express the idea — not repeated appearances of the same object.\n"
-        "FORBIDDEN: surreal, fantasy, story arcs, plot progression, cause-and-effect chains, headline burn-in, object-only montages.\n\n"
+        "- Realistic, simple, physically possible; visually verifiable without sound.\n"
+        "- Same extreme essence across all variations; no unrelated idea mixing.\n"
+        "- Variations express essence — not repeated objects; prefer non-object when stronger.\n"
+        "FORBIDDEN: literal keyword illustration, object-only montages, surreal, fantasy, story arcs, headline burn-in.\n\n"
     )
 
 
@@ -1064,8 +1069,8 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
     return (
         f"ACE Builder2 video planning — variation montage ({_VIDEO_PLAN_SCHEMA_VERSION}). "
         f"Language {lang_name} ({lang}). "
-        "product → headline → headlineCoreKeyword → coreVisualIdea (idea, not object) → sceneVariations → videoPrompt. "
-        "5-second montage of 2-4 idea-expressions; object may appear at most once; all existing keyword/silent/gender rules apply. "
+        "product → headline → headlineCoreKeyword → essence → coreVisualIdea (extreme embodiment) → sceneVariations → videoPrompt. "
+        "5-second montage of 2-4 extreme essence-expressions; prefer essence over object; object ≤ once; all existing rules apply. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -1168,7 +1173,7 @@ def _word_limit(s: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
-_VIDEO_PLAN_SCHEMA_VERSION = "variation_montage_v2"
+_VIDEO_PLAN_SCHEMA_VERSION = "variation_montage_v3"
 _SCENE_VARIATIONS_MIN = 2
 _SCENE_VARIATIONS_MAX = 4
 
@@ -1190,8 +1195,8 @@ def _build_scene_plan_repair_input(
         f"REPAIR REQUEST (one retry): The previous plan failed validation ({reason}).\n"
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, coreVisualIdea, sceneVariations, and videoPrompt to satisfy all rules.\n"
-        "coreVisualIdea must be an underlying IDEA — not a bare object (compass, bridge, key, house).\n"
-        "sceneVariations must be 2-4 independent expressions of that idea — same physical object in at most ONE variation.\n"
+        "Find keyword ESSENCE first; coreVisualIdea must be its strongest extreme visual embodiment — not literal meaning, not bare object.\n"
+        "sceneVariations must be 2-4 expressions of that extreme essence — not object repetitions; same object in at most ONE variation.\n"
         "headlineCoreKeyword must be standalone — reject phrase-dependent headlines/keywords; rewrite headline if needed.\n"
         "coreVisualIdea and all variations must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
         "Use gender-neutral subject (a person) unless product/headline clearly requires gender; no gender contradiction.\n"
@@ -1244,7 +1249,7 @@ def _build_keyword_scene_fallback_plan(
         "sceneConcept": scene_joined,
         "videoPrompt": video_prompt,
         "language": lang,
-        "planInferenceMode": "deterministic_variation_montage_v2_fallback",
+        "planInferenceMode": "deterministic_variation_montage_v3_fallback",
     }
 
 
@@ -1278,9 +1283,9 @@ _RUNWAY_SCENE_TAIL_MARKERS: Tuple[str, ...] = (
 def _runway_variation_montage_camera_focus() -> Tuple[str, str]:
     """5-second montage of related visual variations (Builder2 experiment)."""
     return (
-        "MANDATORY: one 5-second realistic montage of 2-4 very short related visual moments expressing the same core IDEA. "
-        "Each moment expresses the idea — not repeated appearances of the same object. "
-        "Quick cuts between visually distinct variations. Each moment clear and readable. "
+        "MANDATORY: one 5-second realistic montage of 2-4 very short related visual moments expressing the same extreme ESSENCE. "
+        "Each moment is the strongest visual embodiment of the essence — not repeated objects; prefer non-object when stronger. "
+        "Quick cuts between visually distinct essence-expressions. Each moment clear and readable. "
         "NO story arc, NO cause-and-effect, NO plot progression — independent expressions of the same idea. "
         "No surreal motion, no fantasy, no impossible physics.",
         "variation_montage_5s",
@@ -1720,7 +1725,7 @@ def _fetch_video_plan_o3_sync(
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
-    logger.info("VIDEO_PLAN_SEARCH_ORDER=variation_montage_v2")
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=variation_montage_v3")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
