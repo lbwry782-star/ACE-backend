@@ -751,12 +751,12 @@ Flow (mandatory order — internal only; output final JSON only):
 2) headline: direct advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; reject phrase-dependent headlines.
 3) headlineCoreKeyword: exactly ONE standalone semantic word from headline.
 4) coreVisualIdea: the ESSENCE of the keyword — then its strongest extreme visual embodiment (not literal meaning, not bare object).
-5) sceneVariations: 2-4 brief independent expressions of that extreme essence — NOT repeated object shots.
-6) videoPrompt: English 5-second montage of those 2-4 essence-expressions; short, clear, realistic, visually distinct; no headline burn-in.
+5) sceneVariations: 2-4 variations within ONE visual family of that essence — same motif, not dictionary examples.
+6) videoPrompt: English 5-second montage of those family-consistent variations; short, clear, realistic, visually distinct; no headline burn-in.
 
 Empty product name → invent productNameResolved.
 
-Before the JSON: revision pass (headline → keyword → essence → extreme embodiment → variations → montage videoPrompt).
+Before the JSON: revision pass (headline → keyword → essence → extreme embodiment → visual family → variations → montage videoPrompt).
 
 Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 """
@@ -764,7 +764,7 @@ Failure only: {"planningFailure":"planning_failed_invalid_plan"}
 
 def _planner_essence_extreme_block() -> str:
     return (
-        "ESSENCE EXTREME RULE (mandatory — variation_montage_v3):\n"
+        "ESSENCE EXTREME RULE (mandatory — variation_montage_v4):\n"
         "- Do NOT ask: \"What does this keyword mean?\"\n"
         "- DO ask: \"What is the most extreme visual expression of the ESSENCE of this keyword?\"\n"
         "- Goal is NOT literal meaning — goal is the purest visual embodiment of the keyword's essence.\n\n"
@@ -772,7 +772,8 @@ def _planner_essence_extreme_block() -> str:
         "STEP A — Find the essence (not the object, not literal definition).\n"
         "STEP B — Ask: \"What is the strongest visual image that expresses this essence in the most extreme form?\"\n"
         "STEP C — coreVisualIdea names that extreme visual embodiment.\n"
-        "STEP D — sceneVariations are 2-4 independent expressions of that same extreme essence.\n\n"
+        "STEP D — Choose ONE visual family for that embodiment; sceneVariations stay inside that family.\n"
+        "STEP E — sceneVariations are 2-4 independent variations within the same visual family.\n\n"
         "ESSENCE EXAMPLES (keyword → essence — NOT object):\n"
         "- דלת — NOT door. Essence: opening / passage / transition.\n"
         "- קרוב — NOT standing nearby. Essence: maximum connection.\n"
@@ -787,20 +788,21 @@ def _planner_essence_extreme_block() -> str:
         "MONTAGE RULE:\n"
         "- sceneVariations must be variations of the extreme visual ESSENCE — not variations of an object.\n"
         "- BAD: door, door, door, door. GOOD: different forms of openings.\n"
-        "- BAD: bridge, bridge, bridge, bridge. GOOD: different forms of connection.\n\n"
+        "- BAD: bridge, bridge, bridge, bridge. GOOD: one connection family (e.g. people reaching toward each other).\n\n"
         "ESSENCE EXTREME SELF-CHECK (rewrite if any answer is NO):\n"
         "1) Did I identify the essence?\n"
         "2) Did I find the strongest visual embodiment of the essence?\n"
         "3) Is the embodiment stronger than showing the object itself?\n"
         "4) If the object disappeared completely, would the idea still be understood?\n"
-        "5) Are the variations expressions of the essence rather than the object?\n\n"
+        "5) Are the variations expressions of the essence rather than the object?\n"
+        "6) Do all variations belong to the same visual family (side-by-side frame test)?\n\n"
         "GOAL: viewer should not think \"I saw a door\" — viewer should think \"I felt what a door means.\"\n\n"
     )
 
 
 def _planner_essence_before_object_block() -> str:
     return (
-        "ESSENCE BEFORE OBJECT (mandatory — variation_montage_v3):\n"
+        "ESSENCE BEFORE OBJECT (mandatory — variation_montage_v4):\n"
         "- Physical objects are optional. If essence can be expressed more powerfully WITHOUT the object, prefer non-object.\n"
         "- Do NOT automatically show door, key, bridge, compass, house if the essence shows better without them.\n"
         "- coreVisualIdea must name essence embodiment — REJECT bare object nouns: compass, bridge, key, house, door.\n"
@@ -808,32 +810,60 @@ def _planner_essence_before_object_block() -> str:
         "VARIATION EXAMPLES:\n"
         "- דלת / opening: opening beyond leaves; sky through cave mouth; sunlight through cloud gap — no wooden door needed.\n"
         "- מצפן / direction: compass needle once OR none; path fork; boat changing course; arrival at destination.\n"
-        "- גשר / connection: helping hand across gap; groups meeting; shared table — not four bridge shots.\n\n"
+        "- גשר / connection — visual family \"people reaching toward each other\": friends joining hands, human chain, leaning across table, child reaching parent — NOT rescue + river + dinner + handshake mix.\n\n"
+    )
+
+
+def _planner_visual_family_consistency_block() -> str:
+    return (
+        "VISUAL FAMILY CONSISTENCY (mandatory — variation_montage_v4):\n"
+        "- sceneVariations must not merely express the same idea — they must belong to the SAME visual family.\n"
+        "- After coreVisualIdea, choose ONE visual family. Every variation must remain inside that family.\n"
+        "- Goal: viewer feels \"I am seeing the same visual idea expressed several different ways\" — one recurring motif.\n"
+        "- NOT: three unrelated scenes that happen to express the same abstract idea.\n\n"
+        "PROBLEM (reject):\n"
+        "- Keyword גשר / idea: connection. Var 1: mountain rescue. Var 2: chain across river. Var 3: dinner table. Var 4: handshake. "
+        "Same idea, different visual families — montage feels inconsistent.\n\n"
+        "GOOD (קרוב / hug visual family):\n"
+        "- friends hugging, family hugging, couple hugging, elderly friends hugging — same family, different variations.\n"
+        "- Side-by-side frozen frames must look like one visual family.\n\n"
+        "EXAMPLE גשר / human connection:\n"
+        "- coreVisualIdea: human connection. Visual family: people reaching toward each other.\n"
+        "- GOOD: friends reaching hands together; people forming human chain; people leaning across table; child reaching parent.\n"
+        "- BAD: mountain rescue + river chain + dinner table + business handshake.\n\n"
+        "MONTAGE FEEL: different expressions of ONE visual motif — NOT dictionary examples of an abstract idea.\n\n"
+        "SELF-CHECK: freeze each variation frame side by side — same visual family? If NO, rewrite.\n\n"
+        "PRIORITY: 1) Essence  2) Strong embodiment  3) Visual family consistency  4) Interest  "
+        "5) Realistic  6) Silent-video  7) Simplicity.\n\n"
     )
 
 
 def _planner_variation_montage_block() -> str:
     return (
-        "VARIATION MONTAGE MODE (mandatory — Builder2 variation_montage_v3):\n"
+        "VARIATION MONTAGE MODE (mandatory — Builder2 variation_montage_v4):\n"
         "- Do NOT generate a single scene. Generate 2-4 very short variations of the same extreme visual ESSENCE.\n"
         "- Total video duration remains 5 seconds — montage of quick related moments.\n"
-        "- Flow: headline → headlineCoreKeyword → essence → coreVisualIdea (extreme embodiment) → sceneVariations → videoPrompt.\n\n"
-        "CORE VISUAL IDEA:\n"
-        "- coreVisualIdea = strongest extreme visual embodiment of the keyword's essence (realistic, silent-video compatible).\n"
+        "- Flow: headline → keyword → essence → coreVisualIdea → visual family → sceneVariations → videoPrompt.\n\n"
+        "CORE VISUAL IDEA + VISUAL FAMILY:\n"
+        "- coreVisualIdea = strongest extreme visual embodiment of the keyword's essence.\n"
+        "- Then choose ONE visual family; all sceneVariations must stay inside that family.\n"
         "- Examples: קרוב→maximum connection/hug; דלת→opening/passage; עזרה→small support under enormous weight; "
         "בית→protected belonging/nest; גשר→connection; מצפן→finding direction.\n\n"
         "SCENE VARIATIONS (sceneVariations array, 2-4 items):\n"
-        "- Each item independently expresses the same extreme essence — not object permutations.\n"
-        "- NO story, NO plot progression, NO cause-and-effect chains.\n"
-        "- Same physical object in at most ONE variation.\n\n"
+        "- Each item is a variation within the SAME visual family — same motif, different subjects/contexts.\n"
+        "- Must feel like קרוב→hug→friends/family/couple/elderly hugging — NOT mixed rescue/table/handshake families.\n"
+        "- NO story, NO plot progression. Same physical object in at most ONE variation.\n\n"
+        "EXAMPLE keyword גשר / visual family: people reaching toward each other:\n"
+        "1) friends reaching hands together  2) people forming a human chain  "
+        "3) people leaning across a table  4) child reaching toward parent\n\n"
         "EXAMPLE keyword קרוב / maximum connection:\n"
         "1) elderly friends hugging  2) young couple hugging  3) parent and child hugging  4) friends greeting with a hug\n\n"
         "EXAMPLE keyword דלת / opening:\n"
         "1) clear opening visible beyond dense leaves  2) bright sky through cave opening  "
         "3) sunlight visible through gap in clouds  4) light flooding through a dark passage\n\n"
         "VIDEO PROMPT:\n"
-        "- Describe a 5-second montage of 2-4 extreme essence-expressions.\n"
-        "- Goal: communicate what the keyword MEANS through its strongest visual form — not \"I saw a door.\"\n"
+        "- Describe a 5-second montage of 2-4 variations within one visual family.\n"
+        "- Goal: one recurring visual motif — viewer remembers the motif, not scattered dictionary scenes.\n"
         "- Headline overlay at end (downstream) — do NOT burn headline into videoPrompt.\n\n"
     )
 
@@ -930,13 +960,14 @@ def _planner_final_checklist_block() -> str:
         "FINAL CHECKLIST (before returning JSON):\n"
         "1) headlineCoreKeyword is exactly one standalone word.\n"
         "2) coreVisualIdea is the extreme visual embodiment of the keyword's essence — not literal meaning, not bare object.\n"
-        "3) sceneVariations has 2-4 items, all expressing that essence — not other headline words.\n"
-        "4) variations are essence-expressions — not object repetitions; same object ≤ once.\n"
-        "5) variations are independent — no story arc or plot progression.\n"
-        "6) videoPrompt is a 5-second montage of extreme essence-expressions; no headline phrase leakage.\n"
-        "7) main subject gender does not contradict product/headline when gendered subjects appear.\n"
-        "8) silent-video verifiable; realistic; same essence across variations.\n"
-        "9) ESSENCE EXTREME self-check passed (all 5 questions in ESSENCE EXTREME RULE).\n\n"
+        "3) sceneVariations has 2-4 items within ONE visual family of that essence — not other headline words.\n"
+        "4) side-by-side frame test: all variations feel like the same visual family.\n"
+        "5) variations are essence-expressions — not object repetitions; same object ≤ once.\n"
+        "6) variations are independent — no story arc or plot progression.\n"
+        "7) videoPrompt is a 5-second montage of one visual-family motif; no headline phrase leakage.\n"
+        "8) main subject gender does not contradict product/headline when gendered subjects appear.\n"
+        "9) silent-video verifiable; realistic; same essence and family across variations.\n"
+        "10) ESSENCE EXTREME + VISUAL FAMILY self-checks passed.\n\n"
     )
 
 
@@ -957,33 +988,33 @@ def _planner_interest_first_block() -> str:
         '- "דלת" — literal: wooden door. EXTREME: openings — light beyond leaves, sky through cave, sun through cloud gap.\n'
         '- "עזרה" — literal: person helping. EXTREME: small support holding enormous weight.\n'
         '- "בית" — literal: house exterior. EXTREME: nest with eggs / protected belonging.\n'
-        '- "גשר" — literal: bridge repeated. EXTREME: connection — helping hand, groups meeting, shared table.\n\n'
-        "INTEREST TEST: Which embodiment would a viewer remember longer — the object or the extreme essence form? Prefer essence.\n"
-        "CURIOSITY TEST: Would the viewer feel the keyword meaning without naming the object? If not, push more extreme.\n\n"
+        '- "גשר" — BAD: rescue + river chain + dinner + handshake (mixed families). '
+        'GOOD: one family "people reaching toward each other" — joining hands, human chain, lean across table, child to parent.\n\n'
+        "VISUAL FAMILY TEST: freeze frames side by side — same family? If not, rewrite.\n\n"
         "IMPORTANT LIMIT — extreme must NOT come from:\n"
-        "fantasy, surrealism, impossible events, dream logic, visual tricks, symbolism requiring explanation.\n"
-        "Extreme MUST come from: strongest realistic visual form of the essence — contrast, scale, opening, connection, shelter.\n\n"
-        "FINAL PRIORITY ORDER (when several valid essence embodiments exist):\n"
-        "1) Extreme visual power  2) Interesting  3) Realistic  4) Silent-video verifiable  "
-        "5) Keyword-isolated  6) Simple  7) Non-object preferred when stronger.\n\n"
+        "fantasy, surrealism, impossible events, dream logic, visual tricks, symbolism requiring explanation.\n\n"
+        "FINAL PRIORITY ORDER:\n"
+        "1) Essence  2) Strong visual embodiment  3) Visual family consistency  4) Interesting  "
+        "5) Realistic  6) Silent-video verifiable  7) Simple  8) Non-object when stronger.\n\n"
     )
 
 
 def _planner_scene_association_block() -> str:
     return (
         "SCENE ASSOCIATION RULE (mandatory for coreVisualIdea + sceneVariations + videoPrompt):\n"
-        "- Convert headlineCoreKeyword to ESSENCE first, then extreme visual embodiment (see ESSENCE EXTREME RULE).\n"
+        "- Convert headlineCoreKeyword to ESSENCE, extreme embodiment, then ONE visual family (see ESSENCE EXTREME + VISUAL FAMILY rules).\n"
         "- coreVisualIdea comes ONLY from keyword territory — never from a multi-word phrase in the headline.\n"
         "- Do NOT default to literal dictionary meaning or the physical object.\n"
-        "- sceneVariations = different extreme expressions of the same essence — not object permutations.\n"
+        "- sceneVariations = 2-4 variations within ONE visual family of that essence — not mixed families.\n"
         "- Instantly recognizable and emotionally understandable within 5 seconds.\n\n"
         "BAD vs GOOD (keyword → essence → extreme embodiment → variations):\n"
         '- "קרוב" — BAD: standing near. GOOD: maximum connection → hug variations.\n'
         '- "דלת" — BAD: wooden door ×4. GOOD: opening → leaves parting to light, cave mouth to sky, cloud gap to sun.\n'
         '- "עזרה" — BAD: generic helping. GOOD: small support under enormous weight; hand steadying heavy load.\n'
         '- "בית" — BAD: house exterior ×4. GOOD: protected belonging → nest with eggs, bird returning, sheltered young.\n'
-        '- "גשר" — BAD: bridge ×4. GOOD: connection → helping hand across gap, groups meeting, shared table.\n\n'
-        "When multiple valid embodiments exist, apply ESSENCE EXTREME — not first-to-mind literal or object.\n"
+        '- "גשר" — BAD: rescue + river + dinner + handshake (mixed families). '
+        'GOOD: visual family "people reaching" — hands together, human chain, lean across table, child to parent.\n\n'
+        "When multiple valid embodiments exist, apply ESSENCE EXTREME + VISUAL FAMILY CONSISTENCY.\n"
         "Each variation is an independent expression — NO story arc, NO plot progression.\n\n"
     )
 
@@ -1041,11 +1072,12 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 2 — headline (see HEADLINE RULES).\n"
         "STEP 3 — headlineCoreKeyword (see STANDALONE KEYWORD RULE).\n"
         "STEP 4 — Find essence of headlineCoreKeyword; set coreVisualIdea to its strongest extreme visual embodiment.\n"
-        "STEP 5 — sceneVariations: 2-4 independent extreme expressions of that essence (object ≤ once).\n"
-        "STEP 6 — videoPrompt: 5-second montage of those essence-expressions.\n\n"
+        "STEP 5 — Choose ONE visual family for coreVisualIdea; sceneVariations: 2-4 variations inside that family (object ≤ once).\n"
+        "STEP 6 — videoPrompt: 5-second montage of that visual-family motif.\n\n"
         + _planner_variation_montage_block()
         + _planner_essence_extreme_block()
         + _planner_essence_before_object_block()
+        + _planner_visual_family_consistency_block()
         + _planner_headline_rules_block()
         + _planner_headline_phrase_dependency_block()
         + _planner_standalone_keyword_block()
@@ -1057,9 +1089,9 @@ def _planner_keyword_scene_flow_block() -> str:
         + _planner_final_checklist_block()
         + "MONTAGE RULES (sceneVariations + videoPrompt):\n"
         "- Realistic, simple, physically possible; visually verifiable without sound.\n"
-        "- Same extreme essence across all variations; no unrelated idea mixing.\n"
-        "- Variations express essence — not repeated objects; prefer non-object when stronger.\n"
-        "FORBIDDEN: literal keyword illustration, object-only montages, surreal, fantasy, story arcs, headline burn-in.\n\n"
+        "- Same essence AND same visual family across all variations.\n"
+        "- Variations = different expressions of one visual motif — not dictionary examples.\n"
+        "FORBIDDEN: mixed visual families, literal keyword illustration, object-only montages, surreal, story arcs, headline burn-in.\n\n"
     )
 
 
@@ -1070,7 +1102,7 @@ def _build_video_planner_instructions(content_language: str = "he") -> str:
         f"ACE Builder2 video planning — variation montage ({_VIDEO_PLAN_SCHEMA_VERSION}). "
         f"Language {lang_name} ({lang}). "
         "product → headline → headlineCoreKeyword → essence → coreVisualIdea (extreme embodiment) → sceneVariations → videoPrompt. "
-        "5-second montage of 2-4 extreme essence-expressions; prefer essence over object; object ≤ once; all existing rules apply. "
+        "5-second montage of 2-4 variations within one visual family; essence + family consistency; object ≤ once; all existing rules apply. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -1173,7 +1205,7 @@ def _word_limit(s: str, max_words: int) -> str:
     return " ".join(words[:max_words])
 
 
-_VIDEO_PLAN_SCHEMA_VERSION = "variation_montage_v3"
+_VIDEO_PLAN_SCHEMA_VERSION = "variation_montage_v4"
 _SCENE_VARIATIONS_MIN = 2
 _SCENE_VARIATIONS_MAX = 4
 
@@ -1196,7 +1228,7 @@ def _build_scene_plan_repair_input(
         "Keep the same product name and product description.\n"
         "Fix headline, headlineCoreKeyword, coreVisualIdea, sceneVariations, and videoPrompt to satisfy all rules.\n"
         "Find keyword ESSENCE first; coreVisualIdea must be its strongest extreme visual embodiment — not literal meaning, not bare object.\n"
-        "sceneVariations must be 2-4 expressions of that extreme essence — not object repetitions; same object in at most ONE variation.\n"
+        "sceneVariations must be 2-4 variations within ONE visual family of the essence — not mixed families (e.g. no rescue + table + handshake mix); same object in at most ONE variation.\n"
         "headlineCoreKeyword must be standalone — reject phrase-dependent headlines/keywords; rewrite headline if needed.\n"
         "coreVisualIdea and all variations must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
         "Use gender-neutral subject (a person) unless product/headline clearly requires gender; no gender contradiction.\n"
@@ -1249,7 +1281,7 @@ def _build_keyword_scene_fallback_plan(
         "sceneConcept": scene_joined,
         "videoPrompt": video_prompt,
         "language": lang,
-        "planInferenceMode": "deterministic_variation_montage_v3_fallback",
+        "planInferenceMode": "deterministic_variation_montage_v4_fallback",
     }
 
 
@@ -1283,9 +1315,9 @@ _RUNWAY_SCENE_TAIL_MARKERS: Tuple[str, ...] = (
 def _runway_variation_montage_camera_focus() -> Tuple[str, str]:
     """5-second montage of related visual variations (Builder2 experiment)."""
     return (
-        "MANDATORY: one 5-second realistic montage of 2-4 very short related visual moments expressing the same extreme ESSENCE. "
-        "Each moment is the strongest visual embodiment of the essence — not repeated objects; prefer non-object when stronger. "
-        "Quick cuts between visually distinct essence-expressions. Each moment clear and readable. "
+        "MANDATORY: one 5-second realistic montage of 2-4 very short moments within the SAME visual family and extreme essence. "
+        "Each moment is a variation of one recurring visual motif — not scattered dictionary scenes. "
+        "Quick cuts between family-consistent variations. Each moment clear and readable. "
         "NO story arc, NO cause-and-effect, NO plot progression — independent expressions of the same idea. "
         "No surreal motion, no fantasy, no impossible physics.",
         "variation_montage_5s",
@@ -1725,7 +1757,7 @@ def _fetch_video_plan_o3_sync(
     Returns (plan, "") on success, or (None, reason_code).
     """
     logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
-    logger.info("VIDEO_PLAN_SEARCH_ORDER=variation_montage_v3")
+    logger.info("VIDEO_PLAN_SEARCH_ORDER=variation_montage_v4")
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_PLAN_FAIL_NO_API_KEY")
