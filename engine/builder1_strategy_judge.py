@@ -6,11 +6,33 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, TypeAlias
+from typing import Any, Callable, Dict, List, Optional, TypeAlias
+
+from engine.builder1_marketing_copy import MARKETING_TEXT_WORD_COUNT, count_marketing_words
+from engine.builder1_plan_parser import _word_count
+from engine.builder1_plan_spec import BRAND_SLOGAN_MAX_WORDS, HEADLINE_MAX_WORDS
 
 logger = logging.getLogger(__name__)
 
 JudgeModelCaller: TypeAlias = Callable[[str, str], object]
+
+STALE_MARKETING_LENGTH_CODES = frozenset(
+    {
+        "marketing_copy_too_long",
+        "marketing_copy_too_short",
+        "marketing_text_too_long",
+        "marketing_text_too_short",
+        "marketing_copy_too_long_for_image",
+        "marketing_copy_too_long_for_in_image_rendering",
+    }
+)
+
+MARKETING_WORD_COUNT_CODES = frozenset(
+    STALE_MARKETING_LENGTH_CODES
+    | {
+        "marketing_copy_wrong_word_count",
+    }
+)
 
 BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT = """
 You are a strict advertising strategy auditor for Builder1 campaigns.
@@ -39,6 +61,33 @@ Return JSON only:
   "noUnsupportedEvidence": true
 }
 
+IMAGE COPY (rendered inside the generated advertisement):
+- brand name, brand slogan, optional headline
+- must remain short for layout
+- apply brevity rules only to headline and brandSlogan
+
+SUPPORTING MARKETING TEXT BELOW THE IMAGE:
+- field name: marketingText on each ad
+- must contain exactly 50 words
+- exactly 50 words is valid and required
+- fewer than 50 words is invalid
+- more than 50 words is invalid
+- do NOT reject marketingText merely because 50 words feels visually long
+- marketingText is displayed below the ad, not inside the image
+
+Evaluate marketingText for relevance, advantage consistency, factual support, grammar,
+language match, and absence of internal methodology terms.
+
+Use rejectionReasonCodes such as:
+- marketing_copy_wrong_word_count
+- marketing_copy_unsupported_claim
+- marketing_copy_irrelevant
+- marketing_copy_incoherent
+- marketing_copy_wrong_language
+- unsupported_evidence_claim
+
+Do NOT emit marketing_copy_too_long when marketingText contains exactly 50 words.
+
 Fail if:
 - unsupported product capabilities are presented as facts without brief support
 - strategicProblemEvidence or relativeAdvantageBriefSupport invent surveys, percentages, study names, or statistics
@@ -47,9 +96,7 @@ Fail if:
 - physical generator appears chosen before the conceptual action
 - ads merely swap objects without performing the same conceptual action
 - graphic generator lacks concrete renderable fields and recurring visible device
-- marketing copy is too long for in-image rendering
-
-Use rejectionReasonCodes including unsupported_evidence_claim when fabricated evidence appears.
+- headline or brandSlogan exceed image-copy brevity limits
 
 Return structured JSON only.
 """.strip()
@@ -78,6 +125,87 @@ def _coerce_judge_dict(raw_payload: object) -> Dict[str, Any]:
     raise ValueError("judge_output_not_object")
 
 
+def _ads_from_plan(plan_dict: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ads = plan_dict.get("ads")
+    if not isinstance(ads, list):
+        return []
+    return [ad for ad in ads if isinstance(ad, dict)]
+
+
+def all_marketing_text_exactly_required_count(plan_dict: Dict[str, Any]) -> bool:
+    ads = _ads_from_plan(plan_dict)
+    if not ads:
+        return False
+    return all(count_marketing_words(ad.get("marketingText")) == MARKETING_TEXT_WORD_COUNT for ad in ads)
+
+
+def deterministic_judge_checks(plan_dict: Dict[str, Any]) -> List[str]:
+    """Server-side checks using the same marketing word counter as assembly."""
+    reasons: List[str] = []
+    ads = _ads_from_plan(plan_dict)
+    for ad in ads:
+        count = count_marketing_words(ad.get("marketingText"))
+        if count != MARKETING_TEXT_WORD_COUNT:
+            reasons.append("marketing_copy_wrong_word_count")
+        headline = ad.get("headline")
+        if headline and _word_count(str(headline)) > HEADLINE_MAX_WORDS:
+            reasons.append("headline_too_long")
+    brand_slogan = str(plan_dict.get("brandSlogan") or "")
+    if brand_slogan and _word_count(brand_slogan) > BRAND_SLOGAN_MAX_WORDS:
+        reasons.append("brand_slogan_too_long")
+    return list(dict.fromkeys(reasons))
+
+
+def normalize_judge_rejection_codes(codes: List[str], plan_dict: Dict[str, Any]) -> List[str]:
+    all_valid_length = all_marketing_text_exactly_required_count(plan_dict)
+    normalized: List[str] = []
+    for raw_code in codes:
+        code = str(raw_code or "").strip()
+        if not code:
+            continue
+        lowered = code.lower()
+        if code in STALE_MARKETING_LENGTH_CODES or "too_long" in lowered and "marketing" in lowered:
+            if all_valid_length:
+                continue
+            normalized.append("marketing_copy_wrong_word_count")
+            continue
+        if code == "marketing_copy_wrong_word_count" and all_valid_length:
+            continue
+        normalized.append(code)
+    return list(dict.fromkeys(normalized))
+
+
+def finalize_judge_result(
+    *,
+    model_pass: bool,
+    model_codes: List[str],
+    plan_dict: Dict[str, Any],
+    unsupported: bool,
+    raw: Dict[str, Any],
+) -> StrategyJudgeResult:
+    precheck_codes = deterministic_judge_checks(plan_dict)
+    codes = normalize_judge_rejection_codes(model_codes, plan_dict)
+    if precheck_codes:
+        codes = list(dict.fromkeys(precheck_codes + codes))
+        passed = False
+    elif not codes:
+        passed = True
+    else:
+        passed = model_pass and not codes
+    if not passed and not codes:
+        codes = ["strategy_judge_failed"]
+    if passed:
+        logger.info("BUILDER1_STRATEGY_JUDGE_PASS")
+    else:
+        logger.error("BUILDER1_STRATEGY_JUDGE_FAIL codes=%s unsupported=%s", codes, unsupported)
+    return StrategyJudgeResult(
+        passed=passed,
+        rejection_reason_codes=codes,
+        unsupported_claim_detected=unsupported,
+        raw=raw,
+    )
+
+
 def build_strategy_judge_user_prompt(
     *,
     product_description: str,
@@ -93,7 +221,8 @@ def build_strategy_judge_user_prompt(
     return (
         f"Brief:\n{product_description.strip()}\n\n"
         f"Proposed campaign plan:\n{json.dumps(public_plan, ensure_ascii=False, indent=2)}\n\n"
-        "Audit this plan. Return JSON only."
+        "Audit this plan. marketingText must contain exactly 50 words below the image. "
+        "Do not apply image-copy brevity limits to marketingText. Return JSON only."
     )
 
 
@@ -117,18 +246,17 @@ def judge_builder1_strategy(
             rejection_reason_codes=["judge_call_failed"],
         )
 
-    passed = bool(data.get("pass"))
-    codes = [str(c) for c in (data.get("rejectionReasonCodes") or []) if str(c).strip()]
+    model_pass = bool(data.get("pass"))
+    model_codes = [str(c) for c in (data.get("rejectionReasonCodes") or []) if str(c).strip()]
     unsupported = bool(data.get("unsupportedClaimDetected"))
-    if not passed and not codes:
-        codes = ["strategy_judge_failed"]
-    if passed:
-        logger.info("BUILDER1_STRATEGY_JUDGE_PASS")
-    else:
-        logger.error("BUILDER1_STRATEGY_JUDGE_FAIL codes=%s unsupported=%s", codes, unsupported)
-    return StrategyJudgeResult(
-        passed=passed,
-        rejection_reason_codes=codes,
-        unsupported_claim_detected=unsupported,
+    return finalize_judge_result(
+        model_pass=model_pass,
+        model_codes=model_codes,
+        plan_dict=plan_dict,
+        unsupported=unsupported,
         raw=data,
     )
+
+
+def is_marketing_word_count_rejection(codes: List[str]) -> bool:
+    return any(code in MARKETING_WORD_COUNT_CODES for code in codes)

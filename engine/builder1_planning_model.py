@@ -164,15 +164,19 @@ STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
 
 _strict_schema_probe_done = False
 _strict_schema_available = False
+_strict_schema_probe_logged = False
 
 
 def _responses_create_supports_text_parameter() -> bool:
+    global _strict_schema_probe_logged
     try:
-        from openai import OpenAI
+        from openai.resources.responses import Responses
 
-        return "text" in inspect.signature(OpenAI.responses.create).parameters
+        return "text" in inspect.signature(Responses.create).parameters
     except Exception as exc:
-        logger.info("BUILDER1_STRICT_SCHEMA probe_failed err=%s", exc)
+        if not _strict_schema_probe_logged:
+            logger.info("BUILDER1_STRICT_SCHEMA probe_failed err=%s", exc)
+            _strict_schema_probe_logged = True
         return False
 
 

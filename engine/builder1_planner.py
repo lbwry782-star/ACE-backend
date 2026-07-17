@@ -50,7 +50,7 @@ from engine.builder1_staged_parsers import (
     parse_strategy_selection,
 )
 from engine.builder1_marketing_text_repair import ensure_series_ads_marketing_text
-from engine.builder1_strategy_judge import judge_builder1_strategy
+from engine.builder1_strategy_judge import is_marketing_word_count_rejection, judge_builder1_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -196,16 +196,33 @@ def _run_stage(
 
 
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
+    if is_marketing_word_count_rejection(codes):
+        return "marketing_text"
     joined = " ".join(codes).lower()
     if any(k in joined for k in ("graphic", "palette", "layout", "typography", "device")):
         return "graphic_system"
-    if any(k in joined for k in ("series", "ad_", "ads", "headline", "execution", "contribution")):
+    if any(
+        k in joined
+        for k in (
+            "series",
+            "conceptual_execution",
+            "physical_execution",
+            "visual_execution",
+            "scene_description",
+            "new_contribution",
+            "contribution",
+        )
+    ) and "marketing_copy" not in joined:
         return "series_ads"
+    if any(k in joined for k in ("headline_too_long",)):
+        return "marketing_text"
     if any(
         k in joined
         for k in ("slogan", "physical", "medium", "rationale", "brand", "unsupported_evidence")
     ):
         return "brand_physical"
+    if any(k in joined for k in ("marketing_copy", "marketing_text")):
+        return "marketing_text"
     return "series_ads"
 
 
@@ -448,6 +465,15 @@ def plan_builder1(
                     parse_graphic_system_output,
                 )
                 graphic_dict = _graphic_to_dict(graphic)
+            elif repair_stage == "marketing_text":
+                series_ads.ads = ensure_series_ads_marketing_text(
+                    series_ads.ads,
+                    detected_language=detected_language,
+                    relative_advantage=selected_strategy.relative_advantage,
+                    product_name=brand_physical.product_name_resolved or normalized.product_name,
+                    brand_slogan=brand_physical.brand_slogan,
+                    model_caller=model_caller,
+                )
             else:
                 series_ads = _run_stage(
                     "series_ads",
