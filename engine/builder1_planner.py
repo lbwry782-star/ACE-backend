@@ -41,6 +41,7 @@ from engine.builder1_planning_contract import (
     build_strategy_select_user_prompt,
     shuffled_exploration_lens_order,
 )
+from engine.builder1_strict_schema import StrictSchemaConfigurationError
 from engine.builder1_staged_parsers import (
     StageParseError,
     detect_brief_language,
@@ -139,10 +140,10 @@ def _invoke_model_caller(
 ) -> object:
     try:
         sig = inspect.signature(model_caller)
-        if "stage" in sig.parameters:
-            return model_caller(system_prompt, user_prompt, stage=stage)
     except (TypeError, ValueError):
-        pass
+        return model_caller(system_prompt, user_prompt)
+    if "stage" in sig.parameters:
+        return model_caller(system_prompt, user_prompt, stage=stage)
     return model_caller(system_prompt, user_prompt)
 
 
@@ -168,6 +169,13 @@ def _run_stage(
             result = parse_fn(raw)
             logger.info("BUILDER1_STAGE_PARSE_OK stage=%s", stage)
             return result
+        except StrictSchemaConfigurationError as exc:
+            logger.error(
+                "BUILDER1_STRICT_SCHEMA_INVALID stage=%s paths=%s",
+                stage,
+                exc.errors[:5],
+            )
+            raise Builder1PlannerError(f"{stage}_failed") from exc
         except StageParseError as exc:
             last_reasons = exc.reasons
             logger.error("BUILDER1_STAGE_FAILED stage=%s reasons=%s", stage, last_reasons)

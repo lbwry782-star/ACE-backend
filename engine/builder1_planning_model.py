@@ -4,10 +4,17 @@ Builder1 planning model caller helpers — optional strict JSON schema for final
 from __future__ import annotations
 
 import inspect
-import json
 import logging
 import os
 from typing import Any, Callable, Dict, Optional
+
+from engine.builder1_strict_schema import (
+    StrictSchemaConfigurationError,
+    find_strict_schema_errors,
+    is_invalid_json_schema_api_error,
+    normalize_strict_json_schema,
+    prepare_strict_json_schema,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,20 +133,9 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
             "type": "array",
             "items": {
                 "type": "object",
-                "additionalProperties": True,
-                "required": [
-                    "variationLabel",
-                    "newContribution",
-                    "conceptualExecution",
-                    "conceptualActionProof",
-                    "physicalExecution",
-                    "visualExecution",
-                    "sceneDescription",
-                    "headlineNeededReason",
-                    "marketingText",
-                ],
+                "additionalProperties": False,
                 "properties": {
-                    "index": {"type": ["integer", "null"]},
+                    "index": {"type": "integer"},
                     "variationLabel": {"type": "string"},
                     "newContribution": {"type": "string"},
                     "conceptualExecution": {"type": "string"},
@@ -151,6 +147,19 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "headlineNeededReason": {"type": "string"},
                     "marketingText": {"type": "string"},
                 },
+                "required": [
+                    "index",
+                    "variationLabel",
+                    "newContribution",
+                    "conceptualExecution",
+                    "conceptualActionProof",
+                    "physicalExecution",
+                    "visualExecution",
+                    "sceneDescription",
+                    "headline",
+                    "headlineNeededReason",
+                    "marketingText",
+                ],
             },
         },
     },
@@ -202,11 +211,12 @@ def build_text_format_for_stage(stage: Optional[str]) -> Optional[Dict[str, Any]
     schema = STAGE_JSON_SCHEMAS.get(stage)
     if not schema:
         return None
+    prepared = prepare_strict_json_schema(schema)
     return {
         "format": {
             "type": "json_schema",
             "name": f"builder1_{stage}",
-            "schema": schema,
+            "schema": prepared,
             "strict": True,
         }
     }
@@ -228,14 +238,30 @@ def call_planning_model(
         "input": combined,
         "reasoning": reasoning or {"effort": "low"},
     }
-    text_format = build_text_format_for_stage(stage)
+    try:
+        text_format = build_text_format_for_stage(stage)
+    except StrictSchemaConfigurationError as exc:
+        logger.error(
+            "BUILDER1_STRICT_SCHEMA_INVALID stage=%s paths=%s",
+            stage,
+            exc.errors[:5],
+        )
+        raise
     if text_format:
         kwargs["text"] = text_format
         logger.info("BUILDER1_STRICT_SCHEMA stage=%s enabled=true", stage)
     elif stage in STRICT_SCHEMA_STAGES:
         logger.info("BUILDER1_STRICT_SCHEMA stage=%s enabled=false", stage)
 
-    response = client.responses.create(**kwargs)
+    try:
+        response = client.responses.create(**kwargs)
+    except StrictSchemaConfigurationError:
+        raise
+    except Exception as exc:
+        if is_invalid_json_schema_api_error(exc):
+            logger.error("BUILDER1_STRICT_SCHEMA_INVALID stage=%s err=%s", stage, exc)
+            raise StrictSchemaConfigurationError([str(exc)]) from exc
+        raise
     out_text = getattr(response, "output_text", None) or ""
     if not out_text and hasattr(response, "output"):
         parts: list[str] = []
