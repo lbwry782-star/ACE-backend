@@ -100,7 +100,12 @@ Rules:
 - ads must contain exactly the requested ad count ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
 - Each ad performs the same conceptual action with a different execution.
 - Headlines must be null or very short (max 7 words).
-- marketingText must be exactly 50 words in the brief language — one paragraph below the image, not inside it.
+- marketingText must be exactly 50 words in the server target language — one paragraph below the image, not inside it.
+- marketingText must be written in the target language provided in the user prompt.
+- Do not switch languages inside marketingText.
+- Brand names, product names, URLs, numbers, and technical terms may remain in Latin letters when appropriate.
+- Do not translate product or brand names unnecessarily.
+- Do not invent unsupported claims.
 - Do not return brand slogan, physical generator, or graphic generator.
 """.strip()
 
@@ -254,6 +259,7 @@ def build_series_ads_user_prompt(
     *,
     ad_count: int,
     format_value: str,
+    detected_language: str,
     strategic_problem: str,
     relative_advantage: str,
     conceptual: Dict[str, str],
@@ -261,10 +267,20 @@ def build_series_ads_user_prompt(
     graphic_generator: Dict[str, Any],
 ) -> str:
     indexes = ", ".join(str(i) for i in range(1, ad_count + 1))
+    lang_name = "Hebrew" if detected_language == "he" else "English"
     return (
         f"Required ad count: {ad_count}\n"
         f"Required ad indexes: {indexes}\n"
         f"Format: {format_value}\n"
+        f"TARGET LANGUAGE FOR ALL MARKETING TEXT: {lang_name} ({detected_language})\n"
+        "Every marketingText must:\n"
+        "- contain exactly 50 words\n"
+        "- be written in the target language\n"
+        "- use one coherent paragraph\n"
+        "- not switch into another language\n"
+        "- not contain headings, labels, bullets, or hashtags\n"
+        "- not translate the product or brand name unnecessarily\n"
+        "- not invent unsupported claims\n"
         f"Strategic problem: {strategic_problem}\n"
         f"Relative advantage: {relative_advantage}\n"
         f"Conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"

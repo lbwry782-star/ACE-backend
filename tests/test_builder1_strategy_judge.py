@@ -45,6 +45,7 @@ def _plan_dict(*, ad_count: int = 4, word_count: int = 50, headline: str | None 
     return {
         "productNameResolved": "TestBrand",
         "brandSlogan": "Built To Last",
+        "detectedLanguage": "en",
         "ads": ads,
     }
 
@@ -52,6 +53,7 @@ def _plan_dict(*, ad_count: int = 4, word_count: int = 50, headline: str | None 
 class TestStrategyJudgeMarketingCopy(unittest.TestCase):
     def test_hebrew_fifty_words_passes_deterministic(self) -> None:
         plan = _plan_dict(ad_count=1)
+        plan["detectedLanguage"] = "he"
         plan["ads"][0]["marketingText"] = marketing_text_hebrew(50)
         self.assertEqual(deterministic_judge_checks(plan), [])
 

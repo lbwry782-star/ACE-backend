@@ -51,7 +51,7 @@ from engine.builder1_staged_parsers import (
     parse_strategy_selection,
 )
 from engine.builder1_marketing_text_repair import ensure_series_ads_marketing_text
-from engine.builder1_strategy_judge import is_marketing_word_count_rejection, judge_builder1_strategy
+from engine.builder1_strategy_judge import is_marketing_language_rejection, is_marketing_word_count_rejection, judge_builder1_strategy
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +204,7 @@ def _run_stage(
 
 
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
-    if is_marketing_word_count_rejection(codes):
+    if is_marketing_word_count_rejection(codes) or is_marketing_language_rejection(codes):
         return "marketing_text"
     joined = " ".join(codes).lower()
     if any(k in joined for k in ("graphic", "palette", "layout", "typography", "device")):
@@ -397,6 +397,7 @@ def plan_builder1(
         build_series_ads_user_prompt(
             ad_count=normalized.ad_count,
             format_value=normalized.format,
+            detected_language=detected_language,
             strategic_problem=selected_strategy.strategic_problem,
             relative_advantage=selected_strategy.relative_advantage,
             conceptual=conceptual_fixed,

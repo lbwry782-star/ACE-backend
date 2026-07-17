@@ -8,7 +8,12 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, TypeAlias
 
-from engine.builder1_marketing_copy import MARKETING_TEXT_WORD_COUNT, count_marketing_words
+from engine.builder1_marketing_copy import (
+    MARKETING_TEXT_WORD_COUNT,
+    count_marketing_words,
+    normalize_campaign_language,
+    validate_marketing_text_language,
+)
 from engine.builder1_plan_parser import _word_count
 from engine.builder1_plan_spec import BRAND_SLOGAN_MAX_WORDS, HEADLINE_MAX_WORDS
 
@@ -33,6 +38,8 @@ MARKETING_WORD_COUNT_CODES = frozenset(
         "marketing_copy_wrong_word_count",
     }
 )
+
+MARKETING_LANGUAGE_CODES = frozenset({"marketing_copy_wrong_language"})
 
 BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT = """
 You are a strict advertising strategy auditor for Builder1 campaigns.
@@ -77,6 +84,13 @@ SUPPORTING MARKETING TEXT BELOW THE IMAGE:
 
 Evaluate marketingText for relevance, advantage consistency, factual support, grammar,
 language match, and absence of internal methodology terms.
+
+The server provides authoritative detectedLanguage (he or en) in the user prompt.
+marketingText must be written primarily in detectedLanguage.
+Do not reject a predominantly Hebrew paragraph merely because it contains a few Latin brand,
+product, URL, number, or technical tokens.
+Do not reject a predominantly English paragraph merely because it contains a Hebrew brand name.
+Use marketing_copy_wrong_language only when the paragraph is primarily in the wrong language.
 
 Use rejectionReasonCodes such as:
 - marketing_copy_wrong_word_count
@@ -139,14 +153,28 @@ def all_marketing_text_exactly_required_count(plan_dict: Dict[str, Any]) -> bool
     return all(count_marketing_words(ad.get("marketingText")) == MARKETING_TEXT_WORD_COUNT for ad in ads)
 
 
+def all_marketing_text_matches_language(plan_dict: Dict[str, Any]) -> bool:
+    detected = normalize_campaign_language(plan_dict.get("detectedLanguage"))
+    ads = _ads_from_plan(plan_dict)
+    if not ads:
+        return False
+    return all(
+        validate_marketing_text_language(ad.get("marketingText"), detected)["valid"] for ad in ads
+    )
+
+
 def deterministic_judge_checks(plan_dict: Dict[str, Any]) -> List[str]:
     """Server-side checks using the same marketing word counter as assembly."""
     reasons: List[str] = []
+    detected = normalize_campaign_language(plan_dict.get("detectedLanguage"))
     ads = _ads_from_plan(plan_dict)
     for ad in ads:
         count = count_marketing_words(ad.get("marketingText"))
         if count != MARKETING_TEXT_WORD_COUNT:
             reasons.append("marketing_copy_wrong_word_count")
+        lang_result = validate_marketing_text_language(ad.get("marketingText"), detected)
+        if not lang_result["valid"]:
+            reasons.append("marketing_copy_wrong_language")
         headline = ad.get("headline")
         if headline and _word_count(str(headline)) > HEADLINE_MAX_WORDS:
             reasons.append("headline_too_long")
@@ -158,6 +186,7 @@ def deterministic_judge_checks(plan_dict: Dict[str, Any]) -> List[str]:
 
 def normalize_judge_rejection_codes(codes: List[str], plan_dict: Dict[str, Any]) -> List[str]:
     all_valid_length = all_marketing_text_exactly_required_count(plan_dict)
+    all_valid_language = all_marketing_text_matches_language(plan_dict)
     normalized: List[str] = []
     for raw_code in codes:
         code = str(raw_code or "").strip()
@@ -170,6 +199,8 @@ def normalize_judge_rejection_codes(codes: List[str], plan_dict: Dict[str, Any])
             normalized.append("marketing_copy_wrong_word_count")
             continue
         if code == "marketing_copy_wrong_word_count" and all_valid_length:
+            continue
+        if code == "marketing_copy_wrong_language" and all_valid_language:
             continue
         normalized.append(code)
     return list(dict.fromkeys(normalized))
@@ -218,11 +249,14 @@ def build_strategy_judge_user_prompt(
         "strategyJudgeResult",
     }
     public_plan = {k: v for k, v in plan_dict.items() if k not in strip_keys}
+    detected = normalize_campaign_language(plan_dict.get("detectedLanguage"))
     return (
         f"Brief:\n{product_description.strip()}\n\n"
+        f"Authoritative detectedLanguage: {detected}\n\n"
         f"Proposed campaign plan:\n{json.dumps(public_plan, ensure_ascii=False, indent=2)}\n\n"
-        "Audit this plan. marketingText must contain exactly 50 words below the image. "
-        "Do not apply image-copy brevity limits to marketingText. Return JSON only."
+        "Audit this plan. marketingText must contain exactly 50 words below the image in detectedLanguage. "
+        "Do not apply image-copy brevity limits to marketingText. "
+        "Allow isolated brand names or technical terms in another script. Return JSON only."
     )
 
 
@@ -260,3 +294,7 @@ def judge_builder1_strategy(
 
 def is_marketing_word_count_rejection(codes: List[str]) -> bool:
     return any(code in MARKETING_WORD_COUNT_CODES for code in codes)
+
+
+def is_marketing_language_rejection(codes: List[str]) -> bool:
+    return any(code in MARKETING_LANGUAGE_CODES for code in codes)
