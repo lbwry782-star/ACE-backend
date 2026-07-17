@@ -5,6 +5,8 @@ Run: python -m unittest tests.test_builder1_series -v
 """
 from __future__ import annotations
 
+from tests.builder1_test_helpers import marketing_text_words
+
 import base64
 import io
 import unittest
@@ -134,7 +136,7 @@ def _base_campaign(ad_count: int = 2) -> Dict[str, Any]:
                 "conceptualActionProof": f"Proof {i} of shared transformation",
                 "headline": None if i == 1 else f"Line {i}",
                 "headlineNeededReason": "Visual needs support" if i > 1 else "Self-explanatory",
-                "marketingText": f"Marketing {i}",
+                "marketingText": marketing_text_words(50, prefix=f"m{i}"),
             }
         )
     return {
@@ -361,13 +363,14 @@ class TestBuilder1PublicResponse(unittest.TestCase):
 class TestBuilder1Zip(unittest.TestCase):
     def test_zip_still_works(self) -> None:
         img = base64.b64encode(b"fakejpeg").decode()
+        text50 = marketing_text_words(50)
         zbytes = build_builder1_zip_bytes(
             {
                 "productName": "BrandX",
                 "brandSlogan": "Stay Sharp",
                 "ads": [
-                    {"index": 1, "imageBase64": img, "headline": None, "marketingText": "One"},
-                    {"index": 2, "imageBase64": img, "headline": "Hi", "marketingText": "Two"},
+                    {"index": 1, "imageBase64": img, "headline": None, "marketingText": text50},
+                    {"index": 2, "imageBase64": img, "headline": "Hi", "marketingText": marketing_text_words(50, "two")},
                 ],
             }
         )

@@ -100,6 +100,7 @@ Rules:
 - ads must contain exactly the requested ad count ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
 - Each ad performs the same conceptual action with a different execution.
 - Headlines must be null or very short (max 7 words).
+- marketingText must be exactly 50 words in the brief language — one paragraph below the image, not inside it.
 - Do not return brand slogan, physical generator, or graphic generator.
 """.strip()
 

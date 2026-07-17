@@ -49,6 +49,7 @@ from engine.builder1_staged_parsers import (
     parse_strategy_scan,
     parse_strategy_selection,
 )
+from engine.builder1_marketing_text_repair import ensure_series_ads_marketing_text
 from engine.builder1_strategy_judge import judge_builder1_strategy
 
 logger = logging.getLogger(__name__)
@@ -383,6 +384,18 @@ def plan_builder1(
         ),
     )
 
+    try:
+        series_ads.ads = ensure_series_ads_marketing_text(
+            series_ads.ads,
+            detected_language=detected_language,
+            relative_advantage=selected_strategy.relative_advantage,
+            product_name=brand_physical.product_name_resolved or normalized.product_name,
+            brand_slogan=brand_physical.brand_slogan,
+            model_caller=model_caller,
+        )
+    except StageParseError as exc:
+        raise Builder1PlannerError("marketing_text_failed") from exc
+
     plan = assemble_builder1_campaign(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
@@ -449,6 +462,14 @@ def plan_builder1(
                         ad_count=normalized.ad_count,
                     ),
                     lambda raw: parse_series_ads_output(raw, expected_ad_count=normalized.ad_count),
+                )
+                series_ads.ads = ensure_series_ads_marketing_text(
+                    series_ads.ads,
+                    detected_language=detected_language,
+                    relative_advantage=selected_strategy.relative_advantage,
+                    product_name=brand_physical.product_name_resolved or normalized.product_name,
+                    brand_slogan=brand_physical.brand_slogan,
+                    model_caller=model_caller,
                 )
 
             plan = assemble_builder1_campaign(

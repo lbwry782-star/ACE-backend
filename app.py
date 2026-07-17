@@ -55,7 +55,7 @@ from engine.builder1_plan_spec import (
     campaign_identity_to_dict,
 )
 from engine.builder1_planner import Builder1PlannerError, plan_builder1
-from engine.builder1_zip import build_builder1_zip_bytes
+from engine.builder1_zip import build_builder1_zip_bytes, build_builder1_zip_from_request
 
 app = Flask(__name__)
 
@@ -1104,6 +1104,7 @@ def download_video_zip():
     )
 
 
+@app.route("/api/builder1-zip", methods=["POST"])
 @app.route("/api/builder1-download-zip", methods=["POST"])
 def builder1_download_zip():
     if not request.is_json:
@@ -1113,12 +1114,12 @@ def builder1_download_zip():
         return jsonify({"ok": False, "error": "invalid_input"}), 400
 
     try:
-        zip_bytes = build_builder1_zip_bytes(body)
+        zip_bytes, download_name = build_builder1_zip_from_request(body)
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
     response = Response(zip_bytes, mimetype="application/zip")
-    response.headers["Content-Disposition"] = 'attachment; filename="builder1-campaign.zip"'
+    response.headers["Content-Disposition"] = f'attachment; filename="{download_name}"'
     return response
 
 

@@ -6,6 +6,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from engine.builder1_marketing_copy import MARKETING_TEXT_WORD_COUNT, count_marketing_words
 from engine.builder1_plan_spec import (
     AD_COUNT_MAX,
     AD_COUNT_MIN,
@@ -597,6 +598,14 @@ def validate_series_plan_structure(
         if not cap:
             reasons.append("missing_conceptual_action_proof")
 
+        marketing_text = _norm_text(ad_raw.get("marketingText"))
+        if not marketing_text:
+            reasons.append("missing_marketing_text")
+        else:
+            marketing_word_count = count_marketing_words(marketing_text)
+            if marketing_word_count != MARKETING_TEXT_WORD_COUNT:
+                reasons.append("marketing_text_word_count_mismatch")
+
         pe_key = pe.lower()
         ve_key = ve.lower()
         sd_key = sd.lower()
@@ -627,7 +636,7 @@ def validate_series_plan_structure(
                 conceptual_action_proof=cap,
                 headline=headline,
                 headline_needed_reason=_norm_text(ad_raw.get("headlineNeededReason")),
-                marketing_text=_norm_text(ad_raw.get("marketingText")),
+                marketing_text=marketing_text,
             )
         )
 

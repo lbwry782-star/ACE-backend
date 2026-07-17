@@ -5,6 +5,8 @@ Run: python -m unittest tests.test_builder1_staged_planning -v
 """
 from __future__ import annotations
 
+from tests.builder1_test_helpers import marketing_text_words
+
 import copy
 import json
 import unittest
@@ -136,7 +138,7 @@ def _series_ads(ad_count: int = 2, *, series_string: bool = False, incomplete_se
             "sceneDescription": f"Scene {i}",
             "headline": None if i == 1 else f"Line {i}",
             "headlineNeededReason": "Needed" if i > 1 else "Self-explanatory",
-            "marketingText": f"Short {i}",
+                "marketingText": marketing_text_words(50, prefix=f"m{i}"),
         }
         if not omit_indexes:
             if string_indexes:
