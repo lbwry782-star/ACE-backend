@@ -166,15 +166,22 @@ LENSES = [
 def _strategy_scan_payload(*, string_candidate: bool = False) -> Dict[str, Any]:
     candidates: List[Any] = []
     for i in range(1, 13):
-        candidates.append({
-            "id": f"S{i:02d}",
-            "lens": LENSES[i - 1],
-            "strategicProblem": f"Distinct buyer problem {i}",
-            "relativeAdvantage": f"Distinct advantage {i}",
-            "briefSupport": "Follows from brief reinforced shell mention",
-            "advantageSource": "observable_product_mechanism",
-            "claimRisk": "low",
-        })
+        candidates.append(
+            {
+                "id": f"S{i:02d}",
+                "lens": LENSES[i - 1],
+                "strategicProblem": f"Distinct buyer problem {i}",
+                "relativeAdvantage": f"Distinct advantage {i}",
+                "briefSupport": "Follows from brief reinforced shell mention",
+                "advantageSource": "observable_product_mechanism",
+                "claimRisk": "low",
+                "campaignExecutableNow": True,
+                "requiresClientConsultation": False,
+                "clientActionLevel": "none",
+                "implementationCostLevel": "none",
+                "simpleStrategicAction": None,
+            }
+        )
     if string_candidate:
         candidates[0] = "bad string candidate"
     return {"candidates": candidates}

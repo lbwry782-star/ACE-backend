@@ -18,7 +18,56 @@ from engine.builder1_strict_schema import (
 
 logger = logging.getLogger(__name__)
 
-STRICT_SCHEMA_STAGES = frozenset({"brand_physical", "graphic_system", "series_ads"})
+STRICT_SCHEMA_STAGES = frozenset({"strategy_scan", "brand_physical", "graphic_system", "series_ads"})
+
+STRATEGY_SCAN_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidates"],
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "lens",
+                    "strategicProblem",
+                    "relativeAdvantage",
+                    "briefSupport",
+                    "advantageSource",
+                    "claimRisk",
+                    "campaignExecutableNow",
+                    "requiresClientConsultation",
+                    "clientActionLevel",
+                    "implementationCostLevel",
+                    "simpleStrategicAction",
+                ],
+                "properties": {
+                    "id": {"type": "string"},
+                    "lens": {"type": "string"},
+                    "strategicProblem": {"type": "string"},
+                    "relativeAdvantage": {"type": "string"},
+                    "briefSupport": {"type": "string"},
+                    "advantageSource": {"type": "string"},
+                    "claimRisk": {"type": "string"},
+                    "campaignExecutableNow": {"type": "boolean"},
+                    "requiresClientConsultation": {"type": "boolean"},
+                    "clientActionLevel": {
+                        "type": "string",
+                        "enum": ["none", "simple_optional", "complex_required"],
+                    },
+                    "implementationCostLevel": {
+                        "type": "string",
+                        "enum": ["none", "negligible", "material"],
+                    },
+                    "simpleStrategicAction": {"type": ["string", "null"]},
+                },
+            },
+        },
+    },
+}
 
 BRAND_PHYSICAL_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -166,6 +215,7 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
 }
 
 STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "strategy_scan": STRATEGY_SCAN_JSON_SCHEMA,
     "brand_physical": BRAND_PHYSICAL_JSON_SCHEMA,
     "graphic_system": GRAPHIC_SYSTEM_JSON_SCHEMA,
     "series_ads": SERIES_ADS_JSON_SCHEMA,

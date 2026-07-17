@@ -8,6 +8,10 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, TypeAlias
 
+from engine.builder1_client_boundary import (
+    deterministic_client_boundary_checks,
+    is_client_boundary_rejection,
+)
 from engine.builder1_marketing_copy import (
     MARKETING_TEXT_WORD_COUNT,
     count_marketing_words,
@@ -65,7 +69,13 @@ Return JSON only:
   "graphicGeneratorConcrete": true,
   "seriesCoherent": true,
   "sloganDerivesFromAdvantage": true,
-  "noUnsupportedEvidence": true
+  "noUnsupportedEvidence": true,
+  "campaignExecutableFromCurrentBrief": true,
+  "requiresClientConsultation": false,
+  "requiresMaterialClientInvestment": false,
+  "assumesBusinessTransformation": false,
+  "relativeAdvantageExistsNow": true,
+  "simpleStrategicActionWithinScope": true
 }
 
 IMAGE COPY (rendered inside the generated advertisement):
@@ -92,6 +102,13 @@ product, URL, number, or technical tokens.
 Do not reject a predominantly English paragraph merely because it contains a Hebrew brand name.
 Use marketing_copy_wrong_language only when the paragraph is primarily in the wrong language.
 
+DIGITAL-AGENT CLIENT-IMPLEMENTATION BOUNDARY:
+- Builder1 is a digital advertising agent, not a consulting engagement.
+- The campaign must be executable immediately from the brief and current product or service.
+- Fail when the advantage becomes true only after client implementation, consultation, material investment, or business transformation.
+- Allow one simple optional communication action only when it is optional, immediate, reversible, and not presented as an existing consumer capability.
+- Do not reject normal advertising production or media spending.
+
 Use rejectionReasonCodes such as:
 - marketing_copy_wrong_word_count
 - marketing_copy_unsupported_claim
@@ -99,6 +116,12 @@ Use rejectionReasonCodes such as:
 - marketing_copy_incoherent
 - marketing_copy_wrong_language
 - unsupported_evidence_claim
+- client_consultation_required
+- client_implementation_too_complex
+- material_client_investment_required
+- business_transformation_required
+- advantage_not_currently_true
+- unsupported_future_capability
 
 Do NOT emit marketing_copy_too_long when marketingText contains exactly 50 words.
 
@@ -111,6 +134,8 @@ Fail if:
 - ads merely swap objects without performing the same conceptual action
 - graphic generator lacks concrete renderable fields and recurring visible device
 - headline or brandSlogan exceed image-copy brevity limits
+- the campaign requires client consultation, material implementation, or business transformation before the claim is true
+- marketingText or headline presents a future capability as a current fact
 
 Return structured JSON only.
 """.strip()
@@ -181,6 +206,7 @@ def deterministic_judge_checks(plan_dict: Dict[str, Any]) -> List[str]:
     brand_slogan = str(plan_dict.get("brandSlogan") or "")
     if brand_slogan and _word_count(brand_slogan) > BRAND_SLOGAN_MAX_WORDS:
         reasons.append("brand_slogan_too_long")
+    reasons.extend(deterministic_client_boundary_checks(plan_dict))
     return list(dict.fromkeys(reasons))
 
 
@@ -256,7 +282,9 @@ def build_strategy_judge_user_prompt(
         f"Proposed campaign plan:\n{json.dumps(public_plan, ensure_ascii=False, indent=2)}\n\n"
         "Audit this plan. marketingText must contain exactly 50 words below the image in detectedLanguage. "
         "Do not apply image-copy brevity limits to marketingText. "
-        "Allow isolated brand names or technical terms in another script. Return JSON only."
+        "Allow isolated brand names or technical terms in another script. "
+        "Reject campaigns that require client consultation, material implementation, or business transformation. "
+        "Return JSON only."
     )
 
 

@@ -19,6 +19,14 @@ from engine.builder1_plan_parser import (
     check_unsupported_evidence,
     validate_series_plan_structure,
 )
+from engine.builder1_client_boundary import (
+    StrategyBoundaryFields,
+    filter_eligible_strategy_candidates,
+    parse_strategy_boundary_fields,
+    strategy_candidate_is_eligible,
+    validate_conceptual_boundary_text,
+    validate_strategy_candidate_text_boundary,
+)
 from engine.builder1_plan_spec import (
     BRAND_SLOGAN_MAX_WORDS,
     RELATIVE_ADVANTAGE_SOURCES,
@@ -42,6 +50,11 @@ class StrategyCandidate:
     brief_support: str
     advantage_source: str
     claim_risk: str
+    campaign_executable_now: bool = True
+    requires_client_consultation: bool = False
+    client_action_level: str = "none"
+    implementation_cost_level: str = "none"
+    simple_strategic_action: Optional[str] = None
 
 
 @dataclass
@@ -168,6 +181,27 @@ def parse_strategy_scan(raw_payload: object, *, product_description: str) -> Lis
             reasons=reasons,
         )
 
+        boundary, boundary_reasons = parse_strategy_boundary_fields(item, candidate_id=cid)
+        if boundary_reasons:
+            reasons.extend(boundary_reasons)
+            boundary = StrategyBoundaryFields(
+                campaign_executable_now=False,
+                requires_client_consultation=True,
+                client_action_level="complex_required",
+                implementation_cost_level="material",
+                simple_strategic_action=None,
+            )
+
+        reasons.extend(
+            validate_strategy_candidate_text_boundary(
+                strategic_problem=problem,
+                relative_advantage=advantage,
+                brief_support=support,
+                simple_strategic_action=boundary.simple_strategic_action if boundary else None,
+                product_description=product_description,
+            )
+        )
+
         parsed.append(
             StrategyCandidate(
                 id=cid,
@@ -177,6 +211,11 @@ def parse_strategy_scan(raw_payload: object, *, product_description: str) -> Lis
                 brief_support=support,
                 advantage_source=source,
                 claim_risk=risk,
+                campaign_executable_now=boundary.campaign_executable_now if boundary else False,
+                requires_client_consultation=boundary.requires_client_consultation if boundary else True,
+                client_action_level=boundary.client_action_level if boundary else "complex_required",
+                implementation_cost_level=boundary.implementation_cost_level if boundary else "material",
+                simple_strategic_action=boundary.simple_strategic_action if boundary else None,
             )
         )
 
@@ -186,6 +225,8 @@ def parse_strategy_scan(raw_payload: object, *, product_description: str) -> Lis
         reasons.append("strategy_scan_missing_ids")
     if len(lenses) < 5:
         reasons.append("strategy_scan_insufficient_family_diversity")
+    if not filter_eligible_strategy_candidates(parsed):
+        reasons.append("strategy_scan_no_eligible_candidates")
 
     if reasons:
         raise StageParseError("strategy_scan", reasons)
@@ -207,6 +248,8 @@ def parse_strategy_selection(
     by_id = {c.id: c for c in candidates}
     if selected_id not in by_id:
         reasons.append("strategy_selection_invalid_id")
+    elif not strategy_candidate_is_eligible(by_id[selected_id]):
+        reasons.append("strategy_selection_ineligible_candidate")
 
     selection_reason = _norm_text(obj.get("selectionReason"))
     strategy_family = _norm_text(obj.get("strategyFamily"))
@@ -231,7 +274,7 @@ def parse_strategy_selection(
     )
 
 
-def parse_conceptual_scan(raw_payload: object) -> List[ConceptualCandidate]:
+def parse_conceptual_scan(raw_payload: object, *, product_description: str = "") -> List[ConceptualCandidate]:
     reasons: List[str] = []
     try:
         obj = coerce_json_dict(raw_payload)
@@ -270,6 +313,16 @@ def parse_conceptual_scan(raw_payload: object) -> List[ConceptualCandidate]:
             reasons.append("conceptual_scan_candidate_incomplete")
         if _norm_key(generator) in WEAK_CONCEPTUAL_TERMS:
             reasons.append("conceptual_scan_candidate_too_vague")
+
+        reasons.extend(
+            validate_conceptual_boundary_text(
+                generator=generator,
+                action=action,
+                result=result,
+                why=why,
+                product_description=product_description,
+            )
+        )
 
         parsed.append(
             ConceptualCandidate(

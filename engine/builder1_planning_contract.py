@@ -25,37 +25,48 @@ EXPLORATION_LENSES = [
 ]
 
 STAGE_STRATEGY_SCAN_SYSTEM = """
-You are a Builder1 strategy explorer.
+You are a Builder1 strategy explorer for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{"candidates":[{"id":"S01","lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low"}]}
+{"candidates":[{"id":"S01","lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null}]}
 Rules:
 - Exactly 12 candidates with ids S01 through S12.
 - Every candidate must be an object, never a string.
 - advantageSource: explicit_brief | category_inference | brand_position | observable_product_mechanism
 - claimRisk: low | medium | high
+- campaignExecutableNow: true only when the campaign can run immediately from the brief and current product.
+- requiresClientConsultation: false unless the strategy needs workshops, interviews, or consulting to define the offer.
+- clientActionLevel: none | simple_optional | complex_required
+- implementationCostLevel: none | negligible | material
+- simpleStrategicAction: null or one short optional communication action only.
+- Do not propose business transformation, new products, new services, pricing changes, guarantees, dashboards, training, or material client investment.
+- The relative advantage must already exist or be a perceptual advertising reframing of existing facts.
 - Do not invent surveys, percentages, study names, or statistics.
 - briefSupport must cite brief facts or general category reasoning only.
 - Do not include slogans, generators, graphics, or ads.
 """.strip()
 
 STAGE_STRATEGY_SELECT_SYSTEM = """
-You are a Builder1 strategy selector.
+You are a Builder1 strategy selector for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{"selectedCandidateId":"S07","selectionReason":"...","strategyFamily":"...","scores":{"truth":8,"briefSupport":8,"relevance":8,"distinctiveness":7,"brandOwnership":8,"persuasiveStrength":8,"seriesPotential":8,"conceptualActionPotential":8}}
+{"selectedCandidateId":"S07","selectionReason":"...","strategyFamily":"...","scores":{"truth":8,"briefSupport":8,"advertisingExecutability":9,"noConsultationDependency":9,"noMaterialImplementationCost":9,"relevance":8,"distinctiveness":7,"brandOwnership":8,"persuasiveStrength":8,"seriesPotential":8,"conceptualActionPotential":8}}
 Rules:
 - selectedCandidateId must be one of the provided candidate ids.
+- Every provided candidate is already eligible for immediate advertising execution.
 - Do not rewrite the selected problem or advantage.
+- Prefer truthful brief-supported positioning over dramatic business-transformation ideas.
 - Scores are integers 1-10.
 """.strip()
 
 STAGE_CONCEPTUAL_SCAN_SYSTEM = """
-You are a Builder1 conceptual-generator explorer.
+You are a Builder1 conceptual-generator explorer for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
 {"candidates":[{"id":"C01","generator":"...","action":"...","input":"...","transformation":"...","result":"...","whyItExpressesAdvantage":"...","seriesPotential":"..."}]}
 Rules:
 - Exactly 6 candidates with ids C01 through C06.
 - Every candidate must be an object with all string fields non-empty.
 - generator must define a repeatable action, not a mood, object, or abstract noun.
+- The action must occur inside the advertisement itself, not as a client operational change.
+- Do not require the client to build systems, hire staff, change pricing, add services, or invest materially.
 - Do not choose physical objects, slogans, colors, layouts, or ads.
 """.strip()
 
@@ -140,7 +151,9 @@ def build_strategy_scan_repair_prompt(*, broken_json: str, reasons: List[str]) -
     return (
         "Repair ONLY the candidates array. Return exactly:\n"
         '{"candidates":[{"id":"S01","lens":"...","strategicProblem":"...","relativeAdvantage":"...",'
-        '"briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low"}]}\n'
+        '"briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low",'
+        '"campaignExecutableNow":true,"requiresClientConsultation":false,'
+        '"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null}]}\n'
         f"Validation errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken output:\n{broken_json}\n"
         "Every candidate must be an object. Exactly 12 ids S01-S12."
@@ -150,7 +163,8 @@ def build_strategy_scan_repair_prompt(*, broken_json: str, reasons: List[str]) -
 def build_strategy_select_user_prompt(candidates: List[Dict[str, Any]], exploration_seed: str) -> str:
     return (
         f"Campaign exploration seed: {exploration_seed}\n"
-        f"Candidates:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}\n"
+        "Only immediately executable advertising strategies are provided.\n"
+        f"Eligible candidates:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}\n"
         "Select the strongest candidate by id. Do not rewrite its problem or advantage."
     )
 

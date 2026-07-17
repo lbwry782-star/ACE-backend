@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Dict
+
 
 def marketing_text_words(count: int = 50, prefix: str = "word") -> str:
     return " ".join(f"{prefix}{i}" for i in range(1, count + 1))
@@ -35,6 +37,38 @@ def marketing_text_english_with_hebrew_brand(count: int = 50, brand: str = "מו
             words.append(f"word{word_num}")
             word_num += 1
     return " ".join(words)
+
+
+DEFAULT_STRATEGY_BOUNDARY_FIELDS: Dict[str, Any] = {
+    "campaignExecutableNow": True,
+    "requiresClientConsultation": False,
+    "clientActionLevel": "none",
+    "implementationCostLevel": "none",
+    "simpleStrategicAction": None,
+}
+
+
+def strategy_scan_candidate(
+    *,
+    index: int,
+    lens: str,
+    problem: str | None = None,
+    advantage: str | None = None,
+    brief_support: str = "Follows from brief reinforced shell mention",
+    **boundary_overrides: Any,
+) -> Dict[str, Any]:
+    candidate = {
+        "id": f"S{index:02d}",
+        "lens": lens,
+        "strategicProblem": problem or f"Distinct buyer problem {index}",
+        "relativeAdvantage": advantage or f"Distinct advantage {index}",
+        "briefSupport": brief_support,
+        "advantageSource": "observable_product_mechanism",
+        "claimRisk": "low",
+        **DEFAULT_STRATEGY_BOUNDARY_FIELDS,
+    }
+    candidate.update(boundary_overrides)
+    return candidate
 
 
 def marketing_text_with_punctuation() -> str:

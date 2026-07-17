@@ -17,6 +17,10 @@ from engine.builder1_plan_parser import (
     validate_series_plan_structure,
 )
 from engine.builder1_plan_spec import BRAND_SLOGAN_MAX_WORDS, Builder1GraphicGenerator, Builder1SeriesPlan
+from engine.builder1_client_boundary import (
+    validate_brand_physical_boundary_text,
+    validate_series_ads_boundary_text,
+)
 from engine.builder1_staged_parsers import (
     ConceptualCandidate,
     StageParseError,
@@ -148,7 +152,11 @@ def _reject_forbidden_keys(obj: Dict[str, Any], forbidden: set[str], reasons: Li
             reasons.append(f"{prefix}_forbidden_field:{key}")
 
 
-def parse_brand_physical_output(raw_payload: object) -> BrandPhysicalOutput:
+def parse_brand_physical_output(
+    raw_payload: object,
+    *,
+    product_description: str = "",
+) -> BrandPhysicalOutput:
     reasons: List[str] = []
     try:
         obj = coerce_json_dict(raw_payload)
@@ -189,6 +197,20 @@ def parse_brand_physical_output(raw_payload: object) -> BrandPhysicalOutput:
         reasons.append("medium_role_required_when_participates")
     if medium_participates is False and _norm_text(obj.get("mediumRole")):
         medium_role = ""
+
+    brand_slogan = _norm_text(obj.get("brandSlogan"))
+    slogan_action = _norm_text(obj.get("sloganAction"))
+    campaign_rationale = _norm_text(obj.get("campaignRationale"))
+    physical_campaign_role = _norm_text(obj.get("physicalGeneratorCampaignRole"))
+    reasons.extend(
+        validate_brand_physical_boundary_text(
+            brand_slogan=brand_slogan,
+            slogan_action=slogan_action,
+            campaign_rationale=campaign_rationale,
+            physical_generator_campaign_role=physical_campaign_role,
+            product_description=product_description,
+        )
+    )
 
     if reasons:
         log_stage_parse_failure("brand_physical", obj, reasons)
@@ -293,7 +315,12 @@ def _normalize_ad_indexes(ads_raw: List[Any], expected_ad_count: int, reasons: L
     return normalized
 
 
-def parse_series_ads_output(raw_payload: object, *, expected_ad_count: int) -> SeriesAdsOutput:
+def parse_series_ads_output(
+    raw_payload: object,
+    *,
+    expected_ad_count: int,
+    product_description: str = "",
+) -> SeriesAdsOutput:
     reasons: List[str] = []
     try:
         obj = coerce_json_dict(raw_payload)
@@ -323,6 +350,9 @@ def parse_series_ads_output(raw_payload: object, *, expected_ad_count: int) -> S
 
     ads_raw = obj.get("ads")
     normalized_ads = _normalize_ad_indexes(ads_raw if isinstance(ads_raw, list) else [], expected_ad_count, reasons)
+    reasons.extend(
+        validate_series_ads_boundary_text(normalized_ads, product_description=product_description)
+    )
 
     if reasons:
         log_stage_parse_failure("series_ads", obj, reasons)

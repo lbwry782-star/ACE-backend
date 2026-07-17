@@ -45,13 +45,19 @@ from engine.builder1_strict_schema import StrictSchemaConfigurationError
 from engine.builder1_staged_parsers import (
     StageParseError,
     detect_brief_language,
+    filter_eligible_strategy_candidates,
     parse_conceptual_scan,
     parse_conceptual_selection,
     parse_strategy_scan,
     parse_strategy_selection,
 )
 from engine.builder1_marketing_text_repair import ensure_series_ads_marketing_text
-from engine.builder1_strategy_judge import is_marketing_language_rejection, is_marketing_word_count_rejection, judge_builder1_strategy
+from engine.builder1_strategy_judge import (
+    is_client_boundary_rejection,
+    is_marketing_language_rejection,
+    is_marketing_word_count_rejection,
+    judge_builder1_strategy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +212,21 @@ def _run_stage(
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
     if is_marketing_word_count_rejection(codes) or is_marketing_language_rejection(codes):
         return "marketing_text"
+    if is_client_boundary_rejection(codes):
+        joined = " ".join(codes).lower()
+        if "unsupported_future_capability" in joined or "marketing" in joined:
+            return "series_ads"
+        if any(
+            code in codes
+            for code in (
+                "business_transformation_required",
+                "advantage_not_currently_true",
+                "client_consultation_required",
+                "material_client_investment_required",
+            )
+        ):
+            return "strategy_scan"
+        return "brand_physical"
     joined = " ".join(codes).lower()
     if any(k in joined for k in ("graphic", "palette", "layout", "typography", "device")):
         return "graphic_system"
@@ -293,18 +314,27 @@ def plan_builder1(
             "briefSupport": c.brief_support,
             "advantageSource": c.advantage_source,
             "claimRisk": c.claim_risk,
+            "campaignExecutableNow": c.campaign_executable_now,
+            "requiresClientConsultation": c.requires_client_consultation,
+            "clientActionLevel": c.client_action_level,
+            "implementationCostLevel": c.implementation_cost_level,
+            "simpleStrategicAction": c.simple_strategic_action,
         }
         for c in strategy_candidates
     ]
+    eligible_strategy = filter_eligible_strategy_candidates(strategy_candidates)
+    if not eligible_strategy:
+        raise Builder1PlannerError("strategy_selection_failed")
+    eligible_dicts = [c for c in cand_dicts if c["id"] in {e.id for e in eligible_strategy}]
 
     def _parse_selection(raw: object):
-        return parse_strategy_selection(raw, strategy_candidates)
+        return parse_strategy_selection(raw, eligible_strategy)
 
     strategy_selection, selected_strategy = _run_stage(
         "strategy_selection",
         model_caller,
         STAGE_STRATEGY_SELECT_SYSTEM,
-        build_strategy_select_user_prompt(cand_dicts, exploration_seed),
+        build_strategy_select_user_prompt(eligible_dicts, exploration_seed),
         _parse_selection,
     )
 
@@ -318,7 +348,7 @@ def plan_builder1(
             relative_advantage=selected_strategy.relative_advantage,
             exploration_seed=exploration_seed,
         ),
-        parse_conceptual_scan,
+        lambda raw: parse_conceptual_scan(raw, product_description=normalized.product_description),
         repair_builder=lambda broken, reasons: build_conceptual_scan_repair_prompt(
             broken_json=broken, reasons=reasons
         ),
@@ -364,7 +394,9 @@ def plan_builder1(
             conceptual=conceptual_fixed,
             brand_guidelines=brand_guidelines,
         ),
-        parse_brand_physical_output,
+        lambda raw: parse_brand_physical_output(
+            raw, product_description=normalized.product_description
+        ),
         repair_builder=lambda broken, reasons: build_brand_physical_repair_prompt(
             broken_json=broken, reasons=reasons
         ),
@@ -404,7 +436,11 @@ def plan_builder1(
             brand_physical=brand_physical_dict,
             graphic_generator=graphic_dict,
         ),
-        lambda raw: parse_series_ads_output(raw, expected_ad_count=normalized.ad_count),
+        lambda raw: parse_series_ads_output(
+            raw,
+            expected_ad_count=normalized.ad_count,
+            product_description=normalized.product_description,
+        ),
         repair_builder=lambda broken, reasons: build_series_ads_repair_prompt(
             broken_json=broken, reasons=reasons, ad_count=normalized.ad_count
         ),
@@ -459,7 +495,9 @@ def plan_builder1(
                         broken_json=json.dumps(brand_physical_dict, ensure_ascii=False),
                         reasons=judge_result.rejection_reason_codes,
                     ),
-                    parse_brand_physical_output,
+                    lambda raw: parse_brand_physical_output(
+                        raw, product_description=normalized.product_description
+                    ),
                 )
                 brand_physical_dict = _brand_physical_to_dict(brand_physical)
             elif repair_stage == "graphic_system":
@@ -496,7 +534,11 @@ def plan_builder1(
                         reasons=judge_result.rejection_reason_codes,
                         ad_count=normalized.ad_count,
                     ),
-                    lambda raw: parse_series_ads_output(raw, expected_ad_count=normalized.ad_count),
+                    lambda raw: parse_series_ads_output(
+                        raw,
+                        expected_ad_count=normalized.ad_count,
+                        product_description=normalized.product_description,
+                    ),
                 )
                 series_ads.ads = ensure_series_ads_marketing_text(
                     series_ads.ads,
