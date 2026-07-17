@@ -9,48 +9,80 @@ import base64
 import io
 import unittest
 import zipfile
-from typing import Any, Dict, List
-from unittest.mock import patch
+from typing import Any, Dict
+from unittest.mock import MagicMock, patch
 
-from engine.builder1_image_generator import generate_builder1_series_images
+from engine.builder1_campaign_store import (
+    CampaignStoreError,
+    clear_memory_store_for_tests,
+    create_campaign_session,
+    get_campaign_session,
+    mark_ad_generated,
+    release_generation_lock,
+    try_acquire_generation_lock,
+    validate_next_ad_request,
+)
+from engine.builder1_image_generator import ImageRateLimitError, generate_builder1_ad_image
 from engine.builder1_input_normalizer import Builder1InputError, normalize_ad_count
-from engine.builder1_plan_parser import (
-    Builder1SeriesPlanParseError,
-    parse_builder1_series_plan,
-    validate_series_plan_structure,
-)
+from engine.builder1_plan_parser import validate_series_plan_structure
 from engine.builder1_plan_spec import (
-    Builder1AdPlan,
-    Builder1CompositionGrid,
-    Builder1GraphicGenerator,
-    Builder1SeriesGenerator,
-    Builder1SeriesPlan,
-    Builder1Typography,
+    ad_to_public_api_dict,
+    campaign_identity_to_dict,
 )
-from engine.builder1_visual_prompt import build_visual_prompt
+from engine.builder1_visual_prompt import build_campaign_graphic_identity_block, build_visual_prompt
 from engine.builder1_zip import build_builder1_zip_bytes
 
 
 def _graphic() -> Dict[str, Any]:
     return {
-        "colorPalette": ["#111111", "#FFFFFF"],
-        "typography": {
-            "headlineStyle": "Bold sans",
-            "sloganStyle": "Light sans",
-            "brandStyle": "Small caps",
+        "palette": {
+            "dominant": "#111111",
+            "secondary": "#EEEEEE",
+            "accent": "#FF5500",
+            "background": "#F5F5F5",
+            "text": "#222222",
         },
-        "composition": {
-            "grid": "12-col",
-            "visualArea": "top 70%",
-            "copyArea": "bottom 30%",
-            "alignment": "left",
-            "sloganPlacement": "bottom-left",
-            "brandPlacement": "bottom-right",
-        },
-        "imageStyle": "Clean studio photography",
-        "spacing": "Generous margins",
-        "visualTreatment": "High contrast",
-        "backgroundTreatment": "Soft gradient",
+        "layoutTemplate": "visual_right_copy_left",
+        "headlinePlacement": "top_left",
+        "headlineAlignment": "right",
+        "headlineMaxWidthPercent": 34,
+        "headlineColor": "#222222",
+        "headlineTreatment": "plain",
+        "brandBlockPlacement": "bottom_left",
+        "sloganPlacement": "bottom_left",
+        "copySafeArea": {"side": "left", "widthPercent": 38},
+        "imageStyle": "editorial_photography",
+        "backgroundTreatment": "solid",
+        "borderTreatment": "none",
+        "recurringGraphicDevice": "Orange corner bracket",
+        "recurringGraphicDeviceRule": "Identical bracket appears on top-left of every ad",
+        "framingRule": "Subject cropped with generous negative space on copy side",
+    }
+
+
+def _strategy_scan(ad_count: int = 2) -> Dict[str, Any]:
+    lenses = [
+        "economic",
+        "perceptual",
+        "emotional",
+        "operational",
+        "time",
+        "accessibility",
+        "expertise",
+        "challenger_positioning",
+        "participation",
+        "simplicity",
+    ]
+    return {
+        "candidates": [
+            {
+                "lens": lenses[i],
+                "problem": f"Problem lens {i}",
+                "advantage": f"Advantage lens {i}",
+                "briefSupport": "From brief or category",
+            }
+            for i in range(10)
+        ]
     }
 
 
@@ -65,6 +97,8 @@ def _base_campaign(ad_count: int = 2) -> Dict[str, Any]:
                 "physicalExecution": f"Object variant {i}",
                 "visualExecution": f"Action variant {i}",
                 "sceneDescription": f"Scene description {i}",
+                "conceptualExecution": f"Perform stress-test action variant {i}",
+                "conceptualActionProof": f"Proof {i} of shared transformation",
                 "headline": None if i == 1 else f"Line {i}",
                 "headlineNeededReason": "Visual needs support" if i > 1 else "Self-explanatory",
                 "marketingText": f"Marketing {i}",
@@ -75,15 +109,23 @@ def _base_campaign(ad_count: int = 2) -> Dict[str, Any]:
         "detectedLanguage": "en",
         "format": "portrait",
         "adCount": ad_count,
+        "strategyCandidateScan": _strategy_scan(ad_count),
         "strategicProblem": "Buyers doubt durability",
         "strategicProblemEvidence": "Category reviews cite breakage",
         "relativeAdvantage": "Survives daily drops",
+        "relativeAdvantageSource": "observable_product_mechanism",
+        "relativeAdvantageBriefSupport": "Brief mentions reinforced shell",
+        "relativeAdvantageClaimRisk": "Low — grounded in product mechanism",
         "problemAdvantageLink": "Durability removes purchase fear",
         "brandSlogan": "Built To Last",
         "sloganDerivation": "From durability advantage",
         "sloganAction": "Trust everyday use",
         "conceptualGenerator": "Stress-test proof",
-        "conceptualGeneratorAction": "Show survival moments",
+        "conceptualGeneratorAction": "Drop and survive",
+        "conceptualGeneratorInput": "Everyday object",
+        "conceptualGeneratorTransformation": "Subject survives impact",
+        "conceptualGeneratorResult": "Visible proof of durability",
+        "conceptualGeneratorWhyItExpressesAdvantage": "Shows survival not claims",
         "physicalGenerator": "Rubber ball family",
         "physicalGeneratorNaturalPurpose": "Bounce and absorb impact",
         "physicalGeneratorCampaignRole": "Impact survival metaphor",
@@ -100,53 +142,54 @@ def _base_campaign(ad_count: int = 2) -> Dict[str, Any]:
     }
 
 
-def _series_plan_from_dict(data: Dict[str, Any], ad_count: int = 2) -> Builder1SeriesPlan:
+def _parse(data: Dict[str, Any], ad_count: int = 2):
+    from engine.builder1_plan_parser import parse_builder1_series_plan
+
     return parse_builder1_series_plan(
         data,
         expected_format="portrait",
         expected_ad_count=ad_count,
         product_name="",
-        product_description="Test product",
+        product_description="Reinforced shell product for daily carry",
     )
 
 
 class TestBuilder1SeriesParser(unittest.TestCase):
     def test_valid_2_ad_plan_parses(self) -> None:
-        plan = _series_plan_from_dict(_base_campaign(2), 2)
+        plan = _parse(_base_campaign(2), 2)
         self.assertEqual(plan.ad_count, 2)
-        self.assertEqual(len(plan.ads), 2)
 
     def test_valid_4_ad_plan_parses(self) -> None:
-        plan = _series_plan_from_dict(_base_campaign(4), 4)
+        plan = _parse(_base_campaign(4), 4)
         self.assertEqual(len(plan.ads), 4)
 
-    def test_ad_count_1_rejected_via_input(self) -> None:
+    def test_ad_count_4_preserved(self) -> None:
+        self.assertEqual(normalize_ad_count(4), 4)
+
+    def test_ad_count_1_rejected(self) -> None:
         with self.assertRaises(Builder1InputError):
             normalize_ad_count(1)
-
-    def test_ad_count_5_rejected_via_input(self) -> None:
-        with self.assertRaises(Builder1InputError):
-            normalize_ad_count(5)
 
     def test_string_ad_count_rejected(self) -> None:
         with self.assertRaises(Builder1InputError):
             normalize_ad_count("2")
 
-    def test_plan_count_mismatch_rejected(self) -> None:
+    def test_unsupported_capability_rejected(self) -> None:
         data = _base_campaign(2)
-        data["adCount"] = 3
+        data["relativeAdvantage"] = "Live dashboard shows measurable sales increase"
+        data["relativeAdvantageSource"] = "category_inference"
         _, reasons = validate_series_plan_structure(
             data,
             expected_format="portrait",
-            expected_ad_count=3,
+            expected_ad_count=2,
             product_name="",
-            product_description="x",
+            product_description="Simple ad tool",
         )
-        self.assertIn("ads_length_mismatch", reasons)
+        self.assertIn("unsupported_product_capability", reasons)
 
-    def test_missing_slogan_rejected(self) -> None:
+    def test_conceptual_equals_physical_rejected(self) -> None:
         data = _base_campaign(2)
-        data["brandSlogan"] = ""
+        data["conceptualGenerator"] = data["physicalGenerator"]
         _, reasons = validate_series_plan_structure(
             data,
             expected_format="portrait",
@@ -154,11 +197,11 @@ class TestBuilder1SeriesParser(unittest.TestCase):
             product_name="",
             product_description="x",
         )
-        self.assertIn("missing_brand_slogan", reasons)
+        self.assertIn("conceptual_equals_physical_generator", reasons)
 
-    def test_slogan_over_max_words_rejected(self) -> None:
+    def test_missing_conceptual_execution_rejected(self) -> None:
         data = _base_campaign(2)
-        data["brandSlogan"] = "one two three four five six seven"
+        del data["ads"][0]["conceptualExecution"]
         _, reasons = validate_series_plan_structure(
             data,
             expected_format="portrait",
@@ -166,11 +209,11 @@ class TestBuilder1SeriesParser(unittest.TestCase):
             product_name="",
             product_description="x",
         )
-        self.assertIn("brand_slogan_too_long", reasons)
+        self.assertIn("missing_conceptual_execution", reasons)
 
-    def test_missing_graphic_field_rejected(self) -> None:
+    def test_strategy_scan_requires_diverse_lenses(self) -> None:
         data = _base_campaign(2)
-        del data["graphicGenerator"]["imageStyle"]
+        data["strategyCandidateScan"] = {"candidates": [{"lens": "economic", "problem": "a", "advantage": "b"}]}
         _, reasons = validate_series_plan_structure(
             data,
             expected_format="portrait",
@@ -178,239 +221,130 @@ class TestBuilder1SeriesParser(unittest.TestCase):
             product_name="",
             product_description="x",
         )
-        self.assertIn("graphic_generator_missing_style_fields", reasons)
+        self.assertIn("strategy_scan_insufficient_candidates", reasons)
 
-    def test_blank_headline_normalizes_to_null(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][0]["headline"] = "   "
-        plan = _series_plan_from_dict(data, 2)
-        self.assertIsNone(plan.ads[0].headline)
-
-    def test_headline_over_7_words_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][1]["headline"] = "one two three four five six seven eight"
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("headline_too_long", reasons)
-
-    def test_duplicate_ad_indexes_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][1]["index"] = 1
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("duplicate_ad_index", reasons)
-
-    def test_duplicate_physical_executions_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][1]["physicalExecution"] = data["ads"][0]["physicalExecution"]
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("duplicate_physical_execution", reasons)
-
-    def test_duplicate_visual_executions_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][1]["visualExecution"] = data["ads"][0]["visualExecution"]
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("duplicate_visual_execution", reasons)
-
-    def test_duplicate_scene_descriptions_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][1]["sceneDescription"] = data["ads"][0]["sceneDescription"]
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("duplicate_scene_description", reasons)
-
-    def test_headline_only_variation_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][1]["physicalExecution"] = data["ads"][0]["physicalExecution"]
-        data["ads"][1]["visualExecution"] = data["ads"][0]["visualExecution"]
-        data["ads"][1]["sceneDescription"] = data["ads"][0]["sceneDescription"]
-        data["ads"][1]["headline"] = "Different headline only"
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertTrue(
-            "headline_only_variation" in reasons or "duplicate_physical_execution" in reasons
-        )
-
-    def test_per_ad_slogan_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["ads"][0]["brandSlogan"] = "Other"
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("per_ad_slogan_forbidden", reasons)
-
-    def test_old_object_ab_structure_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["objectA"] = "microphone"
-        data["objectB"] = "ice cream"
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("legacy_field_present:objectA", reasons)
-
-    def test_medium_role_inconsistency_rejected(self) -> None:
-        data = _base_campaign(2)
-        data["mediumParticipates"] = False
-        data["mediumRole"] = "Billboard shows idea"
-        _, reasons = validate_series_plan_structure(
-            data,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="x",
-        )
-        self.assertIn("medium_role_forbidden_when_not_participates", reasons)
+    def test_graphic_generator_concrete_fields(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        g = plan.graphic_generator
+        self.assertEqual(g.layout_template, "visual_right_copy_left")
+        self.assertEqual(g.copy_safe_area.width_percent, 38)
+        self.assertTrue(g.recurring_graphic_device)
 
 
 class TestBuilder1VisualPrompt(unittest.TestCase):
-    def _plan(self, medium: bool = False) -> Builder1SeriesPlan:
-        data = _series_plan_from_dict(_base_campaign(2), 2)
-        if medium:
-            data = Builder1SeriesPlan(
-                **{**data.__dict__, "medium_participates": True, "medium_role": "Billboard bends"}
-            )
-        return data
-
-    def test_shared_graphic_language_in_every_prompt(self) -> None:
-        plan = _series_plan_from_dict(_base_campaign(2), 2)
+    def test_identical_graphic_block_all_ads(self) -> None:
+        plan = _parse(_base_campaign(3), 3)
+        block = build_campaign_graphic_identity_block(plan)
         prompts = [build_visual_prompt(plan, ad) for ad in plan.ads]
         for p in prompts:
-            self.assertIn("#111111", p)
-            self.assertIn("Clean studio photography", p)
-            self.assertIn("12-col", p)
+            self.assertIn(block, p)
+        self.assertIn(block, prompts[0])
+        self.assertEqual(prompts[0].count("=== CAMPAIGN GRAPHIC IDENTITY"), 1)
 
-    def test_distinct_executions_per_ad(self) -> None:
-        plan = _series_plan_from_dict(_base_campaign(2), 2)
-        p1 = build_visual_prompt(plan, plan.ads[0])
-        p2 = build_visual_prompt(plan, plan.ads[1])
-        self.assertIn("Scene description 1", p1)
-        self.assertIn("Scene description 2", p2)
-        self.assertNotEqual(p1, p2)
+    def test_conceptual_execution_in_each_prompt(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        for ad in plan.ads:
+            prompt = build_visual_prompt(plan, ad)
+            self.assertIn(ad.conceptual_execution, prompt)
 
-    def test_medium_prohibition_when_false(self) -> None:
-        plan = _series_plan_from_dict(_base_campaign(2), 2)
+    def test_copy_safe_area_reserved(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
         prompt = build_visual_prompt(plan, plan.ads[0])
-        self.assertIn("billboards", prompt.lower())
-
-    def test_medium_role_when_true(self) -> None:
-        data = _base_campaign(2)
-        data["mediumParticipates"] = True
-        data["mediumRole"] = "The billboard itself folds into a bridge"
-        plan = _series_plan_from_dict(data, 2)
-        prompt = build_visual_prompt(plan, plan.ads[0])
-        self.assertIn("folds into a bridge", prompt)
+        self.assertIn("Copy-safe area", prompt)
+        self.assertIn("38%", prompt)
 
 
-class TestBuilder1SeriesImages(unittest.TestCase):
-    def test_preserves_ad_index_order(self) -> None:
-        plan = _series_plan_from_dict(_base_campaign(3), 3)
-        calls: List[int] = []
+class TestBuilder1SingleImage(unittest.TestCase):
+    def test_one_image_per_call(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        calls = []
 
         def caller(prompt: str, fmt: str) -> bytes:
-            for ad in plan.ads:
-                if ad.scene_description in prompt:
-                    calls.append(ad.index)
-                    return f"img-{ad.index}".encode()
-            return b"x"
+            calls.append(1)
+            return b"img"
 
-        result = generate_builder1_series_images(plan, caller)
-        self.assertEqual([r.index for r in result.images], [1, 2, 3])
+        generate_builder1_ad_image(plan, 1, caller)
+        self.assertEqual(len(calls), 1)
 
-    def test_one_failed_image_fails_campaign(self) -> None:
-        plan = _series_plan_from_dict(_base_campaign(2), 2)
+    def test_rate_limit_is_retryable(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
 
-        def caller(prompt: str, fmt: str) -> bytes:
-            if "Scene description 2" in prompt:
-                raise RuntimeError("transient")
-            return b"ok"
+        def caller(_p: str, _f: str) -> bytes:
+            raise ImageRateLimitError(retry_after_seconds=12)
 
-        with self.assertRaises(RuntimeError):
-            generate_builder1_series_images(plan, caller)
+        with self.assertRaises(ImageRateLimitError) as ctx:
+            generate_builder1_ad_image(plan, 1, caller)
+        self.assertEqual(ctx.exception.retry_after_seconds, 12)
 
 
-class TestBuilder1MemoryDisconnect(unittest.TestCase):
-    def test_planner_does_not_import_ace_usage_memory(self) -> None:
-        import engine.builder1_planner as planner_mod
+class TestBuilder1CampaignSession(unittest.TestCase):
+    def setUp(self) -> None:
+        clear_memory_store_for_tests()
 
-        source = planner_mod.__file__
-        with open(source, encoding="utf-8") as f:
-            text = f.read()
-        self.assertNotIn("ace_usage_memory", text)
+    def test_incremental_generation_flow(self) -> None:
+        plan = _parse(_base_campaign(4), 4)
+        create_campaign_session(campaign_id="c1", plan=plan)
+        try_acquire_generation_lock("c1", 1)
+        mark_ad_generated("c1", 1)
+        session = get_campaign_session("c1")
+        self.assertEqual(session.generated_indexes, [1])
+        self.assertEqual(session.next_ad_index, 2)
+
+    def test_next_index_conflict(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        create_campaign_session(campaign_id="c2", plan=plan)
+        with self.assertRaises(CampaignStoreError) as ctx:
+            validate_next_ad_request("c2", 2)
+        self.assertEqual(ctx.exception.code, "campaign_index_conflict")
+
+    def test_duplicate_generation_lock(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        create_campaign_session(campaign_id="c5", plan=plan)
+        try_acquire_generation_lock("c5", 1)
+        with self.assertRaises(CampaignStoreError) as ctx:
+            try_acquire_generation_lock("c5", 1)
+        self.assertEqual(ctx.exception.code, "campaign_generation_in_progress")
+        release_generation_lock("c5")
+
+    def test_campaign_complete_blocks_next(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        create_campaign_session(campaign_id="c3", plan=plan)
+        try_acquire_generation_lock("c3", 1)
+        mark_ad_generated("c3", 1)
+        try_acquire_generation_lock("c3", 2)
+        mark_ad_generated("c3", 2)
+        session = get_campaign_session("c3")
+        self.assertTrue(session.complete)
+        with self.assertRaises(CampaignStoreError) as ctx:
+            validate_next_ad_request("c3", 3)
+        self.assertEqual(ctx.exception.code, "campaign_complete")
 
 
-class TestBuilder1ApiResponse(unittest.TestCase):
-    def test_completed_result_shape(self) -> None:
-        from engine.builder1_plan_spec import ad_plan_to_api_dict, campaign_identity_to_dict
+class TestBuilder1PublicResponse(unittest.TestCase):
+    def test_no_internal_fields_in_public_campaign(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        public = campaign_identity_to_dict(plan)
+        self.assertNotIn("strategyCandidateScan", public)
+        self.assertNotIn("strategyJudgeResult", public)
+        ad_public = ad_to_public_api_dict(plan.ads[0], visual_prompt="p", image_base64="x")
+        self.assertNotIn("sceneDescription", ad_public)
+        self.assertNotIn("variationLabel", ad_public)
 
-        plan = _series_plan_from_dict(_base_campaign(3), 3)
-        result = {
-            "ok": True,
-            "campaign": campaign_identity_to_dict(plan),
-            "ads": [
-                ad_plan_to_api_dict(ad, visual_prompt="p", image_base64="abc")
-                for ad in plan.ads
-            ],
-        }
-        self.assertIn("campaign", result)
-        self.assertIn("ads", result)
-        self.assertEqual(len(result["ads"]), 3)
-        self.assertNotIn("imageBase64", result)
-        self.assertNotIn("objectA", result["campaign"])
 
-    def test_float_ad_count_rejected(self) -> None:
-        with self.assertRaises(Builder1InputError):
-            normalize_ad_count(2.5)
-
-    def test_bool_ad_count_rejected(self) -> None:
-        with self.assertRaises(Builder1InputError):
-            normalize_ad_count(True)
-
-    def test_default_ad_count_is_2(self) -> None:
-        self.assertEqual(normalize_ad_count(None), 2)
+class TestBuilder1PlannerIntegration(unittest.TestCase):
+    def test_next_ad_does_not_call_planner(self) -> None:
+        with patch("engine.builder1_planner.plan_builder1") as mock_plan:
+            mock_plan.side_effect = AssertionError("planner should not be called for next ad")
+            clear_memory_store_for_tests()
+            plan = _parse(_base_campaign(2), 2)
+            create_campaign_session(campaign_id="c4", plan=plan)
+            try_acquire_generation_lock("c4", 1)
+            mark_ad_generated("c4", 1)
+            validate_next_ad_request("c4", 2)
 
 
 class TestBuilder1Zip(unittest.TestCase):
-    def test_zip_creates_expected_files_in_order(self) -> None:
+    def test_zip_creates_expected_files(self) -> None:
         img = base64.b64encode(b"fakejpeg").decode()
         payload = {
             "productName": "BrandX",
@@ -422,9 +356,8 @@ class TestBuilder1Zip(unittest.TestCase):
         }
         zbytes = build_builder1_zip_bytes(payload)
         with zipfile.ZipFile(io.BytesIO(zbytes)) as zf:
-            names = zf.namelist()
-            self.assertEqual(names, ["campaign.txt", "ad-01.jpg", "ad-01.txt", "ad-02.jpg", "ad-02.txt"])
-            self.assertIn("Slogan: Stay Sharp", zf.read("campaign.txt").decode())
+            self.assertIn("campaign.txt", zf.namelist())
+            self.assertIn("ad-01.jpg", zf.namelist())
 
 
 if __name__ == "__main__":

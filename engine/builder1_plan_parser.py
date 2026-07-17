@@ -4,22 +4,29 @@ Builder1 campaign-series plan parser and deterministic validation.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from engine.builder1_plan_spec import (
     AD_COUNT_MAX,
     AD_COUNT_MIN,
+    BACKGROUND_TREATMENT_ENUMS,
+    BORDER_TREATMENT_ENUMS,
     BRAND_SLOGAN_MAX_WORDS,
-    FORMAT_LANDSCAPE,
-    FORMAT_PORTRAIT,
-    FORMAT_SQUARE,
+    COPY_SAFE_SIDES,
+    HEADLINE_ALIGNMENTS,
     HEADLINE_MAX_WORDS,
+    HEADLINE_PLACEMENTS,
+    HEADLINE_TREATMENTS,
+    IMAGE_STYLE_ENUMS,
+    LAYOUT_TEMPLATES,
+    RELATIVE_ADVANTAGE_SOURCES,
+    WEAK_CONCEPTUAL_TERMS,
     Builder1AdPlan,
-    Builder1CompositionGrid,
+    Builder1CopySafeArea,
     Builder1GraphicGenerator,
+    Builder1Palette,
     Builder1SeriesGenerator,
     Builder1SeriesPlan,
-    Builder1Typography,
 )
 
 SUPPORTED_LANGUAGES = {"he", "en", "ar", "ru", "fr", "de", "es", "it", "pt", "nl"}
@@ -35,6 +42,36 @@ LEGACY_FIELDS = {
 }
 
 LEGACY_MODES = {"SIDE_BY_SIDE", "REPLACEMENT"}
+
+HEX_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+
+EXPLORATION_LENSES = {
+    "economic",
+    "perceptual",
+    "emotional",
+    "operational",
+    "time",
+    "accessibility",
+    "expertise",
+    "challenger_positioning",
+    "participation",
+    "simplicity",
+    "specialization",
+    "category_convention",
+    "weakness_converted",
+}
+
+UNSUPPORTED_CAPABILITY_TERMS = (
+    "live dashboard",
+    "dashboard",
+    "guaranteed results",
+    "guaranteed roi",
+    "measurable sales",
+    "sales increase",
+    "live reporting",
+    "real-time reporting",
+    "money-back guarantee",
+)
 
 
 class Builder1SeriesPlanParseError(ValueError):
@@ -53,9 +90,7 @@ def _norm_text(value: object) -> str:
 
 def _word_count(text: str) -> int:
     t = _norm_text(text)
-    if not t:
-        return 0
-    return len(t.split())
+    return len(t.split()) if t else 0
 
 
 def _normalize_headline(value: object) -> Optional[str]:
@@ -63,6 +98,14 @@ def _normalize_headline(value: object) -> Optional[str]:
         return None
     s = _norm_text(value)
     return s if s else None
+
+
+def _norm_key(text: str) -> str:
+    return _norm_text(text).lower()
+
+
+def _is_valid_hex(value: str) -> bool:
+    return bool(HEX_COLOR_RE.match(_norm_text(value)))
 
 
 def _reject_legacy_fields(obj: Dict[str, Any], reasons: List[str]) -> None:
@@ -74,71 +117,165 @@ def _reject_legacy_fields(obj: Dict[str, Any], reasons: List[str]) -> None:
         reasons.append(f"legacy_mode:{mode}")
 
 
+def _validate_strategy_candidate_scan(raw: object, reasons: List[str]) -> None:
+    if raw is None:
+        return
+    if not isinstance(raw, dict):
+        reasons.append("strategy_scan_not_object")
+        return
+    candidates = raw.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) < 10:
+        reasons.append("strategy_scan_insufficient_candidates")
+        return
+    lenses: Set[str] = set()
+    signatures: Set[str] = set()
+    for item in candidates:
+        if not isinstance(item, dict):
+            reasons.append("strategy_scan_candidate_not_object")
+            continue
+        lens = _norm_key(str(item.get("lens") or ""))
+        problem = _norm_key(str(item.get("problem") or ""))
+        advantage = _norm_key(str(item.get("advantage") or ""))
+        if lens:
+            lenses.add(lens)
+        sig = f"{problem}|{advantage}"
+        if sig.strip("|"):
+            signatures.add(sig)
+    if len(lenses) < 8:
+        reasons.append("strategy_scan_insufficient_lens_diversity")
+    if len(signatures) < 8:
+        reasons.append("strategy_scan_duplicate_candidates")
+
+
+def _check_unsupported_claims(
+    *,
+    product_description: str,
+    relative_advantage: str,
+    relative_advantage_source: str,
+    reasons: List[str],
+) -> None:
+    brief = _norm_key(product_description)
+    adv = _norm_key(relative_advantage)
+    if relative_advantage_source == "explicit_brief":
+        return
+    for term in UNSUPPORTED_CAPABILITY_TERMS:
+        if term in adv and term not in brief:
+            reasons.append("unsupported_product_capability")
+            break
+
+
 def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builder1GraphicGenerator]:
     if not isinstance(raw, dict):
         reasons.append("graphic_generator_not_object")
         return None
-    palette = raw.get("colorPalette")
-    if not isinstance(palette, list) or not palette:
+
+    palette_raw = raw.get("palette")
+    if not isinstance(palette_raw, dict):
         reasons.append("graphic_generator_missing_palette")
         return None
-    colors = [_norm_text(c) for c in palette if _norm_text(c)]
-    if not colors:
-        reasons.append("graphic_generator_empty_palette")
+    palette_fields = ("dominant", "secondary", "accent", "background", "text")
+    palette_vals = {k: _norm_text(palette_raw.get(k)) for k in palette_fields}
+    if not all(palette_vals.values()):
+        reasons.append("graphic_generator_incomplete_palette")
         return None
+    for val in palette_vals.values():
+        if not _is_valid_hex(val):
+            reasons.append("graphic_generator_invalid_hex")
+            break
 
-    typo_raw = raw.get("typography")
-    if not isinstance(typo_raw, dict):
-        reasons.append("graphic_generator_missing_typography")
-        return None
-    headline_style = _norm_text(typo_raw.get("headlineStyle"))
-    slogan_style = _norm_text(typo_raw.get("sloganStyle"))
-    brand_style = _norm_text(typo_raw.get("brandStyle"))
-    if not headline_style or not slogan_style or not brand_style:
-        reasons.append("graphic_generator_incomplete_typography")
-        return None
+    layout = _norm_text(raw.get("layoutTemplate"))
+    if layout not in LAYOUT_TEMPLATES:
+        reasons.append("graphic_generator_invalid_layout")
 
-    comp_raw = raw.get("composition")
-    if not isinstance(comp_raw, dict):
-        reasons.append("graphic_generator_missing_composition")
+    headline_placement = _norm_text(raw.get("headlinePlacement"))
+    if headline_placement not in HEADLINE_PLACEMENTS:
+        reasons.append("graphic_generator_invalid_headline_placement")
+
+    headline_alignment = _norm_text(raw.get("headlineAlignment"))
+    if headline_alignment not in HEADLINE_ALIGNMENTS:
+        reasons.append("graphic_generator_invalid_headline_alignment")
+
+    try:
+        headline_max_width = int(raw.get("headlineMaxWidthPercent"))
+    except (TypeError, ValueError):
+        reasons.append("graphic_generator_invalid_headline_width")
+        headline_max_width = -1
+    if headline_max_width < 10 or headline_max_width > 50:
+        reasons.append("graphic_generator_invalid_headline_width")
+
+    headline_color = _norm_text(raw.get("headlineColor"))
+    if not _is_valid_hex(headline_color):
+        reasons.append("graphic_generator_invalid_headline_color")
+
+    headline_treatment = _norm_text(raw.get("headlineTreatment"))
+    if headline_treatment not in HEADLINE_TREATMENTS:
+        reasons.append("graphic_generator_invalid_headline_treatment")
+
+    brand_block = _norm_text(raw.get("brandBlockPlacement"))
+    if brand_block not in HEADLINE_PLACEMENTS:
+        reasons.append("graphic_generator_invalid_brand_placement")
+
+    slogan_placement = _norm_text(raw.get("sloganPlacement"))
+    if slogan_placement not in HEADLINE_PLACEMENTS:
+        reasons.append("graphic_generator_invalid_slogan_placement")
+
+    copy_raw = raw.get("copySafeArea")
+    if not isinstance(copy_raw, dict):
+        reasons.append("graphic_generator_missing_copy_safe_area")
         return None
-    grid = _norm_text(comp_raw.get("grid"))
-    visual_area = _norm_text(comp_raw.get("visualArea"))
-    copy_area = _norm_text(comp_raw.get("copyArea"))
-    alignment = _norm_text(comp_raw.get("alignment"))
-    slogan_placement = _norm_text(comp_raw.get("sloganPlacement"))
-    brand_placement = _norm_text(comp_raw.get("brandPlacement"))
-    if not all([grid, visual_area, copy_area, alignment, slogan_placement, brand_placement]):
-        reasons.append("graphic_generator_incomplete_composition")
-        return None
+    side = _norm_text(copy_raw.get("side"))
+    if side not in COPY_SAFE_SIDES:
+        reasons.append("graphic_generator_invalid_copy_safe_side")
+    try:
+        width_percent = int(copy_raw.get("widthPercent"))
+    except (TypeError, ValueError):
+        reasons.append("graphic_generator_invalid_copy_safe_width")
+        width_percent = -1
+    if width_percent < 15 or width_percent > 50:
+        reasons.append("graphic_generator_invalid_copy_safe_width")
 
     image_style = _norm_text(raw.get("imageStyle"))
-    spacing = _norm_text(raw.get("spacing"))
-    visual_treatment = _norm_text(raw.get("visualTreatment"))
-    background_treatment = _norm_text(raw.get("backgroundTreatment"))
-    if not all([image_style, spacing, visual_treatment, background_treatment]):
-        reasons.append("graphic_generator_missing_style_fields")
+    if image_style not in IMAGE_STYLE_ENUMS:
+        reasons.append("graphic_generator_invalid_image_style")
+
+    background = _norm_text(raw.get("backgroundTreatment"))
+    if background not in BACKGROUND_TREATMENT_ENUMS:
+        reasons.append("graphic_generator_invalid_background")
+
+    border = _norm_text(raw.get("borderTreatment"))
+    if border not in BORDER_TREATMENT_ENUMS:
+        reasons.append("graphic_generator_invalid_border")
+
+    device = _norm_text(raw.get("recurringGraphicDevice"))
+    device_rule = _norm_text(raw.get("recurringGraphicDeviceRule"))
+    framing = _norm_text(raw.get("framingRule"))
+    if not device:
+        reasons.append("graphic_generator_missing_recurring_device")
+    if not device_rule:
+        reasons.append("graphic_generator_missing_device_rule")
+    if not framing:
+        reasons.append("graphic_generator_missing_framing_rule")
+
+    if reasons:
         return None
 
     return Builder1GraphicGenerator(
-        color_palette=colors,
-        typography=Builder1Typography(
-            headline_style=headline_style,
-            slogan_style=slogan_style,
-            brand_style=brand_style,
-        ),
-        composition=Builder1CompositionGrid(
-            grid=grid,
-            visual_area=visual_area,
-            copy_area=copy_area,
-            alignment=alignment,
-            slogan_placement=slogan_placement,
-            brand_placement=brand_placement,
-        ),
+        palette=Builder1Palette(**palette_vals),
+        layout_template=layout,
+        headline_placement=headline_placement,
+        headline_alignment=headline_alignment,
+        headline_max_width_percent=headline_max_width,
+        headline_color=headline_color,
+        headline_treatment=headline_treatment,
+        brand_block_placement=brand_block,
+        slogan_placement=slogan_placement,
+        copy_safe_area=Builder1CopySafeArea(side=side, width_percent=width_percent),
         image_style=image_style,
-        spacing=spacing,
-        visual_treatment=visual_treatment,
-        background_treatment=background_treatment,
+        background_treatment=background,
+        border_treatment=border,
+        recurring_graphic_device=device,
+        recurring_graphic_device_rule=device_rule,
+        framing_rule=framing,
     )
 
 
@@ -155,6 +292,32 @@ def _parse_series_generator(raw: object, reasons: List[str]) -> Optional[Builder
     return Builder1SeriesGenerator(type=t, principle=principle, progression=progression)
 
 
+def _validate_conceptual_generator(
+    *,
+    conceptual: str,
+    conceptual_action: str,
+    conceptual_input: str,
+    conceptual_transform: str,
+    conceptual_result: str,
+    physical: str,
+    reasons: List[str],
+) -> None:
+    if not conceptual_action:
+        reasons.append("missing_conceptual_generator_action")
+    if not conceptual_input:
+        reasons.append("missing_conceptual_generator_input")
+    if not conceptual_transform:
+        reasons.append("missing_conceptual_generator_transformation")
+    if not conceptual_result:
+        reasons.append("missing_conceptual_generator_result")
+    c_key = _norm_key(conceptual)
+    p_key = _norm_key(physical)
+    if c_key and p_key and c_key == p_key:
+        reasons.append("conceptual_equals_physical_generator")
+    if c_key in WEAK_CONCEPTUAL_TERMS and not conceptual_transform:
+        reasons.append("conceptual_generator_too_generic")
+
+
 def validate_series_plan_structure(
     obj: Dict[str, Any],
     *,
@@ -169,6 +332,7 @@ def validate_series_plan_structure(
         return None, ["plan_not_object"]
 
     _reject_legacy_fields(obj, reasons)
+    _validate_strategy_candidate_scan(obj.get("strategyCandidateScan"), reasons)
 
     detected = _norm_text(obj.get("detectedLanguage")).lower()
     if not detected or detected not in SUPPORTED_LANGUAGES:
@@ -192,12 +356,18 @@ def validate_series_plan_structure(
         ("strategicProblem", "missing_strategic_problem"),
         ("strategicProblemEvidence", "missing_strategic_problem_evidence"),
         ("relativeAdvantage", "missing_relative_advantage"),
+        ("relativeAdvantageBriefSupport", "missing_relative_advantage_brief_support"),
+        ("relativeAdvantageClaimRisk", "missing_relative_advantage_claim_risk"),
         ("problemAdvantageLink", "missing_problem_advantage_link"),
         ("brandSlogan", "missing_brand_slogan"),
         ("sloganDerivation", "missing_slogan_derivation"),
         ("sloganAction", "missing_slogan_action"),
         ("conceptualGenerator", "missing_conceptual_generator"),
         ("conceptualGeneratorAction", "missing_conceptual_generator_action"),
+        ("conceptualGeneratorInput", "missing_conceptual_generator_input"),
+        ("conceptualGeneratorTransformation", "missing_conceptual_generator_transformation"),
+        ("conceptualGeneratorResult", "missing_conceptual_generator_result"),
+        ("conceptualGeneratorWhyItExpressesAdvantage", "missing_conceptual_generator_why"),
         ("physicalGenerator", "missing_physical_generator"),
         ("physicalGeneratorNaturalPurpose", "missing_physical_generator_natural_purpose"),
         ("physicalGeneratorCampaignRole", "missing_physical_generator_campaign_role"),
@@ -207,16 +377,38 @@ def validate_series_plan_structure(
         if not _norm_text(obj.get(field_name)):
             reasons.append(code)
 
+    adv_source = _norm_text(obj.get("relativeAdvantageSource"))
+    if adv_source not in RELATIVE_ADVANTAGE_SOURCES:
+        reasons.append("invalid_relative_advantage_source")
+
+    relative_advantage = _norm_text(obj.get("relativeAdvantage"))
+    _check_unsupported_claims(
+        product_description=product_description,
+        relative_advantage=relative_advantage,
+        relative_advantage_source=adv_source,
+        reasons=reasons,
+    )
+
     brand_slogan = _norm_text(obj.get("brandSlogan"))
     if brand_slogan and _word_count(brand_slogan) > BRAND_SLOGAN_MAX_WORDS:
         reasons.append("brand_slogan_too_long")
 
-    if "brandSlogan" in obj and isinstance(obj.get("ads"), list):
+    if isinstance(obj.get("ads"), list):
         for ad_raw in obj["ads"]:
             if isinstance(ad_raw, dict):
                 for bad in ("brandSlogan", "slogan", "campaignSlogan"):
                     if _norm_text(ad_raw.get(bad)):
                         reasons.append("per_ad_slogan_forbidden")
+
+    _validate_conceptual_generator(
+        conceptual=_norm_text(obj.get("conceptualGenerator")),
+        conceptual_action=_norm_text(obj.get("conceptualGeneratorAction")),
+        conceptual_input=_norm_text(obj.get("conceptualGeneratorInput")),
+        conceptual_transform=_norm_text(obj.get("conceptualGeneratorTransformation")),
+        conceptual_result=_norm_text(obj.get("conceptualGeneratorResult")),
+        physical=_norm_text(obj.get("physicalGenerator")),
+        reasons=reasons,
+    )
 
     medium_participates = obj.get("mediumParticipates")
     if not isinstance(medium_participates, bool):
@@ -235,7 +427,6 @@ def validate_series_plan_structure(
     if not isinstance(ads_raw, list):
         reasons.append("ads_not_list")
         return None, reasons
-
     if len(ads_raw) != expected_ad_count:
         reasons.append("ads_length_mismatch")
 
@@ -244,6 +435,7 @@ def validate_series_plan_structure(
     phys_set: set[str] = set()
     vis_set: set[str] = set()
     scene_set: set[str] = set()
+    conceptual_exec_set: set[str] = set()
     execution_signatures: List[Tuple[str, str, str, Optional[str]]] = []
 
     for ad_raw in ads_raw:
@@ -267,6 +459,8 @@ def validate_series_plan_structure(
         ve = _norm_text(ad_raw.get("visualExecution"))
         sd = _norm_text(ad_raw.get("sceneDescription"))
         nc = _norm_text(ad_raw.get("newContribution"))
+        ce = _norm_text(ad_raw.get("conceptualExecution"))
+        cap = _norm_text(ad_raw.get("conceptualActionProof"))
         if not nc:
             reasons.append("missing_new_contribution")
         if not pe:
@@ -275,19 +469,27 @@ def validate_series_plan_structure(
             reasons.append("missing_visual_execution")
         if not sd:
             reasons.append("missing_scene_description")
+        if not ce:
+            reasons.append("missing_conceptual_execution")
+        if not cap:
+            reasons.append("missing_conceptual_action_proof")
 
         pe_key = pe.lower()
         ve_key = ve.lower()
         sd_key = sd.lower()
+        ce_key = ce.lower()
         if pe_key and pe_key in phys_set:
             reasons.append("duplicate_physical_execution")
         if ve_key and ve_key in vis_set:
             reasons.append("duplicate_visual_execution")
         if sd_key and sd_key in scene_set:
             reasons.append("duplicate_scene_description")
+        if ce_key and ce_key in conceptual_exec_set:
+            reasons.append("duplicate_conceptual_execution")
         phys_set.add(pe_key)
         vis_set.add(ve_key)
         scene_set.add(sd_key)
+        conceptual_exec_set.add(ce_key)
         execution_signatures.append((pe_key, ve_key, sd_key, headline))
 
         parsed_ads.append(
@@ -298,6 +500,8 @@ def validate_series_plan_structure(
                 physical_execution=pe,
                 visual_execution=ve,
                 scene_description=sd,
+                conceptual_execution=ce,
+                conceptual_action_proof=cap,
                 headline=headline,
                 headline_needed_reason=_norm_text(ad_raw.get("headlineNeededReason")),
                 marketing_text=_norm_text(ad_raw.get("marketingText")),
@@ -309,29 +513,8 @@ def validate_series_plan_structure(
         reasons.append("ad_indexes_not_sequential")
 
     if len(parsed_ads) == expected_ad_count and len(parsed_ads) >= 2:
-        varying = False
-        for i in range(len(execution_signatures)):
-            for j in range(i + 1, len(execution_signatures)):
-                a = execution_signatures[i]
-                b = execution_signatures[j]
-                if a[:3] != b[:3]:
-                    varying = True
-                    break
-                if a[3] != b[3]:
-                    pass
-            if varying:
-                break
-        if not varying:
-            only_headline_diff = False
-            if len(set(execution_signatures)) == 1:
-                headlines = [s[3] for s in execution_signatures]
-                if len(set(headlines)) > 1:
-                    only_headline_diff = True
-            if only_headline_diff or (
-                len({s[:3] for s in execution_signatures}) == 1
-                and len({s[3] for s in execution_signatures}) > 1
-            ):
-                reasons.append("headline_only_variation")
+        if len({s[:3] for s in execution_signatures}) == 1 and len({s[3] for s in execution_signatures}) > 1:
+            reasons.append("headline_only_variation")
 
     if reasons:
         return None, reasons
@@ -349,13 +532,22 @@ def validate_series_plan_structure(
             detected_language=detected,
             strategic_problem=_norm_text(obj.get("strategicProblem")),
             strategic_problem_evidence=_norm_text(obj.get("strategicProblemEvidence")),
-            relative_advantage=_norm_text(obj.get("relativeAdvantage")),
+            relative_advantage=relative_advantage,
+            relative_advantage_source=adv_source,
+            relative_advantage_brief_support=_norm_text(obj.get("relativeAdvantageBriefSupport")),
+            relative_advantage_claim_risk=_norm_text(obj.get("relativeAdvantageClaimRisk")),
             problem_advantage_link=_norm_text(obj.get("problemAdvantageLink")),
             brand_slogan=brand_slogan,
             slogan_derivation=_norm_text(obj.get("sloganDerivation")),
             slogan_action=_norm_text(obj.get("sloganAction")),
             conceptual_generator=_norm_text(obj.get("conceptualGenerator")),
             conceptual_generator_action=_norm_text(obj.get("conceptualGeneratorAction")),
+            conceptual_generator_input=_norm_text(obj.get("conceptualGeneratorInput")),
+            conceptual_generator_transformation=_norm_text(obj.get("conceptualGeneratorTransformation")),
+            conceptual_generator_result=_norm_text(obj.get("conceptualGeneratorResult")),
+            conceptual_generator_why_it_expresses_advantage=_norm_text(
+                obj.get("conceptualGeneratorWhyItExpressesAdvantage")
+            ),
             physical_generator=_norm_text(obj.get("physicalGenerator")),
             physical_generator_natural_purpose=_norm_text(obj.get("physicalGeneratorNaturalPurpose")),
             physical_generator_campaign_role=_norm_text(obj.get("physicalGeneratorCampaignRole")),

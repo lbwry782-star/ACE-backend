@@ -1,13 +1,12 @@
 """
-Builder1 campaign-series image generation (active production).
+Builder1 single-ad image generation (active production — one image per user action).
 """
 from __future__ import annotations
 
 import base64
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Protocol
+from typing import Callable, Optional
 
 from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_visual_prompt import build_visual_prompt
@@ -17,47 +16,70 @@ logger = logging.getLogger(__name__)
 ImageCaller = Callable[[str, str], bytes]
 
 
-class ProgressCallback(Protocol):
-    def __call__(self, completed_ads: int, total_ads: int) -> None: ...
+class ImageRateLimitError(Exception):
+    def __init__(self, message: str = "image_rate_limited", *, retry_after_seconds: Optional[int] = None):
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__(message)
 
 
 @dataclass
-class Builder1SeriesImageResult:
+class Builder1AdImageResult:
     index: int
     visual_prompt: str
     image_bytes: bytes
 
 
-@dataclass
-class Builder1SeriesImagesResult:
-    images: List[Builder1SeriesImageResult]
+def _is_rate_limit_error(exc: Exception) -> bool:
+    name = type(exc).__name__
+    if name in {"RateLimitError", "APIStatusError"}:
+        return True
+    text = str(exc).lower()
+    return "429" in text or "rate limit" in text or "rate_limit" in text
 
 
-def _generate_one_with_retry(
-    *,
+def _retry_after_seconds(exc: Exception) -> Optional[int]:
+    resp = getattr(exc, "response", None)
+    if resp is not None:
+        headers = getattr(resp, "headers", None) or {}
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if raw is not None:
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def generate_builder1_ad_image(
     series_plan: Builder1SeriesPlan,
     ad_index: int,
     image_caller: ImageCaller,
-) -> Builder1SeriesImageResult:
+) -> Builder1AdImageResult:
+    """
+    Generate exactly one image for one planned ad index.
+    One retry on transient non-rate-limit failures. Rate limits are not retried here.
+    """
     ad = next(a for a in series_plan.ads if a.index == ad_index)
     prompt = build_visual_prompt(series_plan, ad)
     last_exc: Optional[Exception] = None
     for attempt in (1, 2):
         try:
-            logger.info(
-                "BUILDER1_SERIES_IMAGE_START adIndex=%s attempt=%s",
-                ad_index,
-                attempt,
-            )
+            logger.info("BUILDER1_SERIES_IMAGE_START adIndex=%s attempt=%s", ad_index, attempt)
             image_bytes = image_caller(prompt, series_plan.format)
             logger.info("BUILDER1_SERIES_IMAGE_OK adIndex=%s", ad_index)
-            return Builder1SeriesImageResult(
-                index=ad_index,
-                visual_prompt=prompt,
-                image_bytes=image_bytes,
-            )
+            return Builder1AdImageResult(index=ad_index, visual_prompt=prompt, image_bytes=image_bytes)
+        except ImageRateLimitError:
+            raise
         except Exception as exc:
             last_exc = exc
+            if _is_rate_limit_error(exc):
+                retry_after = _retry_after_seconds(exc)
+                logger.error(
+                    "BUILDER1_IMAGE_RATE_LIMITED adIndex=%s retryAfterSeconds=%s",
+                    ad_index,
+                    retry_after,
+                )
+                raise ImageRateLimitError(retry_after_seconds=retry_after) from exc
             logger.error(
                 "BUILDER1_SERIES_IMAGE_FAILED adIndex=%s attempt=%s err=%s",
                 ad_index,
@@ -67,48 +89,13 @@ def _generate_one_with_retry(
     raise RuntimeError(f"image_generation_failed_ad_{ad_index}") from last_exc
 
 
-def generate_builder1_series_images(
-    series_plan: Builder1SeriesPlan,
-    image_caller: ImageCaller,
-    *,
-    on_progress: Optional[ProgressCallback] = None,
-) -> Builder1SeriesImagesResult:
-    """
-    Generate one image per ad with bounded concurrency min(adCount, 2).
-    Atomic: any failure raises and caller must fail the whole campaign.
-    """
-    ad_count = series_plan.ad_count
-    indexes = [ad.index for ad in sorted(series_plan.ads, key=lambda a: a.index)]
-    max_workers = min(ad_count, 2)
-    results_by_index: dict[int, Builder1SeriesImageResult] = {}
-    completed = 0
-
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {
-            pool.submit(
-                _generate_one_with_retry,
-                series_plan=series_plan,
-                ad_index=idx,
-                image_caller=image_caller,
-            ): idx
-            for idx in indexes
-        }
-        for future in as_completed(futures):
-            idx = futures[future]
-            result = future.result()
-            results_by_index[result.index] = result
-            completed += 1
-            if on_progress:
-                on_progress(completed, ad_count)
-
-    ordered = [results_by_index[i] for i in indexes]
-    return Builder1SeriesImagesResult(images=ordered)
-
-
 def image_bytes_to_base64(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode("ascii")
 
 
-# Legacy single-image API removed from active production path.
+def generate_builder1_series_images(*_args, **_kwargs):
+    raise NotImplementedError("Use generate_builder1_ad_image for incremental generation")
+
+
 def generate_builder1_image(*_args, **_kwargs):
-    raise NotImplementedError("generate_builder1_image removed; use generate_builder1_series_images")
+    raise NotImplementedError("Use generate_builder1_ad_image")

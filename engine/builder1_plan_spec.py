@@ -16,35 +16,106 @@ AD_COUNT_MAX = 4
 BRAND_SLOGAN_MAX_WORDS = 6
 HEADLINE_MAX_WORDS = 7
 
-# Legacy Object A/B schema removed from active production.
+RELATIVE_ADVANTAGE_SOURCES = {
+    "explicit_brief",
+    "category_inference",
+    "brand_position",
+    "observable_product_mechanism",
+}
+
+LAYOUT_TEMPLATES = {
+    "visual_right_copy_left",
+    "visual_left_copy_right",
+    "visual_top_copy_bottom",
+    "visual_bottom_copy_top",
+    "full_visual_copy_overlay",
+}
+
+HEADLINE_PLACEMENTS = {
+    "top_left",
+    "top_right",
+    "bottom_left",
+    "bottom_right",
+    "center_left",
+    "center_right",
+}
+
+HEADLINE_ALIGNMENTS = {"left", "right", "center"}
+
+HEADLINE_TREATMENTS = {"plain", "bold", "outline", "shadow", "inverted_box"}
+
+IMAGE_STYLE_ENUMS = {
+    "editorial_photography",
+    "studio_product",
+    "documentary",
+    "illustration_flat",
+    "illustration_textured",
+    "cinematic",
+    "minimal_photography",
+}
+
+BACKGROUND_TREATMENT_ENUMS = {
+    "solid",
+    "gradient",
+    "textured",
+    "photographic_blur",
+    "split_color",
+}
+
+BORDER_TREATMENT_ENUMS = {"none", "thin_frame", "heavy_frame", "rounded_frame", "cutout_shadow"}
+
+COPY_SAFE_SIDES = {"left", "right", "top", "bottom"}
+
+WEAK_CONCEPTUAL_TERMS = {
+    "transparency",
+    "confidence",
+    "growth",
+    "results",
+    "visibility",
+    "connection",
+    "smart advertising",
+    "smart ads",
+    "trust",
+    "quality",
+    "innovation",
+}
+
+INTERNAL_PLAN_FIELDS = {"strategyCandidateScan", "campaignSelfCheck", "strategyJudgeResult"}
 
 
 @dataclass
-class Builder1Typography:
-    headline_style: str
-    slogan_style: str
-    brand_style: str
+class Builder1Palette:
+    dominant: str
+    secondary: str
+    accent: str
+    background: str
+    text: str
 
 
 @dataclass
-class Builder1CompositionGrid:
-    grid: str
-    visual_area: str
-    copy_area: str
-    alignment: str
-    slogan_placement: str
-    brand_placement: str
+class Builder1CopySafeArea:
+    side: str
+    width_percent: int
 
 
 @dataclass
 class Builder1GraphicGenerator:
-    color_palette: List[str]
-    typography: Builder1Typography
-    composition: Builder1CompositionGrid
+    palette: Builder1Palette
+    layout_template: str
+    headline_placement: str
+    headline_alignment: str
+    headline_max_width_percent: int
+    headline_color: str
+    headline_treatment: str
+    brand_block_placement: str
+    slogan_placement: str
+    copy_safe_area: Builder1CopySafeArea
     image_style: str
-    spacing: str
-    visual_treatment: str
     background_treatment: str
+    border_treatment: str
+    recurring_graphic_device: str
+    recurring_graphic_device_rule: str
+    framing_rule: str
 
 
 @dataclass
@@ -62,6 +133,8 @@ class Builder1AdPlan:
     physical_execution: str
     visual_execution: str
     scene_description: str
+    conceptual_execution: str
+    conceptual_action_proof: str
     headline: Optional[str]
     headline_needed_reason: str
     marketing_text: str
@@ -78,12 +151,19 @@ class Builder1SeriesPlan:
     strategic_problem: str
     strategic_problem_evidence: str
     relative_advantage: str
+    relative_advantage_source: str
+    relative_advantage_brief_support: str
+    relative_advantage_claim_risk: str
     problem_advantage_link: str
     brand_slogan: str
     slogan_derivation: str
     slogan_action: str
     conceptual_generator: str
     conceptual_generator_action: str
+    conceptual_generator_input: str
+    conceptual_generator_transformation: str
+    conceptual_generator_result: str
+    conceptual_generator_why_it_expresses_advantage: str
     physical_generator: str
     physical_generator_natural_purpose: str
     physical_generator_campaign_role: str
@@ -97,33 +177,36 @@ class Builder1SeriesPlan:
 
 def graphic_generator_to_dict(g: Builder1GraphicGenerator) -> Dict[str, Any]:
     return {
-        "colorPalette": list(g.color_palette),
-        "typography": {
-            "headlineStyle": g.typography.headline_style,
-            "sloganStyle": g.typography.slogan_style,
-            "brandStyle": g.typography.brand_style,
+        "palette": {
+            "dominant": g.palette.dominant,
+            "secondary": g.palette.secondary,
+            "accent": g.palette.accent,
+            "background": g.palette.background,
+            "text": g.palette.text,
         },
-        "composition": {
-            "grid": g.composition.grid,
-            "visualArea": g.composition.visual_area,
-            "copyArea": g.composition.copy_area,
-            "alignment": g.composition.alignment,
-            "sloganPlacement": g.composition.slogan_placement,
-            "brandPlacement": g.composition.brand_placement,
+        "layoutTemplate": g.layout_template,
+        "headlinePlacement": g.headline_placement,
+        "headlineAlignment": g.headline_alignment,
+        "headlineMaxWidthPercent": g.headline_max_width_percent,
+        "headlineColor": g.headline_color,
+        "headlineTreatment": g.headline_treatment,
+        "brandBlockPlacement": g.brand_block_placement,
+        "sloganPlacement": g.slogan_placement,
+        "copySafeArea": {
+            "side": g.copy_safe_area.side,
+            "widthPercent": g.copy_safe_area.width_percent,
         },
         "imageStyle": g.image_style,
-        "spacing": g.spacing,
-        "visualTreatment": g.visual_treatment,
         "backgroundTreatment": g.background_treatment,
+        "borderTreatment": g.border_treatment,
+        "recurringGraphicDevice": g.recurring_graphic_device,
+        "recurringGraphicDeviceRule": g.recurring_graphic_device_rule,
+        "framingRule": g.framing_rule,
     }
 
 
 def series_generator_to_dict(s: Builder1SeriesGenerator) -> Dict[str, Any]:
-    return {
-        "type": s.type,
-        "principle": s.principle,
-        "progression": s.progression,
-    }
+    return {"type": s.type, "principle": s.principle, "progression": s.progression}
 
 
 def campaign_identity_to_dict(plan: Builder1SeriesPlan) -> Dict[str, Any]:
@@ -135,12 +218,19 @@ def campaign_identity_to_dict(plan: Builder1SeriesPlan) -> Dict[str, Any]:
         "strategicProblem": plan.strategic_problem,
         "strategicProblemEvidence": plan.strategic_problem_evidence,
         "relativeAdvantage": plan.relative_advantage,
+        "relativeAdvantageSource": plan.relative_advantage_source,
+        "relativeAdvantageBriefSupport": plan.relative_advantage_brief_support,
+        "relativeAdvantageClaimRisk": plan.relative_advantage_claim_risk,
         "problemAdvantageLink": plan.problem_advantage_link,
         "brandSlogan": plan.brand_slogan,
         "sloganDerivation": plan.slogan_derivation,
         "sloganAction": plan.slogan_action,
         "conceptualGenerator": plan.conceptual_generator,
         "conceptualGeneratorAction": plan.conceptual_generator_action,
+        "conceptualGeneratorInput": plan.conceptual_generator_input,
+        "conceptualGeneratorTransformation": plan.conceptual_generator_transformation,
+        "conceptualGeneratorResult": plan.conceptual_generator_result,
+        "conceptualGeneratorWhyItExpressesAdvantage": plan.conceptual_generator_why_it_expresses_advantage,
         "physicalGenerator": plan.physical_generator,
         "physicalGeneratorNaturalPurpose": plan.physical_generator_natural_purpose,
         "physicalGeneratorCampaignRole": plan.physical_generator_campaign_role,
@@ -152,17 +242,65 @@ def campaign_identity_to_dict(plan: Builder1SeriesPlan) -> Dict[str, Any]:
     }
 
 
-def ad_plan_to_api_dict(ad: Builder1AdPlan, *, visual_prompt: str = "", image_base64: str = "") -> Dict[str, Any]:
+def ad_to_public_api_dict(
+    ad: Builder1AdPlan,
+    *,
+    visual_prompt: str = "",
+    image_base64: str = "",
+) -> Dict[str, Any]:
+    """Public incremental response — no future ad internals."""
     return {
         "index": ad.index,
-        "variationLabel": ad.variation_label,
-        "newContribution": ad.new_contribution,
-        "physicalExecution": ad.physical_execution,
-        "visualExecution": ad.visual_execution,
-        "sceneDescription": ad.scene_description,
         "headline": ad.headline,
-        "headlineNeededReason": ad.headline_needed_reason,
         "marketingText": ad.marketing_text,
         "visualPrompt": visual_prompt,
         "imageBase64": image_base64,
     }
+
+
+def series_plan_to_store_dict(plan: Builder1SeriesPlan) -> Dict[str, Any]:
+    return {
+        "productName": plan.product_name,
+        "productDescription": plan.product_description,
+        "format": plan.format,
+        "adCount": plan.ad_count,
+        **campaign_identity_to_dict(plan),
+        "ads": [
+            {
+                "index": a.index,
+                "variationLabel": a.variation_label,
+                "newContribution": a.new_contribution,
+                "physicalExecution": a.physical_execution,
+                "visualExecution": a.visual_execution,
+                "sceneDescription": a.scene_description,
+                "conceptualExecution": a.conceptual_execution,
+                "conceptualActionProof": a.conceptual_action_proof,
+                "headline": a.headline,
+                "headlineNeededReason": a.headline_needed_reason,
+                "marketingText": a.marketing_text,
+            }
+            for a in plan.ads
+        ],
+    }
+
+
+def _palette_from_dict(raw: Dict[str, Any]) -> Builder1Palette:
+    return Builder1Palette(
+        dominant=str(raw.get("dominant") or ""),
+        secondary=str(raw.get("secondary") or ""),
+        accent=str(raw.get("accent") or ""),
+        background=str(raw.get("background") or ""),
+        text=str(raw.get("text") or ""),
+    )
+
+
+def series_plan_from_store_dict(data: Dict[str, Any]) -> Builder1SeriesPlan:
+    from engine.builder1_plan_parser import parse_builder1_series_plan
+
+    return parse_builder1_series_plan(
+        data,
+        expected_format=str(data.get("format") or "portrait"),
+        expected_ad_count=int(data.get("adCount") or 2),
+        product_name=str(data.get("productName") or ""),
+        product_description=str(data.get("productDescription") or ""),
+    )
