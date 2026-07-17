@@ -16,6 +16,7 @@ from engine.builder1_planning_contract import (
     build_builder1_planning_user_prompt,
     build_builder1_series_repair_user_prompt,
     build_builder1_strategy_repair_user_prompt,
+    new_campaign_exploration_seed,
     shuffled_exploration_lens_order,
 )
 from engine.builder1_strategy_judge import judge_builder1_strategy
@@ -118,13 +119,14 @@ def plan_builder1(
         brand_guidelines=brand_guidelines,
     )
     lens_order = shuffled_exploration_lens_order()
+    exploration_seed = new_campaign_exploration_seed()
     logger.info(
         "BUILDER1_SERIES_PLANNING_START productName=%s format=%s adCount=%s",
         normalized.product_name,
         normalized.format,
         normalized.ad_count,
     )
-    logger.info("BUILDER1_STRATEGY_SCAN_START lensOrder=%s", ",".join(lens_order))
+    logger.info("BUILDER1_STRATEGY_SCAN_START seed=%s lensOrder=%s", exploration_seed, ",".join(lens_order))
 
     user_prompt = build_builder1_planning_user_prompt(
         product_name=normalized.product_name,
@@ -133,6 +135,7 @@ def plan_builder1(
         ad_count=normalized.ad_count,
         brand_guidelines=brand_guidelines,
         exploration_lens_order=lens_order,
+        campaign_exploration_seed=exploration_seed,
     )
 
     last_error: Optional[Exception] = None
@@ -179,6 +182,7 @@ def plan_builder1(
             rejection_reasons=reasons,
             brand_guidelines=brand_guidelines,
             exploration_lens_order=lens_order,
+            campaign_exploration_seed=exploration_seed,
         )
         try:
             repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, repair_prompt)
@@ -219,6 +223,7 @@ def plan_builder1(
             judge_reason_codes=judge_codes,
             brand_guidelines=brand_guidelines,
             exploration_lens_order=lens_order,
+            campaign_exploration_seed=exploration_seed,
         )
         repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, strategy_repair)
         repaired_plan, repair_reasons, _ = _try_parse(

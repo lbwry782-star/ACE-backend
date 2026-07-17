@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import random
+import uuid
 from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
@@ -30,51 +31,61 @@ You are Builder1, a senior advertising strategist and creative director.
 
 Produce ONE coherent CAMPAIGN with exactly the requested adCount (between {AD_COUNT_MIN} and {AD_COUNT_MAX}).
 
-METHODOLOGY ONLY — no memory of prior campaigns, slogans, or executions.
+METHODOLOGY ONLY — no memory of prior campaigns.
 
-ORDERED PIPELINE — complete every stage before the next.
+The generated images will be COMPLETE FINAL ADVERTISEMENTS with typeset copy inside the image (brand name, brand slogan, optional headline).
+
+ORDERED PIPELINE:
 
 STEP 1 — STRATEGIC PROBLEM
 Output: strategicProblem, strategicProblemEvidence
 
-STEP 2 — STRATEGIC CANDIDATE SCAN (internal)
-Before choosing the final advantage, scan at least 10 distinct problem–advantage pairs.
-Each candidate must use a different exploration lens.
-Do not repeat transparency/ROI/dashboard paraphrases.
-Include strategyCandidateScan with candidates[] of {{lens, problem, advantage, briefSupport}}.
-This scan is internal methodology — keep it in JSON but it will not be shown to users.
+STEP 2 — STRATEGIC CANDIDATE SCAN (internal, mandatory)
+Generate at least 12 genuinely different problem–advantage candidates.
+Reject paraphrases of the same transparency/ROI/dashboard idea.
+Group candidates into at least 5 materially different strategy families.
+Score families on truth, brief support, relevance, distinctiveness, ownership, persuasive strength, series potential, conceptual-action potential.
+Identify top 3 quality candidates.
+If several are close, use campaignExplorationSeed to break ties — do not always pick the most conventional first candidate.
+Output strategyCandidateScan with candidates[], families[], topCandidates[].
+Also output: strategyFamily, strategyScore, campaignExplorationSeed, selectionReason
 
 STEP 3 — RELATIVE ADVANTAGE
-Choose the strongest supported advantage from the scan.
-Do NOT invent product capabilities absent from the brief (dashboards, live reporting, guaranteed ROI, measurable sales lifts).
+Do NOT invent dashboards, live reporting, guaranteed results, sales attribution, transparency systems, speed guarantees, automation, or personal service unless the brief supports them.
+Positioning inference is allowed; invented product features are not.
 Output: relativeAdvantage, relativeAdvantageSource, relativeAdvantageBriefSupport, relativeAdvantageClaimRisk, problemAdvantageLink
-relativeAdvantageSource must be one of: explicit_brief, category_inference, brand_position, observable_product_mechanism
-Generic transparency, quality, service, innovation, trust, or results alone are insufficient.
 
-STEP 4 — BRAND SLOGAN (shared, 1–6 words max)
-Output: brandSlogan, sloganDerivation, sloganAction
+STEP 4 — BRAND SLOGAN (1–4 words preferred, max 6, extremely short for image typesetting)
 
-STEP 5 — CONCEPTUAL GENERATOR (repeatable ACTION, not a theme)
-Must be expressible as: Take X → perform Y → produce Z
+STEP 5 — CONCEPTUAL GENERATOR SCAN (internal, before physical generator)
+Generate at least 6 distinct conceptual-generator candidates.
+Each must define a repeatable action/transformation: Take X → perform Y → produce Z.
+Reject emotions, abstract values, objects, visual styles, categories, or physical generators.
+Score on advantage relationship, action clarity, visual power, serial potential, distinctiveness.
+Select ONE conceptual generator BEFORE choosing any physical generator.
+Output conceptualGeneratorScan with candidates[].
+
+STEP 6 — SELECTED CONCEPTUAL GENERATOR
 Output: conceptualGenerator, conceptualGeneratorAction, conceptualGeneratorInput, conceptualGeneratorTransformation, conceptualGeneratorResult, conceptualGeneratorWhyItExpressesAdvantage
-Reject vague themes like transparency, confidence, growth, results, visibility, connection.
-Must NOT equal the physicalGenerator name.
+Must NOT equal physicalGenerator.
 
-STEP 6 — PHYSICAL GENERATOR
-Embodies the conceptual action. Output: physicalGenerator, physicalGeneratorNaturalPurpose, physicalGeneratorCampaignRole
+STEP 7 — PHYSICAL GENERATOR (derived FROM concept, not before it)
+Output: physicalGenerator, physicalGeneratorNaturalPurpose, physicalGeneratorCampaignRole
 
-STEP 7 — GRAPHIC GENERATOR (concrete, machine-renderable)
-Required exact hex palette roles, layout template, copy-safe area, headline placement inside the ad canvas, recurring visible device.
-Use enums where specified. Same identity in EVERY ad.
+STEP 8 — GRAPHIC GENERATOR (dominant visible art direction)
+Exact hex palette, layout template, typography style/scales, copy zone, recurring visible device, shape language, spacing rule.
+Same identity in EVERY ad. Image model renders final copy inside the ad.
 
-STEP 8 — SERIES GENERATOR + exactly adCount ads
-Each ad must include conceptualExecution and conceptualActionProof showing how it performs the SAME conceptual action differently.
-No ad may only swap objects without performing the shared transformation.
+STEP 9 — SERIES + exactly adCount ads
+Each ad: conceptualExecution, conceptualActionProof, optional headline (null or 1–5 words preferred, max 7).
+Marketing text is NOT rendered in the image.
 
-HEADLINE POLICY: optional per ad (null allowed, max 7 words). Headline renders in Frontend overlay inside the ad canvas — never in the image.
-
-Return JSON only. No markdown fences.
+Return JSON only.
 """.strip()
+
+
+def new_campaign_exploration_seed() -> str:
+    return str(uuid.uuid4())
 
 
 def shuffled_exploration_lens_order() -> List[str]:
@@ -91,9 +102,11 @@ def build_builder1_planning_user_prompt(
     ad_count: int,
     brand_guidelines: Optional[Dict[str, Any]] = None,
     exploration_lens_order: Optional[List[str]] = None,
+    campaign_exploration_seed: Optional[str] = None,
 ) -> str:
     name_line = product_name.strip() or "(not provided — infer from description)"
     lenses = exploration_lens_order or shuffled_exploration_lens_order()
+    seed = campaign_exploration_seed or new_campaign_exploration_seed()
     lens_line = ", ".join(lenses)
     guidelines_block = ""
     if brand_guidelines:
@@ -106,79 +119,18 @@ Product name: {name_line}
 Product description: {product_description.strip()}
 Format: {format_value}
 Requested ad count: {ad_count}
-Exploration lens order for this campaign (use in candidate scan): {lens_line}
+Campaign exploration seed: {seed}
+Exploration lens order: {lens_line}
 
 Return exactly ONE campaign with exactly {ad_count} ads in ads[].
+Use campaignExplorationSeed exactly as provided when breaking ties among strong candidates.
 
-Required JSON shape:
-{{
-  "productNameResolved": "...",
-  "detectedLanguage": "he|en|...",
-  "format": "{format_value}",
-  "adCount": {ad_count},
-  "strategyCandidateScan": {{
-    "candidates": [
-      {{"lens": "economic", "problem": "...", "advantage": "...", "briefSupport": "..."}}
-    ]
-  }},
-  "strategicProblem": "...",
-  "strategicProblemEvidence": "...",
-  "relativeAdvantage": "...",
-  "relativeAdvantageSource": "explicit_brief|category_inference|brand_position|observable_product_mechanism",
-  "relativeAdvantageBriefSupport": "...",
-  "relativeAdvantageClaimRisk": "...",
-  "problemAdvantageLink": "...",
-  "brandSlogan": "...",
-  "sloganDerivation": "...",
-  "sloganAction": "...",
-  "conceptualGenerator": "...",
-  "conceptualGeneratorAction": "...",
-  "conceptualGeneratorInput": "...",
-  "conceptualGeneratorTransformation": "...",
-  "conceptualGeneratorResult": "...",
-  "conceptualGeneratorWhyItExpressesAdvantage": "...",
-  "physicalGenerator": "...",
-  "physicalGeneratorNaturalPurpose": "...",
-  "physicalGeneratorCampaignRole": "...",
-  "graphicGenerator": {{
-    "palette": {{"dominant": "#000000", "secondary": "#FFFFFF", "accent": "#FF0000", "background": "#F5F5F5", "text": "#111111"}},
-    "layoutTemplate": "visual_right_copy_left",
-    "headlinePlacement": "top_left",
-    "headlineAlignment": "right",
-    "headlineMaxWidthPercent": 34,
-    "headlineColor": "#111111",
-    "headlineTreatment": "plain",
-    "brandBlockPlacement": "bottom_left",
-    "sloganPlacement": "bottom_left",
-    "copySafeArea": {{"side": "left", "widthPercent": 38}},
-    "imageStyle": "editorial_photography",
-    "backgroundTreatment": "solid",
-    "borderTreatment": "none",
-    "recurringGraphicDevice": "...",
-    "recurringGraphicDeviceRule": "...",
-    "framingRule": "..."
-  }},
-  "seriesGenerator": {{"type": "...", "principle": "...", "progression": "..."}},
-  "mediumParticipates": false,
-  "mediumRole": "",
-  "campaignRationale": "...",
-  "campaignSelfCheck": {{}},
-  "ads": [
-    {{
-      "index": 1,
-      "variationLabel": "...",
-      "newContribution": "...",
-      "physicalExecution": "...",
-      "visualExecution": "...",
-      "sceneDescription": "...",
-      "conceptualExecution": "...",
-      "conceptualActionProof": "...",
-      "headline": null,
-      "headlineNeededReason": "...",
-      "marketingText": "..."
-    }}
-  ]
-}}
+Required JSON shape includes:
+- strategyCandidateScan with >=12 candidates and >=5 families
+- conceptualGeneratorScan with >=6 candidates BEFORE physicalGenerator
+- strategyFamily, strategyScore, campaignExplorationSeed, selectionReason
+- graphicGenerator with palette, layoutTemplate, typographyStyle, headlineScale, brandScale, sloganScale, copySafeArea, recurringGraphicDevice, recurringGraphicDeviceRule, shapeLanguage, framingRule, spacingRule
+- ads[] with conceptualExecution, conceptualActionProof, headline (null or short string), marketingText
 {guidelines_block}
 """.strip()
 
@@ -193,6 +145,7 @@ def build_builder1_series_repair_user_prompt(
     rejection_reasons: list[str],
     brand_guidelines: Optional[Dict[str, Any]] = None,
     exploration_lens_order: Optional[List[str]] = None,
+    campaign_exploration_seed: Optional[str] = None,
 ) -> str:
     reasons = "\n".join(f"- {r}" for r in rejection_reasons)
     base = build_builder1_planning_user_prompt(
@@ -202,6 +155,7 @@ def build_builder1_series_repair_user_prompt(
         ad_count=ad_count,
         brand_guidelines=brand_guidelines,
         exploration_lens_order=exploration_lens_order,
+        campaign_exploration_seed=campaign_exploration_seed,
     )
     return f"""
 {base}
@@ -226,6 +180,7 @@ def build_builder1_strategy_repair_user_prompt(
     judge_reason_codes: list[str],
     brand_guidelines: Optional[Dict[str, Any]] = None,
     exploration_lens_order: Optional[List[str]] = None,
+    campaign_exploration_seed: Optional[str] = None,
 ) -> str:
     reasons = "\n".join(f"- {c}" for c in judge_reason_codes)
     base = build_builder1_planning_user_prompt(
@@ -235,6 +190,7 @@ def build_builder1_strategy_repair_user_prompt(
         ad_count=ad_count,
         brand_guidelines=brand_guidelines,
         exploration_lens_order=exploration_lens_order,
+        campaign_exploration_seed=campaign_exploration_seed,
     )
     return f"""
 {base}

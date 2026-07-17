@@ -10,21 +10,16 @@ from engine.builder1_plan_spec import Builder1SeriesPlan, graphic_generator_to_d
 
 def build_builder1_series_composition_metadata(series_plan: Builder1SeriesPlan) -> Dict[str, Any]:
     """
-    Serialize shared graphic-generator metadata for Frontend overlay rendering.
-    Same layout identity for every ad in the campaign.
+    Serialize shared graphic-generator metadata for accessibility, ZIP, and display.
+    Copy is rendered inside the generated image — no Frontend overlay is required.
     """
     g = graphic_generator_to_dict(series_plan.graphic_generator)
     return {
         "format": series_plan.format,
         "brandSlogan": series_plan.brand_slogan,
+        "productNameResolved": series_plan.product_name_resolved,
         "graphicGenerator": g,
         "mediumParticipates": series_plan.medium_participates,
         "mediumRole": series_plan.medium_role,
+        "imageContainsFinalCopy": True,
     }
-
-
-# Legacy o3 composition removed from active Builder1 production path.
-def generate_builder1_composition_o3(*_args, **_kwargs):
-    raise NotImplementedError(
-        "generate_builder1_composition_o3 removed; use build_builder1_series_composition_metadata"
-    )

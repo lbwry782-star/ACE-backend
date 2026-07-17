@@ -15,8 +15,6 @@ JudgeModelCaller: TypeAlias = Callable[[str, str], object]
 BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT = """
 You are a strict advertising strategy auditor for Builder1 campaigns.
 
-You receive the product brief and a proposed campaign plan JSON.
-
 Return JSON only:
 {
   "pass": true,
@@ -25,21 +23,29 @@ Return JSON only:
   "strategicProblemReal": true,
   "relativeAdvantageSupported": true,
   "relativeAdvantageDistinctive": true,
+  "conceptualCandidateCountSufficient": true,
   "conceptualGeneratorIsAction": true,
+  "conceptualGeneratorIsNotObject": true,
+  "conceptualGeneratorDirectlyExpressesAdvantage": true,
+  "conceptualGeneratorSupportsSeries": true,
   "conceptualGeneratorExpressesAdvantage": true,
   "physicalGeneratorEmbodiesConcept": true,
+  "physicalGeneratorWasDerivedFromConcept": true,
+  "physicalGeneratorDidNotReplaceConcept": true,
   "graphicGeneratorConcrete": true,
   "seriesCoherent": true
 }
 
-Rules:
-- Fail if the plan invents product capabilities not supported by the brief (dashboards, live reporting, guaranteed ROI, measurable sales lifts, warranties not stated).
-- Fail if relative advantage is generic transparency, quality, trust, innovation, or results without brief support.
-- Fail if conceptualGenerator is a theme/noun rather than a repeatable action/transformation.
-- Fail if conceptualGenerator merely names the physicalGenerator.
-- Fail if graphicGenerator lacks concrete renderable layout/palette/device fields.
-- Fail if ads do not perform the same conceptual action with different proofs.
-- Do not request chain-of-thought. Return structured JSON only.
+Fail if:
+- unsupported product capabilities are presented as facts (dashboards, guaranteed results, live reporting, sales attribution, transparency systems, automation, personal service) without brief support
+- relative advantage is generic transparency/quality/trust/results
+- conceptual generator is a theme, emotion, object, or equals physicalGenerator
+- physical generator appears chosen before the conceptual action
+- ads merely swap objects without performing the same conceptual action
+- graphic generator lacks concrete renderable fields and recurring visible device
+- conceptualGeneratorScan has fewer than 6 action-based candidates
+
+Return structured JSON only.
 """.strip()
 
 
@@ -71,7 +77,13 @@ def build_strategy_judge_user_prompt(
     product_description: str,
     plan_dict: Dict[str, Any],
 ) -> str:
-    public_plan = {k: v for k, v in plan_dict.items() if k not in {"strategyCandidateScan", "campaignSelfCheck"}}
+    strip_keys = {
+        "strategyCandidateScan",
+        "conceptualGeneratorScan",
+        "campaignSelfCheck",
+        "strategyJudgeResult",
+    }
+    public_plan = {k: v for k, v in plan_dict.items() if k not in strip_keys}
     return (
         f"Brief:\n{product_description.strip()}\n\n"
         f"Proposed campaign plan:\n{json.dumps(public_plan, ensure_ascii=False, indent=2)}\n\n"

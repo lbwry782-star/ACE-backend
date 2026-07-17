@@ -44,6 +44,17 @@ HEADLINE_ALIGNMENTS = {"left", "right", "center"}
 
 HEADLINE_TREATMENTS = {"plain", "bold", "outline", "shadow", "inverted_box"}
 
+TYPOGRAPHY_STYLE_ENUMS = {
+    "bold_geometric_sans",
+    "clean_modern_sans",
+    "editorial_serif",
+    "condensed_sans",
+    "rounded_sans",
+    "high_contrast_display",
+}
+
+TEXT_SCALE_ENUMS = {"small", "medium", "large", "extra_large"}
+
 IMAGE_STYLE_ENUMS = {
     "editorial_photography",
     "studio_product",
@@ -78,9 +89,21 @@ WEAK_CONCEPTUAL_TERMS = {
     "trust",
     "quality",
     "innovation",
+    "attention",
+    "simplicity",
+    "being central",
 }
 
-INTERNAL_PLAN_FIELDS = {"strategyCandidateScan", "campaignSelfCheck", "strategyJudgeResult"}
+INTERNAL_PLAN_FIELDS = {
+    "strategyCandidateScan",
+    "conceptualGeneratorScan",
+    "campaignSelfCheck",
+    "strategyJudgeResult",
+    "strategyFamily",
+    "strategyScore",
+    "campaignExplorationSeed",
+    "selectionReason",
+}
 
 
 @dataclass
@@ -105,17 +128,21 @@ class Builder1GraphicGenerator:
     headline_placement: str
     headline_alignment: str
     headline_max_width_percent: int
-    headline_color: str
-    headline_treatment: str
     brand_block_placement: str
     slogan_placement: str
     copy_safe_area: Builder1CopySafeArea
+    typography_style: str
+    headline_scale: str
+    brand_scale: str
+    slogan_scale: str
     image_style: str
     background_treatment: str
     border_treatment: str
     recurring_graphic_device: str
     recurring_graphic_device_rule: str
+    shape_language: str
     framing_rule: str
+    spacing_rule: str
 
 
 @dataclass
@@ -188,20 +215,24 @@ def graphic_generator_to_dict(g: Builder1GraphicGenerator) -> Dict[str, Any]:
         "headlinePlacement": g.headline_placement,
         "headlineAlignment": g.headline_alignment,
         "headlineMaxWidthPercent": g.headline_max_width_percent,
-        "headlineColor": g.headline_color,
-        "headlineTreatment": g.headline_treatment,
         "brandBlockPlacement": g.brand_block_placement,
         "sloganPlacement": g.slogan_placement,
         "copySafeArea": {
             "side": g.copy_safe_area.side,
             "widthPercent": g.copy_safe_area.width_percent,
         },
+        "typographyStyle": g.typography_style,
+        "headlineScale": g.headline_scale,
+        "brandScale": g.brand_scale,
+        "sloganScale": g.slogan_scale,
         "imageStyle": g.image_style,
         "backgroundTreatment": g.background_treatment,
         "borderTreatment": g.border_treatment,
         "recurringGraphicDevice": g.recurring_graphic_device,
         "recurringGraphicDeviceRule": g.recurring_graphic_device_rule,
+        "shapeLanguage": g.shape_language,
         "framingRule": g.framing_rule,
+        "spacingRule": g.spacing_rule,
     }
 
 
@@ -255,6 +286,7 @@ def ad_to_public_api_dict(
         "marketingText": ad.marketing_text,
         "visualPrompt": visual_prompt,
         "imageBase64": image_base64,
+        "imageContainsFinalCopy": True,
     }
 
 
@@ -303,4 +335,5 @@ def series_plan_from_store_dict(data: Dict[str, Any]) -> Builder1SeriesPlan:
         expected_ad_count=int(data.get("adCount") or 2),
         product_name=str(data.get("productName") or ""),
         product_description=str(data.get("productDescription") or ""),
+        require_internal_scans=False,
     )

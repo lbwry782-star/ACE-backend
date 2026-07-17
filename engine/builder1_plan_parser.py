@@ -16,10 +16,11 @@ from engine.builder1_plan_spec import (
     HEADLINE_ALIGNMENTS,
     HEADLINE_MAX_WORDS,
     HEADLINE_PLACEMENTS,
-    HEADLINE_TREATMENTS,
     IMAGE_STYLE_ENUMS,
     LAYOUT_TEMPLATES,
     RELATIVE_ADVANTAGE_SOURCES,
+    TEXT_SCALE_ENUMS,
+    TYPOGRAPHY_STYLE_ENUMS,
     WEAK_CONCEPTUAL_TERMS,
     Builder1AdPlan,
     Builder1CopySafeArea,
@@ -71,6 +72,12 @@ UNSUPPORTED_CAPABILITY_TERMS = (
     "live reporting",
     "real-time reporting",
     "money-back guarantee",
+    "transparency system",
+    "reporting feature",
+    "speed guarantee",
+    "automation capability",
+    "personal service",
+    "direct sales attribution",
 )
 
 
@@ -117,14 +124,16 @@ def _reject_legacy_fields(obj: Dict[str, Any], reasons: List[str]) -> None:
         reasons.append(f"legacy_mode:{mode}")
 
 
-def _validate_strategy_candidate_scan(raw: object, reasons: List[str]) -> None:
+def _validate_strategy_candidate_scan(raw: object, reasons: List[str], *, required: bool) -> None:
     if raw is None:
+        if required:
+            reasons.append("strategy_scan_missing")
         return
     if not isinstance(raw, dict):
         reasons.append("strategy_scan_not_object")
         return
     candidates = raw.get("candidates")
-    if not isinstance(candidates, list) or len(candidates) < 10:
+    if not isinstance(candidates, list) or len(candidates) < 12:
         reasons.append("strategy_scan_insufficient_candidates")
         return
     lenses: Set[str] = set()
@@ -136,15 +145,63 @@ def _validate_strategy_candidate_scan(raw: object, reasons: List[str]) -> None:
         lens = _norm_key(str(item.get("lens") or ""))
         problem = _norm_key(str(item.get("problem") or ""))
         advantage = _norm_key(str(item.get("advantage") or ""))
+        family = _norm_key(str(item.get("strategyFamily") or item.get("family") or ""))
         if lens:
             lenses.add(lens)
         sig = f"{problem}|{advantage}"
         if sig.strip("|"):
             signatures.add(sig)
-    if len(lenses) < 8:
-        reasons.append("strategy_scan_insufficient_lens_diversity")
-    if len(signatures) < 8:
+        if family:
+            lenses.add(f"family:{family}")
+    if len(signatures) < 10:
         reasons.append("strategy_scan_duplicate_candidates")
+    families = raw.get("families")
+    if not isinstance(families, list) or len(families) < 5:
+        reasons.append("strategy_scan_insufficient_families")
+        return
+    family_names: Set[str] = set()
+    for fam in families:
+        if not isinstance(fam, dict):
+            reasons.append("strategy_scan_family_not_object")
+            continue
+        name = _norm_key(str(fam.get("family") or fam.get("name") or ""))
+        if name:
+            family_names.add(name)
+    if len(family_names) < 5:
+        reasons.append("strategy_scan_insufficient_families")
+
+
+def _validate_conceptual_generator_scan(raw: object, reasons: List[str], *, required: bool) -> None:
+    if raw is None:
+        if required:
+            reasons.append("conceptual_scan_missing")
+        return
+    if not isinstance(raw, dict):
+        reasons.append("conceptual_scan_not_object")
+        return
+    candidates = raw.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) < 6:
+        reasons.append("conceptual_scan_insufficient_candidates")
+        return
+    for item in candidates:
+        if not isinstance(item, dict):
+            reasons.append("conceptual_scan_candidate_not_object")
+            continue
+        for field in (
+            "conceptualGenerator",
+            "conceptualGeneratorAction",
+            "conceptualGeneratorInput",
+            "conceptualGeneratorTransformation",
+            "conceptualGeneratorResult",
+            "conceptualGeneratorWhyItExpressesAdvantage",
+            "conceptualGeneratorSeriesPotential",
+        ):
+            if not _norm_text(item.get(field)):
+                reasons.append("conceptual_scan_candidate_incomplete")
+                break
+        gen = _norm_key(str(item.get("conceptualGenerator") or ""))
+        if gen in WEAK_CONCEPTUAL_TERMS:
+            reasons.append("conceptual_scan_candidate_too_vague")
 
 
 def _check_unsupported_claims(
@@ -203,14 +260,6 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
     if headline_max_width < 10 or headline_max_width > 50:
         reasons.append("graphic_generator_invalid_headline_width")
 
-    headline_color = _norm_text(raw.get("headlineColor"))
-    if not _is_valid_hex(headline_color):
-        reasons.append("graphic_generator_invalid_headline_color")
-
-    headline_treatment = _norm_text(raw.get("headlineTreatment"))
-    if headline_treatment not in HEADLINE_TREATMENTS:
-        reasons.append("graphic_generator_invalid_headline_treatment")
-
     brand_block = _norm_text(raw.get("brandBlockPlacement"))
     if brand_block not in HEADLINE_PLACEMENTS:
         reasons.append("graphic_generator_invalid_brand_placement")
@@ -234,6 +283,21 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
     if width_percent < 15 or width_percent > 50:
         reasons.append("graphic_generator_invalid_copy_safe_width")
 
+    typography_style = _norm_text(raw.get("typographyStyle"))
+    if typography_style not in TYPOGRAPHY_STYLE_ENUMS:
+        reasons.append("graphic_generator_invalid_typography_style")
+
+    headline_scale = _norm_text(raw.get("headlineScale"))
+    brand_scale = _norm_text(raw.get("brandScale"))
+    slogan_scale = _norm_text(raw.get("sloganScale"))
+    for scale, code in (
+        (headline_scale, "graphic_generator_invalid_headline_scale"),
+        (brand_scale, "graphic_generator_invalid_brand_scale"),
+        (slogan_scale, "graphic_generator_invalid_slogan_scale"),
+    ):
+        if scale not in TEXT_SCALE_ENUMS:
+            reasons.append(code)
+
     image_style = _norm_text(raw.get("imageStyle"))
     if image_style not in IMAGE_STYLE_ENUMS:
         reasons.append("graphic_generator_invalid_image_style")
@@ -249,12 +313,18 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
     device = _norm_text(raw.get("recurringGraphicDevice"))
     device_rule = _norm_text(raw.get("recurringGraphicDeviceRule"))
     framing = _norm_text(raw.get("framingRule"))
+    shape_language = _norm_text(raw.get("shapeLanguage"))
+    spacing_rule = _norm_text(raw.get("spacingRule"))
     if not device:
         reasons.append("graphic_generator_missing_recurring_device")
     if not device_rule:
         reasons.append("graphic_generator_missing_device_rule")
     if not framing:
         reasons.append("graphic_generator_missing_framing_rule")
+    if not shape_language:
+        reasons.append("graphic_generator_missing_shape_language")
+    if not spacing_rule:
+        reasons.append("graphic_generator_missing_spacing_rule")
 
     if reasons:
         return None
@@ -265,17 +335,21 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
         headline_placement=headline_placement,
         headline_alignment=headline_alignment,
         headline_max_width_percent=headline_max_width,
-        headline_color=headline_color,
-        headline_treatment=headline_treatment,
         brand_block_placement=brand_block,
         slogan_placement=slogan_placement,
         copy_safe_area=Builder1CopySafeArea(side=side, width_percent=width_percent),
+        typography_style=typography_style,
+        headline_scale=headline_scale,
+        brand_scale=brand_scale,
+        slogan_scale=slogan_scale,
         image_style=image_style,
         background_treatment=background,
         border_treatment=border,
         recurring_graphic_device=device,
         recurring_graphic_device_rule=device_rule,
+        shape_language=shape_language,
         framing_rule=framing,
+        spacing_rule=spacing_rule,
     )
 
 
@@ -325,6 +399,7 @@ def validate_series_plan_structure(
     expected_ad_count: int,
     product_name: str,
     product_description: str,
+    require_internal_scans: bool = True,
 ) -> Tuple[Optional[Builder1SeriesPlan], List[str]]:
     reasons: List[str] = []
 
@@ -332,7 +407,27 @@ def validate_series_plan_structure(
         return None, ["plan_not_object"]
 
     _reject_legacy_fields(obj, reasons)
-    _validate_strategy_candidate_scan(obj.get("strategyCandidateScan"), reasons)
+    _validate_strategy_candidate_scan(
+        obj.get("strategyCandidateScan"), reasons, required=require_internal_scans
+    )
+    _validate_conceptual_generator_scan(
+        obj.get("conceptualGeneratorScan"), reasons, required=require_internal_scans
+    )
+    if require_internal_scans:
+        for field, code in (
+            ("strategyFamily", "missing_strategy_family"),
+            ("strategyScore", "missing_strategy_score"),
+            ("campaignExplorationSeed", "missing_campaign_exploration_seed"),
+            ("selectionReason", "missing_selection_reason"),
+        ):
+            if not _norm_text(obj.get(field)) and field != "strategyScore":
+                reasons.append(code)
+        try:
+            score = float(obj.get("strategyScore"))
+            if score <= 0:
+                reasons.append("invalid_strategy_score")
+        except (TypeError, ValueError):
+            reasons.append("missing_strategy_score")
 
     detected = _norm_text(obj.get("detectedLanguage")).lower()
     if not detected or detected not in SUPPORTED_LANGUAGES:
@@ -569,6 +664,7 @@ def parse_builder1_series_plan(
     expected_ad_count: int,
     product_name: str,
     product_description: str,
+    require_internal_scans: bool = True,
 ) -> Builder1SeriesPlan:
     plan, reasons = validate_series_plan_structure(
         raw,
@@ -576,6 +672,7 @@ def parse_builder1_series_plan(
         expected_ad_count=expected_ad_count,
         product_name=product_name,
         product_description=product_description,
+        require_internal_scans=require_internal_scans,
     )
     if plan is None:
         raise Builder1SeriesPlanParseError(reasons[0] if reasons else "invalid_plan", ";".join(reasons))
