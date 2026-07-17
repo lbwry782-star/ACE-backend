@@ -24,6 +24,18 @@ EXPLORATION_LENSES = [
     "weakness_converted",
 ]
 
+STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM = """
+You are a Builder1 product-name resolver for a digital advertising agent.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"productNameResolved":"..."}
+Rules:
+- Invent exactly one concise brand-like product or brand name from the description.
+- Do not return strategy, relative advantage, slogan, headline, generators, or ads.
+- Do not copy the full product description verbatim.
+- Do not return a generic category label such as Shoe Store, Restaurant, חנות נעליים, or מסעדה.
+- The name must be distinctive, readable, advertising-ready, and free of unsupported claims.
+""".strip()
+
 STAGE_STRATEGY_SCAN_SYSTEM = """
 You are a Builder1 strategy explorer for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
@@ -92,6 +104,7 @@ Rules:
 - mediumParticipates must be JSON boolean true or false, never a string.
 - When mediumParticipates is false, mediumRole must be "".
 - brandSlogan must be 1-6 words.
+- productNameResolved must exactly match the fixed productNameResolved value provided in the user prompt. Do not rename it.
 """.strip()
 
 STAGE_GRAPHIC_SYSTEM_SYSTEM = """
@@ -205,9 +218,42 @@ def build_conceptual_select_user_prompt(candidates: List[Dict[str, Any]]) -> str
     )
 
 
+def build_product_name_resolution_user_prompt(
+    *,
+    product_description: str,
+    detected_language: str,
+    brand_guidelines: Optional[Dict[str, Any]] = None,
+) -> str:
+    guidelines = ""
+    if brand_guidelines:
+        guidelines = "\nBrand guidelines:\n" + json.dumps(brand_guidelines, ensure_ascii=False, indent=2)
+    language_rule = (
+        "The generated name must be English (Latin letters only)."
+        if detected_language == "en"
+        else "The generated name may be Hebrew or English only."
+    )
+    return (
+        f"Description:\n{product_description.strip()}\n"
+        f"Detected language: {detected_language}\n"
+        f"{language_rule}\n"
+        "Return exactly one productNameResolved value."
+        f"{guidelines}"
+    )
+
+
+def build_product_name_resolution_repair_prompt(*, broken_json: str, reasons: List[str]) -> str:
+    return (
+        "Repair ONLY the product-name JSON object. Return exactly:\n"
+        '{"productNameResolved":"..."}\n'
+        "Do not copy the description verbatim. Do not return a generic category label.\n"
+        f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        f"Broken:\n{broken_json}"
+    )
+
+
 def build_brand_physical_user_prompt(
     *,
-    product_name: str,
+    product_name_resolved: str,
     product_description: str,
     detected_language: str,
     format_value: str,
@@ -220,7 +266,7 @@ def build_brand_physical_user_prompt(
     if brand_guidelines:
         guidelines = "\nBrand guidelines:\n" + json.dumps(brand_guidelines, ensure_ascii=False, indent=2)
     return (
-        f"Product name: {product_name or '(infer)'}\n"
+        f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
         f"Description: {product_description}\n"
         f"Language context: {detected_language}\n"
         f"Format context: {format_value}\n"

@@ -316,6 +316,7 @@ class TestPublicApiUnchanged(unittest.TestCase):
             ad_count=2,
             detected_language="en",
             exploration_seed="seed",
+            product_name_resolved="TestBrand",
             strategy=strategy,
             strategy_selection=selection,
             conceptual=conceptual,

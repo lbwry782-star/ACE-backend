@@ -27,6 +27,7 @@ from engine.builder1_planning_contract import (
     STAGE_CONCEPTUAL_SCAN_SYSTEM,
     STAGE_CONCEPTUAL_SELECT_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
+    STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
     STAGE_STRATEGY_SCAN_SYSTEM,
     STAGE_STRATEGY_SELECT_SYSTEM,
@@ -219,6 +220,7 @@ def _selected_conceptual():
 
 def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
     return {
+        STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM: {"productNameResolved": "TestBrand"},
         STAGE_STRATEGY_SCAN_SYSTEM: _strategy_scan_payload(),
         STAGE_STRATEGY_SELECT_SYSTEM: {
             "selectedCandidateId": "S01",
@@ -331,6 +333,7 @@ class TestDeterministicAssembly(unittest.TestCase):
             ad_count=ad_count,
             detected_language=detect_brief_language(self.BRIEF),
             exploration_seed="seed-test",
+            product_name_resolved="TestBrand",
             strategy=strategy,
             strategy_selection=parse_strategy_selection(
                 {

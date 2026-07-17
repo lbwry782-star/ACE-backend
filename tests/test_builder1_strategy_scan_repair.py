@@ -44,63 +44,6 @@ from tests.test_builder1_staged_planning import (
 BRIEF = "Reinforced shell product for daily carry"
 
 
-class TestBuilder1ProductNameRouteValidation(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        import sys
-        from unittest.mock import MagicMock
-
-        sys.modules.setdefault("openai", MagicMock())
-        from app import app
-
-        cls.client = app.test_client()
-
-    @patch("app._builder1_executor.submit")
-    def test_empty_product_name_rejected_before_job_creation(self, mock_submit: Any) -> None:
-        resp = self.client.post(
-            "/api/builder1-generate",
-            json={
-                "productName": "",
-                "productDescription": BRIEF,
-                "adCount": 3,
-            },
-        )
-        self.assertEqual(resp.status_code, 400)
-        data = resp.get_json()
-        self.assertFalse(data["ok"])
-        self.assertEqual(data["error"], "missing_product_name")
-        self.assertNotIn("campaignId", data)
-        mock_submit.assert_not_called()
-
-    @patch("app._builder1_executor.submit")
-    def test_whitespace_product_name_rejected(self, mock_submit: Any) -> None:
-        resp = self.client.post(
-            "/api/builder1-generate",
-            json={
-                "productName": "   \t\n",
-                "productDescription": BRIEF,
-                "adCount": 2,
-            },
-        )
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.get_json()["error"], "missing_product_name")
-        mock_submit.assert_not_called()
-
-    @patch("app._builder1_executor.submit")
-    def test_missing_product_name_is_not_planning_failed(self, mock_submit: Any) -> None:
-        resp = self.client.post(
-            "/api/builder1-generate",
-            json={
-                "productDescription": BRIEF,
-                "adCount": 2,
-            },
-        )
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(resp.get_json()["error"], "missing_product_name")
-        self.assertNotEqual(resp.get_json()["error"], "planning_failed")
-        mock_submit.assert_not_called()
-
-
 class TestStrategyCandidateValidation(unittest.TestCase):
     def test_fabricated_statistics_rejected_with_candidate_id(self) -> None:
         item = _strategy_scan_payload()["candidates"][3]

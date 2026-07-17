@@ -34,14 +34,21 @@ from engine.builder1_planning_contract import (
     build_conceptual_select_user_prompt,
     build_graphic_system_repair_prompt,
     build_graphic_system_user_prompt,
+    build_product_name_resolution_repair_prompt,
+    build_product_name_resolution_user_prompt,
     build_series_ads_repair_prompt,
     build_series_ads_user_prompt,
     build_strategy_scan_repair_prompt,
     build_strategy_scan_user_prompt,
     build_strategy_select_user_prompt,
     shuffled_exploration_lens_order,
+    STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM,
 )
 from engine.builder1_marketing_text_repair import ensure_series_ads_marketing_text
+from engine.builder1_product_name import (
+    enforce_authoritative_product_name,
+    parse_product_name_resolution,
+)
 from engine.builder1_strict_schema import StrictSchemaConfigurationError
 from engine.builder1_staged_parsers import (
     StageParseError,
@@ -301,6 +308,72 @@ def _run_strategy_scan_stage(
     raise Builder1PlannerError(f"strategy_scan_failed: {';'.join(last_reasons)}")
 
 
+def _run_product_name_resolution_stage(
+    model_caller: PlanningModelCaller,
+    *,
+    product_description: str,
+    detected_language: str,
+    brand_guidelines: Optional[Dict[str, Any]],
+) -> str:
+    system_prompt = STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM
+    user_prompt = build_product_name_resolution_user_prompt(
+        product_description=product_description,
+        detected_language=detected_language,
+        brand_guidelines=brand_guidelines,
+    )
+    return _run_stage(
+        "product_name_resolution",
+        model_caller,
+        system_prompt,
+        user_prompt,
+        lambda raw: parse_product_name_resolution(
+            raw,
+            product_description=product_description,
+            detected_language=detected_language,
+        ),
+        repair_builder=lambda broken, reasons: build_product_name_resolution_repair_prompt(
+            broken_json=broken,
+            reasons=reasons,
+        ),
+    )
+
+
+def _resolve_builder1_product_name(
+    model_caller: PlanningModelCaller,
+    *,
+    product_name: str,
+    product_description: str,
+    detected_language: str,
+    brand_guidelines: Optional[Dict[str, Any]],
+) -> str:
+    if product_name:
+        logger.info("BUILDER1_PRODUCT_NAME_SOURCE source=user")
+        return product_name
+
+    logger.info("BUILDER1_PRODUCT_NAME_GENERATION_START")
+    try:
+        resolved = _run_product_name_resolution_stage(
+            model_caller,
+            product_description=product_description,
+            detected_language=detected_language,
+            brand_guidelines=brand_guidelines,
+        )
+    except Builder1PlannerError as exc:
+        logger.error("BUILDER1_PRODUCT_NAME_GENERATION_FAILED")
+        raise Builder1PlannerError("product_name_generation_failed") from exc
+    except StageParseError as exc:
+        logger.error("BUILDER1_PRODUCT_NAME_GENERATION_FAILED reasons=%s", exc.reasons)
+        raise Builder1PlannerError("product_name_generation_failed") from exc
+
+    logger.info(
+        "BUILDER1_PRODUCT_NAME_GENERATION_OK nameLength=%s lang=%s",
+        len(resolved),
+        detected_language,
+    )
+    logger.info("BUILDER1_PRODUCT_NAME_SOURCE source=generated")
+    return resolved
+
+
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
     if is_marketing_word_count_rejection(codes) or is_marketing_language_rejection(codes):
         return "marketing_text"
@@ -380,9 +453,17 @@ def plan_builder1(
         detected_language,
     )
 
-    strategy_candidates = _run_strategy_scan_stage(
+    product_name_resolved = _resolve_builder1_product_name(
         model_caller,
         product_name=normalized.product_name,
+        product_description=normalized.product_description,
+        detected_language=detected_language,
+        brand_guidelines=brand_guidelines,
+    )
+
+    strategy_candidates = _run_strategy_scan_stage(
+        model_caller,
+        product_name=product_name_resolved,
         product_description=normalized.product_description,
         detected_language=detected_language,
         lens_order=lens_order,
@@ -469,7 +550,7 @@ def plan_builder1(
         model_caller,
         STAGE_BRAND_PHYSICAL_SYSTEM,
         build_brand_physical_user_prompt(
-            product_name=normalized.product_name,
+            product_name_resolved=product_name_resolved,
             product_description=normalized.product_description,
             detected_language=detected_language,
             format_value=normalized.format,
@@ -484,6 +565,10 @@ def plan_builder1(
         repair_builder=lambda broken, reasons: build_brand_physical_repair_prompt(
             broken_json=broken, reasons=reasons
         ),
+    )
+    brand_physical = enforce_authoritative_product_name(
+        brand_physical,
+        product_name_resolved=product_name_resolved,
     )
     brand_physical_dict = _brand_physical_to_dict(brand_physical)
 
@@ -535,7 +620,7 @@ def plan_builder1(
             series_ads.ads,
             detected_language=detected_language,
             relative_advantage=selected_strategy.relative_advantage,
-            product_name=brand_physical.product_name_resolved or normalized.product_name,
+            product_name=product_name_resolved,
             brand_slogan=brand_physical.brand_slogan,
             model_caller=model_caller,
         )
@@ -549,6 +634,7 @@ def plan_builder1(
         ad_count=normalized.ad_count,
         detected_language=detected_language,
         exploration_seed=exploration_seed,
+        product_name_resolved=product_name_resolved,
         strategy=selected_strategy,
         strategy_selection=strategy_selection,
         conceptual=selected_conceptual,
@@ -583,6 +669,10 @@ def plan_builder1(
                         raw, product_description=normalized.product_description
                     ),
                 )
+                brand_physical = enforce_authoritative_product_name(
+                    brand_physical,
+                    product_name_resolved=product_name_resolved,
+                )
                 brand_physical_dict = _brand_physical_to_dict(brand_physical)
             elif repair_stage == "graphic_system":
                 graphic = _run_stage(
@@ -601,7 +691,7 @@ def plan_builder1(
                     series_ads.ads,
                     detected_language=detected_language,
                     relative_advantage=selected_strategy.relative_advantage,
-                    product_name=brand_physical.product_name_resolved or normalized.product_name,
+                    product_name=product_name_resolved,
                     brand_slogan=brand_physical.brand_slogan,
                     model_caller=model_caller,
                 )
@@ -628,7 +718,7 @@ def plan_builder1(
                     series_ads.ads,
                     detected_language=detected_language,
                     relative_advantage=selected_strategy.relative_advantage,
-                    product_name=brand_physical.product_name_resolved or normalized.product_name,
+                    product_name=product_name_resolved,
                     brand_slogan=brand_physical.brand_slogan,
                     model_caller=model_caller,
                 )
@@ -640,6 +730,7 @@ def plan_builder1(
                 ad_count=normalized.ad_count,
                 detected_language=detected_language,
                 exploration_seed=exploration_seed,
+                product_name_resolved=product_name_resolved,
                 strategy=selected_strategy,
                 strategy_selection=strategy_selection,
                 conceptual=selected_conceptual,

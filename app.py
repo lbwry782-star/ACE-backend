@@ -612,7 +612,14 @@ def _builder1_generate_initial(
             ad_count=ad_count,
             brand_guidelines=brand_guidelines,
         )
-    except (Builder1PlannerError, Exception) as e:
+    except Builder1PlannerError as e:
+        err_message = str(e) if e else "planning_failed"
+        if err_message.startswith("product_name_generation_failed"):
+            logger.error("BUILDER1_PRODUCT_NAME_GENERATION_FAILED jobId=%s err=%s", job_id, err_message)
+            return {"ok": False, "error": "product_name_generation_failed", "message": err_message}
+        logger.error("BUILDER1_SERIES_PLAN_REJECTED jobId=%s err=%s", job_id, err_message)
+        return {"ok": False, "error": "planning_failed", "message": err_message}
+    except Exception as e:
         err_message = str(e) if e else "planning_failed"
         logger.error("BUILDER1_SERIES_PLAN_REJECTED jobId=%s err=%s", job_id, err_message)
         return {"ok": False, "error": "planning_failed", "message": err_message}
@@ -728,18 +735,8 @@ def builder1_generate():
     brand_guidelines = body.get("brandGuidelines")
     if brand_guidelines is not None and not isinstance(brand_guidelines, dict):
         brand_guidelines = None
-    if not product_name:
-        logger.info("BUILDER1_INPUT_REJECTED field=productName reason=missing")
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "missing_product_name",
-                }
-            ),
-            400,
-        )
     if not product_description:
+        logger.info("BUILDER1_INPUT_REJECTED field=productDescription reason=missing")
         return (
             jsonify(
                 {
@@ -748,7 +745,7 @@ def builder1_generate():
                     "message": "productDescription is required",
                 }
             ),
-            200,
+            400,
         )
     raw_ad_count = body.get("adCount")
     logger.info("BUILDER1_AD_COUNT_RAW value=%r", raw_ad_count)
