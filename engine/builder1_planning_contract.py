@@ -40,8 +40,11 @@ Rules:
 - simpleStrategicAction: null or one short optional communication action only.
 - Do not propose business transformation, new products, new services, pricing changes, guarantees, dashboards, training, or material client investment.
 - The relative advantage must already exist or be a perceptual advertising reframing of existing facts.
-- Do not invent surveys, percentages, study names, or statistics.
-- briefSupport must cite brief facts or general category reasoning only.
+- briefSupport (brief grounding only): a direct brief fact, faithful brief paraphrase, observable product property, or clearly labeled category inference without empirical claims.
+- Do not request, cite, or invent market evidence, studies, statistics, surveys, percentages, interview counts, reports, or factual capabilities not in the brief.
+- Do not use wording such as evidence, research, market proof, data shows, or surveys show unless the user explicitly supplied that information.
+- clientActionLevel none requires simpleStrategicAction null.
+- clientActionLevel simple_optional requires a short non-empty simpleStrategicAction that is optional, immediately executable, and needs no client consultation, operational change, new product, new technology, staff training, or material cost.
 - Do not include slogans, generators, graphics, or ads.
 """.strip()
 

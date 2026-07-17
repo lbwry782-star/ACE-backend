@@ -94,6 +94,34 @@ class StrategyBoundaryFields:
     simple_strategic_action: Optional[str]
 
 
+_SIMPLE_ACTION_NULL_SENTINELS = frozenset(
+    {
+        "",
+        "none",
+        "null",
+        "n/a",
+        "na",
+        "not required",
+        "not needed",
+        "no action",
+        "לא נדרש",
+        "אין",
+        "ללא",
+    }
+)
+
+
+def normalize_simple_strategic_action_value(raw: object) -> Optional[str]:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return None
+    text = _norm_text(raw)
+    if text.casefold() in _SIMPLE_ACTION_NULL_SENTINELS:
+        return None
+    return text or None
+
+
 def parse_strategy_boundary_fields(item: Dict[str, Any], *, candidate_id: str) -> Tuple[Optional[StrategyBoundaryFields], List[str]]:
     reasons: List[str] = []
     prefix = f"strategy_scan_{candidate_id}"
@@ -123,12 +151,14 @@ def parse_strategy_boundary_fields(item: Dict[str, Any], *, candidate_id: str) -
         reasons.append(f"{prefix}_simpleStrategicAction_not_string_or_null")
         simple_action: Optional[str] = None
     else:
-        simple_action = _norm_text(simple_raw) if simple_raw else None
+        simple_action = normalize_simple_strategic_action_value(simple_raw)
         if simple_action and len(simple_action.split()) > SIMPLE_STRATEGIC_ACTION_MAX_WORDS:
             reasons.append(f"{prefix}_simpleStrategicAction_too_long")
 
     if action_level == "none" and simple_action:
-        reasons.append(f"{prefix}_simpleStrategicAction_without_optional_action")
+        reasons.append(f"{prefix}_invalid_simple_strategic_action")
+    elif action_level == "simple_optional" and not simple_action:
+        reasons.append(f"{prefix}_invalid_simple_strategic_action")
 
     if reasons:
         return None, reasons
@@ -209,12 +239,14 @@ def scan_text_for_future_capability_claim(text: object) -> bool:
 
 def validate_strategy_candidate_text_boundary(
     *,
+    candidate_id: str,
     strategic_problem: str,
     relative_advantage: str,
     brief_support: str,
     simple_strategic_action: Optional[str],
     product_description: str,
 ) -> List[str]:
+    prefix = f"strategy_scan_{candidate_id}"
     reasons: List[str] = []
     for field_name, value in (
         ("strategicProblem", strategic_problem),
@@ -223,14 +255,14 @@ def validate_strategy_candidate_text_boundary(
     ):
         code = scan_text_for_prohibited_client_action(value, product_description=product_description)
         if code:
-            reasons.append(f"strategy_scan_{field_name}_{code}")
+            reasons.append(f"{prefix}_unsupported_grounding_claim")
     if simple_strategic_action:
         code = scan_text_for_prohibited_client_action(
             simple_strategic_action,
             product_description=product_description,
         )
         if code:
-            reasons.append(f"strategy_scan_simpleStrategicAction_{code}")
+            reasons.append(f"{prefix}_unsupported_grounding_claim")
     return reasons
 
 

@@ -728,6 +728,17 @@ def builder1_generate():
     brand_guidelines = body.get("brandGuidelines")
     if brand_guidelines is not None and not isinstance(brand_guidelines, dict):
         brand_guidelines = None
+    if not product_name:
+        logger.info("BUILDER1_INPUT_REJECTED field=productName reason=missing")
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "missing_product_name",
+                }
+            ),
+            400,
+        )
     if not product_description:
         return (
             jsonify(

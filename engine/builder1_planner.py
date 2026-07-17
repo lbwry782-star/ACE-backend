@@ -41,6 +41,7 @@ from engine.builder1_planning_contract import (
     build_strategy_select_user_prompt,
     shuffled_exploration_lens_order,
 )
+from engine.builder1_marketing_text_repair import ensure_series_ads_marketing_text
 from engine.builder1_strict_schema import StrictSchemaConfigurationError
 from engine.builder1_staged_parsers import (
     StageParseError,
@@ -48,10 +49,13 @@ from engine.builder1_staged_parsers import (
     filter_eligible_strategy_candidates,
     parse_conceptual_scan,
     parse_conceptual_selection,
-    parse_strategy_scan,
     parse_strategy_selection,
 )
-from engine.builder1_marketing_text_repair import ensure_series_ads_marketing_text
+from engine.builder1_strategy_scan import (
+    STRATEGY_SCAN_REPLACEMENT_SYSTEM,
+    ensure_strategy_scan_from_raw,
+    is_global_strategy_scan_failure,
+)
 from engine.builder1_strategy_judge import (
     is_client_boundary_rejection,
     is_marketing_language_rejection,
@@ -209,6 +213,94 @@ def _run_stage(
     raise Builder1PlannerError(f"{stage}_failed: {';'.join(last_reasons)}")
 
 
+def _run_strategy_scan_stage(
+    model_caller: PlanningModelCaller,
+    *,
+    product_name: str,
+    product_description: str,
+    detected_language: str,
+    lens_order: List[str],
+    exploration_seed: str,
+) -> List[Any]:
+    system_prompt = STAGE_STRATEGY_SCAN_SYSTEM
+    user_prompt = build_strategy_scan_user_prompt(
+        product_name=product_name,
+        product_description=product_description,
+        detected_language=detected_language,
+        lens_order=lens_order,
+        exploration_seed=exploration_seed,
+    )
+    last_reasons: List[str] = []
+    raw: object = {}
+
+    def _strategy_scan_replacement_caller(system: str, user: str) -> object:
+        return _invoke_model_caller(
+            model_caller,
+            system,
+            user,
+            stage="strategy_scan",
+        )
+
+    for attempt in (1, 2):
+        logger.info("BUILDER1_STAGE_START stage=strategy_scan attempt=%s", attempt)
+        try:
+            raw = _invoke_model_caller(
+                model_caller,
+                system_prompt,
+                user_prompt,
+                stage="strategy_scan",
+            )
+            return ensure_strategy_scan_from_raw(
+                raw,
+                product_name=product_name,
+                product_description=product_description,
+                model_caller=_strategy_scan_replacement_caller,
+            )
+        except StrictSchemaConfigurationError as exc:
+            logger.error(
+                "BUILDER1_STRICT_SCHEMA_INVALID stage=strategy_scan paths=%s",
+                exc.errors[:5],
+            )
+            raise Builder1PlannerError("strategy_scan_failed") from exc
+        except StageParseError as exc:
+            last_reasons = exc.reasons
+            logger.error("BUILDER1_STAGE_FAILED stage=strategy_scan reasons=%s", last_reasons)
+            if is_global_strategy_scan_failure(last_reasons) and attempt == 1:
+                logger.info("BUILDER1_STAGE_REPAIR stage=strategy_scan global")
+                repair_prompt = build_strategy_scan_repair_prompt(
+                    broken_json=_raw_to_text(raw),
+                    reasons=last_reasons,
+                )
+                try:
+                    raw = _invoke_model_caller(
+                        model_caller,
+                        system_prompt,
+                        repair_prompt,
+                        stage="strategy_scan",
+                    )
+                    return ensure_strategy_scan_from_raw(
+                        raw,
+                        product_name=product_name,
+                        product_description=product_description,
+                        model_caller=_strategy_scan_replacement_caller,
+                    )
+                except StageParseError as exc2:
+                    last_reasons = exc2.reasons
+                    logger.error(
+                        "BUILDER1_STAGE_FAILED stage=strategy_scan global_repair reasons=%s",
+                        last_reasons,
+                    )
+            if attempt == 2:
+                raise Builder1PlannerError("strategy_scan_failed") from exc
+            logger.info("BUILDER1_STAGE_RETRY stage=strategy_scan")
+        except Exception as exc:
+            logger.error("BUILDER1_STAGE_FAILED stage=strategy_scan err=%s", exc)
+            if attempt == 2:
+                raise Builder1PlannerError("strategy_scan_failed") from exc
+            logger.info("BUILDER1_STAGE_RETRY stage=strategy_scan")
+    raise Builder1PlannerError(f"strategy_scan_failed: {';'.join(last_reasons)}")
+
+
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
     if is_marketing_word_count_rejection(codes) or is_marketing_language_rejection(codes):
         return "marketing_text"
@@ -288,21 +380,13 @@ def plan_builder1(
         detected_language,
     )
 
-    strategy_candidates = _run_stage(
-        "strategy_scan",
+    strategy_candidates = _run_strategy_scan_stage(
         model_caller,
-        STAGE_STRATEGY_SCAN_SYSTEM,
-        build_strategy_scan_user_prompt(
-            product_name=normalized.product_name,
-            product_description=normalized.product_description,
-            detected_language=detected_language,
-            lens_order=lens_order,
-            exploration_seed=exploration_seed,
-        ),
-        lambda raw: parse_strategy_scan(raw, product_description=normalized.product_description),
-        repair_builder=lambda broken, reasons: build_strategy_scan_repair_prompt(
-            broken_json=broken, reasons=reasons
-        ),
+        product_name=normalized.product_name,
+        product_description=normalized.product_description,
+        detected_language=detected_language,
+        lens_order=lens_order,
+        exploration_seed=exploration_seed,
     )
 
     cand_dicts = [
