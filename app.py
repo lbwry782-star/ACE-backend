@@ -37,10 +37,16 @@ from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 from engine.builder1_campaign_store import (
     CampaignStoreError,
     create_campaign_session,
+    get_campaign_session,
     mark_ad_generated,
     release_generation_lock,
-    try_acquire_generation_lock,
-    validate_next_ad_request,
+    reserve_next_ad_index,
+)
+from engine.builder1_jobs_store import (
+    create_builder1_job,
+    finalize_builder1_job,
+    get_builder1_job,
+    update_builder1_job,
 )
 from engine.builder2_zip import build_builder2_video_zip_bytes
 from engine.builder1_composition import build_builder1_series_composition_metadata
@@ -63,8 +69,6 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-_builder1_jobs_lock = threading.Lock()
-_builder1_jobs: dict[str, dict[str, Any]] = {}
 _builder1_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="builder1_job")
 
 try:
@@ -488,9 +492,7 @@ def _builder1_image_caller(prompt: str, format_value: str) -> bytes:
 
 
 def _builder1_update_job(job_id: str, **fields: Any) -> None:
-    with _builder1_jobs_lock:
-        if job_id in _builder1_jobs:
-            _builder1_jobs[job_id].update(fields)
+    update_builder1_job(job_id, **fields)
 
 
 def _builder1_build_incremental_result(
@@ -503,7 +505,7 @@ def _builder1_build_incremental_result(
 ) -> dict[str, Any]:
     ad_plan = next(a for a in session.plan.ads if a.index == ad_index)
     composition = build_builder1_series_composition_metadata(session.plan)
-    generated_count = len(session.generated_indexes)
+    generated_count = session.generated_count
     can_next = not session.complete and session.next_ad_index is not None
     return {
         "ok": True,
@@ -516,7 +518,8 @@ def _builder1_build_incremental_result(
             image_base64=image_base64,
         ),
         "generatedCount": generated_count,
-        "totalAds": session.ad_count,
+        "totalAds": session.target_ad_count,
+        "targetAdCount": session.target_ad_count,
         "nextAdIndex": session.next_ad_index,
         "canGenerateNext": can_next,
     }
@@ -527,25 +530,37 @@ def _builder1_generate_single_ad(
     job_id: str,
     campaign_id: str,
     ad_index: int,
-    acquire_lock: bool,
+    already_reserved: bool,
 ) -> dict[str, Any]:
     session = None
-    lock_held = False
+    reservation_held = already_reserved
     try:
-        if acquire_lock:
-            session = try_acquire_generation_lock(campaign_id, ad_index)
-            lock_held = True
+        if already_reserved:
+            session = get_campaign_session(campaign_id)
+            if session.generating_index != ad_index:
+                raise CampaignStoreError("campaign_index_conflict")
         else:
-            session = validate_next_ad_request(campaign_id, ad_index)
-            session = try_acquire_generation_lock(campaign_id, ad_index)
-            lock_held = True
+            session = reserve_next_ad_index(campaign_id, ad_index)
+            reservation_held = True
 
-        logger.info("BUILDER1_NEXT_AD_INDEX campaignId=%s adIndex=%s", campaign_id, ad_index)
-        _builder1_update_job(job_id, stage="generating_images", completedAds=len(session.generated_indexes), totalAds=session.ad_count)
+        logger.info(
+            "BUILDER1_NEXT_AD_INDEX jobId=%s campaignId=%s adIndex=%s targetAdCount=%s",
+            job_id,
+            campaign_id,
+            ad_index,
+            session.target_ad_count,
+        )
+        _builder1_update_job(
+            job_id,
+            stage="generating_images",
+            completedAds=session.generated_count,
+            totalAds=session.target_ad_count,
+            targetAdCount=session.target_ad_count,
+        )
 
         image_result = generate_builder1_ad_image(session.plan, ad_index, _builder1_image_caller)
         session = mark_ad_generated(campaign_id, ad_index)
-        lock_held = False
+        reservation_held = False
 
         logger.info("BUILDER1_AD_GENERATED campaignId=%s adIndex=%s", campaign_id, ad_index)
         return _builder1_build_incremental_result(
@@ -556,7 +571,7 @@ def _builder1_generate_single_ad(
             image_base64=image_bytes_to_base64(image_result.image_bytes),
         )
     except ImageRateLimitError as e:
-        if lock_held:
+        if reservation_held:
             release_generation_lock(campaign_id)
         retry_after = getattr(e, "retry_after_seconds", None)
         logger.error(
@@ -576,11 +591,11 @@ def _builder1_generate_single_ad(
             out["retryAfterSeconds"] = retry_after
         return out
     except CampaignStoreError as e:
-        if lock_held:
+        if reservation_held:
             release_generation_lock(campaign_id)
-        return {"ok": False, "error": e.code, "message": e.message}
+        return {"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}
     except Exception as e:
-        if lock_held:
+        if reservation_held:
             release_generation_lock(campaign_id)
         logger.error("BUILDER1_SERIES_IMAGE_FAILED campaignId=%s adIndex=%s err=%s", campaign_id, ad_index, e)
         return {"ok": False, "error": "image_generation_failed", "message": str(e), "campaignId": campaign_id}
@@ -624,13 +639,17 @@ def _builder1_generate_initial(
         logger.error("BUILDER1_SERIES_PLAN_REJECTED jobId=%s err=%s", job_id, err_message)
         return {"ok": False, "error": "planning_failed", "message": err_message}
 
-    create_campaign_session(campaign_id=campaign_id, plan=series_plan)
-    _builder1_update_job(job_id, stage="building_prompts")
+    create_campaign_session(
+        campaign_id=campaign_id,
+        plan=series_plan,
+        target_ad_count=ad_count,
+    )
+    _builder1_update_job(job_id, stage="building_prompts", targetAdCount=ad_count, totalAds=ad_count)
     return _builder1_generate_single_ad(
         job_id=job_id,
         campaign_id=campaign_id,
         ad_index=1,
-        acquire_lock=True,
+        already_reserved=False,
     )
 
 
@@ -648,10 +667,9 @@ def _builder1_run_initial_job(
         result = _builder1_generate_initial(
             job_id, campaign_id, product_name, product_description, format_val, ad_count, brand_guidelines
         )
-        _builder1_finalize_job(job_id, result, ad_count)
+        _builder1_finalize_job(job_id, result, target_ad_count=ad_count)
     except Exception as e:
-        with _builder1_jobs_lock:
-            _builder1_jobs[job_id] = {"status": "error", "error": "builder1_generation_failed"}
+        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
         logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
 
 
@@ -667,41 +685,17 @@ def _builder1_run_next_job(job_id: str, campaign_id: str, expected_next_index: i
             job_id=job_id,
             campaign_id=campaign_id,
             ad_index=expected_next_index,
-            acquire_lock=False,
+            already_reserved=True,
         )
-        total = 0
-        try:
-            from engine.builder1_campaign_store import get_campaign_session
-
-            total = get_campaign_session(campaign_id).ad_count
-        except Exception:
-            pass
-        _builder1_finalize_job(job_id, result, total or expected_next_index)
+        target_ad_count = get_campaign_session(campaign_id).target_ad_count
+        _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
     except Exception as e:
-        with _builder1_jobs_lock:
-            _builder1_jobs[job_id] = {"status": "error", "error": "builder1_generation_failed"}
+        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
         logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
 
 
-def _builder1_finalize_job(job_id: str, result: dict[str, Any], total_ads: int) -> None:
-    with _builder1_jobs_lock:
-        if result.get("ok") is True:
-            generated = int(result.get("generatedCount") or 0)
-            _builder1_jobs[job_id] = {
-                "status": "done",
-                "stage": "done",
-                "completedAds": generated,
-                "totalAds": total_ads,
-                "result": result,
-            }
-            logger.info("BUILDER1_JOB_DONE jobId=%s generatedCount=%s", job_id, generated)
-        else:
-            err = result.get("error") or "builder1_generation_failed"
-            entry: dict[str, Any] = {"status": "error", "error": err, "result": result}
-            if result.get("retryable"):
-                entry["retryable"] = True
-            _builder1_jobs[job_id] = entry
-            logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, err)
+def _builder1_finalize_job(job_id: str, result: dict[str, Any], *, target_ad_count: int) -> None:
+    finalize_builder1_job(job_id, result, target_ad_count=target_ad_count)
 
 
 @app.route("/api/builder1-generate", methods=["POST"])
@@ -765,15 +759,13 @@ def builder1_generate():
     logger.info("BUILDER1_AD_COUNT_NORMALIZED value=%s", ad_count)
     job_id = str(uuid.uuid4())
     campaign_id = str(uuid.uuid4())
-    with _builder1_jobs_lock:
-        _builder1_jobs[job_id] = {
-            "status": "running",
-            "stage": "planning",
-            "completedAds": 0,
-            "totalAds": ad_count,
-            "campaignId": campaign_id,
-        }
-    logger.info("BUILDER1_JOB_CREATED jobId=%s campaignId=%s adCount=%s", job_id, campaign_id, ad_count)
+    create_builder1_job(
+        job_id=job_id,
+        campaign_id=campaign_id,
+        target_ad_count=ad_count,
+        stage="planning",
+    )
+    logger.info("BUILDER1_JOB_CREATED jobId=%s campaignId=%s targetAdCount=%s", job_id, campaign_id, ad_count)
     _builder1_executor.submit(
         _builder1_run_initial_job,
         job_id,
@@ -792,6 +784,7 @@ def builder1_generate():
                 "stage": "planning",
                 "completedAds": 0,
                 "totalAds": ad_count,
+                "targetAdCount": ad_count,
                 "pollUrl": f"/api/builder1-status?jobId={job_id}",
                 "campaignId": campaign_id,
             }
@@ -818,19 +811,22 @@ def builder1_generate_next():
         return jsonify({"ok": False, "error": "invalid_input", "message": "expectedNextIndex must be an integer"}), 200
 
     try:
-        session = validate_next_ad_request(campaign_id, expected_next_index)
+        session = reserve_next_ad_index(campaign_id, expected_next_index)
     except CampaignStoreError as e:
         return jsonify({"ok": False, "error": e.code, "message": e.message}), 200
 
     job_id = str(uuid.uuid4())
-    with _builder1_jobs_lock:
-        _builder1_jobs[job_id] = {
-            "status": "running",
-            "stage": "generating_images",
-            "completedAds": len(session.generated_indexes),
-            "totalAds": session.ad_count,
-            "campaignId": campaign_id,
-        }
+    create_builder1_job(
+        job_id=job_id,
+        campaign_id=campaign_id,
+        target_ad_count=session.target_ad_count,
+        stage="generating_images",
+    )
+    update_builder1_job(
+        job_id,
+        completedAds=session.generated_count,
+        totalAds=session.target_ad_count,
+    )
     _builder1_executor.submit(_builder1_run_next_job, job_id, campaign_id, expected_next_index)
     return (
         jsonify(
@@ -839,8 +835,9 @@ def builder1_generate_next():
                 "jobId": job_id,
                 "campaignId": campaign_id,
                 "stage": "generating_images",
-                "completedAds": len(session.generated_indexes),
-                "totalAds": session.ad_count,
+                "completedAds": session.generated_count,
+                "totalAds": session.target_ad_count,
+                "targetAdCount": session.target_ad_count,
                 "pollUrl": f"/api/builder1-status?jobId={job_id}",
             }
         ),
@@ -853,8 +850,7 @@ def builder1_status():
     job_id = (request.args.get("jobId") or "").strip()
     if not job_id:
         return jsonify({"status": "error", "error": "missing_job_id"}), 400
-    with _builder1_jobs_lock:
-        job = _builder1_jobs.get(job_id)
+    job = get_builder1_job(job_id)
     if not job:
         return jsonify({"status": "error", "jobId": job_id, "error": "not_found"}), 404
     status = (job.get("status") or "running").strip()

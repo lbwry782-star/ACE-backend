@@ -12,6 +12,7 @@ from engine.builder1_client_boundary import (
     deterministic_client_boundary_checks,
     is_client_boundary_rejection,
 )
+from engine.builder1_no_logo import deterministic_no_logo_checks, is_no_logo_rejection
 from engine.builder1_marketing_copy import (
     MARKETING_TEXT_WORD_COUNT,
     count_marketing_words,
@@ -75,7 +76,13 @@ Return JSON only:
   "requiresMaterialClientInvestment": false,
   "assumesBusinessTransformation": false,
   "relativeAdvantageExistsNow": true,
-  "simpleStrategicActionWithinScope": true
+  "simpleStrategicActionWithinScope": true,
+  "productNameShownAsTextOnly": true,
+  "inventedLogoAbsent": true,
+  "suppliedLogoAbsent": true,
+  "packagingBrandSymbolAbsent": true,
+  "graphicDeviceNotUsedAsLogo": true,
+  "typographyDoesNotBecomeLogoMark": true
 }
 
 IMAGE COPY (rendered inside the generated advertisement):
@@ -136,6 +143,21 @@ Fail if:
 - headline or brandSlogan exceed image-copy brevity limits
 - the campaign requires client consultation, material implementation, or business transformation before the claim is true
 - marketingText or headline presents a future capability as a current fact
+
+NO PRODUCT LOGO (fail before image generation):
+- Product or brand identity in rendered ads must use the written product name as plain readable text only.
+- Never invent, reproduce, display, or plan a logo, symbol, icon, emblem, monogram, badge, seal, or brand mark.
+- A recurring campaign graphic device may appear in ad composition but must not become product identity or packaging branding.
+- Fail when the plan explicitly requests a logo or places a symbol beside or on packaging with the product name.
+- Use rejectionReasonCodes such as:
+  - invented_product_logo
+  - supplied_logo_displayed
+  - logo_like_brand_symbol
+  - packaging_contains_brand_mark
+  - campaign_device_used_as_logo
+  - product_name_not_text_only
+- Set productNameShownAsTextOnly, inventedLogoAbsent, suppliedLogoAbsent, packagingBrandSymbolAbsent,
+  graphicDeviceNotUsedAsLogo, and typographyDoesNotBecomeLogoMark to false when any logo rule fails.
 
 Return structured JSON only.
 """.strip()
@@ -207,6 +229,7 @@ def deterministic_judge_checks(plan_dict: Dict[str, Any]) -> List[str]:
     if brand_slogan and _word_count(brand_slogan) > BRAND_SLOGAN_MAX_WORDS:
         reasons.append("brand_slogan_too_long")
     reasons.extend(deterministic_client_boundary_checks(plan_dict))
+    reasons.extend(deterministic_no_logo_checks(plan_dict))
     return list(dict.fromkeys(reasons))
 
 
@@ -284,6 +307,8 @@ def build_strategy_judge_user_prompt(
         "Do not apply image-copy brevity limits to marketingText. "
         "Allow isolated brand names or technical terms in another script. "
         "Reject campaigns that require client consultation, material implementation, or business transformation. "
+        "Reject any plan that requests, describes, or depends on a product logo, brand symbol, monogram, badge, or packaging brand mark. "
+        "Product identification must remain plain readable text only. "
         "Return JSON only."
     )
 
@@ -326,3 +351,7 @@ def is_marketing_word_count_rejection(codes: List[str]) -> bool:
 
 def is_marketing_language_rejection(codes: List[str]) -> bool:
     return any(code in MARKETING_LANGUAGE_CODES for code in codes)
+
+
+def is_no_logo_rejection_code(codes: List[str]) -> bool:
+    return is_no_logo_rejection(codes)

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
+from engine.builder1_no_logo import sanitize_brand_guidelines_for_builder1
 
 
 @dataclass
@@ -65,7 +66,7 @@ def normalize_brand_guidelines(value: object) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(value, dict):
         return None
-    return value
+    return sanitize_brand_guidelines_for_builder1(value)
 
 
 def normalize_builder1_input(

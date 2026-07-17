@@ -7,6 +7,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
+from engine.builder1_no_logo import BUILDER1_NO_LOGO_PLANNING_RULE, brand_guidelines_for_prompt
 
 EXPLORATION_LENSES = [
     "economic",
@@ -95,27 +96,30 @@ Rules:
 - Scores are integers 1-10.
 """.strip()
 
-STAGE_BRAND_PHYSICAL_SYSTEM = """
+STAGE_BRAND_PHYSICAL_SYSTEM = f"""
 You are a Builder1 brand and physical-system builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{"productNameResolved":"...","brandSlogan":"...","sloganDerivation":"...","sloganAction":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}
+{{"productNameResolved":"...","brandSlogan":"...","sloganDerivation":"...","sloganAction":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
 Rules:
 - Do not include graphic generator, series generator, ads, format, adCount, detectedLanguage, or strategy fields.
 - mediumParticipates must be JSON boolean true or false, never a string.
 - When mediumParticipates is false, mediumRole must be "".
 - brandSlogan must be 1-6 words.
 - productNameResolved must exactly match the fixed productNameResolved value provided in the user prompt. Do not rename it.
+- {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
-STAGE_GRAPHIC_SYSTEM_SYSTEM = """
+STAGE_GRAPHIC_SYSTEM_SYSTEM = f"""
 You are a Builder1 graphic-system builder.
 Return JSON only. Return the graphic generator object directly with no wrapper and no additional top-level keys:
-{"palette":{"dominant":"#111111","secondary":"#EEEEEE","accent":"#FF5500","background":"#F5F5F5","text":"#222222"},"layoutTemplate":"visual_right_copy_left","headlinePlacement":"top_left","headlineAlignment":"right","headlineMaxWidthPercent":34,"brandBlockPlacement":"bottom_left","sloganPlacement":"bottom_left","copySafeArea":{"side":"left","widthPercent":38},"typographyStyle":"bold_geometric_sans","headlineScale":"large","brandScale":"small","sloganScale":"medium","imageStyle":"editorial_photography","backgroundTreatment":"solid","borderTreatment":"none","recurringGraphicDevice":"...","recurringGraphicDeviceRule":"...","shapeLanguage":"...","framingRule":"...","spacingRule":"..."}
+{{"palette":{{"dominant":"#111111","secondary":"#EEEEEE","accent":"#FF5500","background":"#F5F5F5","text":"#222222"}},"layoutTemplate":"visual_right_copy_left","headlinePlacement":"top_left","headlineAlignment":"right","headlineMaxWidthPercent":34,"brandBlockPlacement":"bottom_left","sloganPlacement":"bottom_left","copySafeArea":{{"side":"left","widthPercent":38}},"typographyStyle":"bold_geometric_sans","headlineScale":"large","brandScale":"small","sloganScale":"medium","imageStyle":"editorial_photography","backgroundTreatment":"solid","borderTreatment":"none","recurringGraphicDevice":"...","recurringGraphicDeviceRule":"...","shapeLanguage":"...","framingRule":"...","spacingRule":"..."}}
 Rules:
 - All five palette colors required as #RRGGBB hex.
 - Use only valid layout, placement, typography, image, background, and border enum values.
 - recurringGraphicDevice must be visibly repeatable across ads.
+- recurringGraphicDevice must remain a campaign composition device, not a product logo or packaging brand mark.
 - Do not return ads, slogan, physical generator, or strategy fields.
+- {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
 STAGE_SERIES_ADS_SYSTEM = f"""
@@ -134,6 +138,8 @@ Rules:
 - Do not translate product or brand names unnecessarily.
 - Do not invent unsupported claims.
 - Do not return brand slogan, physical generator, or graphic generator.
+- Product identification in rendered ads must use the written product name as plain text only; never request a logo or brand symbol.
+- {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
 
@@ -225,8 +231,9 @@ def build_product_name_resolution_user_prompt(
     brand_guidelines: Optional[Dict[str, Any]] = None,
 ) -> str:
     guidelines = ""
-    if brand_guidelines:
-        guidelines = "\nBrand guidelines:\n" + json.dumps(brand_guidelines, ensure_ascii=False, indent=2)
+    safe_guidelines = brand_guidelines_for_prompt(brand_guidelines)
+    if safe_guidelines:
+        guidelines = "\nBrand guidelines:\n" + json.dumps(safe_guidelines, ensure_ascii=False, indent=2)
     language_rule = (
         "The generated name must be English (Latin letters only)."
         if detected_language == "en"
@@ -263,8 +270,9 @@ def build_brand_physical_user_prompt(
     brand_guidelines: Optional[Dict[str, Any]] = None,
 ) -> str:
     guidelines = ""
-    if brand_guidelines:
-        guidelines = "\nBrand guidelines:\n" + json.dumps(brand_guidelines, ensure_ascii=False, indent=2)
+    safe_guidelines = brand_guidelines_for_prompt(brand_guidelines)
+    if safe_guidelines:
+        guidelines = "\nBrand guidelines:\n" + json.dumps(safe_guidelines, ensure_ascii=False, indent=2)
     return (
         f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
         f"Description: {product_description}\n"

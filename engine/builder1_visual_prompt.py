@@ -3,8 +3,7 @@ Builder1 campaign-series visual prompt builder (active production).
 """
 from __future__ import annotations
 
-from typing import Optional
-
+from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 
 MEDIUM_PROHIBITION = (
@@ -33,6 +32,7 @@ def build_campaign_graphic_identity_block(series_plan: Builder1SeriesPlan) -> st
             f"Shape language: {g.shape_language}. Framing rule: {g.framing_rule}. Spacing rule: {g.spacing_rule}.",
             f"Recurring graphic device: {g.recurring_graphic_device}.",
             f"Recurring device rule (must be visibly present in this ad): {g.recurring_graphic_device_rule}.",
+            "The recurring graphic device is a campaign composition element only — not a product logo, packaging brand mark, or symbol beside the product name.",
             "Render the recurring graphic device prominently. Do not omit it.",
             "=== END CAMPAIGN GRAPHIC IDENTITY ===",
         ]
@@ -55,6 +55,8 @@ def build_text_to_render_block(
             f'Brand slogan:\n"{series_plan.brand_slogan}"',
             headline_line,
             "Rules:",
+            "- Render the product or brand name as plain readable text only.",
+            "- Do not accompany the product name with any symbol, icon, emblem, monogram, badge, seal, or logo mark.",
             "- Render these strings exactly as written.",
             "- Do not translate, paraphrase, replace words, or invent additional copy.",
             "- Preserve the original language, punctuation, and word order.",
@@ -98,6 +100,7 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
     parts = [
         "Create a complete finished advertisement that fills the entire image frame edge to edge.",
         f"Format: {series_plan.format}. The output is the final ad itself, not a background for later overlay.",
+        BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK,
         build_campaign_graphic_identity_block(series_plan),
         _campaign_strategy_block(series_plan),
         _ad_execution_block(series_plan, ad_plan),

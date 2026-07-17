@@ -15,6 +15,7 @@ from engine.builder1_marketing_copy import (
     normalize_marketing_text,
     validate_marketing_text_50_words,
 )
+from engine.builder1_no_logo import public_payload_without_logo_assets
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
 
 MAX_ZIP_IMAGE_BYTES = 12 * 1024 * 1024
@@ -116,6 +117,7 @@ def _normalize_ads(ads: object) -> List[Dict[str, Any]]:
 
 def build_builder1_single_ad_zip_bytes(payload: Dict[str, Any]) -> Tuple[bytes, str]:
     """Build a single-ad ZIP and return (bytes, download_filename)."""
+    payload = public_payload_without_logo_assets(payload)
     scope = str(payload.get("scope") or "").strip().lower()
     if scope != "single_ad":
         raise ValueError("invalid_zip_scope")
@@ -156,6 +158,7 @@ def build_builder1_zip_bytes(payload: Dict[str, Any]) -> bytes:
     Build ZIP with ad-XX.jpg, ad-XX.txt, and campaign.txt for a full campaign series.
     Backward-compatible full-campaign ZIP support.
     """
+    payload = public_payload_without_logo_assets(payload)
     scope = str(payload.get("scope") or "campaign").strip().lower()
     if scope == "single_ad":
         zip_bytes, _ = build_builder1_single_ad_zip_bytes(payload)

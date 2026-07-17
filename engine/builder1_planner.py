@@ -67,6 +67,7 @@ from engine.builder1_strategy_judge import (
     is_client_boundary_rejection,
     is_marketing_language_rejection,
     is_marketing_word_count_rejection,
+    is_no_logo_rejection_code,
     judge_builder1_strategy,
 )
 
@@ -377,6 +378,15 @@ def _resolve_builder1_product_name(
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
     if is_marketing_word_count_rejection(codes) or is_marketing_language_rejection(codes):
         return "marketing_text"
+    if is_no_logo_rejection_code(codes):
+        if any(
+            code in codes
+            for code in ("supplied_logo_displayed", "product_name_not_text_only")
+        ):
+            return "brand_physical"
+        if "packaging_contains_brand_mark" in codes:
+            return "series_ads"
+        return "graphic_system"
     if is_client_boundary_rejection(codes):
         joined = " ".join(codes).lower()
         if "unsupported_future_capability" in joined or "marketing" in joined:
