@@ -3,24 +3,39 @@ Builder1 campaign-series planning entry point (staged pipeline).
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import uuid
-from typing import Any, Callable, List, Optional, TypeAlias
+from typing import Any, Callable, Dict, List, Optional, TypeAlias
 
+from engine.builder1_final_stages import (
+    BrandPhysicalOutput,
+    SeriesAdsOutput,
+    assemble_builder1_campaign,
+    parse_brand_physical_output,
+    parse_graphic_system_output,
+    parse_series_ads_output,
+)
 from engine.builder1_input_normalizer import normalize_builder1_input
-from engine.builder1_plan_spec import Builder1SeriesPlan
+from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_to_store_dict
 from engine.builder1_planning_contract import (
+    STAGE_BRAND_PHYSICAL_SYSTEM,
     STAGE_CONCEPTUAL_SCAN_SYSTEM,
     STAGE_CONCEPTUAL_SELECT_SYSTEM,
-    STAGE_FINAL_CAMPAIGN_SYSTEM,
+    STAGE_GRAPHIC_SYSTEM_SYSTEM,
+    STAGE_SERIES_ADS_SYSTEM,
     STAGE_STRATEGY_SCAN_SYSTEM,
     STAGE_STRATEGY_SELECT_SYSTEM,
+    build_brand_physical_repair_prompt,
+    build_brand_physical_user_prompt,
     build_conceptual_scan_repair_prompt,
     build_conceptual_scan_user_prompt,
     build_conceptual_select_user_prompt,
-    build_final_campaign_repair_prompt,
-    build_final_campaign_user_prompt,
+    build_graphic_system_repair_prompt,
+    build_graphic_system_user_prompt,
+    build_series_ads_repair_prompt,
+    build_series_ads_user_prompt,
     build_strategy_scan_repair_prompt,
     build_strategy_scan_user_prompt,
     build_strategy_select_user_prompt,
@@ -28,20 +43,17 @@ from engine.builder1_planning_contract import (
 )
 from engine.builder1_staged_parsers import (
     StageParseError,
-    assemble_builder1_series_plan,
     detect_brief_language,
     parse_conceptual_scan,
     parse_conceptual_selection,
-    parse_final_campaign_output,
     parse_strategy_scan,
     parse_strategy_selection,
 )
 from engine.builder1_strategy_judge import judge_builder1_strategy
-from engine.builder1_plan_spec import series_plan_to_store_dict
 
 logger = logging.getLogger(__name__)
 
-PlanningModelCaller: TypeAlias = Callable[[str, str], object]
+PlanningModelCaller: TypeAlias = Callable[..., object]
 
 
 class Builder1PlannerError(RuntimeError):
@@ -60,12 +72,77 @@ def _conceptual_to_dict(c: Any) -> dict[str, str]:
     }
 
 
+def _brand_physical_to_dict(bp: BrandPhysicalOutput) -> Dict[str, Any]:
+    return {
+        "productNameResolved": bp.product_name_resolved,
+        "brandSlogan": bp.brand_slogan,
+        "sloganDerivation": bp.slogan_derivation,
+        "sloganAction": bp.slogan_action,
+        "physicalGenerator": bp.physical_generator,
+        "physicalGeneratorNaturalPurpose": bp.physical_generator_natural_purpose,
+        "physicalGeneratorCampaignRole": bp.physical_generator_campaign_role,
+        "mediumParticipates": bp.medium_participates,
+        "mediumRole": bp.medium_role,
+        "campaignRationale": bp.campaign_rationale,
+    }
+
+
+def _graphic_to_dict(graphic: Any) -> Dict[str, Any]:
+    return {
+        "palette": {
+            "dominant": graphic.palette.dominant,
+            "secondary": graphic.palette.secondary,
+            "accent": graphic.palette.accent,
+            "background": graphic.palette.background,
+            "text": graphic.palette.text,
+        },
+        "layoutTemplate": graphic.layout_template,
+        "headlinePlacement": graphic.headline_placement,
+        "headlineAlignment": graphic.headline_alignment,
+        "headlineMaxWidthPercent": graphic.headline_max_width_percent,
+        "brandBlockPlacement": graphic.brand_block_placement,
+        "sloganPlacement": graphic.slogan_placement,
+        "copySafeArea": {
+            "side": graphic.copy_safe_area.side,
+            "widthPercent": graphic.copy_safe_area.width_percent,
+        },
+        "typographyStyle": graphic.typography_style,
+        "headlineScale": graphic.headline_scale,
+        "brandScale": graphic.brand_scale,
+        "sloganScale": graphic.slogan_scale,
+        "imageStyle": graphic.image_style,
+        "backgroundTreatment": graphic.background_treatment,
+        "borderTreatment": graphic.border_treatment,
+        "recurringGraphicDevice": graphic.recurring_graphic_device,
+        "recurringGraphicDeviceRule": graphic.recurring_graphic_device_rule,
+        "shapeLanguage": graphic.shape_language,
+        "framingRule": graphic.framing_rule,
+        "spacingRule": graphic.spacing_rule,
+    }
+
+
 def _raw_to_text(raw: object) -> str:
     if isinstance(raw, str):
         return raw
     if isinstance(raw, dict):
         return json.dumps(raw, ensure_ascii=False)
     return str(raw)
+
+
+def _invoke_model_caller(
+    model_caller: PlanningModelCaller,
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    stage: Optional[str] = None,
+) -> object:
+    try:
+        sig = inspect.signature(model_caller)
+        if "stage" in sig.parameters:
+            return model_caller(system_prompt, user_prompt, stage=stage)
+    except (TypeError, ValueError):
+        pass
+    return model_caller(system_prompt, user_prompt)
 
 
 def _run_stage(
@@ -83,7 +160,9 @@ def _run_stage(
     for attempt in (1, 2):
         logger.info("BUILDER1_STAGE_START stage=%s attempt=%s", stage, attempt)
         try:
-            raw = model_caller(system_prompt, current_prompt)
+            raw = _invoke_model_caller(
+                model_caller, system_prompt, current_prompt, stage=stage
+            )
             last_raw = _raw_to_text(raw)
             result = parse_fn(raw)
             logger.info("BUILDER1_STAGE_PARSE_OK stage=%s", stage)
@@ -95,7 +174,9 @@ def _run_stage(
                 logger.info("BUILDER1_STAGE_REPAIR stage=%s", stage)
                 current_prompt = repair_builder(last_raw, last_reasons)
                 try:
-                    raw = model_caller(system_prompt, current_prompt)
+                    raw = _invoke_model_caller(
+                        model_caller, system_prompt, current_prompt, stage=stage
+                    )
                     last_raw = _raw_to_text(raw)
                     result = parse_fn(raw)
                     logger.info("BUILDER1_STAGE_PARSE_OK stage=%s after_repair", stage)
@@ -111,6 +192,20 @@ def _run_stage(
                 raise Builder1PlannerError(f"{stage}_failed") from exc
             logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
     raise Builder1PlannerError(f"{stage}_failed: {';'.join(last_reasons)}")
+
+
+def _judge_repair_stage(codes: List[str]) -> Optional[str]:
+    joined = " ".join(codes).lower()
+    if any(k in joined for k in ("graphic", "palette", "layout", "typography", "device")):
+        return "graphic_system"
+    if any(k in joined for k in ("series", "ad_", "ads", "headline", "execution", "contribution")):
+        return "series_ads"
+    if any(
+        k in joined
+        for k in ("slogan", "physical", "medium", "rationale", "brand", "unsupported_evidence")
+    ):
+        return "brand_physical"
+    return "series_ads"
 
 
 def plan_builder1(
@@ -146,7 +241,6 @@ def plan_builder1(
         detected_language,
     )
 
-    # Stage 1 — strategy scan
     strategy_candidates = _run_stage(
         "strategy_scan",
         model_caller,
@@ -164,7 +258,6 @@ def plan_builder1(
         ),
     )
 
-    # Stage 2 — strategy selection
     cand_dicts = [
         {
             "id": c.id,
@@ -179,24 +272,16 @@ def plan_builder1(
     ]
 
     def _parse_selection(raw: object):
-        sel, selected = parse_strategy_selection(raw, strategy_candidates)
-        return sel, selected
+        return parse_strategy_selection(raw, strategy_candidates)
 
-    selection_result = _run_stage(
+    strategy_selection, selected_strategy = _run_stage(
         "strategy_selection",
         model_caller,
         STAGE_STRATEGY_SELECT_SYSTEM,
         build_strategy_select_user_prompt(cand_dicts, exploration_seed),
         _parse_selection,
     )
-    strategy_selection, selected_strategy = selection_result
-    logger.info(
-        "BUILDER1_STRATEGY_SELECTED id=%s family=%s",
-        selected_strategy.id,
-        strategy_selection.strategy_family,
-    )
 
-    # Stage 3 — conceptual scan
     conceptual_candidates = _run_stage(
         "conceptual_scan",
         model_caller,
@@ -213,7 +298,6 @@ def plan_builder1(
         ),
     )
 
-    # Stage 4 — conceptual selection
     conc_dicts = [
         {
             "id": c.id,
@@ -229,62 +313,77 @@ def plan_builder1(
     ]
 
     def _parse_conc_selection(raw: object):
-        sel, selected = parse_conceptual_selection(raw, conceptual_candidates)
-        return sel, selected
+        return parse_conceptual_selection(raw, conceptual_candidates)
 
-    conc_selection_result = _run_stage(
+    _, selected_conceptual = _run_stage(
         "conceptual_selection",
         model_caller,
         STAGE_CONCEPTUAL_SELECT_SYSTEM,
         build_conceptual_select_user_prompt(conc_dicts),
         _parse_conc_selection,
     )
-    _, selected_conceptual = conc_selection_result
-
     conceptual_fixed = _conceptual_to_dict(selected_conceptual)
 
-    # Stage 5 — final campaign construction
-    def _parse_final(raw: object):
-        creative, reasons = parse_final_campaign_output(
-            raw, expected_ad_count=normalized.ad_count
-        )
-        if reasons:
-            raise StageParseError("final_campaign", reasons)
-        return creative
+    brand_physical = _run_stage(
+        "brand_physical",
+        model_caller,
+        STAGE_BRAND_PHYSICAL_SYSTEM,
+        build_brand_physical_user_prompt(
+            product_name=normalized.product_name,
+            product_description=normalized.product_description,
+            detected_language=detected_language,
+            format_value=normalized.format,
+            strategic_problem=selected_strategy.strategic_problem,
+            relative_advantage=selected_strategy.relative_advantage,
+            conceptual=conceptual_fixed,
+            brand_guidelines=brand_guidelines,
+        ),
+        parse_brand_physical_output,
+        repair_builder=lambda broken, reasons: build_brand_physical_repair_prompt(
+            broken_json=broken, reasons=reasons
+        ),
+    )
+    brand_physical_dict = _brand_physical_to_dict(brand_physical)
 
-    final_user = build_final_campaign_user_prompt(
-        product_name=normalized.product_name,
-        product_description=normalized.product_description,
-        ad_count=normalized.ad_count,
-        format_value=normalized.format,
-        strategic_problem=selected_strategy.strategic_problem,
-        relative_advantage=selected_strategy.relative_advantage,
-        brief_support=selected_strategy.brief_support,
-        advantage_source=selected_strategy.advantage_source,
-        conceptual=conceptual_fixed,
-        brand_guidelines=brand_guidelines,
+    graphic = _run_stage(
+        "graphic_system",
+        model_caller,
+        STAGE_GRAPHIC_SYSTEM_SYSTEM,
+        build_graphic_system_user_prompt(
+            product_description=normalized.product_description,
+            detected_language=detected_language,
+            relative_advantage=selected_strategy.relative_advantage,
+            conceptual=conceptual_fixed,
+            brand_physical=brand_physical_dict,
+            format_value=normalized.format,
+        ),
+        parse_graphic_system_output,
+        repair_builder=lambda broken, reasons: build_graphic_system_repair_prompt(
+            broken_json=broken, reasons=reasons
+        ),
+    )
+    graphic_dict = _graphic_to_dict(graphic)
+
+    series_ads = _run_stage(
+        "series_ads",
+        model_caller,
+        STAGE_SERIES_ADS_SYSTEM,
+        build_series_ads_user_prompt(
+            ad_count=normalized.ad_count,
+            format_value=normalized.format,
+            strategic_problem=selected_strategy.strategic_problem,
+            relative_advantage=selected_strategy.relative_advantage,
+            conceptual=conceptual_fixed,
+            brand_physical=brand_physical_dict,
+            graphic_generator=graphic_dict,
+        ),
+        lambda raw: parse_series_ads_output(raw, expected_ad_count=normalized.ad_count),
+        repair_builder=lambda broken, reasons: build_series_ads_repair_prompt(
+            broken_json=broken, reasons=reasons, ad_count=normalized.ad_count
+        ),
     )
 
-    try:
-        final_creative = _run_stage(
-            "final_campaign",
-            model_caller,
-            STAGE_FINAL_CAMPAIGN_SYSTEM,
-            final_user,
-            _parse_final,
-            repair_builder=lambda broken, reasons: build_final_campaign_repair_prompt(
-                broken_json=broken,
-                reasons=reasons,
-                ad_count=normalized.ad_count,
-                strategic_problem=selected_strategy.strategic_problem,
-                relative_advantage=selected_strategy.relative_advantage,
-                conceptual=conceptual_fixed,
-            ),
-        )
-    except Builder1PlannerError:
-        raise
-
-    plan = assemble_builder1_series_plan(
+    plan = assemble_builder1_campaign(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
         format_value=normalized.format,
@@ -294,30 +393,65 @@ def plan_builder1(
         strategy=selected_strategy,
         strategy_selection=strategy_selection,
         conceptual=selected_conceptual,
-        final_creative=final_creative,
+        brand_physical=brand_physical,
+        graphic=graphic,
+        series_ads=series_ads,
     )
 
-    # Stage 6 — judge (content quality only)
-    plan_dict = series_plan_to_store_dict(plan)
     judge_result = judge_builder1_strategy(
         product_description=normalized.product_description,
-        plan_dict=plan_dict,
+        plan_dict=series_plan_to_store_dict(plan),
         model_caller=model_caller,
     )
     if not judge_result.passed:
-        logger.info("BUILDER1_STAGE_REPAIR stage=final_campaign_judge reasons=%s", judge_result.rejection_reason_codes)
-        repair_prompt = build_final_campaign_repair_prompt(
-            broken_json=json.dumps(final_creative, ensure_ascii=False),
-            reasons=judge_result.rejection_reason_codes,
-            ad_count=normalized.ad_count,
-            strategic_problem=selected_strategy.strategic_problem,
-            relative_advantage=selected_strategy.relative_advantage,
-            conceptual=conceptual_fixed,
+        repair_stage = _judge_repair_stage(judge_result.rejection_reason_codes)
+        logger.info(
+            "BUILDER1_STAGE_REPAIR stage=%s_judge reasons=%s",
+            repair_stage,
+            judge_result.rejection_reason_codes,
         )
         try:
-            raw = model_caller(STAGE_FINAL_CAMPAIGN_SYSTEM, repair_prompt)
-            final_creative = _parse_final(raw)
-            plan = assemble_builder1_series_plan(
+            if repair_stage == "brand_physical":
+                brand_physical = _run_stage(
+                    "brand_physical",
+                    model_caller,
+                    STAGE_BRAND_PHYSICAL_SYSTEM,
+                    build_brand_physical_repair_prompt(
+                        broken_json=json.dumps(brand_physical_dict, ensure_ascii=False),
+                        reasons=judge_result.rejection_reason_codes,
+                    ),
+                    parse_brand_physical_output,
+                )
+                brand_physical_dict = _brand_physical_to_dict(brand_physical)
+            elif repair_stage == "graphic_system":
+                graphic = _run_stage(
+                    "graphic_system",
+                    model_caller,
+                    STAGE_GRAPHIC_SYSTEM_SYSTEM,
+                    build_graphic_system_repair_prompt(
+                        broken_json=json.dumps(graphic_dict, ensure_ascii=False),
+                        reasons=judge_result.rejection_reason_codes,
+                    ),
+                    parse_graphic_system_output,
+                )
+                graphic_dict = _graphic_to_dict(graphic)
+            else:
+                series_ads = _run_stage(
+                    "series_ads",
+                    model_caller,
+                    STAGE_SERIES_ADS_SYSTEM,
+                    build_series_ads_repair_prompt(
+                        broken_json=json.dumps(
+                            {"seriesGenerator": series_ads.series_generator, "ads": series_ads.ads},
+                            ensure_ascii=False,
+                        ),
+                        reasons=judge_result.rejection_reason_codes,
+                        ad_count=normalized.ad_count,
+                    ),
+                    lambda raw: parse_series_ads_output(raw, expected_ad_count=normalized.ad_count),
+                )
+
+            plan = assemble_builder1_campaign(
                 product_name=normalized.product_name,
                 product_description=normalized.product_description,
                 format_value=normalized.format,
@@ -327,7 +461,9 @@ def plan_builder1(
                 strategy=selected_strategy,
                 strategy_selection=strategy_selection,
                 conceptual=selected_conceptual,
-                final_creative=final_creative,
+                brand_physical=brand_physical,
+                graphic=graphic,
+                series_ads=series_ads,
             )
             judge2 = judge_builder1_strategy(
                 product_description=normalized.product_description,
@@ -335,11 +471,11 @@ def plan_builder1(
                 model_caller=model_caller,
             )
             if not judge2.passed:
-                raise Builder1PlannerError("strategy_judge_failed")
+                raise Builder1PlannerError("final_judge_failed")
         except Builder1PlannerError:
             raise
         except Exception as exc:
-            raise Builder1PlannerError("strategy_judge_failed") from exc
+            raise Builder1PlannerError("final_judge_failed") from exc
 
     logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", plan.ad_count)
     return plan

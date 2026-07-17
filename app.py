@@ -406,7 +406,12 @@ def _parse_builder1_o3_json_text(raw: str) -> dict[str, Any]:
     return obj
 
 
-def _o3_pro_planning_model_caller(system_prompt: str, user_prompt: str) -> object:
+def _o3_pro_planning_model_caller(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    stage: str | None = None,
+) -> object:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise ValueError("openai_unconfigured")
@@ -415,14 +420,16 @@ def _o3_pro_planning_model_caller(system_prompt: str, user_prompt: str) -> objec
         timeout=httpx.Timeout(150.0),
         max_retries=0,
     )
-    combined = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
-    response = client.responses.create(
+    from engine.builder1_planning_model import call_planning_model
+
+    return call_planning_model(
+        client,
         model="o3-pro",
-        input=combined,
-        reasoning={"effort": "low"},
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        stage=stage,
+        parse_json_text=_parse_builder1_o3_json_text,
     )
-    out_text = getattr(response, "output_text", None) or ""
-    return _parse_builder1_o3_json_text(out_text)
 
 
 @app.route("/api/builder1-plan-demo", methods=["GET"])

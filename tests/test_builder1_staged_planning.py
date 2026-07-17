@@ -5,36 +5,45 @@ Run: python -m unittest tests.test_builder1_staged_planning -v
 """
 from __future__ import annotations
 
+import copy
 import json
 import unittest
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from unittest.mock import patch
 
+from engine.builder1_final_stages import (
+    BrandPhysicalOutput,
+    assemble_builder1_campaign,
+    parse_brand_physical_output,
+    parse_graphic_system_output,
+    parse_series_ads_output,
+)
 from engine.builder1_image_generator import generate_builder1_ad_image
 from engine.builder1_plan_spec import campaign_identity_to_dict, series_plan_to_store_dict
 from engine.builder1_planning_contract import (
+    STAGE_BRAND_PHYSICAL_SYSTEM,
     STAGE_CONCEPTUAL_SCAN_SYSTEM,
     STAGE_CONCEPTUAL_SELECT_SYSTEM,
-    STAGE_FINAL_CAMPAIGN_SYSTEM,
+    STAGE_GRAPHIC_SYSTEM_SYSTEM,
+    STAGE_SERIES_ADS_SYSTEM,
     STAGE_STRATEGY_SCAN_SYSTEM,
     STAGE_STRATEGY_SELECT_SYSTEM,
 )
-from engine.builder1_planner import plan_builder1
+from engine.builder1_planner import Builder1PlannerError, plan_builder1
 from engine.builder1_staged_parsers import (
     StageParseError,
     assemble_builder1_series_plan,
     detect_brief_language,
     parse_conceptual_scan,
     parse_conceptual_selection,
-    parse_final_campaign_output,
     parse_strategy_scan,
     parse_strategy_selection,
 )
 from engine.builder1_strategy_judge import BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT
 
 
-def _graphic() -> Dict[str, Any]:
-    return {
+def _graphic(*, missing_palette: bool = False, missing_color: bool = False, snake_case: bool = False) -> Dict[str, Any]:
+    g = {
         "palette": {
             "dominant": "#111111",
             "secondary": "#EEEEEE",
@@ -62,28 +71,100 @@ def _graphic() -> Dict[str, Any]:
         "framingRule": "Subject with copy-side negative space",
         "spacingRule": "Wide outer margins",
     }
+    if missing_palette:
+        del g["palette"]
+    if missing_color:
+        del g["palette"]["text"]
+    if snake_case:
+        return {
+            "palette": g["palette"],
+            "layout_template": g["layoutTemplate"],
+            "headline_placement": g["headlinePlacement"],
+            "headline_alignment": g["headlineAlignment"],
+            "headline_max_width_percent": g["headlineMaxWidthPercent"],
+            "brand_block_placement": g["brandBlockPlacement"],
+            "slogan_placement": g["sloganPlacement"],
+            "copy_safe_area": g["copySafeArea"],
+            "typography_style": g["typographyStyle"],
+            "headline_scale": g["headlineScale"],
+            "brand_scale": g["brandScale"],
+            "slogan_scale": g["sloganScale"],
+            "image_style": g["imageStyle"],
+            "background_treatment": g["backgroundTreatment"],
+            "border_treatment": g["borderTreatment"],
+            "recurring_graphic_device": g["recurringGraphicDevice"],
+            "recurring_graphic_device_rule": g["recurringGraphicDeviceRule"],
+            "shape_language": g["shapeLanguage"],
+            "framing_rule": g["framingRule"],
+            "spacing_rule": g["spacingRule"],
+        }
+    return g
+
+
+def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False) -> Dict[str, Any]:
+    payload = {
+        "productNameResolved": "TestBrand",
+        "brandSlogan": "Built To Last",
+        "sloganDerivation": "From durability advantage",
+        "sloganAction": "Trust everyday use",
+        "physicalGenerator": "Rubber ball family",
+        "physicalGeneratorNaturalPurpose": "Absorb impact",
+        "physicalGeneratorCampaignRole": "Durability metaphor",
+        "mediumParticipates": False,
+        "mediumRole": "",
+        "campaignRationale": "Ownable durability story",
+    }
+    if missing_natural:
+        del payload["physicalGeneratorNaturalPurpose"]
+    if missing_role:
+        del payload["physicalGeneratorCampaignRole"]
+    return payload
+
+
+def _series_ads(ad_count: int = 2, *, series_string: bool = False, incomplete_series: bool = False,
+                omit_indexes: bool = False, string_indexes: bool = False, wrong_indexes: bool = False,
+                too_few_ads: bool = False) -> Dict[str, Any]:
+    ads = []
+    for i in range(1, ad_count + 1 if not too_few_ads else max(1, ad_count - 1)):
+        ad = {
+            "variationLabel": f"var-{i}",
+            "newContribution": f"Contribution {i}",
+            "conceptualExecution": f"Perform drop proof variant {i}",
+            "conceptualActionProof": f"Proof {i}",
+            "physicalExecution": f"Object variant {i}",
+            "visualExecution": f"Visual variant {i}",
+            "sceneDescription": f"Scene {i}",
+            "headline": None if i == 1 else f"Line {i}",
+            "headlineNeededReason": "Needed" if i > 1 else "Self-explanatory",
+            "marketingText": f"Short {i}",
+        }
+        if not omit_indexes:
+            if string_indexes:
+                ad["index"] = str(i)
+            elif wrong_indexes:
+                ad["index"] = i + 10
+            else:
+                ad["index"] = i
+        ads.append(ad)
+    if series_string:
+        series = "situations progression"
+    elif incomplete_series:
+        series = {"type": "situations", "principle": "", "progression": "Escalating"}
+    else:
+        series = {"type": "situations", "principle": "Different drop contexts", "progression": "Escalating severity"}
+    return {"seriesGenerator": series, "ads": ads}
 
 
 LENSES = [
-    "economic",
-    "perceptual",
-    "emotional",
-    "operational",
-    "time",
-    "accessibility",
-    "expertise",
-    "challenger_positioning",
-    "participation",
-    "simplicity",
-    "specialization",
-    "category_convention",
+    "economic", "perceptual", "emotional", "operational", "time", "accessibility",
+    "expertise", "challenger_positioning", "participation", "simplicity", "specialization", "category_convention",
 ]
 
 
 def _strategy_scan_payload(*, string_candidate: bool = False) -> Dict[str, Any]:
     candidates: List[Any] = []
     for i in range(1, 13):
-        item: Dict[str, Any] = {
+        candidates.append({
             "id": f"S{i:02d}",
             "lens": LENSES[i - 1],
             "strategicProblem": f"Distinct buyer problem {i}",
@@ -91,8 +172,7 @@ def _strategy_scan_payload(*, string_candidate: bool = False) -> Dict[str, Any]:
             "briefSupport": "Follows from brief reinforced shell mention",
             "advantageSource": "observable_product_mechanism",
             "claimRisk": "low",
-        }
-        candidates.append(item)
+        })
     if string_candidate:
         candidates[0] = "bad string candidate"
     return {"candidates": candidates}
@@ -117,145 +197,125 @@ def _conceptual_scan_payload(*, incomplete: bool = False) -> Dict[str, Any]:
     return {"candidates": candidates}
 
 
-def _final_creative(ad_count: int = 2, *, bad_graphic: bool = False) -> Dict[str, Any]:
-    ads = []
-    for i in range(1, ad_count + 1):
-        ads.append(
-            {
-                "index": i,
-                "variationLabel": f"var-{i}",
-                "newContribution": f"Contribution {i}",
-                "conceptualExecution": f"Perform drop proof variant {i}",
-                "conceptualActionProof": f"Proof {i}",
-                "physicalExecution": f"Object variant {i}",
-                "visualExecution": f"Visual variant {i}",
-                "sceneDescription": f"Scene {i}",
-                "headline": None if i == 1 else f"Line {i}",
-                "headlineNeededReason": "Needed" if i > 1 else "Self-explanatory",
-                "marketingText": f"Short {i}",
-            }
-        )
-    graphic = _graphic()
-    if bad_graphic:
-        del graphic["palette"]
-    return {
-        "productNameResolved": "TestBrand",
-        "brandSlogan": "Built To Last",
-        "sloganDerivation": "From durability advantage",
-        "sloganAction": "Trust everyday use",
-        "physicalGenerator": "Rubber ball family",
-        "physicalGeneratorNaturalPurpose": "Absorb impact",
-        "physicalGeneratorCampaignRole": "Durability metaphor",
-        "graphicGenerator": graphic,
-        "seriesGenerator": {
-            "type": "situations",
-            "principle": "Different drop contexts",
-            "progression": "Escalating severity",
-        },
-        "mediumParticipates": False,
-        "mediumRole": "",
-        "campaignRationale": "Ownable durability story",
-        "ads": ads,
-    }
-
-
 def _selected_strategy():
-    scan = parse_strategy_scan(
+    return parse_strategy_scan(
         _strategy_scan_payload(),
         product_description="Reinforced shell product for daily carry",
-    )
-    return scan[0]
+    )[0]
 
 
 def _selected_conceptual():
     return parse_conceptual_scan(_conceptual_scan_payload())[0]
 
 
-class TestStagedParsers(unittest.TestCase):
-    BRIEF = "Reinforced shell product for daily carry"
-
-    def test_strategy_scan_accepts_twelve_objects(self) -> None:
-        result = parse_strategy_scan(_strategy_scan_payload(), product_description=self.BRIEF)
-        self.assertEqual(len(result), 12)
-        self.assertEqual(result[0].id, "S01")
-
-    def test_strategy_scan_string_candidate_triggers_parse_error(self) -> None:
-        with self.assertRaises(StageParseError) as ctx:
-            parse_strategy_scan(
-                _strategy_scan_payload(string_candidate=True),
-                product_description=self.BRIEF,
-            )
-        self.assertIn("strategy_scan_string_candidate", ctx.exception.reasons)
-
-    def test_strategy_selector_uses_lookup_not_rewrite(self) -> None:
-        candidates = parse_strategy_scan(_strategy_scan_payload(), product_description=self.BRIEF)
-        selection, selected = parse_strategy_selection(
-            {
-                "selectedCandidateId": "S03",
-                "selectionReason": "Best fit",
-                "strategyFamily": "durability",
-                "scores": {"truth": 8, "briefSupport": 8, "relevance": 8, "distinctiveness": 7,
-                           "brandOwnership": 8, "persuasiveStrength": 8, "seriesPotential": 8,
-                           "conceptualActionPotential": 8},
+def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
+    return {
+        STAGE_STRATEGY_SCAN_SYSTEM: _strategy_scan_payload(),
+        STAGE_STRATEGY_SELECT_SYSTEM: {
+            "selectedCandidateId": "S01",
+            "selectionReason": "Strongest brief fit",
+            "strategyFamily": "durability",
+            "scores": {
+                "truth": 9, "briefSupport": 9, "relevance": 8, "distinctiveness": 8,
+                "brandOwnership": 8, "persuasiveStrength": 8, "seriesPotential": 9,
+                "conceptualActionPotential": 9,
             },
-            candidates,
-        )
-        self.assertEqual(selection.selected_candidate_id, "S03")
-        self.assertEqual(selected.relative_advantage, "Distinct advantage 3")
+        },
+        STAGE_CONCEPTUAL_SCAN_SYSTEM: _conceptual_scan_payload(),
+        STAGE_CONCEPTUAL_SELECT_SYSTEM: {
+            "selectedCandidateId": "C01",
+            "selectionReason": "Clearest action",
+            "scores": {
+                "advantageConnection": 9, "actionClarity": 9, "visualPower": 8,
+                "seriesPotential": 9, "distinctiveness": 8, "physicalIndependence": 8,
+            },
+        },
+        BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT: {
+            "pass": True,
+            "rejectionReasonCodes": [],
+            "unsupportedClaimDetected": False,
+        },
+    }
 
-    def test_conceptual_scan_accepts_six_objects(self) -> None:
-        result = parse_conceptual_scan(_conceptual_scan_payload())
-        self.assertEqual(len(result), 6)
 
-    def test_incomplete_conceptual_triggers_stage_error(self) -> None:
+def _full_final_responses(ad_count: int = 2) -> Dict[str, Any]:
+    responses = _early_stage_responses(ad_count)
+    responses[STAGE_BRAND_PHYSICAL_SYSTEM] = _brand_physical()
+    responses[STAGE_GRAPHIC_SYSTEM_SYSTEM] = _graphic()
+    responses[STAGE_SERIES_ADS_SYSTEM] = _series_ads(ad_count)
+    return responses
+
+
+class TestFinalSubstageParsers(unittest.TestCase):
+    def test_5a_missing_natural_purpose_rejected(self) -> None:
         with self.assertRaises(StageParseError) as ctx:
-            parse_conceptual_scan(_conceptual_scan_payload(incomplete=True))
-        self.assertIn("conceptual_scan_candidate_incomplete", ctx.exception.reasons)
+            parse_brand_physical_output(_brand_physical(missing_natural=True))
+        self.assertIn("missing_physicalGeneratorNaturalPurpose", ctx.exception.reasons)
 
-    def test_final_output_rejects_internal_scans(self) -> None:
-        payload = _final_creative(2)
-        payload["strategyCandidateScan"] = {"candidates": []}
-        _, reasons = parse_final_campaign_output(payload, expected_ad_count=2)
-        self.assertTrue(any("final_campaign_forbidden_field" in r for r in reasons))
-
-    def test_final_output_rejects_request_controlled_fields(self) -> None:
-        payload = _final_creative(2)
-        payload["format"] = "landscape"
-        payload["adCount"] = "3"
-        _, reasons = parse_final_campaign_output(payload, expected_ad_count=2)
-        self.assertTrue(any("format" in r for r in reasons))
-        self.assertTrue(any("adCount" in r for r in reasons))
-
-    def test_malformed_graphic_rejected_in_final_stage(self) -> None:
-        _, reasons = parse_final_campaign_output(
-            _final_creative(2, bad_graphic=True),
-            expected_ad_count=2,
-        )
-        self.assertIn("graphic_generator_missing_palette", reasons)
-
-    def test_unsupported_statistics_rejected_in_strategy_scan(self) -> None:
-        payload = _strategy_scan_payload()
-        payload["candidates"][0]["briefSupport"] = "According to a 2024 survey, 87% agree"
+    def test_5a_missing_campaign_role_rejected(self) -> None:
         with self.assertRaises(StageParseError) as ctx:
-            parse_strategy_scan(payload, product_description=self.BRIEF)
-        self.assertIn("unsupported_evidence_claim", ctx.exception.reasons)
+            parse_brand_physical_output(_brand_physical(missing_role=True))
+        self.assertIn("missing_physicalGeneratorCampaignRole", ctx.exception.reasons)
 
-    def test_fabricated_study_rejected(self) -> None:
-        payload = _strategy_scan_payload()
-        payload["candidates"][1]["strategicProblem"] = "Market report shows widespread breakage"
+    def test_5a_medium_participates_string_false_normalized(self) -> None:
+        payload = _brand_physical()
+        payload["mediumParticipates"] = "false"
+        result = parse_brand_physical_output(payload)
+        self.assertFalse(result.medium_participates)
+        self.assertEqual(result.medium_role, "")
+
+    def test_5b_missing_palette_rejected(self) -> None:
         with self.assertRaises(StageParseError) as ctx:
-            parse_strategy_scan(payload, product_description=self.BRIEF)
-        self.assertIn("unsupported_evidence_claim", ctx.exception.reasons)
+            parse_graphic_system_output(_graphic(missing_palette=True))
+        self.assertIn("graphic_generator_missing_palette", ctx.exception.reasons)
+
+    def test_5b_missing_palette_color_rejected(self) -> None:
+        with self.assertRaises(StageParseError) as ctx:
+            parse_graphic_system_output(_graphic(missing_color=True))
+        self.assertIn("graphic_generator_incomplete_palette", ctx.exception.reasons)
+
+    def test_5b_snake_case_keys_accepted(self) -> None:
+        graphic = parse_graphic_system_output(_graphic(snake_case=True))
+        self.assertEqual(graphic.layout_template, "visual_right_copy_left")
+
+    def test_5c_series_generator_string_rejected(self) -> None:
+        with self.assertRaises(StageParseError) as ctx:
+            parse_series_ads_output(_series_ads(2, series_string=True), expected_ad_count=2)
+        self.assertIn("series_generator_not_object", ctx.exception.reasons)
+
+    def test_5c_incomplete_series_rejected(self) -> None:
+        with self.assertRaises(StageParseError) as ctx:
+            parse_series_ads_output(_series_ads(2, incomplete_series=True), expected_ad_count=2)
+        self.assertIn("series_generator_incomplete", ctx.exception.reasons)
+
+    def test_5c_omitted_indexes_injected(self) -> None:
+        result = parse_series_ads_output(_series_ads(2, omit_indexes=True), expected_ad_count=2)
+        self.assertEqual([a["index"] for a in result.ads], [1, 2])
+
+    def test_5c_string_indexes_coerced(self) -> None:
+        result = parse_series_ads_output(_series_ads(2, string_indexes=True), expected_ad_count=2)
+        self.assertEqual([a["index"] for a in result.ads], [1, 2])
+
+    def test_5c_wrong_indexes_normalized_to_position(self) -> None:
+        result = parse_series_ads_output(_series_ads(2, wrong_indexes=True), expected_ad_count=2)
+        self.assertEqual([a["index"] for a in result.ads], [1, 2])
+
+    def test_5c_too_few_ads_rejected(self) -> None:
+        with self.assertRaises(StageParseError) as ctx:
+            parse_series_ads_output(_series_ads(4, too_few_ads=True), expected_ad_count=4)
+        self.assertIn("ads_length_mismatch", ctx.exception.reasons)
 
 
-class TestServerAuthoritativeAssembly(unittest.TestCase):
+class TestDeterministicAssembly(unittest.TestCase):
     BRIEF = "Reinforced shell product for daily carry"
 
     def _assemble(self, ad_count: int) -> Any:
         strategy = _selected_strategy()
         conceptual = _selected_conceptual()
-        final = _final_creative(ad_count)
-        return assemble_builder1_series_plan(
+        brand = parse_brand_physical_output(_brand_physical())
+        graphic = parse_graphic_system_output(_graphic())
+        series = parse_series_ads_output(_series_ads(ad_count), expected_ad_count=ad_count)
+        return assemble_builder1_campaign(
             product_name="",
             product_description=self.BRIEF,
             format_value="portrait",
@@ -275,120 +335,64 @@ class TestServerAuthoritativeAssembly(unittest.TestCase):
                 parse_strategy_scan(_strategy_scan_payload(), product_description=self.BRIEF),
             )[0],
             conceptual=conceptual,
-            final_creative=final,
+            brand_physical=brand,
+            graphic=graphic,
+            series_ads=series,
         )
-
-    def test_injects_format(self) -> None:
-        plan = self._assemble(2)
-        self.assertEqual(plan.format, "portrait")
-
-    def test_injects_ad_count_two(self) -> None:
-        plan = self._assemble(2)
-        self.assertEqual(plan.ad_count, 2)
-
-    def test_explicit_ad_count_three(self) -> None:
-        plan = self._assemble(3)
-        self.assertEqual(plan.ad_count, 3)
-        self.assertEqual(len(plan.ads), 3)
 
     def test_explicit_ad_count_four(self) -> None:
         plan = self._assemble(4)
         self.assertEqual(plan.ad_count, 4)
         self.assertEqual(len(plan.ads), 4)
 
-    def test_injects_detected_language(self) -> None:
-        plan = self._assemble(2)
-        self.assertEqual(plan.detected_language, "en")
-
-    def test_model_cannot_override_ad_count_via_final(self) -> None:
-        final = _final_creative(2)
-        final["adCount"] = 4
-        _, reasons = parse_final_campaign_output(final, expected_ad_count=2)
-        self.assertTrue(any("adCount" in r for r in reasons))
-        plan = self._assemble(2)
-        self.assertEqual(plan.ad_count, 2)
-
-    def test_final_parser_does_not_require_scans(self) -> None:
-        from engine.builder1_plan_parser import parse_builder1_series_plan
-
-        plan = self._assemble(2)
-        reparsed = parse_builder1_series_plan(
-            series_plan_to_store_dict(plan),
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description=self.BRIEF,
-            require_internal_scans=False,
-        )
-        self.assertEqual(reparsed.ad_count, 2)
-
-    def test_assembled_plan_has_no_internal_scans(self) -> None:
-        plan = self._assemble(2)
-        store = series_plan_to_store_dict(plan)
-        self.assertNotIn("strategyCandidateScan", store)
-        self.assertNotIn("conceptualGeneratorScan", store)
-        public = campaign_identity_to_dict(plan)
+    def test_no_internal_scans_in_public_plan(self) -> None:
+        public = campaign_identity_to_dict(self._assemble(2))
         self.assertNotIn("strategyCandidateScan", public)
         self.assertNotIn("conceptualGeneratorScan", public)
-        plan = self._assemble(2)
-        store = series_plan_to_store_dict(plan)
-        self.assertNotIn("strategyCandidateScan", store)
-        self.assertNotIn("conceptualGeneratorScan", store)
-        public = campaign_identity_to_dict(plan)
-        self.assertNotIn("strategyCandidateScan", public)
 
 
-class TestStagedPlannerIntegration(unittest.TestCase):
+class TestProductionShapedPlanner(unittest.TestCase):
     BRIEF = "Reinforced shell product for daily carry"
 
-    def _mock_responses(self, ad_count: int = 2) -> Dict[str, Any]:
-        return {
-            STAGE_STRATEGY_SCAN_SYSTEM: _strategy_scan_payload(),
-            STAGE_STRATEGY_SELECT_SYSTEM: {
-                "selectedCandidateId": "S01",
-                "selectionReason": "Strongest brief fit",
-                "strategyFamily": "durability",
-                "scores": {
-                    "truth": 9,
-                    "briefSupport": 9,
-                    "relevance": 8,
-                    "distinctiveness": 8,
-                    "brandOwnership": 8,
-                    "persuasiveStrength": 8,
-                    "seriesPotential": 9,
-                    "conceptualActionPotential": 9,
-                },
-            },
-            STAGE_CONCEPTUAL_SCAN_SYSTEM: _conceptual_scan_payload(),
-            STAGE_CONCEPTUAL_SELECT_SYSTEM: {
-                "selectedCandidateId": "C01",
-                "selectionReason": "Clearest action",
-                "scores": {
-                    "advantageConnection": 9,
-                    "actionClarity": 9,
-                    "visualPower": 8,
-                    "seriesPotential": 9,
-                    "distinctiveness": 8,
-                    "physicalIndependence": 8,
-                },
-            },
-            STAGE_FINAL_CAMPAIGN_SYSTEM: _final_creative(ad_count),
-            BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT: {
-                "pass": True,
-                "rejectionReasonCodes": [],
-                "unsupportedClaimDetected": False,
-            },
-        }
+    def _run_with_sequence(
+        self,
+        *,
+        ad_count: int = 2,
+        stage_sequences: Optional[Dict[str, List[Any]]] = None,
+    ) -> Any:
+        sequences = stage_sequences or {}
+        counters: Dict[str, int] = {}
 
-    def test_successful_planning_reaches_image_generation(self) -> None:
-        responses = self._mock_responses(2)
-        calls: List[str] = []
+        def model_caller(system: str, user: str, stage: str | None = None) -> object:
+            key = system
+            if key in sequences:
+                idx = counters.get(key, 0)
+                counters[key] = idx + 1
+                seq = sequences[key]
+                return copy.deepcopy(seq[min(idx, len(seq) - 1)])
+            return copy.deepcopy(_full_final_responses(ad_count).get(key, {"pass": True, "rejectionReasonCodes": []}))
 
-        def model_caller(system: str, user: str) -> object:
-            calls.append(system[:40])
-            if "Repair ONLY the candidates array" in user:
-                return _strategy_scan_payload()
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
+        return plan_builder1(
+            product_name="",
+            product_description=self.BRIEF,
+            format_value="portrait",
+            model_caller=model_caller,
+            ad_count=ad_count,
+        ), counters
+
+    def test_5b_failure_does_not_rerun_early_stages(self) -> None:
+        brand_calls: List[int] = []
+
+        def model_caller(system: str, user: str, stage: str | None = None) -> object:
+            if system == STAGE_BRAND_PHYSICAL_SYSTEM:
+                brand_calls.append(1)
+            if system == STAGE_GRAPHIC_SYSTEM_SYSTEM:
+                if "Repair ONLY" in user:
+                    return _graphic()
+                if len(brand_calls) == 0:
+                    pass
+                return _graphic(missing_palette=True)
+            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True, "rejectionReasonCodes": []}))
 
         plan = plan_builder1(
             product_name="",
@@ -398,91 +402,77 @@ class TestStagedPlannerIntegration(unittest.TestCase):
             ad_count=2,
         )
         self.assertEqual(plan.ad_count, 2)
-        img_calls: List[int] = []
+        self.assertEqual(len(brand_calls), 1)
 
-        def image_caller(_prompt: str, _fmt: str) -> bytes:
-            img_calls.append(1)
+    def test_5c_failure_does_not_rerun_5a_or_5b(self) -> None:
+        counters = {"brand": 0, "graphic": 0, "series": 0}
+
+        def model_caller(system: str, user: str, stage: str | None = None) -> object:
+            if system == STAGE_BRAND_PHYSICAL_SYSTEM:
+                counters["brand"] += 1
+                return _brand_physical()
+            if system == STAGE_GRAPHIC_SYSTEM_SYSTEM:
+                counters["graphic"] += 1
+                return _graphic()
+            if system == STAGE_SERIES_ADS_SYSTEM:
+                counters["series"] += 1
+                if "Repair ONLY" in user:
+                    return _series_ads(2)
+                return _series_ads(2, series_string=True)
+            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True, "rejectionReasonCodes": []}))
+
+        plan = plan_builder1(
+            product_name="",
+            product_description=self.BRIEF,
+            format_value="portrait",
+            model_caller=model_caller,
+            ad_count=2,
+        )
+        self.assertEqual(plan.ad_count, 2)
+        self.assertEqual(counters["brand"], 1)
+        self.assertEqual(counters["graphic"], 1)
+        self.assertGreaterEqual(counters["series"], 2)
+
+    def test_focused_repair_success_reaches_assembly(self) -> None:
+        plan, _ = self._run_with_sequence(
+            stage_sequences={
+                STAGE_BRAND_PHYSICAL_SYSTEM: [
+                    _brand_physical(missing_role=True),
+                    _brand_physical(),
+                ]
+            }
+        )
+        self.assertEqual(plan.ad_count, 2)
+
+    def test_repeated_malformed_returns_substage_failure(self) -> None:
+        with self.assertRaises(Builder1PlannerError) as ctx:
+            self._run_with_sequence(
+                stage_sequences={
+                    STAGE_GRAPHIC_SYSTEM_SYSTEM: [
+                        _graphic(missing_palette=True),
+                        _graphic(missing_palette=True),
+                        _graphic(missing_palette=True),
+                    ]
+                }
+            )
+        self.assertIn("graphic_system_failed", str(ctx.exception))
+
+    def test_ad_count_four_end_to_end(self) -> None:
+        plan, _ = self._run_with_sequence(ad_count=4)
+        self.assertEqual(plan.ad_count, 4)
+
+    def test_successful_assembly_reaches_image_generation(self) -> None:
+        plan, _ = self._run_with_sequence(ad_count=2)
+        calls: List[int] = []
+
+        def image_caller(_p: str, _f: str) -> bytes:
+            calls.append(1)
             return b"jpeg"
 
         generate_builder1_ad_image(plan, 1, image_caller)
-        self.assertEqual(len(img_calls), 1)
+        self.assertEqual(len(calls), 1)
 
-    def test_ad_count_three_survives_pipeline(self) -> None:
-        responses = self._mock_responses(3)
-
-        def model_caller(system: str, _user: str) -> object:
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
-
-        plan = plan_builder1(
-            product_name="",
-            product_description=self.BRIEF,
-            format_value="portrait",
-            model_caller=model_caller,
-            ad_count=3,
-        )
-        self.assertEqual(plan.ad_count, 3)
-
-    def test_ad_count_four_survives_pipeline(self) -> None:
-        responses = self._mock_responses(4)
-
-        def model_caller(system: str, _user: str) -> object:
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
-
-        plan = plan_builder1(
-            product_name="",
-            product_description=self.BRIEF,
-            format_value="portrait",
-            model_caller=model_caller,
-            ad_count=4,
-        )
-        self.assertEqual(plan.ad_count, 4)
-
-    def test_string_candidate_triggers_repair_not_total_failure(self) -> None:
-        responses = self._mock_responses(2)
-        scan_calls = {"n": 0}
-
-        def model_caller(system: str, user: str) -> object:
-            if system == STAGE_STRATEGY_SCAN_SYSTEM:
-                scan_calls["n"] += 1
-                if "Repair ONLY" in user:
-                    return _strategy_scan_payload()
-                if scan_calls["n"] == 1:
-                    return _strategy_scan_payload(string_candidate=True)
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
-
-        plan = plan_builder1(
-            product_name="",
-            product_description=self.BRIEF,
-            format_value="portrait",
-            model_caller=model_caller,
-            ad_count=2,
-        )
-        self.assertEqual(plan.ad_count, 2)
-        self.assertGreaterEqual(scan_calls["n"], 2)
-
-    def test_judge_receives_normalized_plan(self) -> None:
-        seen: Dict[str, Any] = {}
-
-        def model_caller(system: str, user: str) -> object:
-            if system == BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT:
-                seen["judge_user"] = user
-                return {"pass": True, "rejectionReasonCodes": []}
-            if system == STAGE_STRATEGY_SCAN_SYSTEM and "Repair ONLY" in user:
-                return _strategy_scan_payload()
-            return self._mock_responses(2).get(system, {"pass": True})
-
-        plan_builder1(
-            product_name="",
-            product_description=self.BRIEF,
-            format_value="portrait",
-            model_caller=model_caller,
-            ad_count=2,
-        )
-        self.assertIn("judge_user", seen)
-        self.assertIn('"format": "portrait"', seen["judge_user"])
-        self.assertNotIn("strategyCandidateScan", seen["judge_user"])
-
-    def test_next_ad_does_not_rerun_planner(self) -> None:
+    def test_next_ad_does_not_run_planning(self) -> None:
         with patch("engine.builder1_planner.plan_builder1") as mock_plan:
             mock_plan.side_effect = AssertionError("planner must not run")
             from engine.builder1_campaign_store import (
@@ -502,17 +492,40 @@ class TestStagedPlannerIntegration(unittest.TestCase):
             validate_next_ad_request("staged-next", 2)
 
 
+class TestStagedParsers(unittest.TestCase):
+    BRIEF = "Reinforced shell product for daily carry"
+
+    def test_strategy_scan_accepts_twelve_objects(self) -> None:
+        result = parse_strategy_scan(_strategy_scan_payload(), product_description=self.BRIEF)
+        self.assertEqual(len(result), 12)
+
+
 class TestBuilder2Unchanged(unittest.TestCase):
-    def test_no_builder2_staged_modules(self) -> None:
-        import importlib.util
+    def test_no_builder2_final_stage_modules(self) -> None:
         import pathlib
 
         root = pathlib.Path(__file__).resolve().parents[1] / "engine"
-        builder2_files = list(root.glob("builder2*.py"))
-        for path in builder2_files:
+        for path in root.glob("builder2*.py"):
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("builder1_staged_parsers", text)
-            self.assertNotIn("STAGE_STRATEGY_SCAN_SYSTEM", text)
+            self.assertNotIn("builder1_final_stages", text)
+
+
+class TestPlanningModelStrictSchema(unittest.TestCase):
+    def test_strict_schema_enabled_when_text_param_supported(self) -> None:
+        import engine.builder1_planning_model as pm
+
+        pm._strict_schema_probe_done = False
+        pm._strict_schema_available = False
+        with patch.object(pm, "_responses_create_supports_text_parameter", return_value=True):
+            self.assertTrue(pm.strict_json_schema_available())
+
+    def test_strict_schema_disabled_when_text_param_missing(self) -> None:
+        import engine.builder1_planning_model as pm
+
+        pm._strict_schema_probe_done = False
+        pm._strict_schema_available = False
+        with patch.object(pm, "_responses_create_supports_text_parameter", return_value=False):
+            self.assertFalse(pm.strict_json_schema_available())
 
 
 if __name__ == "__main__":

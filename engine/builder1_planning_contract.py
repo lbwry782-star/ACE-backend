@@ -69,18 +69,38 @@ Rules:
 - Scores are integers 1-10.
 """.strip()
 
-STAGE_FINAL_CAMPAIGN_SYSTEM = f"""
-You are a Builder1 campaign constructor.
-The strategic problem, relative advantage, and conceptual generator are already fixed.
-Return JSON only. Return exactly the final creative plan object and no additional top-level keys.
-Do NOT include: format, adCount, detectedLanguage, strategicProblem, relativeAdvantage, conceptualGenerator fields, or candidate scans.
-Build exactly the requested number of ads ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
-Include: productNameResolved, brandSlogan (1-6 words), sloganDerivation, sloganAction,
-physicalGenerator fields, graphicGenerator with exact hex palette and concrete layout enums,
-seriesGenerator, mediumParticipates, mediumRole, campaignRationale, and ads[].
-Each ad needs: index, variationLabel, newContribution, conceptualExecution, conceptualActionProof,
-physicalExecution, visualExecution, sceneDescription, headline (null or short string), headlineNeededReason, marketingText.
-Images will render brand name, slogan, and optional headline — keep copy very short.
+STAGE_BRAND_PHYSICAL_SYSTEM = """
+You are a Builder1 brand and physical-system builder.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"productNameResolved":"...","brandSlogan":"...","sloganDerivation":"...","sloganAction":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}
+Rules:
+- Do not include graphic generator, series generator, ads, format, adCount, detectedLanguage, or strategy fields.
+- mediumParticipates must be JSON boolean true or false, never a string.
+- When mediumParticipates is false, mediumRole must be "".
+- brandSlogan must be 1-6 words.
+""".strip()
+
+STAGE_GRAPHIC_SYSTEM_SYSTEM = """
+You are a Builder1 graphic-system builder.
+Return JSON only. Return the graphic generator object directly with no wrapper and no additional top-level keys:
+{"palette":{"dominant":"#111111","secondary":"#EEEEEE","accent":"#FF5500","background":"#F5F5F5","text":"#222222"},"layoutTemplate":"visual_right_copy_left","headlinePlacement":"top_left","headlineAlignment":"right","headlineMaxWidthPercent":34,"brandBlockPlacement":"bottom_left","sloganPlacement":"bottom_left","copySafeArea":{"side":"left","widthPercent":38},"typographyStyle":"bold_geometric_sans","headlineScale":"large","brandScale":"small","sloganScale":"medium","imageStyle":"editorial_photography","backgroundTreatment":"solid","borderTreatment":"none","recurringGraphicDevice":"...","recurringGraphicDeviceRule":"...","shapeLanguage":"...","framingRule":"...","spacingRule":"..."}
+Rules:
+- All five palette colors required as #RRGGBB hex.
+- Use only valid layout, placement, typography, image, background, and border enum values.
+- recurringGraphicDevice must be visibly repeatable across ads.
+- Do not return ads, slogan, physical generator, or strategy fields.
+""".strip()
+
+STAGE_SERIES_ADS_SYSTEM = f"""
+You are a Builder1 series and ads builder.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"..."}}]}}
+Rules:
+- seriesGenerator must be an object with type, principle, progression.
+- ads must contain exactly the requested ad count ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
+- Each ad performs the same conceptual action with a different execution.
+- Headlines must be null or very short (max 7 words).
+- Do not return brand slogan, physical generator, or graphic generator.
 """.strip()
 
 
@@ -162,16 +182,14 @@ def build_conceptual_select_user_prompt(candidates: List[Dict[str, Any]]) -> str
     )
 
 
-def build_final_campaign_user_prompt(
+def build_brand_physical_user_prompt(
     *,
     product_name: str,
     product_description: str,
-    ad_count: int,
+    detected_language: str,
     format_value: str,
     strategic_problem: str,
     relative_advantage: str,
-    brief_support: str,
-    advantage_source: str,
     conceptual: Dict[str, str],
     brand_guidelines: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -181,15 +199,91 @@ def build_final_campaign_user_prompt(
     return (
         f"Product name: {product_name or '(infer)'}\n"
         f"Description: {product_description}\n"
-        f"Format (for image generation context only): {format_value}\n"
-        f"Ad count: {ad_count}\n"
+        f"Language context: {detected_language}\n"
+        f"Format context: {format_value}\n"
         f"Fixed strategic problem: {strategic_problem}\n"
         f"Fixed relative advantage: {relative_advantage}\n"
-        f"Brief support: {brief_support}\n"
-        f"Advantage source: {advantage_source}\n"
         f"Fixed conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
-        f"Build the final campaign creative plan with exactly {ad_count} ads."
+        "Return brand slogan and physical-generator system only."
         f"{guidelines}"
+    )
+
+
+def build_brand_physical_repair_prompt(*, broken_json: str, reasons: List[str]) -> str:
+    return (
+        "Repair ONLY the brand/physical JSON object. Return exactly:\n"
+        '{"productNameResolved":"...","brandSlogan":"...","sloganDerivation":"...","sloganAction":"...",'
+        '"physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...",'
+        '"mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}\n'
+        f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        f"Broken:\n{broken_json}"
+    )
+
+
+def build_graphic_system_user_prompt(
+    *,
+    product_description: str,
+    detected_language: str,
+    relative_advantage: str,
+    conceptual: Dict[str, str],
+    brand_physical: Dict[str, Any],
+    format_value: str,
+) -> str:
+    return (
+        f"Brief: {product_description}\n"
+        f"Language: {detected_language}\n"
+        f"Relative advantage: {relative_advantage}\n"
+        f"Conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
+        f"Brand/physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
+        f"Format: {format_value}\n"
+        "Return the graphic generator object directly."
+    )
+
+
+def build_graphic_system_repair_prompt(*, broken_json: str, reasons: List[str]) -> str:
+    return (
+        "Repair ONLY the graphic generator object. Return exactly the graphic object with all palette colors, "
+        "layout/placement enums, copySafeArea, typography scales, and recurring device rules.\n"
+        f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        f"Broken:\n{broken_json}"
+    )
+
+
+def build_series_ads_user_prompt(
+    *,
+    ad_count: int,
+    format_value: str,
+    strategic_problem: str,
+    relative_advantage: str,
+    conceptual: Dict[str, str],
+    brand_physical: Dict[str, Any],
+    graphic_generator: Dict[str, Any],
+) -> str:
+    indexes = ", ".join(str(i) for i in range(1, ad_count + 1))
+    return (
+        f"Required ad count: {ad_count}\n"
+        f"Required ad indexes: {indexes}\n"
+        f"Format: {format_value}\n"
+        f"Strategic problem: {strategic_problem}\n"
+        f"Relative advantage: {relative_advantage}\n"
+        f"Conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
+        f"Brand/physical:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
+        f"Graphic system:\n{json.dumps(graphic_generator, ensure_ascii=False, indent=2)}\n"
+        f"Return seriesGenerator and exactly {ad_count} ads obeying the graphic system."
+    )
+
+
+def build_series_ads_repair_prompt(*, broken_json: str, reasons: List[str], ad_count: int) -> str:
+    return (
+        "Repair ONLY seriesGenerator and ads. Return exactly:\n"
+        '{"seriesGenerator":{"type":"...","principle":"...","progression":"..."},'
+        '"ads":[{"index":1,"variationLabel":"...","newContribution":"...",'
+        '"conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...",'
+        '"visualExecution":"...","sceneDescription":"...","headline":null,'
+        '"headlineNeededReason":"...","marketingText":"..."}]}\n'
+        f"Required ad count: {ad_count}\n"
+        f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        f"Broken:\n{broken_json}"
     )
 
 
@@ -202,13 +296,8 @@ def build_final_campaign_repair_prompt(
     relative_advantage: str,
     conceptual: Dict[str, str],
 ) -> str:
-    return (
-        f"Repair the final campaign creative JSON only.\n"
-        f"Keep fixed strategy and conceptual generator unchanged.\n"
-        f"Ad count must be exactly {ad_count}.\n"
-        f"Fixed problem: {strategic_problem}\n"
-        f"Fixed advantage: {relative_advantage}\n"
-        f"Fixed conceptual:\n{json.dumps(conceptual, ensure_ascii=False)}\n"
-        f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
-        f"Broken:\n{broken_json}"
-    )
+    return build_series_ads_repair_prompt(broken_json=broken_json, reasons=reasons, ad_count=ad_count)
+
+
+STAGE_FINAL_CAMPAIGN_SYSTEM = STAGE_BRAND_PHYSICAL_SYSTEM  # legacy alias
+
