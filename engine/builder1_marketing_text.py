@@ -1,4 +1,5 @@
 """
+LEGACY — not part of active Builder1 campaign-series production path.
 Builder1 marketing text generation (~50 words) via o3-pro.
 """
 from __future__ import annotations

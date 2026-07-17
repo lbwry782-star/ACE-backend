@@ -1,111 +1,28 @@
 """
-Disconnected Builder1 planning entry point scaffold.
+Builder1 campaign-series planning entry point (active production).
 """
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import replace
-from typing import Callable, TypeAlias
+from typing import Any, Callable, Dict, Optional, TypeAlias
 
-from engine.ace_usage_memory import get_used_object_a, remember_object_a as remember_object_a_ace
 from engine.builder1_input_normalizer import normalize_builder1_input
-from engine.builder1_plan_parser import parse_builder1_plan
-from engine.builder1_plan_spec import Builder1Plan
+from engine.builder1_plan_parser import (
+    Builder1SeriesPlanParseError,
+    validate_series_plan_structure,
+)
+from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_planning_contract import (
     BUILDER1_PLANNING_SYSTEM_PROMPT,
     build_builder1_planning_user_prompt,
+    build_builder1_series_repair_user_prompt,
 )
 
 logger = logging.getLogger(__name__)
 
-_NON_PHYSICAL_SECONDARY_HINTS: tuple[str, ...] = (
-    "idea",
-    "concept",
-    "promise",
-    "benefit",
-    "emotion",
-    "feeling",
-    "message",
-    "slogan",
-    "quality",
-    "value",
-)
-_SCENE_CHANGE_HINTS: tuple[str, ...] = (
-    "adapted",
-    "changed grip",
-    "different grip",
-    "different posture",
-    "different pose",
-    "repositioned",
-    "reconfigured",
-    "adjusted hand",
-)
-_WEAK_REPLACEMENT_RATIONALE_HINTS: tuple[str, ...] = (
-    "book-like",
-    "magazine",
-    "pages",
-    "flat rectangular",
-    "flat rectangle",
-    "rectangular body",
-    "open like a book",
-    "hinge-like",
-    "occupies the exact spot",
-    "same spot",
-)
-_REPLACEMENT_CONTINUITY_HINTS: tuple[str, ...] = (
-    "without changing pose",
-    "without changing context",
-    "without changing interaction",
-    "unchanged interaction",
-    "same role",
-    "same secondary interaction",
-    "preserves secondary interaction",
-)
-_HANDHELD_RATIONALE_HINTS: tuple[str, ...] = (
-    "same hand",
-    "same grip",
-    "same position",
-    "holding",
-    "held",
-    "grips",
-    "occupies the same position",
-)
-_FLAT_CARD_PAPER_OBJECT_HINTS: tuple[str, ...] = (
-    "card",
-    "business card",
-    "paper",
-    "sheet",
-    "flyer",
-    "magazine",
-    "book",
-    "page",
-    "postcard",
-)
-_REPLACEMENT_VISUAL_TRANSITION_HINTS: tuple[str, ...] = (
-    "in the replacement",
-    "replacement vision",
-    "replacement version",
-    "instead of",
-    "used to be",
-    "where object a",
-    "object a is shown",
-    "then object b",
-    "then the same",
-    "becomes an",
-    "becomes a",
-    "turns into",
-    "replaces the",
-    "replaces it",
-    "replaced by",
-    "switches from",
-    "changes from",
-    "before replacement",
-    "after replacement",
-)
-
-
-def _norm_text(value: str) -> str:
-    return " ".join((value or "").strip().lower().split())
+MAX_PLANNING_ATTEMPTS = 3
 
 
 def _preview_text(value: object, *, limit: int = 500) -> str:
@@ -115,123 +32,19 @@ def _preview_text(value: object, *, limit: int = 500) -> str:
     return text[:limit].rstrip() + "…"
 
 
-def _missing_invalid_from_parse_error(message: str) -> tuple[str, str]:
-    msg = (message or "").strip()
-    if msg.startswith("missing_keys:"):
-        return msg.split(":", 1)[1], ""
-    if msg.startswith("extra_keys:"):
-        return "", msg.split(":", 1)[1]
-    return "", msg
-
-
-def _repair_reasons(plan: Builder1Plan, *, object_a_repeated: bool) -> list[str]:
-    reasons: list[str] = []
-    a = _norm_text(plan.object_a)
-    b = _norm_text(plan.object_b)
-    secondary = _norm_text(plan.object_a_secondary)
-    visual_desc = _norm_text(plan.visual_description)
-
-    if object_a_repeated:
-        reasons.append("object_a_already_used_in_memory")
-    if a and b and a == b:
-        reasons.append("object_b_identical_to_object_a")
-    if not secondary:
-        reasons.append("object_a_secondary_missing")
-    elif any(h in secondary for h in _NON_PHYSICAL_SECONDARY_HINTS):
-        reasons.append("object_a_secondary_not_concrete_physical")
-    if plan.mode_decision == "REPLACEMENT":
-        if any(h in visual_desc for h in _REPLACEMENT_VISUAL_TRANSITION_HINTS):
-            reasons.append("replacement_visual_description_narrates_a_to_b_transition")
-        object_a_norm = _norm_text(plan.object_a)
-        if object_a_norm and len(object_a_norm) >= 4 and object_a_norm in visual_desc:
-            negated = (
-                "do not show" in visual_desc
-                or "don't show" in visual_desc
-                or "never show" in visual_desc
-                or f"no {object_a_norm}" in visual_desc
-                or f"without {object_a_norm}" in visual_desc
-            )
-            if not negated:
-                reasons.append("replacement_visual_description_describes_object_a_visible")
-    if plan.mode_decision == "REPLACEMENT" and any(h in visual_desc for h in _SCENE_CHANGE_HINTS):
-        reasons.append("replacement_visual_description_indicates_scene_or_grip_change")
-    if plan.mode_decision == "REPLACEMENT":
-        has_weak_rationale = any(h in visual_desc for h in _WEAK_REPLACEMENT_RATIONALE_HINTS)
-        has_continuity_explanation = any(h in visual_desc for h in _REPLACEMENT_CONTINUITY_HINTS)
-        if has_weak_rationale and not has_continuity_explanation:
-            reasons.append("replacement_rationale_too_generic_flat_booklike")
-        has_hand_secondary = "hand" in secondary
-        has_handheld_rationale = any(h in visual_desc for h in _HANDHELD_RATIONALE_HINTS)
-        object_b_flat_paper_like = any(h in b for h in _FLAT_CARD_PAPER_OBJECT_HINTS)
-        if has_hand_secondary and has_handheld_rationale and object_b_flat_paper_like:
-            reasons.append("replacement_handheld_flat_object_needs_reconsideration")
-    if plan.visual_similarity_score < 70:
-        reasons.append("visual_similarity_below_side_by_side_minimum")
-    return reasons
-
-
-def _product_name_repair_reason(
-    *,
-    user_product_name: str,
-    product_description: str,
-    model_product_name_resolved: str,
-) -> str | None:
-    """When user left productName blank, reject description-as-name fallback."""
-
-    if _norm_text(user_product_name):
-        return None
-    if _norm_text(model_product_name_resolved) == _norm_text(product_description):
-        return "product_name_blank_model_used_product_description"
-    return None
-
-
-def _build_repair_user_prompt(
-    *,
-    product_name: str,
-    product_description: str,
-    format_value: str,
-    used_object_a_ace: list[str],
-    previous_plan: Builder1Plan,
-    reasons: list[str],
-) -> str:
-    memory_list = ", ".join(used_object_a_ace) if used_object_a_ace else "(none)"
-    reasons_text = ", ".join(reasons)
-    return (
-        "The previous Builder1 plan violated explicit rules and must be corrected.\n"
-        f"Violations: {reasons_text}\n"
-        "Choose again and return the same JSON schema fields only.\n"
-        "Preserve user context exactly:\n"
-        f"- Product name: {product_name}\n"
-        f"- Product description: {product_description}\n"
-        f"- Format: {format_value}\n"
-        f"- detectedLanguage must remain: {previous_plan.detected_language}\n"
-        "Rules to obey:\n"
-        f"- Object A must be fresh and not in memory: {memory_list}\n"
-        "- Object A secondary must be a classic physical companion/context object of Object A.\n"
-        "- REPLACEMENT only if Object B can replace Object A without changing pose/context/secondary interaction.\n"
-        "- REPLACEMENT visualDescription: final frame only — describe Object B + objectASecondary; never narrate A-to-B transition; Object A must not appear as visible (only negative 'do not show Object A' allowed).\n"
-        "- Forbidden REPLACEMENT visualDescription: 'In the replacement vision...', 'Instead of Object A...', 'Where Object A used to be...', describing Object A then Object B as replacement.\n"
-        "- Correct REPLACEMENT visualDescription example: 'A human hand naturally grips a vanilla ice cream cone...' (final state only; no microphone narrative).\n"
-        "- visualSimilarityScore is physical form only; conceptual/function/language/advertising similarity must NOT inflate the score.\n"
-        "- Before scoring 90+, judge each object as a silent white sculpture; if score would be below 90, REPLACEMENT is forbidden.\n"
-        "- INVALID 90+ examples: computer keyboard ↔ piano keys; computer mouse ↔ real mouse; newspaper ↔ website; camera ↔ eye.\n"
-        "- Weak generic rationale is invalid for REPLACEMENT: flat/open/rectangular/book-like/same-spot wording alone is never enough for 90+.\n"
-        "- Hand-held replacement warning: same hand/same grip/same position is not enough for REPLACEMENT when objectB is flat/card/paper-like.\n"
-        "- If a flat/card/paper object replaces another device/object merely by being held in the same hand or position, reconsider and either choose SIDE_BY_SIDE (70-89) or choose a different objectB.\n"
-        "- If Object B cannot preserve Object A's exact physical role, pose, context, and objectASecondary interaction, choose SIDE_BY_SIDE with score below 90.\n"
-        "- Pairs with visualSimilarityScore below 70 are invalid for Builder1 and must be replaced with a new object pair.\n"
-        "- Use score bands: 70-89 for SIDE_BY_SIDE, or 90+ for REPLACEMENT only when true replacement-grade physical continuity is satisfied.\n"
-        "- If Product name is blank, generate a short new productNameResolved; do not copy productDescription into productNameResolved.\n"
-        "- Choose a new plan if needed.\n"
-        "- Otherwise choose SIDE_BY_SIDE.\n"
-        "Previous invalid plan (for correction reference only):\n"
-        f"- objectA: {previous_plan.object_a}\n"
-        f"- objectASecondary: {previous_plan.object_a_secondary}\n"
-        f"- objectB: {previous_plan.object_b}\n"
-        f"- visualSimilarityScore: {previous_plan.visual_similarity_score}\n"
-        f"- modeDecision: {previous_plan.mode_decision}\n"
-        f"- visualDescription: {previous_plan.visual_description}\n"
-    )
+def _coerce_plan_dict(raw_payload: object) -> Dict[str, Any]:
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    if isinstance(raw_payload, str):
+        text = raw_payload.strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("no_json_object")
+        obj = json.loads(text[start : end + 1])
+        if not isinstance(obj, dict):
+            raise ValueError("model_output_not_object")
+        return obj
+    raise ValueError("model_output_not_object")
 
 
 class Builder1PlannerError(RuntimeError):
@@ -241,212 +54,147 @@ class Builder1PlannerError(RuntimeError):
 PlanningModelCaller: TypeAlias = Callable[[str, str], object]
 
 
+def _try_parse(
+    raw_payload: object,
+    *,
+    normalized_product_name: str,
+    normalized_product_description: str,
+    normalized_format: str,
+    ad_count: int,
+) -> tuple[Optional[Builder1SeriesPlan], list[str], Optional[Dict[str, Any]]]:
+    raw_dict = _coerce_plan_dict(raw_payload)
+    candidate, reasons = validate_series_plan_structure(
+        raw_dict,
+        expected_format=normalized_format,
+        expected_ad_count=ad_count,
+        product_name=normalized_product_name,
+        product_description=normalized_product_description,
+    )
+    return candidate, reasons, raw_dict
+
+
 def plan_builder1(
     product_name: object,
     product_description: object,
     format_value: object,
     model_caller: PlanningModelCaller,
-) -> Builder1Plan:
+    *,
+    ad_count: int = 2,
+    brand_guidelines: Optional[Dict[str, Any]] = None,
+) -> Builder1SeriesPlan:
+    """Plan one Builder1 campaign (2–4 ads). No creative-output memory."""
     normalized = normalize_builder1_input(
         product_name=product_name,
         product_description=product_description,
         format_value=format_value,
+        ad_count=ad_count,
+        brand_guidelines=brand_guidelines,
     )
     logger.info(
-        "BUILDER1_PLANNING_START productName=%s format=%s",
+        "BUILDER1_SERIES_PLANNING_START productName=%s format=%s adCount=%s",
         normalized.product_name,
         normalized.format,
+        normalized.ad_count,
     )
-    used_object_a_ace = get_used_object_a("builder1")
-    recent_object_a_ace = used_object_a_ace[-10:]
-    logger.info(
-        "BUILDER1_MEMORY_INJECTED_TO_PLANNING_ACE object_a_count=%s recent_object_a=%r",
-        len(used_object_a_ace),
-        recent_object_a_ace,
-    )
+
     user_prompt = build_builder1_planning_user_prompt(
-        normalized.product_name,
-        normalized.product_description,
-        normalized.format,
-        used_object_a_ace,
-    )
-    if used_object_a_ace:
-        user_prompt = (
-            f"{user_prompt}\n"
-            "Object A memory from ACE Redis (avoid reusing or near-equivalent ideas):\n"
-            f"- previous_object_a_ace: {', '.join(used_object_a_ace)}\n"
-            "- Do not reuse any Object A listed above.\n"
-        )
-    logger.info("BUILDER1_PLANNING_MODEL_CALL_START")
-    try:
-        raw_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, user_prompt)
-        logger.info("BUILDER1_PLANNING_MODEL_CALL_OK raw_len=%s", len(str(raw_payload or "")))
-    except Exception as exc:
-        logger.error(
-            "BUILDER1_PLANNING_MODEL_CALL_ERROR err_type=%s err=%s",
-            type(exc).__name__,
-            exc,
-        )
-        logger.error(
-            "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
-            type(exc).__name__,
-            exc,
-        )
-        raise Builder1PlannerError("planning_model_call_failed") from exc
-    raw_preview = _preview_text(raw_payload)
-    logger.info("BUILDER1_PLANNING_PARSE_START raw_preview=%s", raw_preview)
-    try:
-        plan = parse_builder1_plan(raw_payload)
-    except Exception as exc:
-        err_type = type(exc).__name__
-        err_text = str(exc)
-        logger.error(
-            "BUILDER1_PLANNING_PARSE_ERROR err_type=%s err=%s raw_preview=%s",
-            err_type,
-            err_text,
-            raw_preview,
-        )
-        missing, invalid = _missing_invalid_from_parse_error(err_text)
-        logger.error(
-            "BUILDER1_PLANNING_VALIDATION_ERROR missing=%s invalid=%s plan_preview=%s",
-            missing,
-            invalid,
-            raw_preview,
-        )
-        logger.error(
-            "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
-            err_type,
-            err_text,
-        )
-        raise Builder1PlannerError("planning_parse_failed") from exc
-    forced_resolved_name = normalized.product_name or plan.product_name_resolved
-    name_reason = _product_name_repair_reason(
-        user_product_name=normalized.product_name,
+        product_name=normalized.product_name,
         product_description=normalized.product_description,
-        model_product_name_resolved=forced_resolved_name,
+        format_value=normalized.format,
+        ad_count=normalized.ad_count,
+        brand_guidelines=brand_guidelines,
     )
-    final_plan = replace(
-        plan,
-        product_name=forced_resolved_name,
-        product_name_resolved=forced_resolved_name,
-        product_description=normalized.product_description,
-        format=normalized.format,
-    )
-    reasons = _repair_reasons(final_plan, object_a_repeated=False)
-    if name_reason:
-        reasons.append(name_reason)
-    if reasons:
-        logger.info(
-            "BUILDER1_PLAN_REPAIR_REQUESTED "
-            "reasons=%r object_a=%r object_a_secondary=%r object_b=%r mode_decision=%r visual_similarity_score=%s",
+
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, MAX_PLANNING_ATTEMPTS + 1):
+        logger.info("BUILDER1_SERIES_PLANNING_MODEL_CALL_START attempt=%s", attempt)
+        try:
+            raw_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, user_prompt)
+        except Exception as exc:
+            last_error = exc
+            logger.error(
+                "BUILDER1_SERIES_PLAN_REJECTED stage=model_call attempt=%s err=%s",
+                attempt,
+                exc,
+            )
+            continue
+
+        raw_preview = _preview_text(raw_payload)
+        logger.info("BUILDER1_SERIES_PLANNING_PARSE_START attempt=%s preview=%s", attempt, raw_preview)
+        try:
+            plan, reasons, raw_dict = _try_parse(
+                raw_payload,
+                normalized_product_name=normalized.product_name,
+                normalized_product_description=normalized.product_description,
+                normalized_format=normalized.format,
+                ad_count=normalized.ad_count,
+            )
+        except Exception as exc:
+            last_error = exc
+            logger.error(
+                "BUILDER1_SERIES_PLAN_REJECTED stage=coerce attempt=%s err=%s",
+                attempt,
+                exc,
+            )
+            continue
+
+        if plan is not None:
+            forced_name = normalized.product_name or plan.product_name_resolved
+            return replace(
+                plan,
+                product_name=forced_name,
+                product_name_resolved=forced_name,
+                product_description=normalized.product_description,
+                format=normalized.format,
+                ad_count=normalized.ad_count,
+            )
+
+        logger.error(
+            "BUILDER1_SERIES_PLAN_REJECTED stage=validation attempt=%s reasons=%s",
+            attempt,
             reasons,
-            final_plan.object_a,
-            final_plan.object_a_secondary,
-            final_plan.object_b,
-            final_plan.mode_decision,
-            final_plan.visual_similarity_score,
         )
-        repair_user_prompt = _build_repair_user_prompt(
+
+        logger.info("BUILDER1_SERIES_REPAIR attempt=%s reasons=%s", attempt, reasons)
+        repair_prompt = build_builder1_series_repair_user_prompt(
             product_name=normalized.product_name,
             product_description=normalized.product_description,
             format_value=normalized.format,
-            used_object_a_ace=used_object_a_ace,
-            previous_plan=final_plan,
-            reasons=reasons,
+            ad_count=normalized.ad_count,
+            broken_plan_json=json.dumps(raw_dict, ensure_ascii=False),
+            rejection_reasons=reasons,
+            brand_guidelines=brand_guidelines,
         )
         try:
-            logger.info("BUILDER1_PLANNING_MODEL_CALL_START")
-            repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, repair_user_prompt)
-            logger.info("BUILDER1_PLANNING_MODEL_CALL_OK raw_len=%s", len(str(repaired_payload or "")))
+            repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, repair_prompt)
+            repaired_plan, repair_reasons, _ = _try_parse(
+                repaired_payload,
+                normalized_product_name=normalized.product_name,
+                normalized_product_description=normalized.product_description,
+                normalized_format=normalized.format,
+                ad_count=normalized.ad_count,
+            )
+            if repaired_plan is not None:
+                forced_name = normalized.product_name or repaired_plan.product_name_resolved
+                final = replace(
+                    repaired_plan,
+                    product_name=forced_name,
+                    product_name_resolved=forced_name,
+                    product_description=normalized.product_description,
+                    format=normalized.format,
+                    ad_count=normalized.ad_count,
+                )
+                logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", final.ad_count)
+                return final
+            logger.error(
+                "BUILDER1_SERIES_PLAN_REJECTED stage=repair_validation reasons=%s",
+                repair_reasons,
+            )
         except Exception as exc:
-            logger.error(
-                "BUILDER1_PLANNING_MODEL_CALL_ERROR err_type=%s err=%s",
-                type(exc).__name__,
-                exc,
-            )
-            logger.error(
-                "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
-                type(exc).__name__,
-                exc,
-            )
-            raise Builder1PlannerError("planning_model_repair_call_failed") from exc
-        repaired_preview = _preview_text(repaired_payload)
-        logger.info("BUILDER1_PLANNING_PARSE_START raw_preview=%s", repaired_preview)
-        try:
-            repaired_plan = parse_builder1_plan(repaired_payload)
-        except Exception as exc:
-            err_type = type(exc).__name__
-            err_text = str(exc)
-            logger.error(
-                "BUILDER1_PLANNING_PARSE_ERROR err_type=%s err=%s raw_preview=%s",
-                err_type,
-                err_text,
-                repaired_preview,
-            )
-            missing, invalid = _missing_invalid_from_parse_error(err_text)
-            logger.error(
-                "BUILDER1_PLANNING_VALIDATION_ERROR missing=%s invalid=%s plan_preview=%s",
-                missing,
-                invalid,
-                repaired_preview,
-            )
-            logger.error(
-                "BUILDER1_PLANNING_FAILED_CAUSE err_type=%s err=%s",
-                err_type,
-                err_text,
-            )
-            raise Builder1PlannerError("planning_parse_failed") from exc
-        forced_repaired_name = normalized.product_name or repaired_plan.product_name_resolved
-        final_plan = replace(
-            repaired_plan,
-            product_name=forced_repaired_name,
-            product_name_resolved=forced_repaired_name,
-            product_description=normalized.product_description,
-            format=normalized.format,
-        )
-        logger.info(
-            "BUILDER1_PLAN_REPAIR_OK "
-            "object_a=%r object_a_secondary=%r object_b=%r mode_decision=%r visual_similarity_score=%s",
-            final_plan.object_a,
-            final_plan.object_a_secondary,
-            final_plan.object_b,
-            final_plan.mode_decision,
-            final_plan.visual_similarity_score,
-        )
-    logger.info(
-        "BUILDER1_PLANNING_OK objectA=%s objectB=%s mode=%s similarity=%s advertisingPromise=%s",
-        final_plan.object_a,
-        final_plan.object_b,
-        final_plan.mode_decision,
-        final_plan.visual_similarity_score,
-        final_plan.advertising_promise,
-    )
-    logger.info(
-        "BUILDER1_PLAN_OK "
-        "product_name=%r product_description=%r format=%r detected_language=%r "
-        "advertising_promise=%r object_a=%r object_a_secondary=%r object_b=%r "
-        "visual_similarity_score=%s mode_decision=%r visual_description=%r",
-        final_plan.product_name,
-        final_plan.product_description,
-        final_plan.format,
-        final_plan.detected_language,
-        final_plan.advertising_promise,
-        final_plan.object_a,
-        final_plan.object_a_secondary,
-        final_plan.object_b,
-        final_plan.visual_similarity_score,
-        final_plan.mode_decision,
-        final_plan.visual_description,
-    )
-    logger.info(
-        "BUILDER1_MODE_DECISION "
-        "object_a=%r object_a_secondary=%r object_b=%r visual_similarity_score=%s mode_decision=%r",
-        final_plan.object_a,
-        final_plan.object_a_secondary,
-        final_plan.object_b,
-        final_plan.visual_similarity_score,
-        final_plan.mode_decision,
-    )
-    if (final_plan.object_a or "").strip():
-        remember_object_a_ace("builder1", final_plan.object_a)
-    return final_plan
+            last_error = exc
+            logger.error("BUILDER1_SERIES_PLAN_REJECTED stage=repair err=%s", exc)
+
+    if last_error:
+        raise Builder1PlannerError("planning_failed") from last_error
+    raise Builder1PlannerError("planning_failed")

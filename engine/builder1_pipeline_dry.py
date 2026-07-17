@@ -1,5 +1,5 @@
 """
-Disconnected Builder1 dry orchestration scaffold.
+LEGACY — Object A/B dry orchestration; not part of active Builder1 campaign-series production path.
 """
 from __future__ import annotations
 

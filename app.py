@@ -1,6 +1,5 @@
 """
-Minimal Flask entrypoint: health + Runway/ACE video pipeline routes only.
-Image ad generation, preview jobs, ZIP download, Builder1, and payment routes are omitted.
+Flask entrypoint: health, Builder1 campaign-series, Builder2 video pipeline routes.
 """
 from __future__ import annotations
 
@@ -35,13 +34,15 @@ from engine.video_jobs_redis import (
     video_job_try_finalize_stale_running,
 )
 from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
-from engine.builder1_generate_demo import build_demo_ad
 from engine.builder2_zip import build_builder2_video_zip_bytes
-from engine.builder1_composition import generate_builder1_composition_o3
-from engine.builder1_headline import generate_builder1_headline_o3
-from engine.builder1_image_generator import generate_builder1_image
-from engine.builder1_marketing_text import generate_builder1_marketing_text_o3
-from engine.builder1_planner import plan_builder1
+from engine.builder1_composition import build_builder1_series_composition_metadata
+from engine.builder1_image_generator import (
+    generate_builder1_series_images,
+    image_bytes_to_base64,
+)
+from engine.builder1_input_normalizer import Builder1InputError, normalize_ad_count
+from engine.builder1_plan_spec import ad_plan_to_api_dict, campaign_identity_to_dict
+from engine.builder1_planner import Builder1PlannerError, plan_builder1
 from engine.builder1_zip import build_builder1_zip_bytes
 
 app = Flask(__name__)
@@ -363,25 +364,16 @@ def video_status():
 
 @app.route("/api/builder1-demo", methods=["GET"])
 def builder1_demo():
-    try:
-        result = build_demo_ad()
-        p = result.plan
-        return (
-            jsonify(
-                {
-                    "productNameResolved": p.product_name_resolved,
-                    "advertisingPromise": p.advertising_promise,
-                    "objectA": p.object_a,
-                    "objectB": p.object_b,
-                    "modeDecision": p.mode_decision,
-                    "visualPrompt": result.visual_prompt,
-                    "imageBytesBase64": base64.b64encode(result.image_bytes).decode("ascii"),
-                }
-            ),
-            200,
-        )
-    except Exception as e:
-        return jsonify({"error": str(e)}), 200
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "error": "demo_disabled",
+                "message": "Use POST /api/builder1-generate for campaign-series generation.",
+            }
+        ),
+        200,
+    )
 
 
 def _parse_builder1_o3_json_text(raw: str) -> dict[str, Any]:
@@ -421,46 +413,18 @@ def _o3_pro_planning_model_caller(system_prompt: str, user_prompt: str) -> objec
     return _parse_builder1_o3_json_text(out_text)
 
 
-def _fake_image_bytes_caller(_prompt: str, _format_value: str) -> bytes:
-    return b"demo-image-bytes"
-
-
 @app.route("/api/builder1-plan-demo", methods=["GET"])
 def builder1_plan_demo():
-    try:
-        product_name = (request.args.get("productName") or "AeroSip Bottle").strip()
-        product_description = (
-            request.args.get("productDescription")
-            or "A lightweight bottle that feels effortless to carry all day."
-        ).strip()
-        format_val = (request.args.get("format") or "portrait").strip()
-        p = plan_builder1(
-            product_name=product_name,
-            product_description=product_description,
-            format_value=format_val,
-            model_caller=_o3_pro_planning_model_caller,
-        )
-        image_result = generate_builder1_image(p, _fake_image_bytes_caller)
-        return (
-            jsonify(
-                {
-                    "productNameResolved": p.product_name_resolved,
-                    "detectedLanguage": p.detected_language,
-                    "advertisingPromise": p.advertising_promise,
-                    "objectA": p.object_a,
-                    "objectASecondary": p.object_a_secondary,
-                    "objectB": p.object_b,
-                    "visualSimilarityScore": p.visual_similarity_score,
-                    "modeDecision": p.mode_decision,
-                    "visualDescription": p.visual_description,
-                    "visualPrompt": image_result.visual_prompt,
-                    "imageBytesBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
-                }
-            ),
-            200,
-        )
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 200
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "error": "demo_disabled",
+                "message": "Use POST /api/builder1-generate for campaign-series generation.",
+            }
+        ),
+        200,
+    )
 
 
 def _builder1_gpt_image_size_for_format(format_value: str) -> str:
@@ -504,165 +468,125 @@ def _builder1_image_caller(prompt: str, format_value: str) -> bytes:
     return base64.b64decode(b64)
 
 
-def _o3_pro_marketing_text_model_caller(system_prompt: str, user_prompt: str) -> str:
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise ValueError("openai_unconfigured")
-    client = OpenAI(
-        api_key=api_key,
-        timeout=httpx.Timeout(120.0),
-        max_retries=0,
-    )
-    combined = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
-    response = client.responses.create(
-        model="o3-pro",
-        input=combined,
-        reasoning={"effort": "low"},
-    )
-    return (getattr(response, "output_text", None) or "").strip()
+def _builder1_update_job(job_id: str, **fields: Any) -> None:
+    with _builder1_jobs_lock:
+        if job_id in _builder1_jobs:
+            _builder1_jobs[job_id].update(fields)
 
 
-def _builder1_json_real_generate(
-    product_name: str, product_description: str, format_val: str
+def _builder1_generate_series(
+    job_id: str,
+    product_name: str,
+    product_description: str,
+    format_val: str,
+    ad_count: int,
+    brand_guidelines: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
-    max_attempts = 3
-    p = None
-    last_error: Exception | None = None
-    for attempt in range(1, max_attempts + 1):
-        logger.info(
-            "BUILDER1_PLANNING_ATTEMPT_START attempt=%s max_attempts=3",
-            attempt,
-        )
-        try:
-            p = plan_builder1(
-                product_name=product_name,
-                product_description=product_description,
-                format_value=format_val,
-                model_caller=_o3_pro_planning_model_caller,
-            )
-            logger.info("BUILDER1_PLANNING_ATTEMPT_OK attempt=%s", attempt)
-            break
-        except Exception as e:
-            last_error = e
-            logger.error(
-                "BUILDER1_PLANNING_ATTEMPT_FAILED attempt=%s err_type=%s err=%s",
-                attempt,
-                type(e).__name__,
-                e,
-            )
-            if attempt < max_attempts:
-                logger.info("BUILDER1_PLANNING_RETRYING next_attempt=%s", attempt + 1)
-                continue
-            logger.error(
-                "BUILDER1_PLANNING_FINAL_FAILED attempts=3 err_type=%s err=%s",
-                type(e).__name__,
-                e,
-                exc_info=True,
-            )
-    if p is None:
-        err_message = str(last_error) if last_error is not None else "planning_failed"
-        return {"ok": False, "error": "planning_failed", "message": err_message}
+    logger.info(
+        "BUILDER1_SERIES_REQUEST jobId=%s adCount=%s format=%s",
+        job_id,
+        ad_count,
+        format_val,
+    )
+    _builder1_update_job(
+        job_id,
+        status="running",
+        stage="planning",
+        completedAds=0,
+        totalAds=ad_count,
+    )
     try:
-        image_result = generate_builder1_image(p, _builder1_image_caller)
+        series_plan = plan_builder1(
+            product_name=product_name,
+            product_description=product_description,
+            format_value=format_val,
+            model_caller=_o3_pro_planning_model_caller,
+            ad_count=ad_count,
+            brand_guidelines=brand_guidelines,
+        )
+    except (Builder1PlannerError, Exception) as e:
+        err_message = str(e) if e else "planning_failed"
+        logger.error("BUILDER1_SERIES_PLAN_REJECTED jobId=%s err=%s", job_id, err_message)
+        return {"ok": False, "error": "planning_failed", "message": err_message}
+
+    _builder1_update_job(job_id, stage="building_prompts")
+
+    def _on_image_progress(completed: int, total: int) -> None:
+        _builder1_update_job(
+            job_id,
+            stage="generating_images",
+            completedAds=completed,
+            totalAds=total,
+        )
+
+    _builder1_update_job(job_id, stage="generating_images", completedAds=0, totalAds=ad_count)
+    try:
+        images_result = generate_builder1_series_images(
+            series_plan,
+            _builder1_image_caller,
+            on_progress=_on_image_progress,
+        )
     except Exception as e:
+        logger.error("BUILDER1_SERIES_IMAGE_FAILED jobId=%s err=%s", job_id, e)
         return {
             "ok": False,
             "error": "builder1_image_call_failed",
             "message": str(e),
         }
-    try:
-        headline = generate_builder1_headline_o3(
-            product_name_resolved=p.product_name_resolved,
-            detected_language=p.detected_language,
-            advertising_promise=p.advertising_promise,
-            object_a=p.object_a,
-            object_a_secondary=p.object_a_secondary,
-            object_b=p.object_b,
-            mode_decision=p.mode_decision,
-            visual_description=p.visual_description,
-            visual_prompt=image_result.visual_prompt,
+
+    _builder1_update_job(job_id, stage="assembling_campaign")
+    composition = build_builder1_series_composition_metadata(series_plan)
+    ads_out: list[dict[str, Any]] = []
+    image_by_index = {img.index: img for img in images_result.images}
+    for ad in sorted(series_plan.ads, key=lambda a: a.index):
+        img = image_by_index[ad.index]
+        ads_out.append(
+            ad_plan_to_api_dict(
+                ad,
+                visual_prompt=img.visual_prompt,
+                image_base64=image_bytes_to_base64(img.image_bytes),
+            )
         )
-    except Exception as e:
-        return {"ok": False, "error": "headline_failed", "message": str(e)}
-    try:
-        composition = generate_builder1_composition_o3(
-            format=p.format,
-            detectedLanguage=p.detected_language,
-            productNameResolved=p.product_name_resolved,
-            headlineProductName=headline["headlineProductName"],
-            headlineText=headline["headlineText"],
-            headlineFull=headline["headlineFull"],
-            objectA=p.object_a,
-            objectASecondary=p.object_a_secondary,
-            objectB=p.object_b,
-            modeDecision=p.mode_decision,
-            visualDescription=p.visual_description,
-            visualPrompt=image_result.visual_prompt,
-        )
-    except Exception as e:
-        return {"ok": False, "error": "composition_failed", "message": str(e)}
-    marketing_text = ""
-    try:
-        marketing_text = generate_builder1_marketing_text_o3(
-            product_name_resolved=p.product_name_resolved,
-            product_description=p.product_description,
-            detected_language=p.detected_language,
-            advertising_promise=p.advertising_promise,
-            object_a=p.object_a,
-            object_a_secondary=p.object_a_secondary,
-            object_b=p.object_b,
-            mode_decision=p.mode_decision,
-            visual_description=p.visual_description,
-            visual_prompt=image_result.visual_prompt,
-            headline_product_name=headline["headlineProductName"],
-            headline_text=headline["headlineText"],
-            headline_full=headline["headlineFull"],
-            model_caller=_o3_pro_marketing_text_model_caller,
-        )
-    except Exception as e:
-        logger.warning("BUILDER1_MARKETING_TEXT_FAILED error=%r", str(e))
+
+    logger.info("BUILDER1_SERIES_DONE jobId=%s adCount=%s", job_id, len(ads_out))
     return {
         "ok": True,
-        "productNameResolved": p.product_name_resolved,
-        "detectedLanguage": p.detected_language,
-        "advertisingPromise": p.advertising_promise,
-        "objectA": p.object_a,
-        "objectASecondary": p.object_a_secondary,
-        "objectB": p.object_b,
-        "visualSimilarityScore": p.visual_similarity_score,
-        "modeDecision": p.mode_decision,
-        "visualDescription": p.visual_description,
-        "visualPrompt": image_result.visual_prompt,
-        "imageBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
-        "marketingText": marketing_text,
-        "headlineProductName": headline["headlineProductName"],
-        "headlineText": headline["headlineText"],
-        "headlineFull": headline["headlineFull"],
-        "compositionLayout": composition["compositionLayout"],
-        "headlineAlign": composition["headlineAlign"],
-        "headlineLines": composition["headlineLines"],
-        "headlineRelativeSize": composition["headlineRelativeSize"],
-        "visualWeight": composition["visualWeight"],
-        "headlineWeight": composition["headlineWeight"],
-        "safeMarginRule": composition["safeMarginRule"],
-        "safeMarginCss": composition["safeMarginCss"],
-        "headlineSizeRule": composition["headlineSizeRule"],
-        "productNameScale": composition["productNameScale"],
-        "headlineTextScale": composition["headlineTextScale"],
-        "compositionNotes": composition["compositionNotes"],
+        "campaign": campaign_identity_to_dict(series_plan),
+        "ads": ads_out,
+        "composition": composition,
     }
 
 
-def _builder1_run_job(job_id: str, product_name: str, product_description: str, format_val: str) -> None:
-    logger.info("BUILDER1_JOB_STARTED jobId=%s", job_id)
+def _builder1_run_job(
+    job_id: str,
+    product_name: str,
+    product_description: str,
+    format_val: str,
+    ad_count: int,
+    brand_guidelines: Optional[dict[str, Any]],
+) -> None:
+    logger.info("BUILDER1_JOB_STARTED jobId=%s adCount=%s", job_id, ad_count)
     try:
-        result = _builder1_json_real_generate(product_name, product_description, format_val)
+        result = _builder1_generate_series(
+            job_id,
+            product_name,
+            product_description,
+            format_val,
+            ad_count,
+            brand_guidelines,
+        )
         with _builder1_jobs_lock:
             if result.get("ok") is True:
-                _builder1_jobs[job_id] = {"status": "done", "result": result}
+                _builder1_jobs[job_id] = {
+                    "status": "done",
+                    "stage": "done",
+                    "completedAds": ad_count,
+                    "totalAds": ad_count,
+                    "result": result,
+                }
                 logger.info("BUILDER1_JOB_DONE jobId=%s", job_id)
             else:
-                err = (result.get("error") or "builder1_generation_failed")
+                err = result.get("error") or "builder1_generation_failed"
                 _builder1_jobs[job_id] = {"status": "error", "error": err}
                 logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, err)
     except Exception as e:
@@ -699,6 +623,9 @@ def builder1_generate():
     product_name = (body.get("productName") or "").strip()
     product_description = (body.get("productDescription") or "").strip()
     format_val = (body.get("format") or "portrait").strip() or "portrait"
+    brand_guidelines = body.get("brandGuidelines")
+    if brand_guidelines is not None and not isinstance(brand_guidelines, dict):
+        brand_guidelines = None
     if not product_description:
         return (
             jsonify(
@@ -710,16 +637,45 @@ def builder1_generate():
             ),
             200,
         )
+    try:
+        ad_count = normalize_ad_count(body.get("adCount"))
+    except Builder1InputError:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "invalid_ad_count",
+                    "message": "adCount must be an integer from 2 through 4",
+                }
+            ),
+            200,
+        )
     job_id = str(uuid.uuid4())
     with _builder1_jobs_lock:
-        _builder1_jobs[job_id] = {"status": "running"}
-    logger.info("BUILDER1_JOB_CREATED jobId=%s", job_id)
-    _builder1_executor.submit(_builder1_run_job, job_id, product_name, product_description, format_val)
+        _builder1_jobs[job_id] = {
+            "status": "running",
+            "stage": "planning",
+            "completedAds": 0,
+            "totalAds": ad_count,
+        }
+    logger.info("BUILDER1_JOB_CREATED jobId=%s adCount=%s", job_id, ad_count)
+    _builder1_executor.submit(
+        _builder1_run_job,
+        job_id,
+        product_name,
+        product_description,
+        format_val,
+        ad_count,
+        brand_guidelines,
+    )
     return (
         jsonify(
             {
                 "status": "running",
                 "jobId": job_id,
+                "stage": "planning",
+                "completedAds": 0,
+                "totalAds": ad_count,
                 "pollUrl": f"/api/builder1-status?jobId={job_id}",
             }
         ),
@@ -739,7 +695,14 @@ def builder1_status():
     status = (job.get("status") or "running").strip()
     logger.info("BUILDER1_JOB_STATUS jobId=%s status=%s", job_id, status)
     if status == "running":
-        return jsonify({"status": "running", "jobId": job_id}), 200
+        out: dict[str, Any] = {"status": "running", "jobId": job_id}
+        if job.get("stage"):
+            out["stage"] = job.get("stage")
+        if job.get("totalAds") is not None:
+            out["totalAds"] = job.get("totalAds")
+        if job.get("completedAds") is not None:
+            out["completedAds"] = job.get("completedAds")
+        return jsonify(out), 200
     if status == "done":
         return jsonify({"status": "done", "jobId": job_id, "result": job.get("result") or {}}), 200
     return jsonify({"status": "error", "jobId": job_id, "error": job.get("error") or "builder1_generation_failed"}), 200
@@ -747,48 +710,12 @@ def builder1_status():
 
 @app.route("/api/builder1-real-image-demo", methods=["GET"])
 def builder1_real_image_demo():
-    try:
-        product_name = (request.args.get("productName") or "AeroSip Bottle").strip()
-        product_description = (
-            request.args.get("productDescription")
-            or "A lightweight bottle that feels effortless to carry all day."
-        ).strip()
-        format_val = (request.args.get("format") or "portrait").strip()
-        p = plan_builder1(
-            product_name=product_name,
-            product_description=product_description,
-            format_value=format_val,
-            model_caller=_o3_pro_planning_model_caller,
-        )
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 200
-    try:
-        image_result = generate_builder1_image(p, _builder1_image_caller)
-    except Exception as e:
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "builder1_image_call_failed",
-                    "details": str(e),
-                }
-            ),
-            200,
-        )
     return (
         jsonify(
             {
-                "productNameResolved": p.product_name_resolved,
-                "detectedLanguage": p.detected_language,
-                "advertisingPromise": p.advertising_promise,
-                "objectA": p.object_a,
-                "objectASecondary": p.object_a_secondary,
-                "objectB": p.object_b,
-                "visualSimilarityScore": p.visual_similarity_score,
-                "modeDecision": p.mode_decision,
-                "visualDescription": p.visual_description,
-                "visualPrompt": image_result.visual_prompt,
-                "imageBytesBase64": base64.b64encode(image_result.image_bytes).decode("ascii"),
+                "ok": False,
+                "error": "demo_disabled",
+                "message": "Use POST /api/builder1-generate for campaign-series generation.",
             }
         ),
         200,
@@ -1017,15 +944,13 @@ def builder1_download_zip():
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "invalid_input"}), 400
 
-    image_base64 = body.get("imageBase64") or ""
-    marketing_text = body.get("marketingText") or ""
     try:
-        zip_bytes = build_builder1_zip_bytes(image_base64, marketing_text)
+        zip_bytes = build_builder1_zip_bytes(body)
     except ValueError as e:
         return jsonify({"ok": False, "error": str(e)}), 400
 
     response = Response(zip_bytes, mimetype="application/zip")
-    response.headers["Content-Disposition"] = 'attachment; filename="builder1-ad.zip"'
+    response.headers["Content-Disposition"] = 'attachment; filename="builder1-campaign.zip"'
     return response
 
 

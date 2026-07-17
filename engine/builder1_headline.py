@@ -1,5 +1,6 @@
 """
-Builder1 headline text via o3-pro (not burned into images).
+LEGACY — not part of active Builder1 campaign-series production path.
+Builder1 headline text via o3-pro (Object A/B era).
 """
 from __future__ import annotations
 

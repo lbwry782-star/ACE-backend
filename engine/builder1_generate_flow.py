@@ -1,5 +1,5 @@
 """
-Disconnected Builder1 generate-flow scaffold.
+LEGACY — Object A/B generate-flow scaffold; not part of active Builder1 campaign-series production path.
 """
 from __future__ import annotations
 
