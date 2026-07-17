@@ -15,6 +15,9 @@ JudgeModelCaller: TypeAlias = Callable[[str, str], object]
 BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT = """
 You are a strict advertising strategy auditor for Builder1 campaigns.
 
+The plan you receive is already normalized by the server.
+Do NOT reject format, adCount, detectedLanguage, ad indexes, or missing candidate scans.
+
 Return JSON only:
 {
   "pass": true,
@@ -23,27 +26,30 @@ Return JSON only:
   "strategicProblemReal": true,
   "relativeAdvantageSupported": true,
   "relativeAdvantageDistinctive": true,
-  "conceptualCandidateCountSufficient": true,
   "conceptualGeneratorIsAction": true,
   "conceptualGeneratorIsNotObject": true,
   "conceptualGeneratorDirectlyExpressesAdvantage": true,
   "conceptualGeneratorSupportsSeries": true,
-  "conceptualGeneratorExpressesAdvantage": true,
   "physicalGeneratorEmbodiesConcept": true,
   "physicalGeneratorWasDerivedFromConcept": true,
   "physicalGeneratorDidNotReplaceConcept": true,
   "graphicGeneratorConcrete": true,
-  "seriesCoherent": true
+  "seriesCoherent": true,
+  "sloganDerivesFromAdvantage": true,
+  "noUnsupportedEvidence": true
 }
 
 Fail if:
-- unsupported product capabilities are presented as facts (dashboards, guaranteed results, live reporting, sales attribution, transparency systems, automation, personal service) without brief support
+- unsupported product capabilities are presented as facts without brief support
+- strategicProblemEvidence or relativeAdvantageBriefSupport invent surveys, percentages, study names, or statistics
 - relative advantage is generic transparency/quality/trust/results
 - conceptual generator is a theme, emotion, object, or equals physicalGenerator
 - physical generator appears chosen before the conceptual action
 - ads merely swap objects without performing the same conceptual action
 - graphic generator lacks concrete renderable fields and recurring visible device
-- conceptualGeneratorScan has fewer than 6 action-based candidates
+- marketing copy is too long for in-image rendering
+
+Use rejectionReasonCodes including unsupported_evidence_claim when fabricated evidence appears.
 
 Return structured JSON only.
 """.strip()

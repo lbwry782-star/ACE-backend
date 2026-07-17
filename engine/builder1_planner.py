@@ -1,104 +1,116 @@
 """
-Builder1 campaign-series planning entry point (active production).
+Builder1 campaign-series planning entry point (staged pipeline).
 """
 from __future__ import annotations
 
 import json
 import logging
-from dataclasses import replace
-from typing import Any, Callable, Dict, Optional, TypeAlias
+import uuid
+from typing import Any, Callable, List, Optional, TypeAlias
 
 from engine.builder1_input_normalizer import normalize_builder1_input
-from engine.builder1_plan_parser import validate_series_plan_structure
-from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_to_store_dict
+from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_planning_contract import (
-    BUILDER1_PLANNING_SYSTEM_PROMPT,
-    build_builder1_planning_user_prompt,
-    build_builder1_series_repair_user_prompt,
-    build_builder1_strategy_repair_user_prompt,
-    new_campaign_exploration_seed,
+    STAGE_CONCEPTUAL_SCAN_SYSTEM,
+    STAGE_CONCEPTUAL_SELECT_SYSTEM,
+    STAGE_FINAL_CAMPAIGN_SYSTEM,
+    STAGE_STRATEGY_SCAN_SYSTEM,
+    STAGE_STRATEGY_SELECT_SYSTEM,
+    build_conceptual_scan_repair_prompt,
+    build_conceptual_scan_user_prompt,
+    build_conceptual_select_user_prompt,
+    build_final_campaign_repair_prompt,
+    build_final_campaign_user_prompt,
+    build_strategy_scan_repair_prompt,
+    build_strategy_scan_user_prompt,
+    build_strategy_select_user_prompt,
     shuffled_exploration_lens_order,
 )
+from engine.builder1_staged_parsers import (
+    StageParseError,
+    assemble_builder1_series_plan,
+    detect_brief_language,
+    parse_conceptual_scan,
+    parse_conceptual_selection,
+    parse_final_campaign_output,
+    parse_strategy_scan,
+    parse_strategy_selection,
+)
 from engine.builder1_strategy_judge import judge_builder1_strategy
+from engine.builder1_plan_spec import series_plan_to_store_dict
 
 logger = logging.getLogger(__name__)
 
-MAX_PLANNING_ATTEMPTS = 3
-
-
-def _preview_text(value: object, *, limit: int = 500) -> str:
-    text = str(value or "").replace("\n", " ").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + "…"
-
-
-def _coerce_plan_dict(raw_payload: object) -> Dict[str, Any]:
-    if isinstance(raw_payload, dict):
-        return raw_payload
-    if isinstance(raw_payload, str):
-        text = raw_payload.strip()
-        start, end = text.find("{"), text.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("no_json_object")
-        obj = json.loads(text[start : end + 1])
-        if not isinstance(obj, dict):
-            raise ValueError("model_output_not_object")
-        return obj
-    raise ValueError("model_output_not_object")
+PlanningModelCaller: TypeAlias = Callable[[str, str], object]
 
 
 class Builder1PlannerError(RuntimeError):
     pass
 
 
-PlanningModelCaller: TypeAlias = Callable[[str, str], object]
+def _conceptual_to_dict(c: Any) -> dict[str, str]:
+    return {
+        "generator": c.generator,
+        "action": c.action,
+        "input": c.input,
+        "transformation": c.transformation,
+        "result": c.result,
+        "whyItExpressesAdvantage": c.why_it_expresses_advantage,
+        "seriesPotential": c.series_potential,
+    }
 
 
-def _try_parse(
-    raw_payload: object,
-    *,
-    normalized_product_name: str,
-    normalized_product_description: str,
-    normalized_format: str,
-    ad_count: int,
-) -> tuple[Optional[Builder1SeriesPlan], list[str], Optional[Dict[str, Any]]]:
-    raw_dict = _coerce_plan_dict(raw_payload)
-    candidate, reasons = validate_series_plan_structure(
-        raw_dict,
-        expected_format=normalized_format,
-        expected_ad_count=ad_count,
-        product_name=normalized_product_name,
-        product_description=normalized_product_description,
-    )
-    return candidate, reasons, raw_dict
+def _raw_to_text(raw: object) -> str:
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict):
+        return json.dumps(raw, ensure_ascii=False)
+    return str(raw)
 
 
-def _finalize_plan(plan: Builder1SeriesPlan, normalized) -> Builder1SeriesPlan:
-    forced_name = normalized.product_name or plan.product_name_resolved
-    return replace(
-        plan,
-        product_name=forced_name,
-        product_name_resolved=forced_name,
-        product_description=normalized.product_description,
-        format=normalized.format,
-        ad_count=normalized.ad_count,
-    )
-
-
-def _run_strategy_judge(
-    *,
-    product_description: str,
-    plan: Builder1SeriesPlan,
+def _run_stage(
+    stage: str,
     model_caller: PlanningModelCaller,
-) -> tuple[bool, list[str], Dict[str, Any]]:
-    plan_dict = series_plan_to_store_dict(plan)
-    result = judge_builder1_strategy(
-        product_description=product_description,
-        plan_dict=plan_dict,
-        model_caller=model_caller,
-    )
-    return result.passed, result.rejection_reason_codes, plan_dict
+    system_prompt: str,
+    user_prompt: str,
+    parse_fn: Callable[[object], Any],
+    *,
+    repair_builder: Optional[Callable[[str, List[str]], str]] = None,
+) -> Any:
+    last_reasons: List[str] = []
+    last_raw = ""
+    current_prompt = user_prompt
+    for attempt in (1, 2):
+        logger.info("BUILDER1_STAGE_START stage=%s attempt=%s", stage, attempt)
+        try:
+            raw = model_caller(system_prompt, current_prompt)
+            last_raw = _raw_to_text(raw)
+            result = parse_fn(raw)
+            logger.info("BUILDER1_STAGE_PARSE_OK stage=%s", stage)
+            return result
+        except StageParseError as exc:
+            last_reasons = exc.reasons
+            logger.error("BUILDER1_STAGE_FAILED stage=%s reasons=%s", stage, last_reasons)
+            if repair_builder and attempt == 1:
+                logger.info("BUILDER1_STAGE_REPAIR stage=%s", stage)
+                current_prompt = repair_builder(last_raw, last_reasons)
+                try:
+                    raw = model_caller(system_prompt, current_prompt)
+                    last_raw = _raw_to_text(raw)
+                    result = parse_fn(raw)
+                    logger.info("BUILDER1_STAGE_PARSE_OK stage=%s after_repair", stage)
+                    return result
+                except StageParseError as exc2:
+                    last_reasons = exc2.reasons
+                    logger.error("BUILDER1_STAGE_FAILED stage=%s repair reasons=%s", stage, last_reasons)
+            logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
+            current_prompt = user_prompt
+        except Exception as exc:
+            logger.error("BUILDER1_STAGE_FAILED stage=%s err=%s", stage, exc)
+            if attempt == 2:
+                raise Builder1PlannerError(f"{stage}_failed") from exc
+            logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
+    raise Builder1PlannerError(f"{stage}_failed: {';'.join(last_reasons)}")
 
 
 def plan_builder1(
@@ -110,7 +122,7 @@ def plan_builder1(
     ad_count: int = 2,
     brand_guidelines: Optional[Dict[str, Any]] = None,
 ) -> Builder1SeriesPlan:
-    """Plan one Builder1 campaign (2–4 ads). No creative-output memory."""
+    """Plan one Builder1 campaign via staged pipeline. No creative-output memory."""
     normalized = normalize_builder1_input(
         product_name=product_name,
         product_description=product_description,
@@ -118,137 +130,216 @@ def plan_builder1(
         ad_count=ad_count,
         brand_guidelines=brand_guidelines,
     )
+    exploration_seed = str(uuid.uuid4())
     lens_order = shuffled_exploration_lens_order()
-    exploration_seed = new_campaign_exploration_seed()
+    detected_language = detect_brief_language(
+        normalized.product_description,
+        normalized.product_name,
+    )
+
     logger.info(
-        "BUILDER1_SERIES_PLANNING_START productName=%s format=%s adCount=%s",
+        "BUILDER1_SERIES_PLANNING_START productName=%s format=%s adCount=%s seed=%s lang=%s",
         normalized.product_name,
         normalized.format,
         normalized.ad_count,
+        exploration_seed,
+        detected_language,
     )
-    logger.info("BUILDER1_STRATEGY_SCAN_START seed=%s lensOrder=%s", exploration_seed, ",".join(lens_order))
 
-    user_prompt = build_builder1_planning_user_prompt(
+    # Stage 1 — strategy scan
+    strategy_candidates = _run_stage(
+        "strategy_scan",
+        model_caller,
+        STAGE_STRATEGY_SCAN_SYSTEM,
+        build_strategy_scan_user_prompt(
+            product_name=normalized.product_name,
+            product_description=normalized.product_description,
+            detected_language=detected_language,
+            lens_order=lens_order,
+            exploration_seed=exploration_seed,
+        ),
+        lambda raw: parse_strategy_scan(raw, product_description=normalized.product_description),
+        repair_builder=lambda broken, reasons: build_strategy_scan_repair_prompt(
+            broken_json=broken, reasons=reasons
+        ),
+    )
+
+    # Stage 2 — strategy selection
+    cand_dicts = [
+        {
+            "id": c.id,
+            "lens": c.lens,
+            "strategicProblem": c.strategic_problem,
+            "relativeAdvantage": c.relative_advantage,
+            "briefSupport": c.brief_support,
+            "advantageSource": c.advantage_source,
+            "claimRisk": c.claim_risk,
+        }
+        for c in strategy_candidates
+    ]
+
+    def _parse_selection(raw: object):
+        sel, selected = parse_strategy_selection(raw, strategy_candidates)
+        return sel, selected
+
+    selection_result = _run_stage(
+        "strategy_selection",
+        model_caller,
+        STAGE_STRATEGY_SELECT_SYSTEM,
+        build_strategy_select_user_prompt(cand_dicts, exploration_seed),
+        _parse_selection,
+    )
+    strategy_selection, selected_strategy = selection_result
+    logger.info(
+        "BUILDER1_STRATEGY_SELECTED id=%s family=%s",
+        selected_strategy.id,
+        strategy_selection.strategy_family,
+    )
+
+    # Stage 3 — conceptual scan
+    conceptual_candidates = _run_stage(
+        "conceptual_scan",
+        model_caller,
+        STAGE_CONCEPTUAL_SCAN_SYSTEM,
+        build_conceptual_scan_user_prompt(
+            product_description=normalized.product_description,
+            strategic_problem=selected_strategy.strategic_problem,
+            relative_advantage=selected_strategy.relative_advantage,
+            exploration_seed=exploration_seed,
+        ),
+        parse_conceptual_scan,
+        repair_builder=lambda broken, reasons: build_conceptual_scan_repair_prompt(
+            broken_json=broken, reasons=reasons
+        ),
+    )
+
+    # Stage 4 — conceptual selection
+    conc_dicts = [
+        {
+            "id": c.id,
+            "generator": c.generator,
+            "action": c.action,
+            "input": c.input,
+            "transformation": c.transformation,
+            "result": c.result,
+            "whyItExpressesAdvantage": c.why_it_expresses_advantage,
+            "seriesPotential": c.series_potential,
+        }
+        for c in conceptual_candidates
+    ]
+
+    def _parse_conc_selection(raw: object):
+        sel, selected = parse_conceptual_selection(raw, conceptual_candidates)
+        return sel, selected
+
+    conc_selection_result = _run_stage(
+        "conceptual_selection",
+        model_caller,
+        STAGE_CONCEPTUAL_SELECT_SYSTEM,
+        build_conceptual_select_user_prompt(conc_dicts),
+        _parse_conc_selection,
+    )
+    _, selected_conceptual = conc_selection_result
+
+    conceptual_fixed = _conceptual_to_dict(selected_conceptual)
+
+    # Stage 5 — final campaign construction
+    def _parse_final(raw: object):
+        creative, reasons = parse_final_campaign_output(
+            raw, expected_ad_count=normalized.ad_count
+        )
+        if reasons:
+            raise StageParseError("final_campaign", reasons)
+        return creative
+
+    final_user = build_final_campaign_user_prompt(
+        product_name=normalized.product_name,
+        product_description=normalized.product_description,
+        ad_count=normalized.ad_count,
+        format_value=normalized.format,
+        strategic_problem=selected_strategy.strategic_problem,
+        relative_advantage=selected_strategy.relative_advantage,
+        brief_support=selected_strategy.brief_support,
+        advantage_source=selected_strategy.advantage_source,
+        conceptual=conceptual_fixed,
+        brand_guidelines=brand_guidelines,
+    )
+
+    try:
+        final_creative = _run_stage(
+            "final_campaign",
+            model_caller,
+            STAGE_FINAL_CAMPAIGN_SYSTEM,
+            final_user,
+            _parse_final,
+            repair_builder=lambda broken, reasons: build_final_campaign_repair_prompt(
+                broken_json=broken,
+                reasons=reasons,
+                ad_count=normalized.ad_count,
+                strategic_problem=selected_strategy.strategic_problem,
+                relative_advantage=selected_strategy.relative_advantage,
+                conceptual=conceptual_fixed,
+            ),
+        )
+    except Builder1PlannerError:
+        raise
+
+    plan = assemble_builder1_series_plan(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
         format_value=normalized.format,
         ad_count=normalized.ad_count,
-        brand_guidelines=brand_guidelines,
-        exploration_lens_order=lens_order,
-        campaign_exploration_seed=exploration_seed,
+        detected_language=detected_language,
+        exploration_seed=exploration_seed,
+        strategy=selected_strategy,
+        strategy_selection=strategy_selection,
+        conceptual=selected_conceptual,
+        final_creative=final_creative,
     )
 
-    last_error: Optional[Exception] = None
-    final_plan: Optional[Builder1SeriesPlan] = None
-    last_raw: Optional[Dict[str, Any]] = None
-
-    for attempt in range(1, MAX_PLANNING_ATTEMPTS + 1):
-        logger.info("BUILDER1_SERIES_PLANNING_MODEL_CALL_START attempt=%s", attempt)
-        try:
-            raw_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, user_prompt)
-        except Exception as exc:
-            last_error = exc
-            logger.error("BUILDER1_SERIES_PLAN_REJECTED stage=model_call attempt=%s err=%s", attempt, exc)
-            continue
-
-        raw_preview = _preview_text(raw_payload)
-        logger.info("BUILDER1_SERIES_PLANNING_PARSE_START attempt=%s preview=%s", attempt, raw_preview)
-        try:
-            plan, reasons, raw_dict = _try_parse(
-                raw_payload,
-                normalized_product_name=normalized.product_name,
-                normalized_product_description=normalized.product_description,
-                normalized_format=normalized.format,
-                ad_count=normalized.ad_count,
-            )
-            last_raw = raw_dict
-        except Exception as exc:
-            last_error = exc
-            logger.error("BUILDER1_SERIES_PLAN_REJECTED stage=coerce attempt=%s err=%s", attempt, exc)
-            continue
-
-        if plan is not None:
-            final_plan = _finalize_plan(plan, normalized)
-            break
-
-        logger.error("BUILDER1_SERIES_PLAN_REJECTED stage=validation attempt=%s reasons=%s", attempt, reasons)
-        logger.info("BUILDER1_SERIES_REPAIR attempt=%s reasons=%s", attempt, reasons)
-        repair_prompt = build_builder1_series_repair_user_prompt(
-            product_name=normalized.product_name,
-            product_description=normalized.product_description,
-            format_value=normalized.format,
-            ad_count=normalized.ad_count,
-            broken_plan_json=json.dumps(raw_dict, ensure_ascii=False),
-            rejection_reasons=reasons,
-            brand_guidelines=brand_guidelines,
-            exploration_lens_order=lens_order,
-            campaign_exploration_seed=exploration_seed,
-        )
-        try:
-            repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, repair_prompt)
-            repaired_plan, repair_reasons, repaired_raw = _try_parse(
-                repaired_payload,
-                normalized_product_name=normalized.product_name,
-                normalized_product_description=normalized.product_description,
-                normalized_format=normalized.format,
-                ad_count=normalized.ad_count,
-            )
-            last_raw = repaired_raw
-            if repaired_plan is not None:
-                final_plan = _finalize_plan(repaired_plan, normalized)
-                break
-            logger.error("BUILDER1_SERIES_PLAN_REJECTED stage=repair_validation reasons=%s", repair_reasons)
-        except Exception as exc:
-            last_error = exc
-            logger.error("BUILDER1_SERIES_PLAN_REJECTED stage=repair err=%s", exc)
-
-    if final_plan is None:
-        if last_error:
-            raise Builder1PlannerError("planning_failed") from last_error
-        raise Builder1PlannerError("planning_failed")
-
-    passed, judge_codes, plan_dict = _run_strategy_judge(
+    # Stage 6 — judge (content quality only)
+    plan_dict = series_plan_to_store_dict(plan)
+    judge_result = judge_builder1_strategy(
         product_description=normalized.product_description,
-        plan=final_plan,
+        plan_dict=plan_dict,
         model_caller=model_caller,
     )
-    if not passed:
-        logger.info("BUILDER1_SERIES_REPAIR stage=strategy_judge reasons=%s", judge_codes)
-        strategy_repair = build_builder1_strategy_repair_user_prompt(
-            product_name=normalized.product_name,
-            product_description=normalized.product_description,
-            format_value=normalized.format,
+    if not judge_result.passed:
+        logger.info("BUILDER1_STAGE_REPAIR stage=final_campaign_judge reasons=%s", judge_result.rejection_reason_codes)
+        repair_prompt = build_final_campaign_repair_prompt(
+            broken_json=json.dumps(final_creative, ensure_ascii=False),
+            reasons=judge_result.rejection_reason_codes,
             ad_count=normalized.ad_count,
-            broken_plan_json=json.dumps(last_raw or plan_dict, ensure_ascii=False),
-            judge_reason_codes=judge_codes,
-            brand_guidelines=brand_guidelines,
-            exploration_lens_order=lens_order,
-            campaign_exploration_seed=exploration_seed,
+            strategic_problem=selected_strategy.strategic_problem,
+            relative_advantage=selected_strategy.relative_advantage,
+            conceptual=conceptual_fixed,
         )
-        repaired_payload = model_caller(BUILDER1_PLANNING_SYSTEM_PROMPT, strategy_repair)
-        repaired_plan, repair_reasons, _ = _try_parse(
-            repaired_payload,
-            normalized_product_name=normalized.product_name,
-            normalized_product_description=normalized.product_description,
-            normalized_format=normalized.format,
-            ad_count=normalized.ad_count,
-        )
-        if repaired_plan is None:
-            raise Builder1PlannerError("strategy_judge_failed")
-        final_plan = _finalize_plan(repaired_plan, normalized)
-        passed2, judge_codes2, plan_dict2 = _run_strategy_judge(
-            product_description=normalized.product_description,
-            plan=final_plan,
-            model_caller=model_caller,
-        )
-        if not passed2:
-            raise Builder1PlannerError("strategy_judge_failed")
+        try:
+            raw = model_caller(STAGE_FINAL_CAMPAIGN_SYSTEM, repair_prompt)
+            final_creative = _parse_final(raw)
+            plan = assemble_builder1_series_plan(
+                product_name=normalized.product_name,
+                product_description=normalized.product_description,
+                format_value=normalized.format,
+                ad_count=normalized.ad_count,
+                detected_language=detected_language,
+                exploration_seed=exploration_seed,
+                strategy=selected_strategy,
+                strategy_selection=strategy_selection,
+                conceptual=selected_conceptual,
+                final_creative=final_creative,
+            )
+            judge2 = judge_builder1_strategy(
+                product_description=normalized.product_description,
+                plan_dict=series_plan_to_store_dict(plan),
+                model_caller=model_caller,
+            )
+            if not judge2.passed:
+                raise Builder1PlannerError("strategy_judge_failed")
+        except Builder1PlannerError:
+            raise
+        except Exception as exc:
+            raise Builder1PlannerError("strategy_judge_failed") from exc
 
-    logger.info(
-        "BUILDER1_STRATEGY_SELECTED adCount=%s brandSlogan=%s advantage=%s",
-        final_plan.ad_count,
-        final_plan.brand_slogan,
-        final_plan.relative_advantage,
-    )
-    logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", final_plan.ad_count)
-    return final_plan
+    logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", plan.ad_count)
+    return plan

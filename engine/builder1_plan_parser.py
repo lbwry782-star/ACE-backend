@@ -62,6 +62,15 @@ EXPLORATION_LENSES = {
     "weakness_converted",
 }
 
+FABRICATED_EVIDENCE_PATTERNS = (
+    re.compile(r"\d+\s*%\s"),
+    re.compile(r"\d+\s*%"),
+    re.compile(r"\b\d{4}\b.*\b(study|survey|report|research|poll)\b", re.I),
+    re.compile(r"\b(study|survey|poll|benchmark|market report)\b", re.I),
+    re.compile(r"\b\d+\s*(users|customers|people|companies|brands)\b", re.I),
+    re.compile(r"\b(according to|research shows|data shows|statistics show)\b", re.I),
+)
+
 UNSUPPORTED_CAPABILITY_TERMS = (
     "live dashboard",
     "dashboard",
@@ -202,6 +211,19 @@ def _validate_conceptual_generator_scan(raw: object, reasons: List[str], *, requ
         gen = _norm_key(str(item.get("conceptualGenerator") or ""))
         if gen in WEAK_CONCEPTUAL_TERMS:
             reasons.append("conceptual_scan_candidate_too_vague")
+
+
+def check_unsupported_evidence(text: str, brief: str) -> bool:
+    """Return True when text contains fabricated evidence not supported by the brief."""
+    t = _norm_text(text)
+    if not t:
+        return False
+    if re.search(r"\d+\s*%", t) and not re.search(r"\d+\s*%", brief):
+        return True
+    for pat in FABRICATED_EVIDENCE_PATTERNS[2:]:
+        if pat.search(t):
+            return True
+    return False
 
 
 def _check_unsupported_claims(
@@ -477,6 +499,12 @@ def validate_series_plan_structure(
         reasons.append("invalid_relative_advantage_source")
 
     relative_advantage = _norm_text(obj.get("relativeAdvantage"))
+    evidence = _norm_text(obj.get("strategicProblemEvidence"))
+    if check_unsupported_evidence(evidence, product_description):
+        reasons.append("unsupported_evidence_claim")
+    brief_support = _norm_text(obj.get("relativeAdvantageBriefSupport"))
+    if check_unsupported_evidence(brief_support, product_description):
+        reasons.append("unsupported_evidence_claim")
     _check_unsupported_claims(
         product_description=product_description,
         relative_advantage=relative_advantage,
