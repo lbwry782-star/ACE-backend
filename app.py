@@ -577,13 +577,24 @@ def _builder1_generate_single_ad(
 ) -> dict[str, Any]:
     session = None
     reservation_held = already_reserved
+    lock_token = ""
     try:
         if already_reserved:
             session = get_campaign_session(campaign_id)
             if session.generating_index != ad_index:
                 raise CampaignStoreError("campaign_index_conflict")
+            if session.generating_lock_owner_job_id and session.generating_lock_owner_job_id != job_id:
+                raise CampaignStoreError("campaign_generation_in_progress")
+            lock_token = session.generating_lock_token or ""
+            logger.info(
+                "BUILDER1_GENERATION_LOCK_CONTINUED campaignId=%s jobId=%s reservedAdIndex=%s",
+                campaign_id,
+                job_id,
+                ad_index,
+            )
         else:
-            session = reserve_next_ad_index(campaign_id, ad_index)
+            session = reserve_next_ad_index(campaign_id, ad_index, job_id=job_id)
+            lock_token = session.generating_lock_token or ""
             reservation_held = True
 
         logger.info(
@@ -621,7 +632,11 @@ def _builder1_generate_single_ad(
         )
     except ImageComplianceError as e:
         if reservation_held:
-            release_generation_lock(campaign_id)
+            release_generation_lock(
+                campaign_id,
+                job_id=job_id,
+                lock_token=lock_token,
+            )
         session = get_campaign_session(campaign_id)
         logger.error(
             "BUILDER1_IMAGE_COMPLIANCE_FAILED campaignId=%s jobId=%s adIndex=%s violations=%s",
@@ -638,7 +653,11 @@ def _builder1_generate_single_ad(
         )
     except ImageComplianceUnavailableError as e:
         if reservation_held:
-            release_generation_lock(campaign_id)
+            release_generation_lock(
+                campaign_id,
+                job_id=job_id,
+                lock_token=lock_token,
+            )
         session = get_campaign_session(campaign_id)
         return _builder1_image_compliance_error_response(
             campaign_id=campaign_id,
@@ -648,7 +667,11 @@ def _builder1_generate_single_ad(
         )
     except ImageRateLimitError as e:
         if reservation_held:
-            release_generation_lock(campaign_id)
+            release_generation_lock(
+                campaign_id,
+                job_id=job_id,
+                lock_token=lock_token,
+            )
         retry_after = getattr(e, "retry_after_seconds", None)
         logger.error(
             "BUILDER1_IMAGE_RATE_LIMITED campaignId=%s adIndex=%s retryAfterSeconds=%s",
@@ -668,11 +691,19 @@ def _builder1_generate_single_ad(
         return out
     except CampaignStoreError as e:
         if reservation_held:
-            release_generation_lock(campaign_id)
+            release_generation_lock(
+                campaign_id,
+                job_id=job_id,
+                lock_token=lock_token,
+            )
         return {"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}
     except Exception as e:
         if reservation_held:
-            release_generation_lock(campaign_id)
+            release_generation_lock(
+                campaign_id,
+                job_id=job_id,
+                lock_token=lock_token,
+            )
         logger.error("BUILDER1_SERIES_IMAGE_FAILED campaignId=%s adIndex=%s err=%s", campaign_id, ad_index, e)
         return {"ok": False, "error": "image_generation_failed", "message": str(e), "campaignId": campaign_id}
 
@@ -888,12 +919,12 @@ def builder1_generate_next():
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "invalid_input", "message": "expectedNextIndex must be an integer"}), 200
 
+    job_id = str(uuid.uuid4())
     try:
-        session = reserve_next_ad_index(campaign_id, expected_next_index)
+        session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
     except CampaignStoreError as e:
         return jsonify({"ok": False, "error": e.code, "message": e.message}), 200
 
-    job_id = str(uuid.uuid4())
     create_builder1_job(
         job_id=job_id,
         campaign_id=campaign_id,
