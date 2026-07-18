@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from engine.builder1_image_compliance import ImageComplianceResult
+
+
+def pass_compliance_reviewer(**_kwargs: Any) -> ImageComplianceResult:
+    """Explicit test-only injected reviewer — approves without a real multimodal call."""
+    return ImageComplianceResult(passed=True, violations=[], confidence="high")
+
 
 def marketing_text_words(count: int = 50, prefix: str = "word") -> str:
     return " ".join(f"{prefix}{i}" for i in range(1, count + 1))

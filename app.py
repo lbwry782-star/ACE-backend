@@ -55,6 +55,11 @@ from engine.builder1_image_generator import (
     generate_builder1_ad_image,
     image_bytes_to_base64,
 )
+from engine.builder1_image_compliance import (
+    ImageComplianceError,
+    ImageComplianceUnavailableError,
+    log_builder1_image_compliance_config,
+)
 from engine.builder1_input_normalizer import Builder1InputError, normalize_ad_count
 from engine.builder1_plan_spec import (
     ad_to_public_api_dict,
@@ -75,6 +80,11 @@ try:
     log_video_headline_delivery_startup("web")
 except Exception as e:
     logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG web startup failed err=%s", e)
+
+try:
+    log_builder1_image_compliance_config()
+except Exception as e:
+    logger.warning("BUILDER1_IMAGE_COMPLIANCE_CONFIG startup failed err=%s", e)
 
 
 @app.before_request
@@ -525,6 +535,24 @@ def _builder1_build_incremental_result(
     }
 
 
+def _builder1_image_compliance_error_response(
+    *,
+    campaign_id: str,
+    ad_index: int,
+    session,
+    error_code: str,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "error": error_code,
+        "retryable": True,
+        "campaignId": campaign_id,
+        "nextAdIndex": ad_index,
+        "generatedCount": session.generated_count,
+        "targetAdCount": session.target_ad_count,
+    }
+
+
 def _builder1_generate_single_ad(
     *,
     job_id: str,
@@ -558,7 +586,13 @@ def _builder1_generate_single_ad(
             targetAdCount=session.target_ad_count,
         )
 
-        image_result = generate_builder1_ad_image(session.plan, ad_index, _builder1_image_caller)
+        image_result = generate_builder1_ad_image(
+            session.plan,
+            ad_index,
+            _builder1_image_caller,
+            campaign_id=campaign_id,
+            job_id=job_id,
+        )
         session = mark_ad_generated(campaign_id, ad_index)
         reservation_held = False
 
@@ -569,6 +603,33 @@ def _builder1_generate_single_ad(
             ad_index=ad_index,
             visual_prompt=image_result.visual_prompt,
             image_base64=image_bytes_to_base64(image_result.image_bytes),
+        )
+    except ImageComplianceError as e:
+        if reservation_held:
+            release_generation_lock(campaign_id)
+        session = get_campaign_session(campaign_id)
+        logger.error(
+            "BUILDER1_IMAGE_COMPLIANCE_FAILED campaignId=%s jobId=%s adIndex=%s violations=%s",
+            campaign_id,
+            job_id,
+            ad_index,
+            e.violations,
+        )
+        return _builder1_image_compliance_error_response(
+            campaign_id=campaign_id,
+            ad_index=ad_index,
+            session=session,
+            error_code="image_compliance_failed",
+        )
+    except ImageComplianceUnavailableError as e:
+        if reservation_held:
+            release_generation_lock(campaign_id)
+        session = get_campaign_session(campaign_id)
+        return _builder1_image_compliance_error_response(
+            campaign_id=campaign_id,
+            ad_index=ad_index,
+            session=session,
+            error_code="image_compliance_unavailable",
         )
     except ImageRateLimitError as e:
         if reservation_held:
@@ -626,6 +687,8 @@ def _builder1_generate_initial(
             model_caller=_o3_pro_planning_model_caller,
             ad_count=ad_count,
             brand_guidelines=brand_guidelines,
+            campaign_id=campaign_id,
+            job_id=job_id,
         )
     except Builder1PlannerError as e:
         err_message = str(e) if e else "planning_failed"

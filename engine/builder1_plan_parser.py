@@ -352,6 +352,8 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
     if reasons:
         return None
 
+    slogan_placement_reason = _norm_text(raw.get("sloganPlacementReason"))
+
     return Builder1GraphicGenerator(
         palette=Builder1Palette(**palette_vals),
         layout_template=layout,
@@ -373,6 +375,7 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
         shape_language=shape_language,
         framing_rule=framing,
         spacing_rule=spacing_rule,
+        slogan_placement_reason=slogan_placement_reason,
     )
 
 

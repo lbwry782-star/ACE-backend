@@ -119,6 +119,9 @@ class TestSuppliedLogoSanitization(unittest.TestCase):
             format_value="portrait",
             strategic_problem="Buyers doubt energy claims",
             relative_advantage="Clean sustained energy",
+            brand_slogan="Clean Sustained Energy",
+            slogan_derivation="From clean sustained energy advantage",
+            implied_action="Show clean sustained energy visually",
             conceptual={"action": "Prove clean energy"},
             brand_guidelines={
                 "logoUrl": "https://cdn.example.com/voltrush-logo.png",

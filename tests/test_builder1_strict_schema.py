@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 from engine.builder1_final_stages import parse_series_ads_output
+from tests.builder1_test_helpers import pass_compliance_reviewer
 from engine.builder1_image_generator import generate_builder1_ad_image
 from engine.builder1_marketing_copy import validate_marketing_text_50_words
 from engine.builder1_planning_contract import STAGE_SERIES_ADS_SYSTEM
@@ -285,7 +286,7 @@ class TestStrictSchemaIntegration(unittest.TestCase):
             image_calls.append(1)
             return b"jpeg"
 
-        generate_builder1_ad_image(plan, 1, image_caller)
+        generate_builder1_ad_image(plan, 1, image_caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertEqual(len(image_calls), 1)
 
     def test_exactly_fifty_marketing_words_remain_valid(self) -> None:

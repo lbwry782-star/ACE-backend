@@ -7,6 +7,7 @@ import unittest
 from typing import Any, Dict, List
 from unittest.mock import patch
 
+from tests.builder1_test_helpers import pass_compliance_reviewer
 from engine.builder1_image_generator import generate_builder1_ad_image
 from engine.builder1_marketing_copy import MARKETING_TEXT_WORD_COUNT, count_marketing_words
 from engine.builder1_planner import plan_builder1
@@ -174,7 +175,7 @@ class TestPlannerJudgeIntegration(unittest.TestCase):
             calls.append(1)
             return b"jpeg"
 
-        generate_builder1_ad_image(plan, 1, image_caller)
+        generate_builder1_ad_image(plan, 1, image_caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertEqual(len(calls), 1)
 
 

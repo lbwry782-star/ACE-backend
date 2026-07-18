@@ -73,8 +73,10 @@ class ConceptualCandidate:
     input: str
     transformation: str
     result: str
+    why_it_expresses_slogan: str
     why_it_expresses_advantage: str
     series_potential: str
+    brand_ownership_potential: str
 
 
 @dataclass
@@ -166,7 +168,13 @@ def parse_strategy_selection(
     )
 
 
-def parse_conceptual_scan(raw_payload: object, *, product_description: str = "") -> List[ConceptualCandidate]:
+def parse_conceptual_scan(
+    raw_payload: object,
+    *,
+    product_description: str = "",
+    brand_slogan: str = "",
+    implied_action: str = "",
+) -> List[ConceptualCandidate]:
     reasons: List[str] = []
     try:
         obj = coerce_json_dict(raw_payload)
@@ -198,10 +206,12 @@ def parse_conceptual_scan(raw_payload: object, *, product_description: str = "")
         inp = _norm_text(item.get("input"))
         transform = _norm_text(item.get("transformation"))
         result = _norm_text(item.get("result"))
+        why_slogan = _norm_text(item.get("whyItExpressesSlogan"))
         why = _norm_text(item.get("whyItExpressesAdvantage"))
         series_pot = _norm_text(item.get("seriesPotential"))
+        ownership = _norm_text(item.get("brandOwnershipPotential"))
 
-        if not all([generator, action, inp, transform, result, why, series_pot]):
+        if not all([generator, action, inp, transform, result, why_slogan, why, series_pot, ownership]):
             reasons.append("conceptual_scan_candidate_incomplete")
         if _norm_key(generator) in WEAK_CONCEPTUAL_TERMS:
             reasons.append("conceptual_scan_candidate_too_vague")
@@ -224,8 +234,10 @@ def parse_conceptual_scan(raw_payload: object, *, product_description: str = "")
                 input=inp,
                 transformation=transform,
                 result=result,
+                why_it_expresses_slogan=why_slogan,
                 why_it_expresses_advantage=why,
                 series_potential=series_pot,
+                brand_ownership_potential=ownership,
             )
         )
 

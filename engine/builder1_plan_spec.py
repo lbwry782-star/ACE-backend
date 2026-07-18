@@ -104,6 +104,14 @@ INTERNAL_PLAN_FIELDS = {
     "strategyScore",
     "campaignExplorationSeed",
     "selectionReason",
+    "planningInternals",
+    "conceptualGeneratorWhyItExpressesSlogan",
+    "embodimentChoice",
+    "productVisibilityJustification",
+    "brandOwnershipReason",
+    "competitorTransferTest",
+    "transferRisk",
+    "categoryRelevancePatched",
 }
 
 
@@ -144,6 +152,7 @@ class Builder1GraphicGenerator:
     shape_language: str
     framing_rule: str
     spacing_rule: str
+    slogan_placement_reason: str = ""
 
 
 @dataclass
@@ -201,6 +210,7 @@ class Builder1SeriesPlan:
     medium_role: str
     campaign_rationale: str
     ads: List[Builder1AdPlan] = field(default_factory=list)
+    planning_internals: Dict[str, Any] = field(default_factory=dict)
 
 
 def graphic_generator_to_dict(g: Builder1GraphicGenerator) -> Dict[str, Any]:
@@ -218,6 +228,7 @@ def graphic_generator_to_dict(g: Builder1GraphicGenerator) -> Dict[str, Any]:
         "headlineMaxWidthPercent": g.headline_max_width_percent,
         "brandBlockPlacement": g.brand_block_placement,
         "sloganPlacement": g.slogan_placement,
+        "sloganPlacementReason": g.slogan_placement_reason,
         "copySafeArea": {
             "side": g.copy_safe_area.side,
             "widthPercent": g.copy_safe_area.width_percent,
@@ -292,29 +303,43 @@ def ad_to_public_api_dict(
 
 
 def series_plan_to_store_dict(plan: Builder1SeriesPlan) -> Dict[str, Any]:
-    return {
+    base = {
         "productName": plan.product_name,
         "productDescription": plan.product_description,
         "format": plan.format,
         "adCount": plan.ad_count,
         **campaign_identity_to_dict(plan),
-        "ads": [
-            {
-                "index": a.index,
-                "variationLabel": a.variation_label,
-                "newContribution": a.new_contribution,
-                "physicalExecution": a.physical_execution,
-                "visualExecution": a.visual_execution,
-                "sceneDescription": a.scene_description,
-                "conceptualExecution": a.conceptual_execution,
-                "conceptualActionProof": a.conceptual_action_proof,
-                "headline": a.headline,
-                "headlineNeededReason": a.headline_needed_reason,
-                "marketingText": a.marketing_text,
-            }
-            for a in plan.ads
-        ],
+        "ads": [],
     }
+    internals = plan.planning_internals or {}
+    ad_internals = internals.get("adInternals") if isinstance(internals.get("adInternals"), dict) else {}
+    for a in plan.ads:
+        ad_dict = {
+            "index": a.index,
+            "variationLabel": a.variation_label,
+            "newContribution": a.new_contribution,
+            "physicalExecution": a.physical_execution,
+            "visualExecution": a.visual_execution,
+            "sceneDescription": a.scene_description,
+            "conceptualExecution": a.conceptual_execution,
+            "conceptualActionProof": a.conceptual_action_proof,
+            "headline": a.headline,
+            "headlineNeededReason": a.headline_needed_reason,
+            "marketingText": a.marketing_text,
+        }
+        extra = ad_internals.get(a.index) or ad_internals.get(str(a.index))
+        if isinstance(extra, dict):
+            ad_dict.update(extra)
+        base["ads"].append(ad_dict)
+    if internals:
+        base.update(
+            {
+                key: value
+                for key, value in internals.items()
+                if key != "adInternals"
+            }
+        )
+    return base
 
 
 def _palette_from_dict(raw: Dict[str, Any]) -> Builder1Palette:

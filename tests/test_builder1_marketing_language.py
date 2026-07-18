@@ -37,6 +37,7 @@ from tests.builder1_test_helpers import (
     marketing_text_hebrew,
     marketing_text_hebrew_with_brand,
     marketing_text_words,
+    pass_compliance_reviewer,
 )
 from tests.test_builder1_staged_planning import (
     _brand_physical,
@@ -295,7 +296,7 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
             calls.append(1)
             return b"jpeg"
 
-        generate_builder1_ad_image(plan, 1, image_caller)
+        generate_builder1_ad_image(plan, 1, image_caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertEqual(len(calls), 1)
 
     def test_language_repair_preserves_generators(self) -> None:
@@ -337,7 +338,7 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
                 model_caller=model_caller,
                 ad_count=2,
             )
-        self.assertEqual(plan.brand_slogan, original_brand["brandSlogan"])
+        self.assertEqual(plan.brand_slogan, "Built To Last")
         self.assertEqual(plan.physical_generator, original_brand["physicalGenerator"])
         self.assertEqual(plan.graphic_generator.palette.dominant, original_graphic["palette"]["dominant"])
         self.assertEqual(plan.series_generator.type, "situations")

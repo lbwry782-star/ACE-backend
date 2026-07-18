@@ -22,6 +22,7 @@ from engine.builder1_campaign_store import (
     reserve_next_ad_index,
     validate_next_ad_request,
 )
+from tests.builder1_test_helpers import pass_compliance_reviewer
 from engine.builder1_image_generator import ImageRateLimitError, generate_builder1_ad_image
 from engine.builder1_jobs_store import (
     clear_memory_jobs_for_tests,
@@ -275,8 +276,8 @@ class TestImageGenerationIsolation(unittest.TestCase):
             calls.append(prompt)
             return b"img"
 
-        generate_builder1_ad_image(plan_a, 1, caller)
-        generate_builder1_ad_image(plan_b, 1, caller)
+        generate_builder1_ad_image(plan_a, 1, caller, compliance_reviewer=pass_compliance_reviewer)
+        generate_builder1_ad_image(plan_b, 1, caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertIn("Brand-imgA", calls[0])
         self.assertIn("Brand-imgB", calls[1])
         self.assertNotIn("Brand-imgB", calls[0])

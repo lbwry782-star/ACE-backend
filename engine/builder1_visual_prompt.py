@@ -70,10 +70,13 @@ def build_text_to_render_block(
 def _campaign_strategy_block(series_plan: Builder1SeriesPlan) -> str:
     return "\n".join(
         [
-            f"Shared conceptual action: {series_plan.conceptual_generator_action}.",
+            f"Fixed brand slogan (campaign-wide): {series_plan.brand_slogan}.",
+            f"Slogan-implied action: {series_plan.slogan_action}.",
+            f"Shared conceptual law: {series_plan.conceptual_generator_action}.",
             f"Conceptual transformation: Take {series_plan.conceptual_generator_input} → {series_plan.conceptual_generator_transformation} → {series_plan.conceptual_generator_result}.",
-            f"Why this expresses the advantage: {series_plan.conceptual_generator_why_it_expresses_advantage}.",
+            f"Why this expresses the slogan and advantage: {series_plan.conceptual_generator_why_it_expresses_advantage}.",
             f"Relative advantage proven: {series_plan.relative_advantage}.",
+            f"Physical generator family: {series_plan.physical_generator}.",
         ]
     )
 
@@ -97,10 +100,24 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
         if series_plan.medium_participates
         else MEDIUM_PROHIBITION
     )
+    hebrew_block = ""
+    if series_plan.detected_language == "he":
+        hebrew_block = (
+            "Hebrew composition: main visual on the right or center; RTL reading flow; "
+            f"fixed brand slogan at {series_plan.graphic_generator.slogan_placement}."
+        )
+    headline_rule = (
+        "Optional ad headline for this execution only — render it exactly as specified."
+        if ad_plan.headline
+        else "No ad headline for this execution — do not invent headline text."
+    )
     parts = [
         "Create a complete finished advertisement that fills the entire image frame edge to edge.",
         f"Format: {series_plan.format}. The output is the final ad itself, not a background for later overlay.",
         BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK,
+        "BRAND SLOGAN is fixed across the campaign. MARKETING TEXT must NOT appear inside the image.",
+        headline_rule,
+        hebrew_block,
         build_campaign_graphic_identity_block(series_plan),
         _campaign_strategy_block(series_plan),
         _ad_execution_block(series_plan, ad_plan),

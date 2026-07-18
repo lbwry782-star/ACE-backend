@@ -18,7 +18,7 @@ from engine.builder1_strict_schema import (
 
 logger = logging.getLogger(__name__)
 
-STRICT_SCHEMA_STAGES = frozenset({"strategy_scan", "brand_physical", "graphic_system", "series_ads"})
+STRICT_SCHEMA_STAGES = frozenset({"strategy_scan", "slogan_scan", "brand_physical", "graphic_system", "series_ads"})
 
 STRATEGY_SCAN_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -69,29 +69,62 @@ STRATEGY_SCAN_JSON_SCHEMA: Dict[str, Any] = {
     },
 }
 
+SLOGAN_SCAN_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidates"],
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "brandSlogan",
+                    "derivationFromAdvantage",
+                    "impliedAction",
+                    "whyOwnable",
+                    "whyNaturalInLanguage",
+                    "competitorTransferRisk",
+                    "campaignGenerativePower",
+                ],
+                "properties": {
+                    "id": {"type": "string"},
+                    "brandSlogan": {"type": "string"},
+                    "derivationFromAdvantage": {"type": "string"},
+                    "impliedAction": {"type": "string"},
+                    "whyOwnable": {"type": "string"},
+                    "whyNaturalInLanguage": {"type": "string"},
+                    "competitorTransferRisk": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "campaignGenerativePower": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 BRAND_PHYSICAL_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
         "productNameResolved",
-        "brandSlogan",
-        "sloganDerivation",
-        "sloganAction",
         "physicalGenerator",
         "physicalGeneratorNaturalPurpose",
         "physicalGeneratorCampaignRole",
+        "embodimentChoice",
+        "productVisibilityJustification",
         "mediumParticipates",
         "mediumRole",
         "campaignRationale",
     ],
     "properties": {
         "productNameResolved": {"type": "string"},
-        "brandSlogan": {"type": "string"},
-        "sloganDerivation": {"type": "string"},
-        "sloganAction": {"type": "string"},
         "physicalGenerator": {"type": "string"},
         "physicalGeneratorNaturalPurpose": {"type": "string"},
         "physicalGeneratorCampaignRole": {"type": "string"},
+        "embodimentChoice": {"type": "string", "enum": ["literal", "transferred"]},
+        "productVisibilityJustification": {"type": "string"},
         "mediumParticipates": {"type": "boolean"},
         "mediumRole": {"type": "string"},
         "campaignRationale": {"type": "string"},
@@ -109,6 +142,7 @@ GRAPHIC_SYSTEM_JSON_SCHEMA: Dict[str, Any] = {
         "headlineMaxWidthPercent",
         "brandBlockPlacement",
         "sloganPlacement",
+        "sloganPlacementReason",
         "copySafeArea",
         "typographyStyle",
         "headlineScale",
@@ -142,6 +176,7 @@ GRAPHIC_SYSTEM_JSON_SCHEMA: Dict[str, Any] = {
         "headlineMaxWidthPercent": {"type": "integer"},
         "brandBlockPlacement": {"type": "string"},
         "sloganPlacement": {"type": "string"},
+        "sloganPlacementReason": {"type": "string"},
         "copySafeArea": {
             "type": "object",
             "additionalProperties": False,
@@ -195,6 +230,20 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "headline": {"type": ["string", "null"]},
                     "headlineNeededReason": {"type": "string"},
                     "marketingText": {"type": "string"},
+                    "familiarExpectation": {"type": "string"},
+                    "singleChangedPropertyOrAction": {"type": "string"},
+                    "immediateClarityReason": {"type": "string"},
+                    "sloganConnection": {"type": "string"},
+                    "relativeAdvantageConnection": {"type": "string"},
+                    "brandOwnershipReason": {"type": "string"},
+                    "categoryRelevanceReason": {"type": "string"},
+                    "headlineRequired": {"type": "boolean"},
+                    "headlineReason": {"type": "string"},
+                    "productVisibilityRequired": {"type": "boolean"},
+                    "productVisibilityReason": {"type": "string"},
+                    "sameVisualLawProof": {"type": "string"},
+                    "distinctFromOtherAdsReason": {"type": "string"},
+                    "noReuseCheck": {"type": "string"},
                 },
                 "required": [
                     "index",
@@ -208,6 +257,20 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "headline",
                     "headlineNeededReason",
                     "marketingText",
+                    "familiarExpectation",
+                    "singleChangedPropertyOrAction",
+                    "immediateClarityReason",
+                    "sloganConnection",
+                    "relativeAdvantageConnection",
+                    "brandOwnershipReason",
+                    "categoryRelevanceReason",
+                    "headlineRequired",
+                    "headlineReason",
+                    "productVisibilityRequired",
+                    "productVisibilityReason",
+                    "sameVisualLawProof",
+                    "distinctFromOtherAdsReason",
+                    "noReuseCheck",
                 ],
             },
         },
@@ -216,6 +279,7 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
 
 STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "strategy_scan": STRATEGY_SCAN_JSON_SCHEMA,
+    "slogan_scan": SLOGAN_SCAN_JSON_SCHEMA,
     "brand_physical": BRAND_PHYSICAL_JSON_SCHEMA,
     "graphic_system": GRAPHIC_SYSTEM_JSON_SCHEMA,
     "series_ads": SERIES_ADS_JSON_SCHEMA,

@@ -12,6 +12,7 @@ from engine.builder1_client_boundary import (
     deterministic_client_boundary_checks,
     is_client_boundary_rejection,
 )
+from engine.builder1_creative_methodology import deterministic_methodology_checks
 from engine.builder1_no_logo import deterministic_no_logo_checks, is_no_logo_rejection
 from engine.builder1_marketing_copy import (
     MARKETING_TEXT_WORD_COUNT,
@@ -230,6 +231,7 @@ def deterministic_judge_checks(plan_dict: Dict[str, Any]) -> List[str]:
         reasons.append("brand_slogan_too_long")
     reasons.extend(deterministic_client_boundary_checks(plan_dict))
     reasons.extend(deterministic_no_logo_checks(plan_dict))
+    reasons.extend(deterministic_methodology_checks(plan_dict))
     return list(dict.fromkeys(reasons))
 
 

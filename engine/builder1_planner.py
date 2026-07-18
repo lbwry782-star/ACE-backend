@@ -19,12 +19,15 @@ from engine.builder1_final_stages import (
 )
 from engine.builder1_input_normalizer import normalize_builder1_input
 from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_to_store_dict
+from engine.builder1_creative_methodology import is_foundational_strategic_rejection, methodology_repair_stage
 from engine.builder1_planning_contract import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
     STAGE_CONCEPTUAL_SCAN_SYSTEM,
     STAGE_CONCEPTUAL_SELECT_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
+    STAGE_SLOGAN_SCAN_SYSTEM,
+    STAGE_SLOGAN_SELECT_SYSTEM,
     STAGE_STRATEGY_SCAN_SYSTEM,
     STAGE_STRATEGY_SELECT_SYSTEM,
     build_brand_physical_repair_prompt,
@@ -38,6 +41,9 @@ from engine.builder1_planning_contract import (
     build_product_name_resolution_user_prompt,
     build_series_ads_repair_prompt,
     build_series_ads_user_prompt,
+    build_slogan_scan_repair_prompt,
+    build_slogan_scan_user_prompt,
+    build_slogan_select_user_prompt,
     build_strategy_scan_repair_prompt,
     build_strategy_scan_user_prompt,
     build_strategy_select_user_prompt,
@@ -57,6 +63,12 @@ from engine.builder1_staged_parsers import (
     parse_conceptual_scan,
     parse_conceptual_selection,
     parse_strategy_selection,
+)
+from engine.builder1_slogan_stage import (
+    SloganCandidate,
+    parse_slogan_scan,
+    parse_slogan_selection,
+    validate_selected_slogan,
 )
 from engine.builder1_strategy_scan import (
     STRATEGY_SCAN_REPLACEMENT_SYSTEM,
@@ -87,20 +99,21 @@ def _conceptual_to_dict(c: Any) -> dict[str, str]:
         "input": c.input,
         "transformation": c.transformation,
         "result": c.result,
+        "whyItExpressesSlogan": c.why_it_expresses_slogan,
         "whyItExpressesAdvantage": c.why_it_expresses_advantage,
         "seriesPotential": c.series_potential,
+        "brandOwnershipPotential": c.brand_ownership_potential,
     }
 
 
 def _brand_physical_to_dict(bp: BrandPhysicalOutput) -> Dict[str, Any]:
     return {
         "productNameResolved": bp.product_name_resolved,
-        "brandSlogan": bp.brand_slogan,
-        "sloganDerivation": bp.slogan_derivation,
-        "sloganAction": bp.slogan_action,
         "physicalGenerator": bp.physical_generator,
         "physicalGeneratorNaturalPurpose": bp.physical_generator_natural_purpose,
         "physicalGeneratorCampaignRole": bp.physical_generator_campaign_role,
+        "embodimentChoice": bp.embodiment_choice,
+        "productVisibilityJustification": bp.product_visibility_justification,
         "mediumParticipates": bp.medium_participates,
         "mediumRole": bp.medium_role,
         "campaignRationale": bp.campaign_rationale,
@@ -122,6 +135,7 @@ def _graphic_to_dict(graphic: Any) -> Dict[str, Any]:
         "headlineMaxWidthPercent": graphic.headline_max_width_percent,
         "brandBlockPlacement": graphic.brand_block_placement,
         "sloganPlacement": graphic.slogan_placement,
+        "sloganPlacementReason": graphic.slogan_placement_reason,
         "copySafeArea": {
             "side": graphic.copy_safe_area.side,
             "widthPercent": graphic.copy_safe_area.width_percent,
@@ -378,6 +392,9 @@ def _resolve_builder1_product_name(
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
     if is_marketing_word_count_rejection(codes) or is_marketing_language_rejection(codes):
         return "marketing_text"
+    methodology_stage = methodology_repair_stage(codes)
+    if methodology_stage:
+        return methodology_stage
     if is_no_logo_rejection_code(codes):
         if any(
             code in codes
@@ -438,8 +455,15 @@ def plan_builder1(
     *,
     ad_count: int = 2,
     brand_guidelines: Optional[Dict[str, Any]] = None,
+    campaign_id: Optional[str] = None,
+    job_id: Optional[str] = None,
 ) -> Builder1SeriesPlan:
     """Plan one Builder1 campaign via staged pipeline. No creative-output memory."""
+    from engine.builder1_planning_pipeline import (
+        apply_targeted_judge_repair,
+        run_builder1_campaign_pipeline,
+    )
+
     normalized = normalize_builder1_input(
         product_name=product_name,
         product_description=product_description,
@@ -471,294 +495,100 @@ def plan_builder1(
         brand_guidelines=brand_guidelines,
     )
 
-    strategy_candidates = _run_strategy_scan_stage(
-        model_caller,
-        product_name=product_name_resolved,
-        product_description=normalized.product_description,
+    strategic_restart_used = False
+    ctx = run_builder1_campaign_pipeline(
+        normalized=normalized,
+        product_name_resolved=product_name_resolved,
         detected_language=detected_language,
+        exploration_seed=exploration_seed,
         lens_order=lens_order,
-        exploration_seed=exploration_seed,
-    )
-
-    cand_dicts = [
-        {
-            "id": c.id,
-            "lens": c.lens,
-            "strategicProblem": c.strategic_problem,
-            "relativeAdvantage": c.relative_advantage,
-            "briefSupport": c.brief_support,
-            "advantageSource": c.advantage_source,
-            "claimRisk": c.claim_risk,
-            "campaignExecutableNow": c.campaign_executable_now,
-            "requiresClientConsultation": c.requires_client_consultation,
-            "clientActionLevel": c.client_action_level,
-            "implementationCostLevel": c.implementation_cost_level,
-            "simpleStrategicAction": c.simple_strategic_action,
-        }
-        for c in strategy_candidates
-    ]
-    eligible_strategy = filter_eligible_strategy_candidates(strategy_candidates)
-    if not eligible_strategy:
-        raise Builder1PlannerError("strategy_selection_failed")
-    eligible_dicts = [c for c in cand_dicts if c["id"] in {e.id for e in eligible_strategy}]
-
-    def _parse_selection(raw: object):
-        return parse_strategy_selection(raw, eligible_strategy)
-
-    strategy_selection, selected_strategy = _run_stage(
-        "strategy_selection",
-        model_caller,
-        STAGE_STRATEGY_SELECT_SYSTEM,
-        build_strategy_select_user_prompt(eligible_dicts, exploration_seed),
-        _parse_selection,
-    )
-
-    conceptual_candidates = _run_stage(
-        "conceptual_scan",
-        model_caller,
-        STAGE_CONCEPTUAL_SCAN_SYSTEM,
-        build_conceptual_scan_user_prompt(
-            product_description=normalized.product_description,
-            strategic_problem=selected_strategy.strategic_problem,
-            relative_advantage=selected_strategy.relative_advantage,
-            exploration_seed=exploration_seed,
-        ),
-        lambda raw: parse_conceptual_scan(raw, product_description=normalized.product_description),
-        repair_builder=lambda broken, reasons: build_conceptual_scan_repair_prompt(
-            broken_json=broken, reasons=reasons
-        ),
-    )
-
-    conc_dicts = [
-        {
-            "id": c.id,
-            "generator": c.generator,
-            "action": c.action,
-            "input": c.input,
-            "transformation": c.transformation,
-            "result": c.result,
-            "whyItExpressesAdvantage": c.why_it_expresses_advantage,
-            "seriesPotential": c.series_potential,
-        }
-        for c in conceptual_candidates
-    ]
-
-    def _parse_conc_selection(raw: object):
-        return parse_conceptual_selection(raw, conceptual_candidates)
-
-    _, selected_conceptual = _run_stage(
-        "conceptual_selection",
-        model_caller,
-        STAGE_CONCEPTUAL_SELECT_SYSTEM,
-        build_conceptual_select_user_prompt(conc_dicts),
-        _parse_conc_selection,
-    )
-    conceptual_fixed = _conceptual_to_dict(selected_conceptual)
-
-    brand_physical = _run_stage(
-        "brand_physical",
-        model_caller,
-        STAGE_BRAND_PHYSICAL_SYSTEM,
-        build_brand_physical_user_prompt(
-            product_name_resolved=product_name_resolved,
-            product_description=normalized.product_description,
-            detected_language=detected_language,
-            format_value=normalized.format,
-            strategic_problem=selected_strategy.strategic_problem,
-            relative_advantage=selected_strategy.relative_advantage,
-            conceptual=conceptual_fixed,
-            brand_guidelines=brand_guidelines,
-        ),
-        lambda raw: parse_brand_physical_output(
-            raw, product_description=normalized.product_description
-        ),
-        repair_builder=lambda broken, reasons: build_brand_physical_repair_prompt(
-            broken_json=broken, reasons=reasons
-        ),
-    )
-    brand_physical = enforce_authoritative_product_name(
-        brand_physical,
-        product_name_resolved=product_name_resolved,
-    )
-    brand_physical_dict = _brand_physical_to_dict(brand_physical)
-
-    graphic = _run_stage(
-        "graphic_system",
-        model_caller,
-        STAGE_GRAPHIC_SYSTEM_SYSTEM,
-        build_graphic_system_user_prompt(
-            product_description=normalized.product_description,
-            detected_language=detected_language,
-            relative_advantage=selected_strategy.relative_advantage,
-            conceptual=conceptual_fixed,
-            brand_physical=brand_physical_dict,
-            format_value=normalized.format,
-        ),
-        parse_graphic_system_output,
-        repair_builder=lambda broken, reasons: build_graphic_system_repair_prompt(
-            broken_json=broken, reasons=reasons
-        ),
-    )
-    graphic_dict = _graphic_to_dict(graphic)
-
-    series_ads = _run_stage(
-        "series_ads",
-        model_caller,
-        STAGE_SERIES_ADS_SYSTEM,
-        build_series_ads_user_prompt(
-            ad_count=normalized.ad_count,
-            format_value=normalized.format,
-            detected_language=detected_language,
-            strategic_problem=selected_strategy.strategic_problem,
-            relative_advantage=selected_strategy.relative_advantage,
-            conceptual=conceptual_fixed,
-            brand_physical=brand_physical_dict,
-            graphic_generator=graphic_dict,
-        ),
-        lambda raw: parse_series_ads_output(
-            raw,
-            expected_ad_count=normalized.ad_count,
-            product_description=normalized.product_description,
-        ),
-        repair_builder=lambda broken, reasons: build_series_ads_repair_prompt(
-            broken_json=broken, reasons=reasons, ad_count=normalized.ad_count
-        ),
-    )
-
-    try:
-        series_ads.ads = ensure_series_ads_marketing_text(
-            series_ads.ads,
-            detected_language=detected_language,
-            relative_advantage=selected_strategy.relative_advantage,
-            product_name=product_name_resolved,
-            brand_slogan=brand_physical.brand_slogan,
-            model_caller=model_caller,
-        )
-    except StageParseError as exc:
-        raise Builder1PlannerError("marketing_text_failed") from exc
-
-    plan = assemble_builder1_campaign(
-        product_name=normalized.product_name,
-        product_description=normalized.product_description,
-        format_value=normalized.format,
-        ad_count=normalized.ad_count,
-        detected_language=detected_language,
-        exploration_seed=exploration_seed,
-        product_name_resolved=product_name_resolved,
-        strategy=selected_strategy,
-        strategy_selection=strategy_selection,
-        conceptual=selected_conceptual,
-        brand_physical=brand_physical,
-        graphic=graphic,
-        series_ads=series_ads,
-    )
-
-    judge_result = judge_builder1_strategy(
-        product_description=normalized.product_description,
-        plan_dict=series_plan_to_store_dict(plan),
         model_caller=model_caller,
+        brand_guidelines=brand_guidelines,
     )
-    if not judge_result.passed:
-        repair_stage = _judge_repair_stage(judge_result.rejection_reason_codes)
+
+    while not ctx.judge_result.passed:
+        codes = ctx.judge_result.rejection_reason_codes
+        if is_foundational_strategic_rejection(codes):
+            if strategic_restart_used:
+                logger.error(
+                    "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
+                    campaign_id or "",
+                    job_id or "",
+                    codes,
+                )
+                raise Builder1PlannerError("planning_failed")
+            logger.info(
+                "BUILDER1_STRATEGIC_RESTART_START campaignId=%s jobId=%s",
+                campaign_id or "",
+                job_id or "",
+            )
+            logger.info(
+                "BUILDER1_STRATEGIC_RESTART_REASON campaignId=%s jobId=%s codes=%s",
+                campaign_id or "",
+                job_id or "",
+                codes,
+            )
+            exploration_seed = str(uuid.uuid4())
+            lens_order = shuffled_exploration_lens_order()
+            strategic_restart_used = True
+            ctx = run_builder1_campaign_pipeline(
+                normalized=normalized,
+                product_name_resolved=product_name_resolved,
+                detected_language=detected_language,
+                exploration_seed=exploration_seed,
+                lens_order=lens_order,
+                model_caller=model_caller,
+                brand_guidelines=brand_guidelines,
+            )
+            if ctx.judge_result.passed:
+                logger.info(
+                    "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
+                    campaign_id or "",
+                    job_id or "",
+                    ctx.exploration_seed,
+                )
+                logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
+                return ctx.plan
+            if is_foundational_strategic_rejection(ctx.judge_result.rejection_reason_codes):
+                logger.error(
+                    "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
+                    campaign_id or "",
+                    job_id or "",
+                    ctx.judge_result.rejection_reason_codes,
+                )
+                raise Builder1PlannerError("planning_failed")
+            codes = ctx.judge_result.rejection_reason_codes
+
+        repair_stage = _judge_repair_stage(codes)
         logger.info(
             "BUILDER1_STAGE_REPAIR stage=%s_judge reasons=%s",
             repair_stage,
-            judge_result.rejection_reason_codes,
+            codes,
         )
         try:
-            if repair_stage == "brand_physical":
-                brand_physical = _run_stage(
-                    "brand_physical",
-                    model_caller,
-                    STAGE_BRAND_PHYSICAL_SYSTEM,
-                    build_brand_physical_repair_prompt(
-                        broken_json=json.dumps(brand_physical_dict, ensure_ascii=False),
-                        reasons=judge_result.rejection_reason_codes,
-                    ),
-                    lambda raw: parse_brand_physical_output(
-                        raw, product_description=normalized.product_description
-                    ),
-                )
-                brand_physical = enforce_authoritative_product_name(
-                    brand_physical,
-                    product_name_resolved=product_name_resolved,
-                )
-                brand_physical_dict = _brand_physical_to_dict(brand_physical)
-            elif repair_stage == "graphic_system":
-                graphic = _run_stage(
-                    "graphic_system",
-                    model_caller,
-                    STAGE_GRAPHIC_SYSTEM_SYSTEM,
-                    build_graphic_system_repair_prompt(
-                        broken_json=json.dumps(graphic_dict, ensure_ascii=False),
-                        reasons=judge_result.rejection_reason_codes,
-                    ),
-                    parse_graphic_system_output,
-                )
-                graphic_dict = _graphic_to_dict(graphic)
-            elif repair_stage == "marketing_text":
-                series_ads.ads = ensure_series_ads_marketing_text(
-                    series_ads.ads,
-                    detected_language=detected_language,
-                    relative_advantage=selected_strategy.relative_advantage,
-                    product_name=product_name_resolved,
-                    brand_slogan=brand_physical.brand_slogan,
-                    model_caller=model_caller,
-                )
-            else:
-                series_ads = _run_stage(
-                    "series_ads",
-                    model_caller,
-                    STAGE_SERIES_ADS_SYSTEM,
-                    build_series_ads_repair_prompt(
-                        broken_json=json.dumps(
-                            {"seriesGenerator": series_ads.series_generator, "ads": series_ads.ads},
-                            ensure_ascii=False,
-                        ),
-                        reasons=judge_result.rejection_reason_codes,
-                        ad_count=normalized.ad_count,
-                    ),
-                    lambda raw: parse_series_ads_output(
-                        raw,
-                        expected_ad_count=normalized.ad_count,
-                        product_description=normalized.product_description,
-                    ),
-                )
-                series_ads.ads = ensure_series_ads_marketing_text(
-                    series_ads.ads,
-                    detected_language=detected_language,
-                    relative_advantage=selected_strategy.relative_advantage,
-                    product_name=product_name_resolved,
-                    brand_slogan=brand_physical.brand_slogan,
-                    model_caller=model_caller,
-                )
-
-            plan = assemble_builder1_campaign(
-                product_name=normalized.product_name,
-                product_description=normalized.product_description,
-                format_value=normalized.format,
-                ad_count=normalized.ad_count,
-                detected_language=detected_language,
-                exploration_seed=exploration_seed,
+            ctx = apply_targeted_judge_repair(
+                ctx,
+                normalized=normalized,
                 product_name_resolved=product_name_resolved,
-                strategy=selected_strategy,
-                strategy_selection=strategy_selection,
-                conceptual=selected_conceptual,
-                brand_physical=brand_physical,
-                graphic=graphic,
-                series_ads=series_ads,
-            )
-            judge2 = judge_builder1_strategy(
-                product_description=normalized.product_description,
-                plan_dict=series_plan_to_store_dict(plan),
+                detected_language=detected_language,
                 model_caller=model_caller,
+                brand_guidelines=brand_guidelines,
+                repair_stage=repair_stage or "series_ads",
+                rejection_codes=codes,
             )
-            if not judge2.passed:
-                raise Builder1PlannerError("final_judge_failed")
+            break
         except Builder1PlannerError:
             raise
         except Exception as exc:
             raise Builder1PlannerError("final_judge_failed") from exc
 
-    logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", plan.ad_count)
-    return plan
+    if strategic_restart_used and ctx.judge_result.passed:
+        logger.info(
+            "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
+            campaign_id or "",
+            job_id or "",
+            ctx.exploration_seed,
+        )
+
+    logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
+    return ctx.plan

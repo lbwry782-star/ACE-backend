@@ -1,0 +1,332 @@
+"""
+Builder1 post-generation image compliance review — no-logo visual enforcement.
+"""
+from __future__ import annotations
+
+import base64
+import json
+import logging
+import os
+from dataclasses import dataclass
+from typing import Callable, List, Optional, TypeAlias
+
+logger = logging.getLogger(__name__)
+
+IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
+    {
+        "invented_product_logo",
+        "supplied_logo_displayed",
+        "logo_like_brand_symbol",
+        "packaging_contains_brand_mark",
+        "campaign_device_used_as_logo",
+        "product_name_rendered_as_logo",
+    }
+)
+
+IMAGE_COMPLIANCE_CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
+
+BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK = "\n".join(
+    [
+        "=== IMAGE COMPLIANCE CORRECTION (MANDATORY) ===",
+        "Remove every logo, symbol, icon, emblem, monogram, badge, or brand mark from the image.",
+        "Retain only the exact product name as ordinary readable text.",
+        "Do not replace the removed mark with another symbol.",
+        "Preserve the approved campaign concept, scene, composition, slogan, and graphic system.",
+        "=== END IMAGE COMPLIANCE CORRECTION ===",
+    ]
+)
+
+IMAGE_COMPLIANCE_SYSTEM_PROMPT = """
+You are a strict Builder1 advertisement image compliance reviewer.
+
+Inspect the generated advertisement image only.
+
+Allowed:
+- product or brand name as readable plain text
+- ordinary non-brand scene objects
+- decorative campaign graphics clearly not attached to product identity
+- generic packaging decoration that cannot reasonably be interpreted as a logo
+
+Prohibited:
+- invented product logo
+- supplied logo
+- lightning bolt, leaf, crown, badge, monogram, emblem, icon, or symbol used as product identity
+- logo-like mark beside or above the product name
+- brand symbol printed on packaging
+- campaign graphic device converted into a package logo
+- product name stylized into a pictorial logo mark
+
+Return JSON only:
+{"pass": true, "violations": [], "confidence": "high"}
+
+When failing, set pass to false and list violation codes from:
+invented_product_logo, supplied_logo_displayed, logo_like_brand_symbol,
+packaging_contains_brand_mark, campaign_device_used_as_logo, product_name_rendered_as_logo
+
+Do not use OCR as the primary mechanism. Judge the visible composition.
+""".strip()
+
+ComplianceReviewer = Callable[..., "ImageComplianceResult"]
+
+_config_logged = False
+
+
+@dataclass
+class ImageComplianceResult:
+    passed: bool
+    violations: List[str]
+    confidence: str = "high"
+
+
+class ImageComplianceError(Exception):
+    """Visual compliance rejection after review (including post-regeneration)."""
+
+    def __init__(self, violations: List[str], *, ad_index: int):
+        self.violations = violations
+        self.ad_index = ad_index
+        super().__init__(f"image_compliance_failed:{','.join(violations)}")
+
+
+class ImageComplianceResponseError(ValueError):
+    """Malformed reviewer JSON — must never be treated as pass."""
+
+
+class ImageComplianceUnavailableError(Exception):
+    """Review infrastructure unavailable — not a visual logo violation."""
+
+    def __init__(self, reason_code: str, *, ad_index: int):
+        self.reason_code = reason_code
+        self.ad_index = ad_index
+        super().__init__(f"image_compliance_unavailable:{reason_code}")
+
+
+def compliance_model_name() -> str:
+    return (os.environ.get("BUILDER1_IMAGE_COMPLIANCE_MODEL") or "gpt-4o").strip() or "gpt-4o"
+
+
+def compliance_client_available() -> bool:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        return False
+    try:
+        from openai import OpenAI  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def log_builder1_image_compliance_config() -> None:
+    global _config_logged
+    if _config_logged:
+        return
+    model = compliance_model_name()
+    client_available = compliance_client_available()
+    logger.info(
+        "BUILDER1_IMAGE_COMPLIANCE_CONFIG enabled=true model=%s clientAvailable=%s",
+        model,
+        client_available,
+    )
+    _config_logged = True
+
+
+def _coerce_review_dict(raw_payload: object) -> dict:
+    if isinstance(raw_payload, dict):
+        return raw_payload
+    if isinstance(raw_payload, str):
+        text = raw_payload.strip()
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise ImageComplianceResponseError("compliance_output_not_object")
+        try:
+            obj = json.loads(text[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ImageComplianceResponseError("compliance_output_invalid_json") from exc
+        if not isinstance(obj, dict):
+            raise ImageComplianceResponseError("compliance_output_not_object")
+        return obj
+    raise ImageComplianceResponseError("compliance_output_not_object")
+
+
+def parse_image_compliance_response(raw_payload: object) -> ImageComplianceResult:
+    data = _coerce_review_dict(raw_payload)
+    if "pass" not in data or not isinstance(data["pass"], bool):
+        raise ImageComplianceResponseError("pass_not_boolean")
+    if "violations" not in data or not isinstance(data["violations"], list):
+        raise ImageComplianceResponseError("violations_not_array")
+    violations = [str(v).strip() for v in data["violations"] if str(v).strip()]
+    for code in violations:
+        if code not in IMAGE_COMPLIANCE_VIOLATION_CODES:
+            raise ImageComplianceResponseError("invalid_violation_code")
+    confidence_raw = data.get("confidence")
+    if confidence_raw is None:
+        raise ImageComplianceResponseError("confidence_missing")
+    confidence = str(confidence_raw).strip().lower()
+    if confidence not in IMAGE_COMPLIANCE_CONFIDENCE_VALUES:
+        raise ImageComplianceResponseError("invalid_confidence")
+    passed = data["pass"]
+    if passed and violations:
+        raise ImageComplianceResponseError("pass_true_with_violations")
+    if not passed and not violations:
+        raise ImageComplianceResponseError("pass_false_without_violations")
+    return ImageComplianceResult(passed=passed, violations=violations, confidence=confidence)
+
+
+def _is_transient_review_error(exc: Exception) -> bool:
+    name = type(exc).__name__
+    if name in {"RateLimitError", "APIConnectionError", "APITimeoutError", "TimeoutError"}:
+        return True
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("429", "rate limit", "rate_limit", "timeout", "temporarily unavailable", "connection")
+    )
+
+
+def _is_unsupported_model_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        token in text
+        for token in ("model_not_found", "does not exist", "unsupported model", "invalid model")
+    )
+
+
+def _openai_compliance_review_call(
+    *,
+    image_bytes: bytes,
+    product_name: str,
+) -> object:
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise ImageComplianceUnavailableError("missing_api_key", ad_index=-1)
+    try:
+        from openai import OpenAI
+        import httpx
+    except Exception as exc:
+        raise ImageComplianceUnavailableError("client_unavailable", ad_index=-1) from exc
+
+    model = compliance_model_name()
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    client = OpenAI(api_key=api_key, timeout=httpx.Timeout(120.0), max_retries=0)
+    user_text = (
+        f'Product name allowed as plain text only: "{product_name}".\n'
+        "Review this generated Builder1 advertisement image for logo compliance."
+    )
+    last_exc: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            response = client.responses.create(
+                model=model,
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": f"{IMAGE_COMPLIANCE_SYSTEM_PROMPT}\n\n{user_text}",
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{image_b64}",
+                            },
+                        ],
+                    }
+                ],
+            )
+            out_text = getattr(response, "output_text", None) or ""
+            if not out_text and hasattr(response, "output"):
+                parts: List[str] = []
+                for item in response.output or []:
+                    for content in getattr(item, "content", []) or []:
+                        if getattr(content, "type", None) == "output_text":
+                            parts.append(getattr(content, "text", "") or "")
+                out_text = "".join(parts)
+            if not out_text:
+                raise ImageComplianceResponseError("compliance_output_empty")
+            return out_text
+        except ImageComplianceUnavailableError:
+            raise
+        except ImageComplianceResponseError:
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if _is_unsupported_model_error(exc):
+                raise ImageComplianceUnavailableError("unsupported_model", ad_index=-1) from exc
+            if _is_transient_review_error(exc) and attempt == 1:
+                logger.info("BUILDER1_IMAGE_COMPLIANCE_REVIEW_RETRY attempt=2")
+                continue
+            if _is_transient_review_error(exc):
+                raise ImageComplianceUnavailableError("transient_review_failure", ad_index=-1) from exc
+            raise ImageComplianceUnavailableError("review_service_error", ad_index=-1) from exc
+    raise ImageComplianceUnavailableError("transient_review_failure", ad_index=-1) from last_exc
+
+
+def review_builder1_ad_image_compliance(
+    image_bytes: bytes,
+    *,
+    product_name: str,
+    ad_index: int,
+    campaign_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+    reviewer: Optional[ComplianceReviewer] = None,
+) -> ImageComplianceResult:
+    logger.info(
+        "BUILDER1_IMAGE_COMPLIANCE_REVIEW_START campaignId=%s jobId=%s adIndex=%s",
+        campaign_id or "",
+        job_id or "",
+        ad_index,
+    )
+    try:
+        if reviewer is not None:
+            raw = reviewer(
+                image_bytes=image_bytes,
+                product_name=product_name,
+                ad_index=ad_index,
+                campaign_id=campaign_id,
+                job_id=job_id,
+            )
+            if isinstance(raw, ImageComplianceResult):
+                result = raw
+            else:
+                result = parse_image_compliance_response(raw)
+        else:
+            log_builder1_image_compliance_config()
+            raw = _openai_compliance_review_call(image_bytes=image_bytes, product_name=product_name)
+            result = parse_image_compliance_response(raw)
+    except ImageComplianceUnavailableError as exc:
+        reason_code = exc.reason_code
+        logger.error(
+            "BUILDER1_IMAGE_COMPLIANCE_UNAVAILABLE campaignId=%s jobId=%s adIndex=%s reasonCode=%s",
+            campaign_id or "",
+            job_id or "",
+            ad_index,
+            reason_code,
+        )
+        raise ImageComplianceUnavailableError(reason_code, ad_index=ad_index) from exc
+    except ImageComplianceResponseError as exc:
+        reason_code = "malformed_response"
+        logger.error(
+            "BUILDER1_IMAGE_COMPLIANCE_UNAVAILABLE campaignId=%s jobId=%s adIndex=%s reasonCode=%s",
+            campaign_id or "",
+            job_id or "",
+            ad_index,
+            reason_code,
+        )
+        raise ImageComplianceUnavailableError(reason_code, ad_index=ad_index) from exc
+
+    if result.passed:
+        logger.info(
+            "BUILDER1_IMAGE_COMPLIANCE_REVIEW_PASS campaignId=%s jobId=%s adIndex=%s confidence=%s",
+            campaign_id or "",
+            job_id or "",
+            ad_index,
+            result.confidence,
+        )
+    else:
+        logger.error(
+            "BUILDER1_IMAGE_COMPLIANCE_REVIEW_FAIL campaignId=%s jobId=%s adIndex=%s violations=%s",
+            campaign_id or "",
+            job_id or "",
+            ad_index,
+            result.violations,
+        )
+    return result

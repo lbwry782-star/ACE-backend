@@ -73,72 +73,109 @@ Rules:
 - Scores are integers 1-10.
 """.strip()
 
-STAGE_CONCEPTUAL_SCAN_SYSTEM = """
-You are a Builder1 conceptual-generator explorer for a digital advertising agent.
+STAGE_SLOGAN_SCAN_SYSTEM = f"""
+You are a Builder1 brand-slogan explorer.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{"candidates":[{"id":"C01","generator":"...","action":"...","input":"...","transformation":"...","result":"...","whyItExpressesAdvantage":"...","seriesPotential":"..."}]}
+{{"candidates":[{{"id":"L01","brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"..."}}]}}
+Rules:
+- Exactly 6 candidates with ids L01 through L06.
+- Every candidate must be an object with all string fields non-empty.
+- competitorTransferRisk must be low, medium, or high.
+- The slogan is a linguistic distillation of the selected relative advantage — not decorative copy, not a generic quality claim, not a product description, not an ad headline.
+- Prefer one to four words when natural; allow slightly longer only when brevity would damage clarity.
+- Each slogan must imply a visual or conceptual action and support several distinct advertisements.
+- Do not invent capabilities that require future client implementation.
+- Do not reuse generic slogans that could belong to many unrelated brands.
+- Do not include conceptual generators, physical objects, graphics, or ads.
+- {BUILDER1_NO_LOGO_PLANNING_RULE}
+""".strip()
+
+STAGE_SLOGAN_SELECT_SYSTEM = """
+You are a Builder1 brand-slogan selector.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"selectedCandidateId":"L04","selectionReason":"...","scores":{"directAdvantageExpression":8,"naturalness":8,"memorability":7,"credibility":9,"brandOwnership":8,"competitorTransferResistance":8,"actionClarity":8,"campaignGenerativePower":9}}
+Rules:
+- selectedCandidateId must be one of the provided ids.
+- Do not rewrite the selected candidate.
+- Prioritize direct expression of the relative advantage, credibility, natural language, brand ownership, and clear implied action over cleverness.
+- Scores are integers 1-10.
+""".strip()
+
+STAGE_CONCEPTUAL_SCAN_SYSTEM = """
+You are a Builder1 conceptual-generator explorer.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"candidates":[{"id":"C01","generator":"...","action":"...","input":"...","transformation":"...","result":"...","whyItExpressesSlogan":"...","whyItExpressesAdvantage":"...","seriesPotential":"...","brandOwnershipPotential":"..."}]}
 Rules:
 - Exactly 6 candidates with ids C01 through C06.
 - Every candidate must be an object with all string fields non-empty.
+- The conceptual generator must answer: what action or transformation makes the selected brand slogan visible?
+- Derive every candidate from the fixed brand slogan and its implied action — not from random objects or attractive scenes.
 - generator must define a repeatable action, not a mood, object, or abstract noun.
-- The action must occur inside the advertisement itself, not as a client operational change.
-- Do not require the client to build systems, hire staff, change pricing, add services, or invest materially.
-- Do not choose physical objects, slogans, colors, layouts, or ads.
+- Do not choose the physical generator in this stage.
+- Do not require client operational change, new products, pricing, or material investment.
+- Do not choose slogans, colors, layouts, or ads.
 """.strip()
 
 STAGE_CONCEPTUAL_SELECT_SYSTEM = """
 You are a Builder1 conceptual-generator selector.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{"selectedCandidateId":"C04","selectionReason":"...","scores":{"advantageConnection":8,"actionClarity":8,"visualPower":8,"seriesPotential":8,"distinctiveness":7,"physicalIndependence":8}}
+{"selectedCandidateId":"C04","selectionReason":"...","scores":{"sloganConnection":9,"advantageConnection":8,"actionClarity":8,"visualPower":8,"seriesPotential":8,"brandOwnership":8,"categoryRelevance":8,"physicalIndependence":8,"noClientOperationalAction":9}}
 Rules:
 - selectedCandidateId must be one of the provided ids.
-- Do not invent a new generator.
+- Do not invent a new generator or slogan.
+- Prefer candidates strongly connected to the exact selected slogan and relative advantage.
 - Scores are integers 1-10.
 """.strip()
 
 STAGE_BRAND_PHYSICAL_SYSTEM = f"""
-You are a Builder1 brand and physical-system builder.
+You are a Builder1 physical-system builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"productNameResolved":"...","brandSlogan":"...","sloganDerivation":"...","sloganAction":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
+{{"productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","embodimentChoice":"transferred","productVisibilityJustification":"","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
 Rules:
-- Do not include graphic generator, series generator, ads, format, adCount, detectedLanguage, or strategy fields.
+- Do NOT create, replace, or modify the brand slogan. It is fixed before this stage.
+- productNameResolved must exactly match the fixed productNameResolved value provided in the user prompt. Do not rename it.
+- Compare literal embodiment (show the product directly) versus transferred embodiment (another object/mechanism that communicates the meaning more clearly).
+- Prefer transferred embodiment when it is clearer, simpler, more surprising, or more emotionally direct.
+- embodimentChoice must be literal or transferred.
+- When embodimentChoice is literal, productVisibilityJustification must explain why showing the product is essential.
+- When embodimentChoice is transferred, productVisibilityJustification may be "".
+- The physical generator must derive from: relative advantage → fixed slogan → implied action → selected conceptual generator.
+- Do not include graphic generator, series generator, ads, format, adCount, detectedLanguage, strategy fields, or slogan fields.
 - mediumParticipates must be JSON boolean true or false, never a string.
 - When mediumParticipates is false, mediumRole must be "".
-- brandSlogan must be 1-6 words.
-- productNameResolved must exactly match the fixed productNameResolved value provided in the user prompt. Do not rename it.
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
 STAGE_GRAPHIC_SYSTEM_SYSTEM = f"""
 You are a Builder1 graphic-system builder.
 Return JSON only. Return the graphic generator object directly with no wrapper and no additional top-level keys:
-{{"palette":{{"dominant":"#111111","secondary":"#EEEEEE","accent":"#FF5500","background":"#F5F5F5","text":"#222222"}},"layoutTemplate":"visual_right_copy_left","headlinePlacement":"top_left","headlineAlignment":"right","headlineMaxWidthPercent":34,"brandBlockPlacement":"bottom_left","sloganPlacement":"bottom_left","copySafeArea":{{"side":"left","widthPercent":38}},"typographyStyle":"bold_geometric_sans","headlineScale":"large","brandScale":"small","sloganScale":"medium","imageStyle":"editorial_photography","backgroundTreatment":"solid","borderTreatment":"none","recurringGraphicDevice":"...","recurringGraphicDeviceRule":"...","shapeLanguage":"...","framingRule":"...","spacingRule":"..."}}
+{{"palette":{{"dominant":"#111111","secondary":"#EEEEEE","accent":"#FF5500","background":"#F5F5F5","text":"#222222"}},"layoutTemplate":"visual_right_copy_left","headlinePlacement":"top_left","headlineAlignment":"right","headlineMaxWidthPercent":34,"brandBlockPlacement":"bottom_left","sloganPlacement":"bottom_left","sloganPlacementReason":"","copySafeArea":{{"side":"left","widthPercent":38}},"typographyStyle":"bold_geometric_sans","headlineScale":"large","brandScale":"small","sloganScale":"medium","imageStyle":"editorial_photography","backgroundTreatment":"solid","borderTreatment":"none","recurringGraphicDevice":"...","recurringGraphicDeviceRule":"...","shapeLanguage":"...","framingRule":"...","spacingRule":"..."}}
 Rules:
 - All five palette colors required as #RRGGBB hex.
 - Use only valid layout, placement, typography, image, background, and border enum values.
-- recurringGraphicDevice must be visibly repeatable across ads.
-- recurringGraphicDevice must remain a campaign composition device, not a product logo or packaging brand mark.
-- Do not return ads, slogan, physical generator, or strategy fields.
+- recurringGraphicDevice must be visibly repeatable across ads and must remain a campaign composition device, not a product logo or packaging brand mark.
+- For Hebrew campaigns default sloganPlacement to bottom_left to preserve RTL reading flow: see visual → understand → read brand interpretation.
+- Use another sloganPlacement only when sloganPlacementReason explains the strategic RTL-preserving reason.
+- Do not return ads, physical generator, or strategy fields.
+- Do not default to billboards, packaging mockups, product-on-pedestal, or split-screen unless the campaign concept requires them.
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
 STAGE_SERIES_ADS_SYSTEM = f"""
 You are a Builder1 series and ads builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"..."}}]}}
+{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","productVisibilityRequired":false,"productVisibilityReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"..."}}]}}
 Rules:
 - seriesGenerator must be an object with type, principle, progression.
 - ads must contain exactly the requested ad count ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
-- Each ad performs the same conceptual action with a different execution.
-- Headlines must be null or very short (max 7 words).
+- One fixed brand slogan and one conceptual law across all ads; each ad is another proof with a distinct execution.
+- Default headline to null unless the visual alone cannot communicate the idea.
+- Do not use a headline to explain what object changed or what the visual joke means.
 - marketingText must be exactly 50 words in the server target language — one paragraph below the image, not inside it.
 - marketingText must be written in the target language provided in the user prompt.
-- Do not switch languages inside marketingText.
-- Brand names, product names, URLs, numbers, and technical terms may remain in Latin letters when appropriate.
-- Do not translate product or brand names unnecessarily.
-- Do not invent unsupported claims.
 - Do not return brand slogan, physical generator, or graphic generator.
 - Product identification in rendered ads must use the written product name as plain text only; never request a logo or brand symbol.
+- Populate all internal methodology fields on every ad.
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
@@ -191,18 +228,67 @@ def build_strategy_select_user_prompt(candidates: List[Dict[str, Any]], explorat
     )
 
 
+def build_slogan_scan_user_prompt(
+    *,
+    product_name_resolved: str,
+    product_description: str,
+    detected_language: str,
+    strategic_problem: str,
+    relative_advantage: str,
+    brief_support: str,
+) -> str:
+    return (
+        f"Product name (fixed): {product_name_resolved}\n"
+        f"Brief: {product_description}\n"
+        f"Language: {detected_language}\n"
+        f"Selected strategic problem: {strategic_problem}\n"
+        f"Selected relative advantage: {relative_advantage}\n"
+        f"Relative-advantage grounding: {brief_support}\n"
+        "Builder1 is a digital advertising agent — the slogan must work from what currently exists.\n"
+        "Return exactly 6 slogan candidates L01-L06 as objects."
+    )
+
+
+def build_slogan_scan_repair_prompt(*, broken_json: str, reasons: List[str]) -> str:
+    return (
+        "Repair ONLY the candidates array. Return exactly:\n"
+        '{"candidates":[{"id":"L01","brandSlogan":"...","derivationFromAdvantage":"...",'
+        '"impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...",'
+        '"competitorTransferRisk":"low","campaignGenerativePower":"..."}]}\n'
+        f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        f"Broken:\n{broken_json}"
+    )
+
+
+def build_slogan_select_user_prompt(candidates: List[Dict[str, Any]]) -> str:
+    return (
+        f"Slogan candidates:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}\n"
+        "Select one candidate by id. Do not rewrite it."
+    )
+
+
 def build_conceptual_scan_user_prompt(
     *,
     product_description: str,
+    product_name_resolved: str,
     strategic_problem: str,
     relative_advantage: str,
+    brand_slogan: str,
+    slogan_derivation: str,
+    implied_action: str,
     exploration_seed: str,
 ) -> str:
     return (
+        f"Product name (fixed): {product_name_resolved}\n"
         f"Brief: {product_description}\n"
         f"Selected strategic problem: {strategic_problem}\n"
         f"Selected relative advantage: {relative_advantage}\n"
+        f"Fixed brand slogan: {brand_slogan}\n"
+        f"Slogan derivation: {slogan_derivation}\n"
+        f"Implied slogan action: {implied_action}\n"
         f"Exploration seed: {exploration_seed}\n"
+        "Every conceptual candidate must derive from the slogan action. "
+        "Answer: what action or transformation makes the slogan visible?\n"
         "Return exactly 6 conceptual-generator candidates C01-C06 as objects."
     )
 
@@ -211,7 +297,8 @@ def build_conceptual_scan_repair_prompt(*, broken_json: str, reasons: List[str])
     return (
         "Repair ONLY the candidates array. Return exactly:\n"
         '{"candidates":[{"id":"C01","generator":"...","action":"...","input":"...",'
-        '"transformation":"...","result":"...","whyItExpressesAdvantage":"...","seriesPotential":"..."}]}\n'
+        '"transformation":"...","result":"...","whyItExpressesSlogan":"...",'
+        '"whyItExpressesAdvantage":"...","seriesPotential":"...","brandOwnershipPotential":"..."}]}\n'
         f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"
     )
@@ -266,6 +353,9 @@ def build_brand_physical_user_prompt(
     format_value: str,
     strategic_problem: str,
     relative_advantage: str,
+    brand_slogan: str,
+    slogan_derivation: str,
+    implied_action: str,
     conceptual: Dict[str, str],
     brand_guidelines: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -280,18 +370,23 @@ def build_brand_physical_user_prompt(
         f"Format context: {format_value}\n"
         f"Fixed strategic problem: {strategic_problem}\n"
         f"Fixed relative advantage: {relative_advantage}\n"
+        f"Fixed brand slogan (do not change): {brand_slogan}\n"
+        f"Fixed slogan derivation: {slogan_derivation}\n"
+        f"Fixed implied slogan action: {implied_action}\n"
         f"Fixed conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
-        "Return brand slogan and physical-generator system only."
+        "Compare literal versus transferred embodiment before choosing the physical generator.\n"
+        "Return physical-generator system only. Do NOT return or modify the brand slogan."
         f"{guidelines}"
     )
 
 
 def build_brand_physical_repair_prompt(*, broken_json: str, reasons: List[str]) -> str:
     return (
-        "Repair ONLY the brand/physical JSON object. Return exactly:\n"
-        '{"productNameResolved":"...","brandSlogan":"...","sloganDerivation":"...","sloganAction":"...",'
-        '"physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...",'
-        '"mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}\n'
+        "Repair ONLY the physical-system JSON object. Return exactly:\n"
+        '{"productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...",'
+        '"physicalGeneratorCampaignRole":"...","embodimentChoice":"transferred",'
+        '"productVisibilityJustification":"","mediumParticipates":false,"mediumRole":"",'
+        '"campaignRationale":"..."}\n'
         f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"
     )
@@ -302,17 +397,26 @@ def build_graphic_system_user_prompt(
     product_description: str,
     detected_language: str,
     relative_advantage: str,
+    brand_slogan: str,
     conceptual: Dict[str, str],
     brand_physical: Dict[str, Any],
     format_value: str,
 ) -> str:
+    hebrew_rule = ""
+    if detected_language == "he":
+        hebrew_rule = (
+            "Hebrew campaign: default main visual right/center, RTL flow, brand slogan at bottom_left "
+            "unless sloganPlacementReason provides a strategic RTL-preserving alternative.\n"
+        )
     return (
         f"Brief: {product_description}\n"
         f"Language: {detected_language}\n"
+        f"Fixed brand slogan: {brand_slogan}\n"
         f"Relative advantage: {relative_advantage}\n"
         f"Conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
-        f"Brand/physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
+        f"Physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
         f"Format: {format_value}\n"
+        f"{hebrew_rule}"
         "Return the graphic generator object directly."
     )
 
@@ -333,6 +437,8 @@ def build_series_ads_user_prompt(
     detected_language: str,
     strategic_problem: str,
     relative_advantage: str,
+    brand_slogan: str,
+    implied_action: str,
     conceptual: Dict[str, str],
     brand_physical: Dict[str, Any],
     graphic_generator: Dict[str, Any],
@@ -344,6 +450,8 @@ def build_series_ads_user_prompt(
         f"Required ad indexes: {indexes}\n"
         f"Format: {format_value}\n"
         f"TARGET LANGUAGE FOR ALL MARKETING TEXT: {lang_name} ({detected_language})\n"
+        f"Fixed brand slogan across all ads: {brand_slogan}\n"
+        f"Fixed implied slogan action: {implied_action}\n"
         "Every marketingText must:\n"
         "- contain exactly 50 words\n"
         "- be written in the target language\n"
@@ -352,12 +460,14 @@ def build_series_ads_user_prompt(
         "- not contain headings, labels, bullets, or hashtags\n"
         "- not translate the product or brand name unnecessarily\n"
         "- not invent unsupported claims\n"
+        "Headline default: null. Use a headline only when the visual alone cannot communicate the idea.\n"
+        "Do not use a headline to explain what changed or what the visual joke means.\n"
         f"Strategic problem: {strategic_problem}\n"
         f"Relative advantage: {relative_advantage}\n"
         f"Conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
-        f"Brand/physical:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
+        f"Physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
         f"Graphic system:\n{json.dumps(graphic_generator, ensure_ascii=False, indent=2)}\n"
-        f"Return seriesGenerator and exactly {ad_count} ads obeying the graphic system."
+        f"Return seriesGenerator and exactly {ad_count} ads obeying the graphic system and internal methodology fields."
     )
 
 

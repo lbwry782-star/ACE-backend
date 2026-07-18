@@ -28,6 +28,7 @@ from engine.builder1_staged_parsers import (
     StrategySelection,
     coerce_json_dict,
 )
+from engine.builder1_slogan_stage import SloganCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +96,11 @@ _SNAKE_TO_CAMEL = {
 @dataclass
 class BrandPhysicalOutput:
     product_name_resolved: str
-    brand_slogan: str
-    slogan_derivation: str
-    slogan_action: str
     physical_generator: str
     physical_generator_natural_purpose: str
     physical_generator_campaign_role: str
+    embodiment_choice: str
+    product_visibility_justification: str
     medium_participates: bool
     medium_role: str
     campaign_rationale: str
@@ -168,21 +168,26 @@ def parse_brand_physical_output(
 
     required = [
         ("productNameResolved", "missing_productNameResolved"),
-        ("brandSlogan", "missing_brandSlogan"),
-        ("sloganDerivation", "missing_sloganDerivation"),
-        ("sloganAction", "missing_sloganAction"),
         ("physicalGenerator", "missing_physicalGenerator"),
         ("physicalGeneratorNaturalPurpose", "missing_physicalGeneratorNaturalPurpose"),
         ("physicalGeneratorCampaignRole", "missing_physicalGeneratorCampaignRole"),
+        ("embodimentChoice", "missing_embodimentChoice"),
         ("campaignRationale", "missing_campaignRationale"),
     ]
     for field, code in required:
         if not _norm_text(obj.get(field)):
             reasons.append(code)
 
-    brand_slogan = _norm_text(obj.get("brandSlogan"))
-    if brand_slogan and _word_count(brand_slogan) > BRAND_SLOGAN_MAX_WORDS:
-        reasons.append("brand_slogan_too_long")
+    if obj.get("brandSlogan") or obj.get("sloganDerivation") or obj.get("sloganAction"):
+        reasons.append("brand_physical_must_not_create_slogan")
+
+    embodiment_choice = _norm_text(obj.get("embodimentChoice")).lower()
+    if embodiment_choice not in {"literal", "transferred"}:
+        reasons.append("invalid_embodiment_choice")
+
+    product_visibility_justification = _norm_text(obj.get("productVisibilityJustification"))
+    if embodiment_choice == "literal" and not product_visibility_justification:
+        reasons.append("literal_product_depiction_unjustified")
 
     try:
         medium_participates = _normalize_bool(obj.get("mediumParticipates"), default=False)
@@ -198,14 +203,12 @@ def parse_brand_physical_output(
     if medium_participates is False and _norm_text(obj.get("mediumRole")):
         medium_role = ""
 
-    brand_slogan = _norm_text(obj.get("brandSlogan"))
-    slogan_action = _norm_text(obj.get("sloganAction"))
     campaign_rationale = _norm_text(obj.get("campaignRationale"))
     physical_campaign_role = _norm_text(obj.get("physicalGeneratorCampaignRole"))
     reasons.extend(
         validate_brand_physical_boundary_text(
-            brand_slogan=brand_slogan,
-            slogan_action=slogan_action,
+            brand_slogan="",
+            slogan_action="",
             campaign_rationale=campaign_rationale,
             physical_generator_campaign_role=physical_campaign_role,
             product_description=product_description,
@@ -218,15 +221,14 @@ def parse_brand_physical_output(
 
     return BrandPhysicalOutput(
         product_name_resolved=_norm_text(obj.get("productNameResolved")),
-        brand_slogan=brand_slogan,
-        slogan_derivation=_norm_text(obj.get("sloganDerivation")),
-        slogan_action=_norm_text(obj.get("sloganAction")),
         physical_generator=_norm_text(obj.get("physicalGenerator")),
         physical_generator_natural_purpose=_norm_text(obj.get("physicalGeneratorNaturalPurpose")),
-        physical_generator_campaign_role=_norm_text(obj.get("physicalGeneratorCampaignRole")),
+        physical_generator_campaign_role=physical_campaign_role,
+        embodiment_choice=embodiment_choice,
+        product_visibility_justification=product_visibility_justification,
         medium_participates=medium_participates,
         medium_role=medium_role,
-        campaign_rationale=_norm_text(obj.get("campaignRationale")),
+        campaign_rationale=campaign_rationale,
     )
 
 
@@ -372,6 +374,7 @@ def assemble_builder1_campaign(
     product_name_resolved: str,
     strategy: StrategyCandidate,
     strategy_selection: StrategySelection,
+    selected_slogan: SloganCandidate,
     conceptual: ConceptualCandidate,
     brand_physical: BrandPhysicalOutput,
     graphic: Builder1GraphicGenerator,
@@ -396,15 +399,21 @@ def assemble_builder1_campaign(
         "relativeAdvantageBriefSupport": strategy.brief_support,
         "relativeAdvantageClaimRisk": strategy.claim_risk,
         "problemAdvantageLink": f"{strategy.relative_advantage} addresses {strategy.strategic_problem}",
-        "brandSlogan": brand_physical.brand_slogan,
-        "sloganDerivation": brand_physical.slogan_derivation,
-        "sloganAction": brand_physical.slogan_action,
+        "brandSlogan": selected_slogan.brand_slogan,
+        "sloganDerivation": selected_slogan.derivation_from_advantage,
+        "sloganAction": selected_slogan.implied_action,
         "conceptualGenerator": conceptual.generator,
         "conceptualGeneratorAction": conceptual.action,
         "conceptualGeneratorInput": conceptual.input,
         "conceptualGeneratorTransformation": conceptual.transformation,
         "conceptualGeneratorResult": conceptual.result,
+        "conceptualGeneratorWhyItExpressesSlogan": conceptual.why_it_expresses_slogan,
         "conceptualGeneratorWhyItExpressesAdvantage": conceptual.why_it_expresses_advantage,
+        "embodimentChoice": brand_physical.embodiment_choice,
+        "productVisibilityJustification": brand_physical.product_visibility_justification,
+        "brandOwnershipReason": selected_slogan.why_ownable,
+        "competitorTransferTest": selected_slogan.competitor_transfer_risk,
+        "transferRisk": selected_slogan.competitor_transfer_risk,
         "physicalGenerator": brand_physical.physical_generator,
         "physicalGeneratorNaturalPurpose": brand_physical.physical_generator_natural_purpose,
         "physicalGeneratorCampaignRole": brand_physical.physical_generator_campaign_role,
@@ -422,6 +431,7 @@ def assemble_builder1_campaign(
             "headlineMaxWidthPercent": graphic.headline_max_width_percent,
             "brandBlockPlacement": graphic.brand_block_placement,
             "sloganPlacement": graphic.slogan_placement,
+            "sloganPlacementReason": getattr(graphic, "slogan_placement_reason", ""),
             "copySafeArea": {
                 "side": graphic.copy_safe_area.side,
                 "widthPercent": graphic.copy_safe_area.width_percent,
@@ -456,4 +466,44 @@ def assemble_builder1_campaign(
     )
     if plan is None:
         raise StageParseError("assemble", reasons)
-    return plan
+
+    from dataclasses import replace
+
+    ad_internals = {
+        int(ad.get("index")): {
+            key: ad.get(key)
+            for key in ad
+            if key
+            in {
+                "familiarExpectation",
+                "singleChangedPropertyOrAction",
+                "immediateClarityReason",
+                "sloganConnection",
+                "relativeAdvantageConnection",
+                "brandOwnershipReason",
+                "categoryRelevanceReason",
+                "headlineRequired",
+                "headlineReason",
+                "productVisibilityRequired",
+                "productVisibilityReason",
+                "sameVisualLawProof",
+                "distinctFromOtherAdsReason",
+                "noReuseCheck",
+            }
+        }
+        for ad in series_ads.ads
+        if isinstance(ad, dict) and ad.get("index") is not None
+    }
+    return replace(
+        plan,
+        planning_internals={
+            "conceptualGeneratorWhyItExpressesSlogan": conceptual.why_it_expresses_slogan,
+            "embodimentChoice": brand_physical.embodiment_choice,
+            "productVisibilityJustification": brand_physical.product_visibility_justification,
+            "brandOwnershipReason": selected_slogan.why_ownable,
+            "competitorTransferTest": selected_slogan.competitor_transfer_risk,
+            "transferRisk": selected_slogan.competitor_transfer_risk,
+            "sloganPlacementReason": getattr(graphic, "slogan_placement_reason", ""),
+            "adInternals": ad_internals,
+        },
+    )

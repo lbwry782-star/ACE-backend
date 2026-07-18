@@ -18,6 +18,7 @@ from engine.builder1_client_boundary import (
     strategy_candidate_is_eligible,
 )
 from engine.builder1_final_stages import parse_brand_physical_output, parse_series_ads_output
+from tests.builder1_test_helpers import pass_compliance_reviewer
 from engine.builder1_image_generator import generate_builder1_ad_image
 from engine.builder1_plan_spec import campaign_identity_to_dict
 from engine.builder1_planner import plan_builder1
@@ -253,7 +254,7 @@ class TestPlannerBoundaryIntegration(unittest.TestCase):
             calls.append(1)
             return b"jpeg"
 
-        generate_builder1_ad_image(plan, 1, image_caller)
+        generate_builder1_ad_image(plan, 1, image_caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertEqual(len(calls), 1)
 
     def test_incremental_ads_do_not_rerun_planning(self) -> None:
@@ -280,7 +281,13 @@ class TestPublicApiUnchanged(unittest.TestCase):
     def test_public_campaign_identity_has_no_internal_boundary_fields(self) -> None:
         from engine.builder1_final_stages import assemble_builder1_campaign, parse_brand_physical_output
         from engine.builder1_final_stages import parse_graphic_system_output, parse_series_ads_output
-        from engine.builder1_staged_parsers import parse_conceptual_scan, parse_strategy_scan, parse_strategy_selection
+        from engine.builder1_staged_parsers import (
+            parse_conceptual_scan,
+            parse_conceptual_selection,
+            parse_strategy_scan,
+            parse_strategy_selection,
+        )
+        from tests.test_builder1_staged_planning import _selected_slogan
 
         strategy_candidates = parse_strategy_scan(
             _strategy_scan_payload(),
@@ -296,7 +303,6 @@ class TestPublicApiUnchanged(unittest.TestCase):
             strategy_candidates,
         )
         conceptual_candidates = parse_conceptual_scan(_conceptual_scan_payload())
-        from engine.builder1_staged_parsers import parse_conceptual_selection
 
         _, conceptual = parse_conceptual_selection(
             {
@@ -319,6 +325,7 @@ class TestPublicApiUnchanged(unittest.TestCase):
             product_name_resolved="TestBrand",
             strategy=strategy,
             strategy_selection=selection,
+            selected_slogan=_selected_slogan(),
             conceptual=conceptual,
             brand_physical=brand,
             graphic=graphic,

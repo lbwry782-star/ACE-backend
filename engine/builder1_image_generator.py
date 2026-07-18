@@ -8,6 +8,13 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from engine.builder1_image_compliance import (
+    BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK,
+    ComplianceReviewer,
+    ImageComplianceError,
+    ImageComplianceUnavailableError,
+    review_builder1_ad_image_compliance,
+)
 from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_visual_prompt import build_visual_prompt
 
@@ -50,24 +57,20 @@ def _retry_after_seconds(exc: Exception) -> Optional[int]:
     return None
 
 
-def generate_builder1_ad_image(
-    series_plan: Builder1SeriesPlan,
+def _generate_with_retry(
+    *,
     ad_index: int,
+    prompt: str,
+    format_value: str,
     image_caller: ImageCaller,
-) -> Builder1AdImageResult:
-    """
-    Generate exactly one image for one planned ad index.
-    One retry on transient non-rate-limit failures. Rate limits are not retried here.
-    """
-    ad = next(a for a in series_plan.ads if a.index == ad_index)
-    prompt = build_visual_prompt(series_plan, ad)
+) -> bytes:
     last_exc: Optional[Exception] = None
     for attempt in (1, 2):
         try:
             logger.info("BUILDER1_SERIES_IMAGE_START adIndex=%s attempt=%s", ad_index, attempt)
-            image_bytes = image_caller(prompt, series_plan.format)
+            image_bytes = image_caller(prompt, format_value)
             logger.info("BUILDER1_SERIES_IMAGE_OK adIndex=%s", ad_index)
-            return Builder1AdImageResult(index=ad_index, visual_prompt=prompt, image_bytes=image_bytes)
+            return image_bytes
         except ImageRateLimitError:
             raise
         except Exception as exc:
@@ -87,6 +90,72 @@ def generate_builder1_ad_image(
                 exc,
             )
     raise RuntimeError(f"image_generation_failed_ad_{ad_index}") from last_exc
+
+
+def generate_builder1_ad_image(
+    series_plan: Builder1SeriesPlan,
+    ad_index: int,
+    image_caller: ImageCaller,
+    *,
+    compliance_reviewer: Optional[ComplianceReviewer] = None,
+    campaign_id: Optional[str] = None,
+    job_id: Optional[str] = None,
+) -> Builder1AdImageResult:
+    """
+    Generate exactly one image for one planned ad index.
+    One retry on transient non-rate-limit failures. Rate limits are not retried here.
+    """
+    ad = next(a for a in series_plan.ads if a.index == ad_index)
+    prompt = build_visual_prompt(series_plan, ad)
+    image_bytes = _generate_with_retry(
+        ad_index=ad_index,
+        prompt=prompt,
+        format_value=series_plan.format,
+        image_caller=image_caller,
+    )
+
+    review = review_builder1_ad_image_compliance(
+        image_bytes,
+        product_name=series_plan.product_name_resolved,
+        ad_index=ad_index,
+        campaign_id=campaign_id,
+        job_id=job_id,
+        reviewer=compliance_reviewer,
+    )
+    if review.passed:
+        return Builder1AdImageResult(index=ad_index, visual_prompt=prompt, image_bytes=image_bytes)
+
+    logger.info(
+        "BUILDER1_IMAGE_COMPLIANCE_REGENERATE campaignId=%s jobId=%s adIndex=%s violations=%s",
+        campaign_id or "",
+        job_id or "",
+        ad_index,
+        review.violations,
+    )
+    corrected_prompt = f"{prompt}\n\n{BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK}"
+    image_bytes = _generate_with_retry(
+        ad_index=ad_index,
+        prompt=corrected_prompt,
+        format_value=series_plan.format,
+        image_caller=image_caller,
+    )
+    review2 = review_builder1_ad_image_compliance(
+        image_bytes,
+        product_name=series_plan.product_name_resolved,
+        ad_index=ad_index,
+        campaign_id=campaign_id,
+        job_id=job_id,
+        reviewer=compliance_reviewer,
+    )
+    if review2.passed:
+        return Builder1AdImageResult(
+            index=ad_index,
+            visual_prompt=corrected_prompt,
+            image_bytes=image_bytes,
+        )
+    if not review2.violations:
+        raise ImageComplianceUnavailableError("malformed_response", ad_index=ad_index)
+    raise ImageComplianceError(review2.violations, ad_index=ad_index)
 
 
 def image_bytes_to_base64(image_bytes: bytes) -> str:

@@ -5,7 +5,7 @@ Run: python -m unittest tests.test_builder1_series -v
 """
 from __future__ import annotations
 
-from tests.builder1_test_helpers import marketing_text_words
+from tests.builder1_test_helpers import marketing_text_words, pass_compliance_reviewer
 
 import base64
 import io
@@ -67,6 +67,7 @@ def _graphic() -> Dict[str, Any]:
         "shapeLanguage": "Angular geometric frames",
         "framingRule": "Subject cropped with generous negative space on copy side",
         "spacingRule": "Wide outer margins with tight copy grouping",
+        "sloganPlacementReason": "",
     }
 
 
@@ -312,7 +313,7 @@ class TestBuilder1SingleImage(unittest.TestCase):
             calls.append(1)
             return b"img"
 
-        generate_builder1_ad_image(plan, 1, caller)
+        generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertEqual(len(calls), 1)
 
     def test_rate_limit_is_retryable(self) -> None:
@@ -322,7 +323,7 @@ class TestBuilder1SingleImage(unittest.TestCase):
             raise ImageRateLimitError(retry_after_seconds=12)
 
         with self.assertRaises(ImageRateLimitError) as ctx:
-            generate_builder1_ad_image(plan, 1, caller)
+            generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertEqual(ctx.exception.retry_after_seconds, 12)
 
 

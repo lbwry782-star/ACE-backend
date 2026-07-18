@@ -5,7 +5,7 @@ Run: python -m unittest tests.test_builder1_staged_planning -v
 """
 from __future__ import annotations
 
-from tests.builder1_test_helpers import marketing_text_words
+from tests.builder1_test_helpers import marketing_text_words, pass_compliance_reviewer
 
 import copy
 import json
@@ -29,6 +29,8 @@ from engine.builder1_planning_contract import (
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
+    STAGE_SLOGAN_SCAN_SYSTEM,
+    STAGE_SLOGAN_SELECT_SYSTEM,
     STAGE_STRATEGY_SCAN_SYSTEM,
     STAGE_STRATEGY_SELECT_SYSTEM,
 )
@@ -73,6 +75,7 @@ def _graphic(*, missing_palette: bool = False, missing_color: bool = False, snak
         "shapeLanguage": "Angular geometric frames",
         "framingRule": "Subject with copy-side negative space",
         "spacingRule": "Wide outer margins",
+        "sloganPlacementReason": "",
     }
     if missing_palette:
         del g["palette"]
@@ -107,12 +110,11 @@ def _graphic(*, missing_palette: bool = False, missing_color: bool = False, snak
 def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False) -> Dict[str, Any]:
     payload = {
         "productNameResolved": "TestBrand",
-        "brandSlogan": "Built To Last",
-        "sloganDerivation": "From durability advantage",
-        "sloganAction": "Trust everyday use",
         "physicalGenerator": "Rubber ball family",
         "physicalGeneratorNaturalPurpose": "Absorb impact",
         "physicalGeneratorCampaignRole": "Durability metaphor",
+        "embodimentChoice": "transferred",
+        "productVisibilityJustification": "",
         "mediumParticipates": False,
         "mediumRole": "",
         "campaignRationale": "Ownable durability story",
@@ -124,11 +126,31 @@ def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False
     return payload
 
 
+def _internal_ad_fields(*, headline: str | None = None) -> Dict[str, Any]:
+    return {
+        "familiarExpectation": "Everyday object survives normal use",
+        "singleChangedPropertyOrAction": "Impact absorbed instead of breaking",
+        "immediateClarityReason": "Viewer instantly sees survival proof",
+        "sloganConnection": "Shows Built To Last through visible survival",
+        "relativeAdvantageConnection": "Proves reinforced durability advantage",
+        "brandOwnershipReason": "Specific to reinforced shell brief",
+        "categoryRelevanceReason": "Durability matters for daily carry category",
+        "headlineRequired": headline is not None,
+        "headlineReason": "Needed" if headline else "Self-explanatory visual",
+        "productVisibilityRequired": False,
+        "productVisibilityReason": "",
+        "sameVisualLawProof": "Same drop-survival law as other ads",
+        "distinctFromOtherAdsReason": "Different drop context",
+        "noReuseCheck": "Distinct execution",
+    }
+
+
 def _series_ads(ad_count: int = 2, *, series_string: bool = False, incomplete_series: bool = False,
                 omit_indexes: bool = False, string_indexes: bool = False, wrong_indexes: bool = False,
                 too_few_ads: bool = False) -> Dict[str, Any]:
     ads = []
     for i in range(1, ad_count + 1 if not too_few_ads else max(1, ad_count - 1)):
+        headline = None if i == 1 else f"Line {i}"
         ad = {
             "variationLabel": f"var-{i}",
             "newContribution": f"Contribution {i}",
@@ -137,9 +159,10 @@ def _series_ads(ad_count: int = 2, *, series_string: bool = False, incomplete_se
             "physicalExecution": f"Object variant {i}",
             "visualExecution": f"Visual variant {i}",
             "sceneDescription": f"Scene {i}",
-            "headline": None if i == 1 else f"Line {i}",
+            "headline": headline,
             "headlineNeededReason": "Needed" if i > 1 else "Self-explanatory",
-                "marketingText": marketing_text_words(50, prefix=f"m{i}"),
+            "marketingText": marketing_text_words(50, prefix=f"m{i}"),
+            **_internal_ad_fields(headline=headline),
         }
         if not omit_indexes:
             if string_indexes:
@@ -188,18 +211,38 @@ def _strategy_scan_payload(*, string_candidate: bool = False) -> Dict[str, Any]:
     return {"candidates": candidates}
 
 
+def _slogan_scan_payload(*, generic: bool = False) -> Dict[str, Any]:
+    candidates = []
+    for i in range(1, 7):
+        candidates.append(
+            {
+                "id": f"L{i:02d}",
+                "brandSlogan": "Built To Last" if not generic or i > 1 else "Quality Without Compromise",
+                "derivationFromAdvantage": "Distills survives daily drops advantage into spoken phrase",
+                "impliedAction": "Show everyday impact survival visually",
+                "whyOwnable": "Tied to reinforced shell durability from brief",
+                "whyNaturalInLanguage": "Natural spoken English phrase",
+                "competitorTransferRisk": "low",
+                "campaignGenerativePower": "Supports several distinct drop-context executions",
+            }
+        )
+    return {"candidates": candidates}
+
+
 def _conceptual_scan_payload(*, incomplete: bool = False) -> Dict[str, Any]:
     candidates = []
     for i in range(1, 7):
         c = {
             "id": f"C{i:02d}",
             "generator": f"Stress-test mechanism {i}",
-            "action": f"Drop and survive variant {i}",
+            "action": "Show everyday impact survival visually",
             "input": "Everyday carry item",
             "transformation": f"Impact absorbed step {i}",
             "result": f"Visible durability proof {i}",
-            "whyItExpressesAdvantage": "Shows advantage through action",
+            "whyItExpressesSlogan": "Makes Built To Last visible through survival action",
+            "whyItExpressesAdvantage": "Shows survives daily drops through action",
             "seriesPotential": "Escalating drop contexts",
+            "brandOwnershipPotential": "Specific to reinforced shell durability",
         }
         if incomplete and i == 1:
             c["action"] = ""
@@ -212,6 +255,30 @@ def _selected_strategy():
         _strategy_scan_payload(),
         product_description="Reinforced shell product for daily carry",
     )[0]
+
+
+def _selected_slogan():
+    from engine.builder1_slogan_stage import parse_slogan_scan, parse_slogan_selection
+
+    candidates = parse_slogan_scan(_slogan_scan_payload())
+    _, selected = parse_slogan_selection(
+        {
+            "selectedCandidateId": "L01",
+            "selectionReason": "Best",
+            "scores": {
+                "directAdvantageExpression": 9,
+                "naturalness": 8,
+                "memorability": 8,
+                "credibility": 9,
+                "brandOwnership": 8,
+                "competitorTransferResistance": 8,
+                "actionClarity": 9,
+                "campaignGenerativePower": 9,
+            },
+        },
+        candidates,
+    )
+    return selected
 
 
 def _selected_conceptual():
@@ -232,13 +299,35 @@ def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
                 "conceptualActionPotential": 9,
             },
         },
+        STAGE_SLOGAN_SCAN_SYSTEM: _slogan_scan_payload(),
+        STAGE_SLOGAN_SELECT_SYSTEM: {
+            "selectedCandidateId": "L01",
+            "selectionReason": "Strongest advantage expression",
+            "scores": {
+                "directAdvantageExpression": 9,
+                "naturalness": 8,
+                "memorability": 8,
+                "credibility": 9,
+                "brandOwnership": 8,
+                "competitorTransferResistance": 8,
+                "actionClarity": 9,
+                "campaignGenerativePower": 9,
+            },
+        },
         STAGE_CONCEPTUAL_SCAN_SYSTEM: _conceptual_scan_payload(),
         STAGE_CONCEPTUAL_SELECT_SYSTEM: {
             "selectedCandidateId": "C01",
-            "selectionReason": "Clearest action",
+            "selectionReason": "Clearest slogan action",
             "scores": {
-                "advantageConnection": 9, "actionClarity": 9, "visualPower": 8,
-                "seriesPotential": 9, "distinctiveness": 8, "physicalIndependence": 8,
+                "sloganConnection": 9,
+                "advantageConnection": 9,
+                "actionClarity": 9,
+                "visualPower": 8,
+                "seriesPotential": 9,
+                "brandOwnership": 8,
+                "categoryRelevance": 8,
+                "physicalIndependence": 8,
+                "noClientOperationalAction": 9,
             },
         },
         BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT: {
@@ -346,6 +435,7 @@ class TestDeterministicAssembly(unittest.TestCase):
                 },
                 parse_strategy_scan(_strategy_scan_payload(), product_description=self.BRIEF),
             )[0],
+            selected_slogan=_selected_slogan(),
             conceptual=conceptual,
             brand_physical=brand,
             graphic=graphic,
@@ -481,7 +571,7 @@ class TestProductionShapedPlanner(unittest.TestCase):
             calls.append(1)
             return b"jpeg"
 
-        generate_builder1_ad_image(plan, 1, image_caller)
+        generate_builder1_ad_image(plan, 1, image_caller, compliance_reviewer=pass_compliance_reviewer)
         self.assertEqual(len(calls), 1)
 
     def test_next_ad_does_not_run_planning(self) -> None:
