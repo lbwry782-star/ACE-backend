@@ -159,13 +159,20 @@ You are a Builder1 brand-slogan explorer and selector.
 Return JSON only. Return exactly this object and no additional top-level keys:
 {{"candidates":[{{"id":"L01","brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"..."}}],"evaluations":[{{"candidateId":"L01","derivedFromAdvantage":true,"naturalInLanguage":true,"credible":true,"ownable":true,"impliedActionValid":true,"campaignGenerative":true,"eligible":true,"rejectionCodes":[]}}],"selectedCandidateId":"L01","selectionReason":"..."}}
 Internal order:
-1. Generate exactly six slogan candidates L01-L06.
-2. Evaluate each slogan once in evaluations.
-3. Select one eligible slogan by id.
-4. Fix the selected slogan and its meaningful implied action.
+1. Generate exactly six serious brand-slogan candidates from the fixed relative advantage.
+2. Compare and evaluate each candidate once in evaluations.
+3. Choose the strongest slogan and commit to it via selectedCandidateId.
+4. Explain in selectionReason how the chosen slogan distills the relative advantage.
+5. Define the implied action the slogan requires.
 Rules:
 - Exactly 6 candidates with ids L01 through L06.
-- competitorTransferRisk must be low for selectedCandidateId.
+- The slogan is a direct linguistic distillation of the relative advantage — not decorative copy, not a generic quality claim, not a product description, not an ad headline.
+- Prefer a concise slogan, usually one to four words, when natural.
+- A longer slogan is allowed when brevity would damage meaning, clarity, distinctiveness, memorability, or natural language.
+- Do not obey a mechanical word maximum.
+- A strong relative advantage may naturally yield a simple slogan; do not force clever copy.
+- Select the slogan before receiving or creating conceptual or visual ideas.
+- Product Name is separate from brandSlogan; do not include the product name inside brandSlogan.
 - Semantic derivation does not require repeating the same words as the relative advantage.
 - Do not include conceptual generators, physical objects, graphics, or ads.
 - Do not use Creator, Judge, or tournament roles.
@@ -391,7 +398,13 @@ def build_slogan_stage_user_prompt(
         f"Selected relative advantage: {relative_advantage}\n"
         f"Relative-advantage grounding: {brief_support}\n"
         "Builder1 is a digital advertising agent — the slogan must work from what currently exists.\n"
-        "Generate exactly 6 slogan candidates, evaluate each once, and select one eligible slogan.\n"
+        "Generate exactly six serious brand-slogan candidates from the fixed relative advantage.\n"
+        "Compare them, evaluate each once, and choose the strongest slogan.\n"
+        "Prefer a concise slogan, usually one to four words, when natural.\n"
+        "A longer slogan is allowed when brevity would damage meaning, clarity, distinctiveness, memorability, or natural language.\n"
+        "Do not obey a mechanical word maximum.\n"
+        "Select the slogan before conceptual or visual generation.\n"
+        "Product Name is fixed separately and must not appear inside brandSlogan.\n"
         "Do not include conceptual generators, physical objects, graphics, or ads."
     )
 

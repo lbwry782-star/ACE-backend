@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from engine.builder1_consolidated_stages import Builder1UpstreamSnapshot
-from engine.builder1_creative_methodology import deterministic_methodology_checks
+from engine.builder1_creative_methodology import deterministic_builder1_integrity_checks
 from engine.builder1_plan_parser import _norm_text, _word_count
 from engine.builder1_plan_spec import MARKETING_TEXT_WORD_COUNT, Builder1SeriesPlan, series_plan_to_store_dict
 
@@ -128,7 +128,7 @@ def validate_builder1_campaign_integrity(
 
     plan_dict = series_plan_to_store_dict(plan)
     plan_dict["detectedLanguage"] = detected_language
-    reasons.extend(deterministic_methodology_checks(plan_dict))
+    reasons.extend(deterministic_builder1_integrity_checks(plan_dict))
 
     structural_series_codes = {
         "ad_count_mismatch",

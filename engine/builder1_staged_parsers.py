@@ -28,7 +28,6 @@ from engine.builder1_client_boundary import (
     validate_strategy_candidate_text_boundary,
 )
 from engine.builder1_plan_spec import (
-    BRAND_SLOGAN_MAX_WORDS,
     RELATIVE_ADVANTAGE_SOURCES,
     WEAK_CONCEPTUAL_TERMS,
     Builder1SeriesPlan,
@@ -439,8 +438,6 @@ def parse_final_campaign_output(
             reasons.append(f"missing_{field}")
 
     brand_slogan = _norm_text(obj.get("brandSlogan"))
-    if brand_slogan and _word_count(brand_slogan) > BRAND_SLOGAN_MAX_WORDS:
-        reasons.append("brand_slogan_too_long")
 
     medium_participates = obj.get("mediumParticipates")
     if not isinstance(medium_participates, bool):

@@ -12,7 +12,6 @@ from engine.builder1_plan_spec import (
     AD_COUNT_MIN,
     BACKGROUND_TREATMENT_ENUMS,
     BORDER_TREATMENT_ENUMS,
-    BRAND_SLOGAN_MAX_WORDS,
     COPY_SAFE_SIDES,
     HEADLINE_ALIGNMENTS,
     HEADLINE_MAX_WORDS,
@@ -517,8 +516,6 @@ def validate_series_plan_structure(
     )
 
     brand_slogan = _norm_text(obj.get("brandSlogan"))
-    if brand_slogan and _word_count(brand_slogan) > BRAND_SLOGAN_MAX_WORDS:
-        reasons.append("brand_slogan_too_long")
 
     if isinstance(obj.get("ads"), list):
         for ad_raw in obj["ads"]:

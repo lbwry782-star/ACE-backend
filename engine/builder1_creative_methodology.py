@@ -306,6 +306,11 @@ def deterministic_methodology_checks(plan_dict: Dict[str, Any]) -> List[str]:
     return list(dict.fromkeys(reasons))
 
 
+def deterministic_builder1_integrity_checks(plan_dict: Dict[str, Any]) -> List[str]:
+    """Objective campaign invariants for post-series validation — no slogan creative judgment."""
+    return deterministic_methodology_checks(plan_dict)
+
+
 def strip_internal_ad_fields(ad: Dict[str, Any]) -> Dict[str, Any]:
     return {key: value for key, value in ad.items() if key not in INTERNAL_AD_FIELDS and key not in {"competitorTransferTest", "transferRisk"}}
 

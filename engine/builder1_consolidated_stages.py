@@ -9,29 +9,18 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from engine.builder1_client_boundary import strategy_candidate_is_eligible
 from engine.builder1_planning_contract import (
     STAGE_CONCEPTUAL_STAGE_SYSTEM,
-    STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM,
     STAGE_SLOGAN_STAGE_SYSTEM,
     STAGE_STRATEGY_STAGE_SYSTEM,
     build_conceptual_scan_repair_prompt,
     build_conceptual_stage_user_prompt,
-    build_slogan_candidate_repair_user_prompt,
     build_slogan_stage_user_prompt,
     build_strategy_stage_user_prompt,
 )
-from engine.builder1_slogan_quality import (
-    merge_slogan_candidate_replacements,
-    parse_slogan_candidate_replacements,
-)
 from engine.builder1_slogan_stage import (
-    SLOGAN_IDS,
-    SLOGAN_REJECTION_CODES,
     SloganCandidate,
     SloganSelection,
-    parse_slogan_scan,
-    slogan_candidate_to_dict,
-    validate_selected_slogan,
-    validate_slogan_candidate,
 )
+from engine.builder1_slogan_stage_parser import parse_consolidated_slogan_stage_response
 from engine.builder1_staged_parsers import (
     CONCEPTUAL_IDS,
     STRATEGY_IDS,
@@ -311,230 +300,13 @@ def run_strategy_stage(
     )
 
 
-def _parse_slogan_evaluations(
-    raw_payload: object,
-    *,
-    expected_ids: List[str],
-) -> Dict[str, Dict[str, Any]]:
-    reasons: List[str] = []
-    try:
-        obj = coerce_json_dict(raw_payload)
-    except Exception as exc:
-        raise StageParseError("slogan_stage", ["slogan_stage_not_object"]) from exc
-
-    evaluations_raw = obj.get("evaluations")
-    if not isinstance(evaluations_raw, list):
-        raise StageParseError("slogan_stage", ["slogan_stage_missing_evaluations"])
-
-    expected = {_norm_id(cid) for cid in expected_ids}
-    parsed: Dict[str, Dict[str, Any]] = {}
-    seen: set[str] = set()
-    for item in evaluations_raw:
-        if not isinstance(item, dict):
-            reasons.append("slogan_stage_evaluation_not_object")
-            continue
-        cid = _norm_id(item.get("candidateId"))
-        if cid not in expected:
-            reasons.append(f"slogan_stage_evaluation_unknown_id:{cid}")
-            continue
-        if cid in seen:
-            reasons.append(f"slogan_stage_evaluation_duplicate_id:{cid}")
-            continue
-        seen.add(cid)
-        rejection_codes = [
-            str(code)
-            for code in (item.get("rejectionCodes") or [])
-            if str(code).strip() in SLOGAN_REJECTION_CODES
-        ]
-        eligible_flag = bool(item.get("eligible"))
-        if eligible_flag and rejection_codes:
-            reasons.append(f"slogan_stage_evaluation_contradictory:{cid}")
-        if not eligible_flag and not rejection_codes:
-            reasons.append(f"slogan_stage_evaluation_ineligible_without_codes:{cid}")
-        parsed[cid] = {
-            "eligible": eligible_flag,
-            "rejection_codes": rejection_codes,
-            "derived_from_advantage": bool(item.get("derivedFromAdvantage")),
-            "natural_in_language": bool(item.get("naturalInLanguage")),
-            "credible": bool(item.get("credible")),
-            "ownable": bool(item.get("ownable")),
-            "implied_action_valid": bool(item.get("impliedActionValid")),
-            "campaign_generative": bool(item.get("campaignGenerative")),
-        }
-
-    if seen != expected:
-        for missing in sorted(expected - seen):
-            reasons.append(f"slogan_stage_evaluation_missing_id:{missing}")
-
-    if reasons:
-        raise StageParseError("slogan_stage", reasons)
-    return parsed
-
-
-def _slogan_gate_reasons(
-    candidate: SloganCandidate,
-    *,
-    relative_advantage: str,
-    product_description: str,
-    detected_language: str,
-    model_eval: Dict[str, Any],
-) -> List[str]:
-    reasons = validate_selected_slogan(
-        candidate,
-        relative_advantage=relative_advantage,
-        product_description=product_description,
-        detected_language=detected_language,
-    )
-    if not model_eval.get("eligible"):
-        reasons.extend(model_eval.get("rejection_codes") or ["slogan_not_credible"])
-    if candidate.competitor_transfer_risk != "low":
-        reasons.append("slogan_not_ownable")
-    if not candidate.implied_action.strip():
-        reasons.append("slogan_no_implied_action")
-    return list(dict.fromkeys(reasons))
-
-
-def _repair_slogan_candidates(
-    *,
-    candidates: List[SloganCandidate],
-    broken_ids: List[str],
-    selected_strategy: StrategyCandidate,
-    product_name_resolved: str,
-    product_description: str,
-    detected_language: str,
-    model_caller: PlanningModelCaller,
-    run_stage: RunStageFn,
-) -> List[SloganCandidate]:
-    if not broken_ids:
-        return candidates
-    preserved = {c.id: c for c in candidates if c.id not in broken_ids}
-    rejection_codes_by_id = {
-        cid: validate_slogan_candidate(
-            next(c for c in candidates if c.id == cid),
-            relative_advantage=selected_strategy.relative_advantage,
-            product_name=product_name_resolved,
-            product_description=product_description,
-            detected_language=detected_language,
-        ).rejection_codes
-        for cid in broken_ids
-    }
-
-    def _parse(raw: object):
-        replacements = parse_slogan_candidate_replacements(raw, allowed_ids=broken_ids)
-        return merge_slogan_candidate_replacements(candidates, replacements, preserved=preserved)
-
-    return run_stage(
-        "slogan_candidate_repair",
-        model_caller,
-        STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM,
-        build_slogan_candidate_repair_user_prompt(
-            invalid_candidate_ids=broken_ids,
-            rejection_codes_by_id=rejection_codes_by_id,
-            strategic_problem=selected_strategy.strategic_problem,
-            relative_advantage=selected_strategy.relative_advantage,
-            brief_support=selected_strategy.brief_support,
-            product_name_resolved=product_name_resolved,
-            detected_language=detected_language,
-            candidates=[slogan_candidate_to_dict(c) for c in candidates],
-        ),
-        _parse,
-    )
-
-
 def process_slogan_stage_response(
     raw_payload: object,
-    *,
-    selected_strategy: StrategyCandidate,
-    product_name_resolved: str,
-    product_description: str,
-    detected_language: str,
-    model_caller: PlanningModelCaller,
-    run_stage: RunStageFn,
 ) -> Tuple[SloganSelection, SloganCandidate, List[SloganCandidate]]:
-    candidates = parse_slogan_scan(raw_payload)
-    evaluations = _parse_slogan_evaluations(raw_payload, expected_ids=SLOGAN_IDS)
-
-    local_validations = {
-        c.id: validate_slogan_candidate(
-            c,
-            relative_advantage=selected_strategy.relative_advantage,
-            product_name=product_name_resolved,
-            product_description=product_description,
-            detected_language=detected_language,
-        )
-        for c in candidates
-    }
-    broken_ids = [c.id for c in candidates if not local_validations[c.id].eligible]
-    if broken_ids:
-        candidates = _repair_slogan_candidates(
-            candidates=candidates,
-            broken_ids=broken_ids,
-            selected_strategy=selected_strategy,
-            product_name_resolved=product_name_resolved,
-            product_description=product_description,
-            detected_language=detected_language,
-            model_caller=model_caller,
-            run_stage=run_stage,
-        )
-        local_validations = {
-            c.id: validate_slogan_candidate(
-                c,
-                relative_advantage=selected_strategy.relative_advantage,
-                product_name=product_name_resolved,
-                product_description=product_description,
-                detected_language=detected_language,
-            )
-            for c in candidates
-        }
-
-    eligible_ids = [
-        cid
-        for cid in SLOGAN_IDS
-        if local_validations[cid].eligible and evaluations[cid].get("eligible")
-    ]
-    if not eligible_ids:
-        raise StageParseError("slogan_stage", ["slogan_stage_no_eligible_candidates"])
-
-    obj = coerce_json_dict(raw_payload)
-    preferred_id = _norm_id(obj.get("selectedCandidateId"))
-    selection_reason = str(obj.get("selectionReason") or "").strip() or "Strongest eligible slogan"
-    by_id = {c.id: c for c in candidates}
-
-    selected: Optional[SloganCandidate] = None
-    if preferred_id in eligible_ids:
-        candidate = by_id[preferred_id]
-        if not _slogan_gate_reasons(
-            candidate,
-            relative_advantage=selected_strategy.relative_advantage,
-            product_description=product_description,
-            detected_language=detected_language,
-            model_eval=evaluations[preferred_id],
-        ):
-            selected = candidate
-
-    if selected is None:
-        for cid in SLOGAN_IDS:
-            if cid not in eligible_ids:
-                continue
-            candidate = by_id[cid]
-            if not _slogan_gate_reasons(
-                candidate,
-                relative_advantage=selected_strategy.relative_advantage,
-                product_description=product_description,
-                detected_language=detected_language,
-                model_eval=evaluations[cid],
-            ):
-                selected = candidate
-                logger.info(
-                    "BUILDER1_SLOGAN_STAGE_RESELECT modelSelected=%s localSelected=%s",
-                    preferred_id,
-                    cid,
-                )
-                break
-
-    if selected is None:
-        raise StageParseError("slogan_stage", ["slogan_stage_no_eligible_candidates"])
-
+    candidates, _evaluations, selected_id, selection_reason = parse_consolidated_slogan_stage_response(
+        raw_payload
+    )
+    selected = next(candidate for candidate in candidates if candidate.id == selected_id)
     return (
         SloganSelection(
             selected_candidate_id=selected.id,
@@ -565,15 +337,7 @@ def run_slogan_stage(
     )
 
     def _parse(raw: object):
-        return process_slogan_stage_response(
-            raw,
-            selected_strategy=selected_strategy,
-            product_name_resolved=product_name_resolved,
-            product_description=product_description,
-            detected_language=detected_language,
-            model_caller=model_caller,
-            run_stage=run_stage,
-        )
+        return process_slogan_stage_response(raw)
 
     return run_stage(
         "slogan_stage",

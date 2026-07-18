@@ -13,6 +13,7 @@ FORMAT_SQUARE = "square"
 AD_COUNT_MIN = 2
 AD_COUNT_MAX = 4
 
+# Legacy constant retained for inactive legacy parsers/tests only — not used in active Builder1 production.
 BRAND_SLOGAN_MAX_WORDS = 6
 HEADLINE_MAX_WORDS = 7
 MARKETING_TEXT_WORD_COUNT = 50

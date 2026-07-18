@@ -16,7 +16,7 @@ from engine.builder1_plan_parser import (
     check_unsupported_evidence,
     validate_series_plan_structure,
 )
-from engine.builder1_plan_spec import BRAND_SLOGAN_MAX_WORDS, Builder1GraphicGenerator, Builder1SeriesPlan
+from engine.builder1_plan_spec import Builder1GraphicGenerator, Builder1SeriesPlan
 from engine.builder1_client_boundary import (
     validate_brand_physical_boundary_text,
     validate_series_ads_boundary_text,
