@@ -18,7 +18,7 @@ from engine.builder1_strict_schema import (
 
 logger = logging.getLogger(__name__)
 
-STRICT_SCHEMA_STAGES = frozenset({"strategy_scan", "slogan_scan", "brand_physical", "graphic_system", "series_ads"})
+STRICT_SCHEMA_STAGES = frozenset({"strategy_scan", "slogan_scan", "slogan_quality_review", "slogan_candidate_repair", "brand_physical", "graphic_system", "series_ads"})
 
 STRATEGY_SCAN_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -75,6 +75,81 @@ SLOGAN_SCAN_JSON_SCHEMA: Dict[str, Any] = {
     "required": ["candidates"],
     "properties": {
         "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "brandSlogan",
+                    "derivationFromAdvantage",
+                    "impliedAction",
+                    "whyOwnable",
+                    "whyNaturalInLanguage",
+                    "competitorTransferRisk",
+                    "campaignGenerativePower",
+                ],
+                "properties": {
+                    "id": {"type": "string"},
+                    "brandSlogan": {"type": "string"},
+                    "derivationFromAdvantage": {"type": "string"},
+                    "impliedAction": {"type": "string"},
+                    "whyOwnable": {"type": "string"},
+                    "whyNaturalInLanguage": {"type": "string"},
+                    "competitorTransferRisk": {"type": "string", "enum": ["low", "medium", "high"]},
+                    "campaignGenerativePower": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+SLOGAN_QUALITY_REVIEW_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["reviews"],
+    "properties": {
+        "reviews": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "candidateId",
+                    "derivedFromAdvantage",
+                    "naturalInLanguage",
+                    "credible",
+                    "ownable",
+                    "impliedActionValid",
+                    "campaignGenerative",
+                    "eligible",
+                    "rejectionCodes",
+                ],
+                "properties": {
+                    "candidateId": {"type": "string"},
+                    "derivedFromAdvantage": {"type": "boolean"},
+                    "naturalInLanguage": {"type": "boolean"},
+                    "credible": {"type": "boolean"},
+                    "ownable": {"type": "boolean"},
+                    "impliedActionValid": {"type": "boolean"},
+                    "campaignGenerative": {"type": "boolean"},
+                    "eligible": {"type": "boolean"},
+                    "rejectionCodes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+            },
+        },
+    },
+}
+
+SLOGAN_CANDIDATE_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["replacements"],
+    "properties": {
+        "replacements": {
             "type": "array",
             "items": {
                 "type": "object",
@@ -280,6 +355,8 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
 STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "strategy_scan": STRATEGY_SCAN_JSON_SCHEMA,
     "slogan_scan": SLOGAN_SCAN_JSON_SCHEMA,
+    "slogan_quality_review": SLOGAN_QUALITY_REVIEW_JSON_SCHEMA,
+    "slogan_candidate_repair": SLOGAN_CANDIDATE_REPAIR_JSON_SCHEMA,
     "brand_physical": BRAND_PHYSICAL_JSON_SCHEMA,
     "graphic_system": GRAPHIC_SYSTEM_JSON_SCHEMA,
     "series_ads": SERIES_ADS_JSON_SCHEMA,

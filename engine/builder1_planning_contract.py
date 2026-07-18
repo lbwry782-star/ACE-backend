@@ -101,6 +101,34 @@ Rules:
 - Scores are integers 1-10.
 """.strip()
 
+STAGE_SLOGAN_QUALITY_REVIEW_SYSTEM = """
+You are a Builder1 slogan quality reviewer.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"reviews":[{"candidateId":"L01","derivedFromAdvantage":true,"naturalInLanguage":true,"credible":true,"ownable":true,"impliedActionValid":true,"campaignGenerative":true,"eligible":true,"rejectionCodes":[]}]}
+Rules:
+- Review every supplied candidate id exactly once.
+- Do not rewrite slogans or add candidates.
+- The selected relative advantage remains authoritative.
+- Semantic derivation does not require repeating the same words as the advantage sentence.
+- eligible=true requires rejectionCodes to be [].
+- eligible=false requires at least one rejection code from:
+  slogan_not_derived_from_advantage, slogan_generic, slogan_descriptive_only, slogan_not_ownable,
+  slogan_not_credible, slogan_no_implied_action, slogan_not_campaign_generative,
+  slogan_requires_future_capability, slogan_wrong_language, slogan_invalid_structure
+""".strip()
+
+STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM = """
+You are a Builder1 slogan candidate repair agent.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"replacements":[{"id":"L03","brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"..."}]}
+Rules:
+- Replace ONLY the requested candidate ids.
+- Do not include ids that were not requested.
+- competitorTransferRisk must be low, medium, or high.
+- Every string field must be non-empty.
+- Preserve the selected relative advantage as the source of meaning.
+""".strip()
+
 STAGE_CONCEPTUAL_SCAN_SYSTEM = """
 You are a Builder1 conceptual-generator explorer.
 Return JSON only. Return exactly this object and no additional top-level keys:
@@ -260,10 +288,65 @@ def build_slogan_scan_repair_prompt(*, broken_json: str, reasons: List[str]) -> 
     )
 
 
-def build_slogan_select_user_prompt(candidates: List[Dict[str, Any]]) -> str:
+def build_slogan_select_user_prompt(
+    candidates: List[Dict[str, Any]],
+    *,
+    eligible_candidate_ids: Optional[List[str]] = None,
+) -> str:
+    eligible = eligible_candidate_ids or [str(c.get("id", "")) for c in candidates]
     return (
         f"Slogan candidates:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}\n"
-        "Select one candidate by id. Do not rewrite it."
+        f"eligibleCandidateIds: {json.dumps(eligible, ensure_ascii=False)}\n"
+        "Select one candidate by id from eligibleCandidateIds only. Do not rewrite it."
+    )
+
+
+def build_slogan_quality_review_user_prompt(
+    *,
+    strategic_problem: str,
+    relative_advantage: str,
+    brief_support: str,
+    product_name_resolved: str,
+    detected_language: str,
+    candidates: List[Dict[str, Any]],
+) -> str:
+    return (
+        f"Product name (fixed): {product_name_resolved}\n"
+        f"Language: {detected_language}\n"
+        f"Selected strategic problem: {strategic_problem}\n"
+        f"Selected relative advantage: {relative_advantage}\n"
+        f"Relative-advantage grounding: {brief_support}\n"
+        f"Slogan candidates:\n{json.dumps(candidates, ensure_ascii=False, indent=2)}\n"
+        "Review every supplied candidate id exactly once. Do not rewrite slogans or add candidates."
+    )
+
+
+def build_slogan_candidate_repair_user_prompt(
+    *,
+    invalid_candidate_ids: List[str],
+    rejection_codes_by_id: Dict[str, List[str]],
+    strategic_problem: str,
+    relative_advantage: str,
+    brief_support: str,
+    product_name_resolved: str,
+    detected_language: str,
+    candidates: List[Dict[str, Any]],
+) -> str:
+    code_lines = [
+        f"- {cid}: {', '.join(rejection_codes_by_id.get(cid, []))}" for cid in invalid_candidate_ids
+    ]
+    return (
+        f"Repair ONLY these candidate ids: {', '.join(invalid_candidate_ids)}\n"
+        f"Product name (fixed): {product_name_resolved}\n"
+        f"Language: {detected_language}\n"
+        f"Selected strategic problem: {strategic_problem}\n"
+        f"Selected relative advantage: {relative_advantage}\n"
+        f"Relative-advantage grounding: {brief_support}\n"
+        "Rejection codes:\n"
+        + "\n".join(code_lines)
+        + "\nOriginal invalid candidates:\n"
+        + json.dumps(candidates, ensure_ascii=False, indent=2)
+        + "\nReturn replacements only for the invalid ids."
     )
 
 

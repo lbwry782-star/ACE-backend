@@ -46,7 +46,16 @@ from engine.builder1_staged_parsers import (
     parse_conceptual_selection,
     parse_strategy_selection,
 )
-from engine.builder1_slogan_stage import parse_slogan_scan, parse_slogan_selection, validate_selected_slogan
+from engine.builder1_slogan_quality import (
+    SloganFullRescanRequired,
+    execute_slogan_scan_through_selection,
+)
+from engine.builder1_slogan_stage import (
+    parse_slogan_scan,
+    parse_slogan_selection,
+    slogan_candidate_to_dict,
+    validate_selected_slogan,
+)
 from engine.builder1_strategy_judge import StrategyJudgeResult, judge_builder1_strategy
 
 logger = logging.getLogger(__name__)
@@ -150,73 +159,41 @@ def run_builder1_campaign_pipeline(
             broken_json=broken, reasons=reasons
         ),
     )
-    slogan_dicts = [
-        {
-            "id": c.id,
-            "brandSlogan": c.brand_slogan,
-            "derivationFromAdvantage": c.derivation_from_advantage,
-            "impliedAction": c.implied_action,
-            "whyOwnable": c.why_ownable,
-            "whyNaturalInLanguage": c.why_natural_in_language,
-            "competitorTransferRisk": c.competitor_transfer_risk,
-            "campaignGenerativePower": c.campaign_generative_power,
-        }
-        for c in slogan_candidates
-    ]
+    slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
+    selected_slogan: Any = None
 
-    def _parse_slogan_selection(raw: object):
-        return parse_slogan_selection(raw, slogan_candidates)
+    def _run_slogan_pipeline_once(*, full_rescan_used: bool) -> bool:
+        nonlocal slogan_candidates, slogan_dicts, selected_slogan
+        try:
+            selected_slogan, slogan_candidates = execute_slogan_scan_through_selection(
+                slogan_candidates=slogan_candidates,
+                selected_strategy=selected_strategy,
+                product_name_resolved=product_name_resolved,
+                product_description=normalized.product_description,
+                detected_language=detected_language,
+                model_caller=model_caller,
+                run_stage=_run_stage,
+                full_rescan_used=full_rescan_used,
+            )
+        except SloganFullRescanRequired:
+            return False
+        slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
+        return True
 
-    _, selected_slogan = _run_stage(
-        "slogan_selection",
-        model_caller,
-        STAGE_SLOGAN_SELECT_SYSTEM,
-        build_slogan_select_user_prompt(slogan_dicts),
-        _parse_slogan_selection,
-    )
-    slogan_gate = validate_selected_slogan(
-        selected_slogan,
-        relative_advantage=selected_strategy.relative_advantage,
-        product_description=normalized.product_description,
-    )
-    if slogan_gate:
-        logger.info("BUILDER1_STAGE_REPAIR stage=slogan_scan quality_gate reasons=%s", slogan_gate)
+    if not _run_slogan_pipeline_once(full_rescan_used=False):
+        logger.info("BUILDER1_SLOGAN_FULL_RESCAN reason=no_eligible_candidates")
         slogan_candidates = _run_stage(
             "slogan_scan",
             model_caller,
             STAGE_SLOGAN_SCAN_SYSTEM,
             build_slogan_scan_repair_prompt(
                 broken_json=json.dumps({"candidates": slogan_dicts}, ensure_ascii=False),
-                reasons=slogan_gate,
+                reasons=["no_eligible_slogan_candidates"],
             ),
             parse_slogan_scan,
         )
-        slogan_dicts = [
-            {
-                "id": c.id,
-                "brandSlogan": c.brand_slogan,
-                "derivationFromAdvantage": c.derivation_from_advantage,
-                "impliedAction": c.implied_action,
-                "whyOwnable": c.why_ownable,
-                "whyNaturalInLanguage": c.why_natural_in_language,
-                "competitorTransferRisk": c.competitor_transfer_risk,
-                "campaignGenerativePower": c.campaign_generative_power,
-            }
-            for c in slogan_candidates
-        ]
-        _, selected_slogan = _run_stage(
-            "slogan_selection",
-            model_caller,
-            STAGE_SLOGAN_SELECT_SYSTEM,
-            build_slogan_select_user_prompt(slogan_dicts),
-            _parse_slogan_selection,
-        )
-        slogan_gate = validate_selected_slogan(
-            selected_slogan,
-            relative_advantage=selected_strategy.relative_advantage,
-            product_description=normalized.product_description,
-        )
-        if slogan_gate:
+        slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
+        if not _run_slogan_pipeline_once(full_rescan_used=True):
             raise Builder1PlannerError("slogan_quality_gate_failed")
 
     conceptual_candidates = _run_stage(
@@ -445,30 +422,17 @@ def apply_targeted_judge_repair(
             ),
             parse_slogan_scan,
         )
-        slogan_dicts = [
-            {
-                "id": c.id,
-                "brandSlogan": c.brand_slogan,
-                "derivationFromAdvantage": c.derivation_from_advantage,
-                "impliedAction": c.implied_action,
-                "whyOwnable": c.why_ownable,
-                "whyNaturalInLanguage": c.why_natural_in_language,
-                "competitorTransferRisk": c.competitor_transfer_risk,
-                "campaignGenerativePower": c.campaign_generative_power,
-            }
-            for c in slogan_candidates
-        ]
-
-        def _parse_slogan_sel(raw: object):
-            return parse_slogan_selection(raw, slogan_candidates)
-
-        _, selected_slogan = _run_stage(
-            "slogan_selection",
-            model_caller,
-            STAGE_SLOGAN_SELECT_SYSTEM,
-            build_slogan_select_user_prompt(slogan_dicts),
-            _parse_slogan_sel,
+        selected_slogan, slogan_candidates = execute_slogan_scan_through_selection(
+            slogan_candidates=slogan_candidates,
+            selected_strategy=selected_strategy,
+            product_name_resolved=product_name_resolved,
+            product_description=normalized.product_description,
+            detected_language=detected_language,
+            model_caller=model_caller,
+            run_stage=_run_stage,
+            full_rescan_used=True,
         )
+        slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
     elif repair_stage == "conceptual_scan":
         conceptual_candidates = _run_stage(
             "conceptual_scan",

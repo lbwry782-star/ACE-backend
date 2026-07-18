@@ -46,10 +46,12 @@ from tests.test_builder1_series import _base_campaign, _parse
 class TestPlanningOrder(unittest.TestCase):
     def test_planner_source_order_has_slogan_before_conceptual(self) -> None:
         from engine import builder1_planning_pipeline as module
+        from engine import builder1_slogan_quality as quality_module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
         self.assertLess(source.index("slogan_scan"), source.index("conceptual_scan"))
-        self.assertLess(source.index("slogan_selection"), source.index("conceptual_scan"))
+        quality_source = inspect.getsource(quality_module.run_slogan_selection_with_quality_gate)
+        self.assertIn("slogan_selection", quality_source)
         self.assertLess(source.index("strategy_selection"), source.index("slogan_scan"))
 
     def test_conceptual_scan_prompt_receives_selected_slogan(self) -> None:

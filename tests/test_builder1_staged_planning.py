@@ -29,6 +29,8 @@ from engine.builder1_planning_contract import (
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
+    STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM,
+    STAGE_SLOGAN_QUALITY_REVIEW_SYSTEM,
     STAGE_SLOGAN_SCAN_SYSTEM,
     STAGE_SLOGAN_SELECT_SYSTEM,
     STAGE_STRATEGY_SCAN_SYSTEM,
@@ -285,6 +287,25 @@ def _selected_conceptual():
     return parse_conceptual_scan(_conceptual_scan_payload())[0]
 
 
+def _slogan_quality_review_payload() -> Dict[str, Any]:
+    return {
+        "reviews": [
+            {
+                "candidateId": f"L{i:02d}",
+                "derivedFromAdvantage": True,
+                "naturalInLanguage": True,
+                "credible": True,
+                "ownable": True,
+                "impliedActionValid": True,
+                "campaignGenerative": True,
+                "eligible": True,
+                "rejectionCodes": [],
+            }
+            for i in range(1, 7)
+        ]
+    }
+
+
 def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
     return {
         STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM: {"productNameResolved": "TestBrand"},
@@ -300,6 +321,8 @@ def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
             },
         },
         STAGE_SLOGAN_SCAN_SYSTEM: _slogan_scan_payload(),
+        STAGE_SLOGAN_QUALITY_REVIEW_SYSTEM: _slogan_quality_review_payload(),
+        STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM: {"replacements": []},
         STAGE_SLOGAN_SELECT_SYSTEM: {
             "selectedCandidateId": "L01",
             "selectionReason": "Strongest advantage expression",
