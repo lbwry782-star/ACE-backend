@@ -330,16 +330,21 @@ def series_plan_to_store_dict(plan: Builder1SeriesPlan) -> Dict[str, Any]:
         }
         extra = ad_internals.get(a.index) or ad_internals.get(str(a.index))
         if isinstance(extra, dict):
-            ad_dict.update(extra)
+            for key, value in extra.items():
+                if key == "brandSlogan":
+                    continue
+                ad_dict[key] = value
         base["ads"].append(ad_dict)
     if internals:
-        base.update(
-            {
-                key: value
-                for key, value in internals.items()
-                if key != "adInternals"
-            }
-        )
+        stored_internals = {
+            key: value
+            for key, value in internals.items()
+            if key != "adInternals"
+        }
+        if ad_internals:
+            stored_internals["adInternals"] = ad_internals
+        if stored_internals:
+            base["planningInternals"] = stored_internals
     return base
 
 
@@ -354,13 +359,36 @@ def _palette_from_dict(raw: Dict[str, Any]) -> Builder1Palette:
 
 
 def series_plan_from_store_dict(data: Dict[str, Any]) -> Builder1SeriesPlan:
+    from dataclasses import replace
+
+    from engine.builder1_final_stages import build_series_ad_internals
     from engine.builder1_plan_parser import parse_builder1_series_plan
 
-    return parse_builder1_series_plan(
+    plan = parse_builder1_series_plan(
         data,
         expected_format=str(data.get("format") or "portrait"),
         expected_ad_count=int(data.get("adCount") or 2),
         product_name=str(data.get("productName") or ""),
         product_description=str(data.get("productDescription") or ""),
         require_internal_scans=False,
+    )
+    stored_internals = data.get("planningInternals")
+    if isinstance(stored_internals, dict):
+        ad_internals = stored_internals.get("adInternals")
+        if not isinstance(ad_internals, dict):
+            ad_internals = build_series_ad_internals(
+                [ad for ad in (data.get("ads") or []) if isinstance(ad, dict)],
+                fixed_slogan=plan.brand_slogan,
+            )
+        planning_internals = dict(stored_internals)
+        planning_internals["adInternals"] = ad_internals
+        return replace(plan, planning_internals=planning_internals)
+    return replace(
+        plan,
+        planning_internals={
+            "adInternals": build_series_ad_internals(
+                [ad for ad in (data.get("ads") or []) if isinstance(ad, dict)],
+                fixed_slogan=plan.brand_slogan,
+            )
+        },
     )

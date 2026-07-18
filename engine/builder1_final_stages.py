@@ -112,6 +112,74 @@ class SeriesAdsOutput:
     ads: List[Dict[str, Any]]
 
 
+_PER_AD_MODEL_SLOGAN_KEYS = ("brandSlogan", "slogan", "campaignSlogan")
+
+_AD_INTERNAL_FIELD_KEYS = frozenset(
+    {
+        "familiarExpectation",
+        "singleChangedPropertyOrAction",
+        "immediateClarityReason",
+        "sloganConnection",
+        "relativeAdvantageConnection",
+        "brandOwnershipReason",
+        "categoryRelevanceReason",
+        "headlineRequired",
+        "headlineReason",
+        "productVisibilityRequired",
+        "productVisibilityReason",
+        "sameVisualLawProof",
+        "distinctFromOtherAdsReason",
+        "noReuseCheck",
+        "brandSlogan",
+    }
+)
+
+
+def strip_model_slogan_fields_from_series_ads(
+    ads: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Remove any model-generated per-ad slogan fields before server assembly."""
+    cleaned: List[Dict[str, Any]] = []
+    for ad in ads:
+        if not isinstance(ad, dict):
+            cleaned.append(ad)
+            continue
+        ad_copy = dict(ad)
+        for key in _PER_AD_MODEL_SLOGAN_KEYS:
+            ad_copy.pop(key, None)
+        cleaned.append(ad_copy)
+    return cleaned
+
+
+def inject_fixed_campaign_slogan_into_series_ads(
+    ads: List[Dict[str, Any]],
+    *,
+    fixed_slogan: str,
+) -> List[Dict[str, Any]]:
+    """Return ad dicts with deprecated model slogan fields removed for assembly."""
+    return strip_model_slogan_fields_from_series_ads(ads)
+
+
+def build_series_ad_internals(
+    ads: List[Dict[str, Any]],
+    *,
+    fixed_slogan: str,
+) -> Dict[int, Dict[str, Any]]:
+    """Build per-ad internals with the server-owned fixed campaign slogan."""
+    ad_internals: Dict[int, Dict[str, Any]] = {}
+    for ad in ads:
+        if not isinstance(ad, dict) or ad.get("index") is None:
+            continue
+        idx = int(ad["index"])
+        ad_internals[idx] = {
+            key: ad.get(key)
+            for key in ad
+            if key in _AD_INTERNAL_FIELD_KEYS
+        }
+        ad_internals[idx]["brandSlogan"] = fixed_slogan
+    return ad_internals
+
+
 def log_stage_parse_failure(stage: str, raw_payload: object, reasons: List[str]) -> None:
     keys: List[str] = []
     types: Dict[str, str] = {}
@@ -352,6 +420,7 @@ def parse_series_ads_output(
 
     ads_raw = obj.get("ads")
     normalized_ads = _normalize_ad_indexes(ads_raw if isinstance(ads_raw, list) else [], expected_ad_count, reasons)
+    normalized_ads = strip_model_slogan_fields_from_series_ads(normalized_ads)
     reasons.extend(
         validate_series_ads_boundary_text(normalized_ads, product_description=product_description)
     )
@@ -385,6 +454,9 @@ def assemble_builder1_campaign(
     if check_unsupported_evidence(evidence, product_description):
         raise StageParseError("assemble", ["unsupported_evidence_claim"])
 
+    fixed_slogan = selected_slogan.brand_slogan
+    assembled_ads = inject_fixed_campaign_slogan_into_series_ads(series_ads.ads, fixed_slogan=fixed_slogan)
+
     assembled: Dict[str, Any] = {
         "productName": product_name,
         "productDescription": product_description,
@@ -399,7 +471,7 @@ def assemble_builder1_campaign(
         "relativeAdvantageBriefSupport": strategy.brief_support,
         "relativeAdvantageClaimRisk": strategy.claim_risk,
         "problemAdvantageLink": f"{strategy.relative_advantage} addresses {strategy.strategic_problem}",
-        "brandSlogan": selected_slogan.brand_slogan,
+        "brandSlogan": fixed_slogan,
         "sloganDerivation": selected_slogan.derivation_from_advantage,
         "sloganAction": selected_slogan.implied_action,
         "conceptualGenerator": conceptual.generator,
@@ -453,7 +525,7 @@ def assemble_builder1_campaign(
         "mediumParticipates": brand_physical.medium_participates,
         "mediumRole": brand_physical.medium_role,
         "campaignRationale": brand_physical.campaign_rationale,
-        "ads": series_ads.ads,
+        "ads": assembled_ads,
     }
 
     plan, reasons = validate_series_plan_structure(
@@ -469,31 +541,7 @@ def assemble_builder1_campaign(
 
     from dataclasses import replace
 
-    ad_internals = {
-        int(ad.get("index")): {
-            key: ad.get(key)
-            for key in ad
-            if key
-            in {
-                "familiarExpectation",
-                "singleChangedPropertyOrAction",
-                "immediateClarityReason",
-                "sloganConnection",
-                "relativeAdvantageConnection",
-                "brandOwnershipReason",
-                "categoryRelevanceReason",
-                "headlineRequired",
-                "headlineReason",
-                "productVisibilityRequired",
-                "productVisibilityReason",
-                "sameVisualLawProof",
-                "distinctFromOtherAdsReason",
-                "noReuseCheck",
-            }
-        }
-        for ad in series_ads.ads
-        if isinstance(ad, dict) and ad.get("index") is not None
-    }
+    ad_internals = build_series_ad_internals(assembled_ads, fixed_slogan=fixed_slogan)
     return replace(
         plan,
         planning_internals={

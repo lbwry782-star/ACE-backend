@@ -302,12 +302,17 @@ Return JSON only. Return exactly this object and no additional top-level keys:
 Rules:
 - seriesGenerator must be an object with type, principle, progression.
 - ads must contain exactly the requested ad count ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
-- One fixed brand slogan and one conceptual law across all ads; each ad is another proof with a distinct execution.
+- The campaign slogan has already been selected upstream and is immutable.
+- Do not generate, rewrite, paraphrase, translate, punctuate, or spacing-change the slogan.
+- Do not create a different slogan for any advertisement.
+- Do not return brandSlogan, slogan, campaignSlogan, physical generator, or graphic generator.
+- Use sloganConnection only to explain how each visual execution expresses the fixed slogan.
+- The exact displayed slogan will be inserted by the server into every ad.
+- Create only distinct ad executions of the fixed conceptual, physical, and graphic laws.
 - Default headline to null unless the visual alone cannot communicate the idea.
 - Do not use a headline to explain what object changed or what the visual joke means.
 - marketingText must be exactly 50 words in the server target language — one paragraph below the image, not inside it.
 - marketingText must be written in the target language provided in the user prompt.
-- Do not return brand slogan, physical generator, or graphic generator.
 - Product identification in rendered ads must use the written product name as plain text only; never request a logo or brand symbol.
 - Populate all internal methodology fields on every ad.
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
@@ -712,8 +717,12 @@ def build_series_ads_user_prompt(
         f"Required ad indexes: {indexes}\n"
         f"Format: {format_value}\n"
         f"TARGET LANGUAGE FOR ALL MARKETING TEXT: {lang_name} ({detected_language})\n"
-        f"Fixed brand slogan across all ads: {brand_slogan}\n"
+        f"Fixed brand slogan across all ads (immutable, server-owned): {brand_slogan}\n"
         f"Fixed implied slogan action: {implied_action}\n"
+        "The campaign slogan is already selected. Do not generate, rewrite, paraphrase, translate, "
+        "or alter punctuation or spacing for the slogan.\n"
+        "Do not return brandSlogan or any per-ad slogan field. Use sloganConnection only to explain "
+        "how each ad expresses the fixed slogan. The server inserts the exact slogan into every ad.\n"
         "Every marketingText must:\n"
         "- contain exactly 50 words\n"
         "- be written in the target language\n"

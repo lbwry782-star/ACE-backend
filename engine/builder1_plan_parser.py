@@ -521,8 +521,12 @@ def validate_series_plan_structure(
         for ad_raw in obj["ads"]:
             if isinstance(ad_raw, dict):
                 for bad in ("brandSlogan", "slogan", "campaignSlogan"):
-                    if _norm_text(ad_raw.get(bad)):
-                        reasons.append("per_ad_slogan_forbidden")
+                    per_ad_value = _norm_text(ad_raw.get(bad))
+                    if not per_ad_value:
+                        continue
+                    if brand_slogan and per_ad_value == brand_slogan:
+                        continue
+                    reasons.append("per_ad_slogan_forbidden")
 
     _validate_conceptual_generator(
         conceptual=_norm_text(obj.get("conceptualGenerator")),

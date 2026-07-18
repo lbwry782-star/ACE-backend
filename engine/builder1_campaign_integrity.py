@@ -106,11 +106,11 @@ def validate_builder1_campaign_integrity(
         reasons.append("duplicate_ad_indices")
         needs_series_stage_retry = True
 
-    fixed_slogan = _norm_text(plan.brand_slogan)
+    fixed_slogan = plan.brand_slogan
     for ad in plan.ads:
         ad_dict = plan.planning_internals.get("adInternals", {}).get(ad.index, {})
-        slogan_conn = _norm_text(ad_dict.get("sloganConnection"))
-        if fixed_slogan and slogan_conn and fixed_slogan.lower() not in slogan_conn.lower():
+        ad_slogan = ad_dict.get("brandSlogan")
+        if ad_slogan is not None and ad_slogan != fixed_slogan:
             reasons.append(f"ad_{ad.index}_slogan_inconsistent")
 
         headline_required = ad_dict.get("headlineRequired")
