@@ -53,6 +53,7 @@ class TestPlanningProfiles(unittest.TestCase):
 
     def test_balanced_profile_routes_execution_stages(self) -> None:
         self.assertEqual(resolve_stage_model("strategy_stage"), "o3-pro")
+        self.assertEqual(resolve_stage_model("product_name_resolution"), "gpt-4.1")
         self.assertEqual(resolve_stage_model("graphic_system"), "gpt-4.1")
         self.assertEqual(resolve_stage_model("series_ads"), "gpt-4.1")
 
@@ -203,7 +204,8 @@ class TestProductionShapedRegression(unittest.TestCase):
             prompt = __import__(
                 "engine.builder1_visual_prompt", fromlist=["build_visual_prompt"]
             ).build_visual_prompt(plan, plan.ads[0])
-            self.assertIn("Do not depict the advertised product itself", prompt)
+            self.assertIn("ADVERTISED PRODUCT: not depicted", prompt)
+            self.assertIn("PACKAGING: not depicted", prompt)
             self.assertIn(plan.transferred_object, prompt)
 
 

@@ -75,6 +75,7 @@ def run_builder1_campaign_pipeline(
     lens_order: List[str],
     model_caller: Any,
     brand_guidelines: Optional[Dict[str, Any]],
+    visibility_decision: Optional[Any] = None,
 ) -> Builder1PipelineContext:
     from engine.builder1_planner import (
         Builder1PlannerError,
@@ -133,10 +134,16 @@ def run_builder1_campaign_pipeline(
     ]
     conceptual_fixed = _conceptual_to_dict(selected_conceptual)
 
-    visibility_decision = derive_product_visibility_policy(
-        product_name=product_name_resolved,
-        product_description=normalized.product_description,
-        brand_guidelines=brand_guidelines,
+    if visibility_decision is None:
+        visibility_decision = derive_product_visibility_policy(
+            product_name=product_name_resolved,
+            product_description=normalized.product_description,
+            brand_guidelines=brand_guidelines,
+        )
+
+    log_builder1_product_visibility_policy(
+        policy=visibility_decision.policy,
+        source=visibility_decision.source,
     )
 
     brand_physical = _run_stage(

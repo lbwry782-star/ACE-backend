@@ -196,3 +196,28 @@ def build_visibility_compliance_correction(violations: List[str]) -> str:
     lines.append("Preserve the approved campaign concept, scene composition, slogan, and graphic system.")
     lines.append("=== END IMAGE VISIBILITY COMPLIANCE CORRECTION ===")
     return "\n".join(lines)
+
+
+BUILDER1_NO_PRODUCT_STRICT_CORRECTION_BLOCK = "\n".join(
+    [
+        "=== IMAGE COMPLIANCE CORRECTION — NO_PRODUCT_STRICT (MANDATORY) ===",
+        "Remove the advertised product completely from the image.",
+        "Remove every product unit, container, bottle, can, box, carton, jar, bag, device, garment, food item, and vehicle that matches the advertised product category.",
+        "Remove all packaging and mock packaging.",
+        "Do not reinterpret the advertised product as a prop, background object, label, or partial silhouette.",
+        "Show ONLY the approved transferred physical generator as the hero subject.",
+        "Preserve Product Name and slogan only as plain readable advertising typography.",
+        "Preserve the approved graphic system, palette, and composition.",
+        "=== END IMAGE COMPLIANCE CORRECTION — NO_PRODUCT_STRICT ===",
+    ]
+)
+
+
+def build_no_product_strict_correction(*, transferred_object: str, transferred_object_action: str) -> str:
+    return "\n".join(
+        [
+            BUILDER1_NO_PRODUCT_STRICT_CORRECTION_BLOCK,
+            f"Approved transferred physical generator: {transferred_object}.",
+            f"Approved transferred action: {transferred_object_action}.",
+        ]
+    )

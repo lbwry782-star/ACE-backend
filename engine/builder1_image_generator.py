@@ -16,8 +16,16 @@ from engine.builder1_image_compliance import (
     ImageComplianceUnavailableError,
     review_builder1_ad_image_compliance,
 )
+from engine.builder1_image_prompt_preflight import (
+    ImagePromptPreflightError,
+    run_image_prompt_preflight,
+)
 from engine.builder1_plan_spec import Builder1SeriesPlan
-from engine.builder1_product_visibility import build_visibility_compliance_correction
+from engine.builder1_product_visibility import (
+    ProductVisibilityPolicy,
+    build_no_product_strict_correction,
+    build_visibility_compliance_correction,
+)
 from engine.builder1_visual_prompt import build_visual_prompt
 
 logger = logging.getLogger(__name__)
@@ -71,6 +79,19 @@ def _retry_after_seconds(exc: Exception) -> Optional[int]:
     return None
 
 
+def _resolve_visibility_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
+    raw = (series_plan.product_visibility_policy or "").strip().upper()
+    try:
+        return ProductVisibilityPolicy(raw)
+    except ValueError:
+        internals = series_plan.planning_internals or {}
+        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
+        try:
+            return ProductVisibilityPolicy(raw)
+        except ValueError:
+            return ProductVisibilityPolicy.FORBIDDEN
+
+
 def _generate_with_retry(
     *,
     ad_index: int,
@@ -106,9 +127,29 @@ def _generate_with_retry(
     raise RuntimeError(f"image_generation_failed_ad_{ad_index}") from last_exc
 
 
-def _build_compliance_correction_block(violations: list[str]) -> str:
-    blocks = [BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK]
+def _build_compliance_correction_block(
+    violations: list[str],
+    *,
+    series_plan: Builder1SeriesPlan,
+    campaign_id: str,
+    ad_index: int,
+) -> str:
     visibility_violations = [code for code in violations if code in VISIBILITY_VIOLATION_CODES]
+    if "product_visible_without_explicit_request" in visibility_violations:
+        transferred = series_plan.transferred_object or series_plan.physical_generator
+        action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
+        logger.info(
+            "BUILDER1_IMAGE_RETRY_CORRECTION campaignId=%s adIndex=%s "
+            "violation=product_visible_without_explicit_request correctionProfile=NO_PRODUCT_STRICT",
+            campaign_id or "",
+            ad_index,
+        )
+        return build_no_product_strict_correction(
+            transferred_object=transferred,
+            transferred_object_action=action,
+        )
+
+    blocks = [BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK]
     if visibility_violations:
         blocks.append(build_visibility_compliance_correction(visibility_violations))
     return "\n\n".join(blocks)
@@ -129,6 +170,14 @@ def generate_builder1_ad_image(
     """
     ad = next(a for a in series_plan.ads if a.index == ad_index)
     prompt = build_visual_prompt(series_plan, ad)
+    run_image_prompt_preflight(
+        series_plan=series_plan,
+        ad_plan=ad,
+        prompt=prompt,
+        campaign_id=campaign_id or "",
+        ad_index=ad_index,
+    )
+
     image_started = time.perf_counter()
     image_bytes = _generate_with_retry(
         ad_index=ad_index,
@@ -138,6 +187,13 @@ def generate_builder1_ad_image(
     )
     image_generation_duration_ms = int((time.perf_counter() - image_started) * 1000)
 
+    policy = _resolve_visibility_policy(series_plan)
+    review_product_description = (
+        series_plan.product_description
+        if policy != ProductVisibilityPolicy.FORBIDDEN
+        else ""
+    )
+
     compliance_started = time.perf_counter()
     review = review_builder1_ad_image_compliance(
         image_bytes,
@@ -145,7 +201,7 @@ def generate_builder1_ad_image(
         ad_index=ad_index,
         campaign_id=campaign_id,
         job_id=job_id,
-        product_description=series_plan.product_description,
+        product_description=review_product_description,
         visibility_policy=series_plan.product_visibility_policy,
         transferred_object=series_plan.transferred_object or series_plan.physical_generator,
         reviewer=compliance_reviewer,
@@ -168,7 +224,7 @@ def generate_builder1_ad_image(
         ad_index,
         review.violations,
     )
-    corrected_prompt = f"{prompt}\n\n{_build_compliance_correction_block(review.violations)}"
+    corrected_prompt = f"{prompt}\n\n{_build_compliance_correction_block(review.violations, series_plan=series_plan, campaign_id=campaign_id or '', ad_index=ad_index)}"
     regen_started = time.perf_counter()
     image_bytes = _generate_with_retry(
         ad_index=ad_index,
@@ -184,7 +240,7 @@ def generate_builder1_ad_image(
         ad_index=ad_index,
         campaign_id=campaign_id,
         job_id=job_id,
-        product_description=series_plan.product_description,
+        product_description=review_product_description,
         visibility_policy=series_plan.product_visibility_policy,
         transferred_object=series_plan.transferred_object or series_plan.physical_generator,
         reviewer=compliance_reviewer,

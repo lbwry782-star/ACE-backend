@@ -469,12 +469,22 @@ def plan_builder1(
         detected_language,
     )
 
-    product_name_resolved = _resolve_builder1_product_name(
-        model_caller,
+    from engine.builder1_product_visibility import (
+        ProductVisibilityPolicy,
+        ProductVisibilitySource,
+        derive_product_visibility_policy,
+        log_builder1_product_visibility_policy,
+    )
+
+    visibility_decision = derive_product_visibility_policy(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
-        detected_language=detected_language,
         brand_guidelines=brand_guidelines,
+    )
+    log_builder1_product_visibility_policy(
+        campaign_id=campaign_id or "",
+        policy=visibility_decision.policy,
+        source=visibility_decision.source,
     )
 
     metrics = Builder1PlanningMetrics(
@@ -485,6 +495,14 @@ def plan_builder1(
     metrics_token = set_planning_metrics(metrics)
 
     try:
+        product_name_resolved = _resolve_builder1_product_name(
+            model_caller,
+            product_name=normalized.product_name,
+            product_description=normalized.product_description,
+            detected_language=detected_language,
+            brand_guidelines=brand_guidelines,
+        )
+
         metrics.begin_pipeline_pass("initial")
         try:
             ctx = run_builder1_campaign_pipeline(
@@ -495,6 +513,7 @@ def plan_builder1(
                 lens_order=lens_order,
                 model_caller=model_caller,
                 brand_guidelines=brand_guidelines,
+                visibility_decision=visibility_decision,
             )
         except StrategySelectionExhausted as exc:
             raise Builder1PlannerError("strategy_stage_failed") from exc
@@ -502,28 +521,6 @@ def plan_builder1(
             metrics.end_pipeline_pass()
 
         logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
-        from engine.builder1_product_visibility import (
-            ProductVisibilityPolicy,
-            ProductVisibilitySource,
-            log_builder1_product_visibility_policy,
-        )
-
-        internals = ctx.plan.planning_internals or {}
-        policy_raw = internals.get("productVisibilityPolicy", ProductVisibilityPolicy.FORBIDDEN.value)
-        source_raw = internals.get("productVisibilitySource", ProductVisibilitySource.DEFAULT.value)
-        try:
-            policy = ProductVisibilityPolicy(str(policy_raw))
-        except ValueError:
-            policy = ProductVisibilityPolicy.FORBIDDEN
-        try:
-            source = ProductVisibilitySource(str(source_raw))
-        except ValueError:
-            source = ProductVisibilitySource.DEFAULT
-        log_builder1_product_visibility_policy(
-            campaign_id=campaign_id or "",
-            policy=policy,
-            source=source,
-        )
         return ctx.plan
     finally:
         metrics.log_summary()

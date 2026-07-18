@@ -7,7 +7,7 @@ import logging
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -49,22 +49,29 @@ CORE_QUALITY_STAGES = frozenset(
     }
 )
 
-EXECUTION_STAGES = frozenset({"graphic_system", "series_ads"})
+BALANCED_EXECUTION_STAGES = frozenset(
+    {
+        "product_name_resolution",
+        "graphic_system",
+        "series_ads",
+    }
+)
 
 FAST_EXECUTION_STAGES = frozenset(
     {
+        "product_name_resolution",
         "slogan_stage",
         "conceptual_stage",
         "brand_physical",
         "graphic_system",
         "series_ads",
-        "product_name_resolution",
     }
 )
 
 VALID_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
 
 _config_logged = False
+_execution_model_warning_logged = False
 _available_models_cache: Optional[frozenset[str]] = None
 
 
@@ -81,20 +88,36 @@ class StageRoutingDecision:
     execution_optimization_active: bool
 
 
-def default_planning_model() -> str:
-    return (os.environ.get("BUILDER1_PLANNING_MODEL") or "o3-pro").strip() or "o3-pro"
-
-
-def execution_model() -> str:
-    configured = (os.environ.get("BUILDER1_EXECUTION_MODEL") or "").strip()
+def quality_model() -> str:
+    configured = (os.environ.get("BUILDER1_QUALITY_MODEL") or "").strip()
     if configured:
         return configured
-    return default_planning_model()
+    legacy = (os.environ.get("BUILDER1_PLANNING_MODEL") or "").strip()
+    if legacy:
+        return legacy
+    return "o3-pro"
+
+
+def configured_execution_model() -> Optional[str]:
+    raw = (os.environ.get("BUILDER1_EXECUTION_MODEL") or "").strip()
+    return raw or None
+
+
+def execution_model_resolved() -> str:
+    configured = configured_execution_model()
+    if configured:
+        return configured
+    return quality_model()
 
 
 def execution_optimization_active() -> bool:
-    configured = (os.environ.get("BUILDER1_EXECUTION_MODEL") or "").strip()
-    return bool(configured) and configured != default_planning_model()
+    profile = resolve_planning_profile()
+    if profile not in {PlanningProfile.BALANCED, PlanningProfile.FAST}:
+        return False
+    configured = configured_execution_model()
+    if not configured:
+        return False
+    return configured != quality_model()
 
 
 def resolve_planning_profile() -> PlanningProfile:
@@ -124,26 +147,27 @@ def _env_stage_model(stage: str) -> str:
 
 
 def _profile_default_model(stage: str, profile: PlanningProfile) -> str:
-    quality_model = default_planning_model()
-    exec_model = execution_model()
+    q_model = quality_model()
+    exec_configured = configured_execution_model()
+    exec_model = execution_model_resolved()
     if profile == PlanningProfile.QUALITY:
-        return quality_model
+        return q_model
     if profile == PlanningProfile.BALANCED:
-        if stage in EXECUTION_STAGES:
+        if stage in BALANCED_EXECUTION_STAGES and exec_configured:
             return exec_model
-        return quality_model
+        return q_model
     if stage == "strategy_stage":
-        return quality_model
-    if stage in FAST_EXECUTION_STAGES:
+        return q_model
+    if stage in FAST_EXECUTION_STAGES and exec_configured:
         return exec_model
-    return quality_model
+    return q_model
 
 
 def _profile_default_reasoning(stage: str, profile: PlanningProfile) -> str:
     if profile == PlanningProfile.QUALITY:
         return "low"
     if profile == PlanningProfile.BALANCED:
-        if stage in EXECUTION_STAGES:
+        if stage in BALANCED_EXECUTION_STAGES:
             return "low"
         return "low"
     if stage == "strategy_stage":
@@ -151,14 +175,54 @@ def _profile_default_reasoning(stage: str, profile: PlanningProfile) -> str:
     return "low"
 
 
+def _log_missing_execution_model_warning(profile: PlanningProfile) -> None:
+    global _execution_model_warning_logged
+    if _execution_model_warning_logged:
+        return
+    if profile not in {PlanningProfile.BALANCED, PlanningProfile.FAST}:
+        return
+    if configured_execution_model():
+        return
+    _execution_model_warning_logged = True
+    logger.warning(
+        "BUILDER1_EXECUTION_MODEL_MISSING profile=%s qualityModel=%s "
+        "executionOptimizationActive=false allStagesFallbackToQualityModel=true",
+        profile.value,
+        quality_model(),
+    )
+
+
 def resolve_stage_model(stage: Optional[str]) -> str:
     profile = resolve_planning_profile()
+    _log_missing_execution_model_warning(profile)
     if not stage:
-        return default_planning_model()
+        return quality_model()
+
+    exec_configured = configured_execution_model()
+    profile_model = _profile_default_model(stage, profile)
     explicit = _env_stage_model(stage)
+
+    if (
+        profile in {PlanningProfile.BALANCED, PlanningProfile.FAST}
+        and stage in (BALANCED_EXECUTION_STAGES if profile == PlanningProfile.BALANCED else FAST_EXECUTION_STAGES)
+        and exec_configured
+    ):
+        if explicit and explicit == quality_model() and profile_model != quality_model():
+            logger.warning(
+                "BUILDER1_STAGE_MODEL_IGNORED profile=%s stage=%s configuredStageModel=%s "
+                "routingToExecutionModel=%s",
+                profile.value,
+                stage,
+                explicit,
+                profile_model,
+            )
+            return profile_model
+        if not explicit:
+            return profile_model
+
     if explicit:
         return explicit
-    return _profile_default_model(stage, profile)
+    return profile_model
 
 
 def resolve_stage_reasoning_effort(stage: Optional[str], model: str) -> Optional[str]:
@@ -206,23 +270,24 @@ def log_builder1_planning_profile_config() -> None:
     if _config_logged:
         return
     profile = resolve_planning_profile()
+    _log_missing_execution_model_warning(profile)
+    q_model = quality_model()
+    exec_model = configured_execution_model() or "(unset)"
     models = {stage: resolve_stage_model(stage) for stage in PLANNING_STAGES}
-    efforts = {
-        stage: resolve_stage_reasoning_effort(stage, models[stage]) or "none"
-        for stage in PLANNING_STAGES
-    }
     logger.info(
-        "BUILDER1_PLANNING_PROFILE_CONFIG profile=%s strategyModel=%s sloganModel=%s "
-        "conceptualModel=%s physicalModel=%s graphicModel=%s seriesModel=%s "
-        "reasoningEfforts=%s executionOptimizationActive=%s",
+        "BUILDER1_PLANNING_PROFILE_CONFIG profile=%s qualityModel=%s executionModel=%s "
+        "productNameModel=%s strategyModel=%s sloganModel=%s conceptualModel=%s "
+        "physicalModel=%s graphicModel=%s seriesModel=%s executionOptimizationActive=%s",
         profile.value,
+        q_model,
+        exec_model,
+        models["product_name_resolution"],
         models["strategy_stage"],
         models["slogan_stage"],
         models["conceptual_stage"],
         models["brand_physical"],
         models["graphic_system"],
         models["series_ads"],
-        efforts,
         str(execution_optimization_active()).lower(),
     )
     _config_logged = True

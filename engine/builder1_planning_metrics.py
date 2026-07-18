@@ -27,6 +27,7 @@ class Builder1PlanningMetrics:
     campaign_id: str = ""
     job_id: str = ""
     product_name_call_used: bool = False
+    product_name_stage_calls: int = 0
     strategy_stage_calls: int = 0
     slogan_stage_calls: int = 0
     conceptual_stage_calls: int = 0
@@ -64,6 +65,7 @@ class Builder1PlanningMetrics:
             return
         if stage == "product_name_resolution":
             self.product_name_call_used = True
+            self.product_name_stage_calls += 1
         elif stage == "strategy_stage":
             self.strategy_stage_calls += 1
         elif stage == "slogan_stage":
@@ -141,13 +143,14 @@ class Builder1PlanningMetrics:
 
         logger.info(
             "BUILDER1_PLANNING_CALL_SUMMARY campaignId=%s jobId=%s "
-            "productNameCallUsed=%s strategyStageCalls=%s sloganStageCalls=%s "
+            "productNameCallUsed=%s productNameStageCalls=%s strategyStageCalls=%s sloganStageCalls=%s "
             "conceptualStageCalls=%s physicalStageCalls=%s graphicStageCalls=%s "
             "seriesStageCalls=%s focusedRepairCalls=%s totalPlanningModelCalls=%s "
             "promptTokens=%s outputTokens=%s totalTokens=%s totalPlanningDurationMs=%s",
             self.campaign_id or "",
             self.job_id or "",
             str(self.product_name_call_used).lower(),
+            self.product_name_stage_calls,
             self.strategy_stage_calls,
             self.slogan_stage_calls,
             self.conceptual_stage_calls,

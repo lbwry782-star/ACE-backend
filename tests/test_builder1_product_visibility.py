@@ -123,19 +123,20 @@ class TestImagePromptVisibility(unittest.TestCase):
 
     def test_image_prompt_excludes_product_and_packaging(self) -> None:
         prompt = build_visual_prompt(self._plan(), self._plan().ads[0])
-        self.assertIn("Do not depict the advertised product itself", prompt)
-        self.assertIn("Do not create a product shot", prompt)
+        self.assertIn("ADVERTISED PRODUCT: not depicted", prompt)
+        self.assertIn("PACKAGING: not depicted", prompt)
+        self.assertNotIn(self._plan().product_description, prompt)
 
     def test_image_prompt_positively_describes_transferred_object(self) -> None:
         plan = self._plan()
         prompt = build_visual_prompt(plan, plan.ads[0])
-        self.assertIn(f"Primary object: {plan.transferred_object}", prompt)
-        self.assertIn(f"Primary action: {plan.transferred_object_action}", prompt)
+        self.assertIn(f"MAIN VISUAL: {plan.transferred_object}", prompt)
+        self.assertIn(f"ACTION: {plan.transferred_object_action}", prompt)
 
     def test_product_name_plain_text_only(self) -> None:
         prompt = build_visual_prompt(self._plan(), self._plan().ads[0])
-        self.assertIn("plain readable text only", prompt)
-        self.assertIn("normal readable advertising typography", prompt)
+        self.assertIn("plain readable advertising typography", prompt.lower())
+        self.assertIn("Do not print the brand name on any object", prompt)
 
 
 class TestComplianceVisibility(unittest.TestCase):

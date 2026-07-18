@@ -5,10 +5,7 @@ from __future__ import annotations
 
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
-from engine.builder1_product_visibility import (
-    ProductVisibilityPolicy,
-    build_product_visibility_image_block,
-)
+from engine.builder1_product_visibility import ProductVisibilityPolicy
 
 MEDIUM_PROHIBITION = (
     "Do not show this advertisement inside a billboard, framed poster mockup, phone screen, "
@@ -30,9 +27,6 @@ def _resolve_visibility_policy(series_plan: Builder1SeriesPlan) -> ProductVisibi
 
 
 def build_campaign_graphic_identity_block(series_plan: Builder1SeriesPlan) -> str:
-    """
-    Identical graphic identity block repeated verbatim in every ad image prompt.
-    """
     g = series_plan.graphic_generator
     p = g.palette
     c = g.copy_safe_area
@@ -72,8 +66,9 @@ def build_text_to_render_block(
             f'Brand slogan:\n"{series_plan.brand_slogan}"',
             headline_line,
             "Rules:",
-            "- Render the product or brand name as plain readable text only.",
-            "- Do not accompany the product name with any symbol, icon, emblem, monogram, badge, seal, or logo mark.",
+            "- Render the brand name as plain readable advertising typography only.",
+            "- Do not print the brand name on any object, label, packaging, badge, seal, emblem, or sign.",
+            "- Do not accompany the brand name with any symbol, icon, emblem, monogram, badge, seal, or logo mark.",
             "- Render these strings exactly as written.",
             "- Do not translate, paraphrase, replace words, or invent additional copy.",
             "- Preserve the original language, punctuation, and word order.",
@@ -84,42 +79,50 @@ def build_text_to_render_block(
     )
 
 
-def _campaign_strategy_block(series_plan: Builder1SeriesPlan) -> str:
+def _forbidden_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
+    transferred = series_plan.transferred_object or series_plan.physical_generator
+    action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
     return "\n".join(
         [
-            f"Fixed brand slogan (campaign-wide): {series_plan.brand_slogan}.",
-            f"Slogan-implied action: {series_plan.slogan_action}.",
-            f"Shared conceptual law: {series_plan.conceptual_generator_action}.",
-            f"Conceptual transformation: Take {series_plan.conceptual_generator_input} → {series_plan.conceptual_generator_transformation} → {series_plan.conceptual_generator_result}.",
-            f"Why this expresses the slogan and advantage: {series_plan.conceptual_generator_why_it_expresses_advantage}.",
-            f"Relative advantage proven: {series_plan.relative_advantage}.",
-            f"Transferred physical generator: {series_plan.transferred_object or series_plan.physical_generator}.",
-            f"Transferred object action: {series_plan.transferred_object_action or series_plan.physical_generator_campaign_role}.",
+            "=== MAIN VISUAL (ONLY SUBJECT) ===",
+            f"MAIN VISUAL: {transferred}",
+            f"ACTION: {action}",
+            f"Ad variation: {ad_plan.variation_label}.",
+            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            "This transferred external object is the sole hero subject of the advertisement.",
+            "=== END MAIN VISUAL ===",
+            "=== ADVERTISED PRODUCT ===",
+            "ADVERTISED PRODUCT: not depicted",
+            "=== END ADVERTISED PRODUCT ===",
+            "=== PACKAGING ===",
+            "PACKAGING: not depicted",
+            "=== END PACKAGING ===",
+            "=== BRAND IDENTIFICATION ===",
+            "Product Name and slogan appear only as plain readable advertising typography.",
+            "Do not attach brand identification to any object, package, label, or sign.",
+            "=== END BRAND IDENTIFICATION ===",
         ]
     )
 
 
-def _ad_execution_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
+def _secondary_exception_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
+    transferred = series_plan.transferred_object or series_plan.physical_generator
+    action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
     return "\n".join(
         [
-            f"Ad {ad_plan.index} — {ad_plan.variation_label}.",
-            f"This ad performs the shared conceptual action by: {ad_plan.conceptual_execution}.",
-            f"Conceptual action proof: {ad_plan.conceptual_action_proof}.",
-            f"Physical execution: {ad_plan.physical_execution}.",
-            f"Visual execution: {ad_plan.visual_execution}.",
-            f"Scene: {ad_plan.scene_description}.",
+            "=== MAIN VISUAL ===",
+            f"MAIN VISUAL: {transferred}",
+            f"ACTION: {action}",
+            f"Ad variation: {ad_plan.variation_label}.",
+            "The transferred object remains the main visual.",
+            "The advertised product may appear only as a small secondary unbranded element.",
+            "=== END MAIN VISUAL ===",
         ]
     )
 
 
 def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
     policy = _resolve_visibility_policy(series_plan)
-    visibility_block = build_product_visibility_image_block(
-        policy=policy,
-        transferred_object=series_plan.transferred_object or series_plan.physical_generator,
-        transferred_object_action=series_plan.transferred_object_action or series_plan.physical_generator_campaign_role,
-        product_name=series_plan.product_name_resolved,
-    )
     medium_block = (
         f"Medium participation (justified): {series_plan.medium_role}."
         if series_plan.medium_participates
@@ -136,17 +139,22 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
         if ad_plan.headline
         else "No ad headline for this execution — do not invent headline text."
     )
+    main_visual_block = (
+        _forbidden_main_visual_block(series_plan, ad_plan)
+        if policy == ProductVisibilityPolicy.FORBIDDEN
+        else _secondary_exception_main_visual_block(series_plan, ad_plan)
+    )
     parts = [
         "Create a complete finished advertisement that fills the entire image frame edge to edge.",
         f"Format: {series_plan.format}. The output is the final ad itself, not a background for later overlay.",
         BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK,
-        visibility_block,
-        "BRAND SLOGAN is fixed across the campaign. MARKETING TEXT must NOT appear inside the image.",
+        main_visual_block,
+        f"Fixed brand slogan (typography only): {series_plan.brand_slogan}.",
+        f"Slogan-implied action for the transferred object: {series_plan.slogan_action}.",
+        "MARKETING TEXT must NOT appear inside the image.",
         headline_rule,
         hebrew_block,
         build_campaign_graphic_identity_block(series_plan),
-        _campaign_strategy_block(series_plan),
-        _ad_execution_block(series_plan, ad_plan),
         build_text_to_render_block(series_plan, ad_plan),
         medium_block,
         "Prohibit any text beyond the exact brand name, brand slogan, and optional headline specified above.",

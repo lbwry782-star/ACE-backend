@@ -40,6 +40,7 @@ from engine.builder1_campaign_store import (
     create_campaign_session,
     get_campaign_session,
     mark_ad_generated,
+    mark_image_retry_required,
     release_generation_lock,
     reserve_next_ad_index,
 )
@@ -56,6 +57,7 @@ from engine.builder1_image_generator import (
     generate_builder1_ad_image,
     image_bytes_to_base64,
 )
+from engine.builder1_image_prompt_preflight import ImagePromptPreflightError
 from engine.builder1_image_compliance import (
     ImageComplianceError,
     ImageComplianceUnavailableError,
@@ -565,15 +567,20 @@ def _builder1_image_compliance_error_response(
     ad_index: int,
     session,
     error_code: str,
+    violations: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     return {
         "ok": False,
         "error": error_code,
         "retryable": True,
+        "planningComplete": True,
+        "retryAdIndex": ad_index,
         "campaignId": campaign_id,
         "nextAdIndex": ad_index,
         "generatedCount": session.generated_count,
         "targetAdCount": session.target_ad_count,
+        "status": getattr(session, "status", None) or "image_retry_required",
+        "lastImageViolations": violations or getattr(session, "last_image_violations", None) or [],
     }
 
 
@@ -677,7 +684,11 @@ def _builder1_generate_single_ad(
                 job_id=job_id,
                 lock_token=lock_token,
             )
-        session = get_campaign_session(campaign_id)
+        session = mark_image_retry_required(
+            campaign_id,
+            failed_ad_index=ad_index,
+            violations=list(e.violations),
+        )
         logger.error(
             "BUILDER1_IMAGE_COMPLIANCE_FAILED campaignId=%s jobId=%s adIndex=%s violations=%s",
             campaign_id,
@@ -690,6 +701,33 @@ def _builder1_generate_single_ad(
             ad_index=ad_index,
             session=session,
             error_code="image_compliance_failed",
+            violations=list(e.violations),
+        )
+    except ImagePromptPreflightError as e:
+        if reservation_held:
+            release_generation_lock(
+                campaign_id,
+                job_id=job_id,
+                lock_token=lock_token,
+            )
+        session = mark_image_retry_required(
+            campaign_id,
+            failed_ad_index=ad_index,
+            violations=list(e.reasons),
+        )
+        logger.error(
+            "BUILDER1_IMAGE_PROMPT_PREFLIGHT_BLOCKED campaignId=%s jobId=%s adIndex=%s reasons=%s",
+            campaign_id,
+            job_id,
+            ad_index,
+            e.reasons,
+        )
+        return _builder1_image_compliance_error_response(
+            campaign_id=campaign_id,
+            ad_index=ad_index,
+            session=session,
+            error_code="image_prompt_preflight_failed",
+            violations=list(e.reasons),
         )
     except ImageComplianceUnavailableError as e:
         if reservation_held:
@@ -949,6 +987,77 @@ def builder1_generate():
                 "targetAdCount": ad_count,
                 "pollUrl": f"/api/builder1-status?jobId={job_id}",
                 "campaignId": campaign_id,
+            }
+        ),
+        202,
+    )
+
+
+@app.route("/api/builder1-retry-image", methods=["POST"])
+def builder1_retry_image():
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON body"}), 200
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON object"}), 200
+
+    campaign_id = (body.get("campaignId") or "").strip()
+    if not campaign_id:
+        return jsonify({"ok": False, "error": "invalid_input", "message": "campaignId is required"}), 200
+
+    try:
+        retry_ad_index = int(body.get("retryAdIndex") or body.get("adIndex") or body.get("expectedNextIndex"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "invalid_input", "message": "retryAdIndex must be an integer"}), 200
+
+    try:
+        session = get_campaign_session(campaign_id)
+    except CampaignStoreError as e:
+        return jsonify({"ok": False, "error": e.code, "message": e.message}), 200
+
+    if not session.planning_complete:
+        return jsonify({"ok": False, "error": "planning_incomplete", "campaignId": campaign_id}), 200
+    if retry_ad_index in session.generated_indexes:
+        return jsonify({"ok": False, "error": "campaign_index_conflict", "campaignId": campaign_id}), 200
+    if retry_ad_index < 1 or retry_ad_index > session.target_ad_count:
+        return jsonify({"ok": False, "error": "campaign_index_conflict", "campaignId": campaign_id}), 200
+
+    job_id = str(uuid.uuid4())
+    try:
+        session = reserve_next_ad_index(campaign_id, retry_ad_index, job_id=job_id)
+    except CampaignStoreError as e:
+        return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
+
+    create_builder1_job(
+        job_id=job_id,
+        campaign_id=campaign_id,
+        target_ad_count=session.target_ad_count,
+        stage="generating_images",
+    )
+    update_builder1_job(
+        job_id,
+        completedAds=session.generated_count,
+        totalAds=session.target_ad_count,
+    )
+    _builder1_executor.submit(
+        _builder1_run_next_job,
+        job_id,
+        campaign_id,
+        retry_ad_index,
+    )
+    return (
+        jsonify(
+            {
+                "status": "running",
+                "jobId": job_id,
+                "campaignId": campaign_id,
+                "stage": "generating_images",
+                "completedAds": session.generated_count,
+                "totalAds": session.target_ad_count,
+                "targetAdCount": session.target_ad_count,
+                "retryAdIndex": retry_ad_index,
+                "planningComplete": True,
+                "pollUrl": f"/api/builder1-status?jobId={job_id}",
             }
         ),
         202,

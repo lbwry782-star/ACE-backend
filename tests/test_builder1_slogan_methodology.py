@@ -190,7 +190,7 @@ class TestPlannerIntegration(unittest.TestCase):
         self.assertLess(stage_order.index("slogan_stage"), stage_order.index("conceptual_stage"))
         self.assertEqual(plan.brand_slogan, "Built To Last")
         prompt = build_visual_prompt(plan, plan.ads[0])
-        self.assertIn("Fixed brand slogan (campaign-wide): Built To Last.", prompt)
+        self.assertIn("Fixed brand slogan (typography only): Built To Last.", prompt)
 
 
 class TestRegressionAndBoundaries(unittest.TestCase):

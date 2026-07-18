@@ -173,7 +173,7 @@ class TestVisualPromptNoLogoBlock(unittest.TestCase):
     def test_product_name_rendered_as_plain_text_only(self) -> None:
         block = build_text_to_render_block(self.plan, self.plan.ads[0])
         self.assertIn('"TestBrand"', block)
-        self.assertIn("plain readable text only", block)
+        self.assertIn("plain readable advertising typography", block)
 
     def test_visual_prompt_excludes_supplied_logo_urls(self) -> None:
         prompt = build_visual_prompt(self.plan, self.plan.ads[0])

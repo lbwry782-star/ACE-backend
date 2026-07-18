@@ -303,8 +303,8 @@ class TestBuilder1VisualPrompt(unittest.TestCase):
     def test_conceptual_execution_in_prompt(self) -> None:
         plan = _parse(_base_campaign(2), 2)
         prompt = build_visual_prompt(plan, plan.ads[0])
-        self.assertIn(plan.ads[0].conceptual_execution, prompt)
-        self.assertIn(plan.relative_advantage, prompt)
+        self.assertIn(plan.ads[0].physical_execution or plan.ads[0].visual_execution, prompt)
+        self.assertNotIn(plan.product_description, prompt)
 
 
 class TestBuilder1SingleImage(unittest.TestCase):
