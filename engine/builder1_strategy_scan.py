@@ -31,25 +31,15 @@ from engine.builder1_staged_parsers import (
     filter_eligible_strategy_candidates,
 )
 
+from engine.builder1_planning_contract import STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM
+
 logger = logging.getLogger(__name__)
 
-StrategyScanModelCaller = Callable[[str, str], object]
+StrategyScanModelCaller = Callable[..., object]
 
 CLAIM_RISKS = {"low", "medium", "high"}
 
-STRATEGY_SCAN_REPLACEMENT_SYSTEM = """
-You are a Builder1 strategy candidate repair assistant.
-Return JSON only. Return exactly this object and no additional top-level keys:
-{"replacements":[{"id":"S01","lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null}]}
-Rules:
-- Replace ONLY the requested candidate ids.
-- briefSupport may contain only a direct brief fact, faithful brief paraphrase, or clearly labeled category inference.
-- Do not invent percentages, studies, surveys, dates, interview counts, reports, or factual capabilities.
-- Do not request or cite external market evidence.
-- clientActionLevel none requires simpleStrategicAction null.
-- clientActionLevel simple_optional requires a short non-empty simpleStrategicAction.
-- complex_required and material implementation cost are not allowed.
-""".strip()
+STRATEGY_SCAN_REPLACEMENT_SYSTEM = STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM
 
 _GLOBAL_SCAN_ERRORS = frozenset(
     {
@@ -310,27 +300,33 @@ def build_strategy_scan_replacement_user_prompt(
     )
 
 
-def parse_strategy_scan_replacements(raw_payload: object, *, allowed_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+def parse_strategy_candidate_replacements(raw_payload: object, *, allowed_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     obj = coerce_json_dict(raw_payload)
     replacements_raw = obj.get("replacements")
     if not isinstance(replacements_raw, list):
-        raise StageParseError("strategy_scan_repair", ["strategy_scan_repair_missing_replacements"])
+        raise StageParseError("strategy_candidate_repair", ["strategy_candidate_repair_missing_replacements"])
 
     allowed = {cid.upper() for cid in allowed_ids}
     parsed: Dict[str, Dict[str, Any]] = {}
     for item in replacements_raw:
         if not isinstance(item, dict):
-            raise StageParseError("strategy_scan_repair", ["strategy_scan_repair_entry_not_object"])
+            raise StageParseError("strategy_candidate_repair", ["strategy_candidate_repair_entry_not_object"])
         cid = _norm_text(item.get("id")).upper()
         if cid not in allowed:
-            raise StageParseError("strategy_scan_repair", [f"strategy_scan_repair_unexpected_id:{cid}"])
+            raise StageParseError(
+                "strategy_candidate_repair",
+                [f"strategy_candidate_repair_unexpected_id:{cid}"],
+            )
         parsed[cid] = item
 
     for cid in allowed_ids:
         upper = cid.upper()
         if upper not in parsed:
-            raise StageParseError("strategy_scan_repair", [f"strategy_scan_repair_missing_id:{upper}"])
+            raise StageParseError("strategy_candidate_repair", [f"strategy_candidate_repair_missing_id:{upper}"])
     return parsed
+
+
+parse_strategy_scan_replacements = parse_strategy_candidate_replacements
 
 
 def merge_strategy_scan_replacements(
@@ -360,6 +356,43 @@ def finalize_strategy_scan_candidates(valid_candidates: Dict[str, StrategyCandid
     return [valid_candidates[cid] for cid in STRATEGY_IDS]
 
 
+def _run_focused_strategy_candidate_repair(
+    *,
+    model_caller: StrategyScanModelCaller,
+    product_name: str,
+    product_description: str,
+    invalid: Dict[str, List[str]],
+    candidate_items: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    invalid_ids = sorted(invalid.keys())
+    user_prompt = build_strategy_scan_replacement_user_prompt(
+        product_name=product_name,
+        product_description=product_description,
+        invalid_candidates=invalid,
+        candidate_items=candidate_items,
+    )
+    last_reasons: List[str] = []
+    for parse_attempt in (1, 2):
+        replacement_raw = model_caller(
+            STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM,
+            user_prompt,
+            stage="strategy_candidate_repair",
+        )
+        try:
+            return parse_strategy_candidate_replacements(
+                replacement_raw,
+                allowed_ids=invalid_ids,
+            )
+        except StageParseError as exc:
+            last_reasons = exc.reasons
+            logger.warning(
+                "BUILDER1_STRATEGY_CANDIDATE_REPAIR_PARSE_RETRY attempt=%s reasons=%s",
+                parse_attempt,
+                last_reasons,
+            )
+    raise StageParseError("strategy_candidate_repair", last_reasons or ["strategy_candidate_repair_failed"])
+
+
 def ensure_strategy_scan_from_raw(
     raw_payload: object,
     *,
@@ -384,29 +417,37 @@ def ensure_strategy_scan_from_raw(
             repair_attempt,
             ",".join(sorted(invalid)),
         )
-        if repair_attempt == 2:
-            all_reasons = [reason for reasons in invalid.values() for reason in reasons]
-            raise StageParseError("strategy_scan", all_reasons)
 
         candidate_items = {_norm_text(item.get("id")).upper(): item for item in candidates_raw}
-        user_prompt = build_strategy_scan_replacement_user_prompt(
-            product_name=product_name,
-            product_description=product_description,
-            invalid_candidates=invalid,
-            candidate_items=candidate_items,
-        )
-        replacement_raw = model_caller(STRATEGY_SCAN_REPLACEMENT_SYSTEM, user_prompt)
-        replacements = parse_strategy_scan_replacements(
-            replacement_raw,
-            allowed_ids=sorted(invalid.keys()),
-        )
+        try:
+            replacements = _run_focused_strategy_candidate_repair(
+                model_caller=model_caller,
+                product_name=product_name,
+                product_description=product_description,
+                invalid=invalid,
+                candidate_items=candidate_items,
+            )
+        except StageParseError:
+            if repair_attempt == 2:
+                raise
+            continue
+
         candidates_raw = merge_strategy_scan_replacements(
             candidates_raw,
             replacements,
             valid_raw=valid_raw,
         )
 
-    raise StageParseError("strategy_scan", ["strategy_scan_repair_failed"])
+    invalid, _valid, _valid_raw = validate_strategy_scan_set(
+        candidates_raw,
+        product_description=product_description,
+    )
+    if invalid:
+        raise StageParseError(
+            "strategy_candidate_repair",
+            ["strategy_candidate_repair_exhausted"],
+        )
+    return finalize_strategy_scan_candidates(_valid)
 
 
 def parse_strategy_scan(raw_payload: object, *, product_description: str) -> List[StrategyCandidate]:

@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from engine.builder1_plan_parser import (
     _check_unsupported_claims,
@@ -63,6 +63,37 @@ class StrategySelection:
     selection_reason: str
     strategy_family: str
     scores: Dict[str, int]
+
+
+@dataclass
+class StrategyCandidateReview:
+    candidate_id: str
+    grounded_in_brief: bool
+    advantage_currently_true: bool
+    executable_now: bool
+    requires_material_investment: bool
+    requires_client_consultation: bool
+    requires_business_transformation: bool
+    brand_ownable: bool
+    category_relevant: bool
+    eligible: bool
+    rejection_codes: List[str]
+
+
+STRATEGY_SELECTION_REJECTION_CODES = frozenset(
+    {
+        "advantage_not_currently_true",
+        "relative_advantage_not_currently_true",
+        "material_client_investment_required",
+        "client_consultation_required",
+        "business_transformation_required",
+        "unsupported_future_capability",
+        "unsupported_evidence_claim",
+        "strategy_not_brand_ownable",
+        "category_relevance_patched",
+        "campaign_transferable_to_competitor",
+    }
+)
 
 
 @dataclass
@@ -131,18 +162,98 @@ def parse_strategy_scan(raw_payload: object, *, product_description: str) -> Lis
 def parse_strategy_selection(
     raw_payload: object,
     candidates: List[StrategyCandidate],
-) -> Tuple[StrategySelection, StrategyCandidate]:
+    *,
+    eligible_ids: Optional[Set[str]] = None,
+) -> Tuple[StrategySelection, StrategyCandidate, Dict[str, StrategyCandidateReview]]:
     reasons: List[str] = []
     try:
         obj = coerce_json_dict(raw_payload)
     except Exception as exc:
         raise StageParseError("strategy_selection", ["strategy_selection_not_object"]) from exc
 
-    selected_id = _norm_text(obj.get("selectedCandidateId")).upper()
     by_id = {c.id: c for c in candidates}
+    supplied_ids = sorted(eligible_ids) if eligible_ids is not None else sorted(by_id.keys())
+    expected = {cid.upper() for cid in supplied_ids}
+
+    reviews_raw = obj.get("candidateReviews")
+    if not isinstance(reviews_raw, list):
+        reasons.append("strategy_selection_missing_reviews")
+        reviews_raw = []
+
+    parsed_reviews: Dict[str, StrategyCandidateReview] = {}
+    seen_review_ids: set[str] = set()
+    for item in reviews_raw:
+        if not isinstance(item, dict):
+            reasons.append("strategy_selection_review_not_object")
+            continue
+        cid = _norm_text(item.get("candidateId")).upper()
+        if cid not in expected:
+            reasons.append(f"strategy_selection_review_unknown_id:{cid}")
+            continue
+        if cid in seen_review_ids:
+            reasons.append(f"strategy_selection_review_duplicate_id:{cid}")
+            continue
+        seen_review_ids.add(cid)
+
+        rejection_codes = [
+            str(code)
+            for code in (item.get("rejectionCodes") or [])
+            if str(code).strip() in STRATEGY_SELECTION_REJECTION_CODES
+        ]
+        eligible_flag = bool(item.get("eligible"))
+        review = StrategyCandidateReview(
+            candidate_id=cid,
+            grounded_in_brief=bool(item.get("groundedInBrief")),
+            advantage_currently_true=bool(item.get("advantageCurrentlyTrue")),
+            executable_now=bool(item.get("executableNow")),
+            requires_material_investment=bool(item.get("requiresMaterialInvestment")),
+            requires_client_consultation=bool(item.get("requiresClientConsultation")),
+            requires_business_transformation=bool(item.get("requiresBusinessTransformation")),
+            brand_ownable=bool(item.get("brandOwnable")),
+            category_relevant=bool(item.get("categoryRelevant")),
+            eligible=eligible_flag,
+            rejection_codes=rejection_codes,
+        )
+        if eligible_flag and rejection_codes:
+            reasons.append(f"strategy_selection_review_contradictory:{cid}")
+        if not eligible_flag and not rejection_codes:
+            reasons.append(f"strategy_selection_review_ineligible_without_codes:{cid}")
+        if eligible_flag and (
+            review.requires_material_investment
+            or review.requires_client_consultation
+            or review.requires_business_transformation
+            or not review.advantage_currently_true
+            or not review.executable_now
+        ):
+            reasons.append(f"strategy_selection_review_ineligible_flags:{cid}")
+            review = StrategyCandidateReview(
+                candidate_id=cid,
+                grounded_in_brief=review.grounded_in_brief,
+                advantage_currently_true=review.advantage_currently_true,
+                executable_now=review.executable_now,
+                requires_material_investment=review.requires_material_investment,
+                requires_client_consultation=review.requires_client_consultation,
+                requires_business_transformation=review.requires_business_transformation,
+                brand_ownable=review.brand_ownable,
+                category_relevant=review.category_relevant,
+                eligible=False,
+                rejection_codes=rejection_codes or ["advantage_not_currently_true"],
+            )
+        parsed_reviews[cid] = review
+
+    if seen_review_ids != expected:
+        for missing in sorted(expected - seen_review_ids):
+            reasons.append(f"strategy_selection_review_missing_id:{missing}")
+
+    selected_id = _norm_text(obj.get("selectedCandidateId")).upper()
     if selected_id not in by_id:
         reasons.append("strategy_selection_invalid_id")
-    elif not strategy_candidate_is_eligible(by_id[selected_id]):
+    if eligible_ids is not None and selected_id not in eligible_ids:
+        reasons.append("strategy_selection_ineligible_candidate")
+    selected_review = parsed_reviews.get(selected_id)
+    if selected_review and not selected_review.eligible:
+        reasons.append("strategy_selection_ineligible_candidate")
+    elif selected_id in by_id and not strategy_candidate_is_eligible(by_id[selected_id]):
         reasons.append("strategy_selection_ineligible_candidate")
 
     selection_reason = _norm_text(obj.get("selectionReason"))
@@ -165,6 +276,7 @@ def parse_strategy_selection(
             scores={str(k): int(v) for k, v in scores.items()},
         ),
         selected,
+        parsed_reviews,
     )
 
 

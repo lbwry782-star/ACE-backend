@@ -18,7 +18,18 @@ from engine.builder1_strict_schema import (
 
 logger = logging.getLogger(__name__)
 
-STRICT_SCHEMA_STAGES = frozenset({"strategy_scan", "slogan_scan", "slogan_quality_review", "slogan_candidate_repair", "brand_physical", "graphic_system", "series_ads"})
+STRICT_SCHEMA_STAGES = frozenset(
+    {
+        "strategy_scan",
+        "strategy_candidate_repair",
+        "slogan_scan",
+        "slogan_quality_review",
+        "slogan_candidate_repair",
+        "brand_physical",
+        "graphic_system",
+        "series_ads",
+    }
+)
 
 STRATEGY_SCAN_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -352,8 +363,58 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
     },
 }
 
+STRATEGY_CANDIDATE_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["replacements"],
+    "properties": {
+        "replacements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "lens",
+                    "strategicProblem",
+                    "relativeAdvantage",
+                    "briefSupport",
+                    "advantageSource",
+                    "claimRisk",
+                    "campaignExecutableNow",
+                    "requiresClientConsultation",
+                    "clientActionLevel",
+                    "implementationCostLevel",
+                    "simpleStrategicAction",
+                ],
+                "properties": {
+                    "id": {"type": "string"},
+                    "lens": {"type": "string"},
+                    "strategicProblem": {"type": "string"},
+                    "relativeAdvantage": {"type": "string"},
+                    "briefSupport": {"type": "string"},
+                    "advantageSource": {"type": "string"},
+                    "claimRisk": {"type": "string"},
+                    "campaignExecutableNow": {"type": "boolean"},
+                    "requiresClientConsultation": {"type": "boolean"},
+                    "clientActionLevel": {
+                        "type": "string",
+                        "enum": ["none", "simple_optional", "complex_required"],
+                    },
+                    "implementationCostLevel": {
+                        "type": "string",
+                        "enum": ["none", "negligible", "material"],
+                    },
+                    "simpleStrategicAction": {"type": ["string", "null"]},
+                },
+            },
+        },
+    },
+}
+
 STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "strategy_scan": STRATEGY_SCAN_JSON_SCHEMA,
+    "strategy_candidate_repair": STRATEGY_CANDIDATE_REPAIR_JSON_SCHEMA,
     "slogan_scan": SLOGAN_SCAN_JSON_SCHEMA,
     "slogan_quality_review": SLOGAN_QUALITY_REVIEW_JSON_SCHEMA,
     "slogan_candidate_repair": SLOGAN_CANDIDATE_REPAIR_JSON_SCHEMA,

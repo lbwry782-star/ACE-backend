@@ -45,6 +45,7 @@ from tests.test_builder1_staged_planning import (
     _graphic,
     _series_ads,
     _strategy_scan_payload,
+    _strategy_selection_payload,
 )
 
 
@@ -188,15 +189,14 @@ class TestStrategyBoundaryFields(unittest.TestCase):
         eligible = [c for c in candidates if strategy_candidate_is_eligible(c)]
         with self.assertRaises(StageParseError) as ctx:
             parse_strategy_selection(
-                {
-                    "selectedCandidateId": "S01",
-                    "selectionReason": "Dramatic",
-                    "strategyFamily": "durability",
-                    "scores": {"truth": 9},
-                },
-                eligible,
+                _strategy_selection_payload(
+                    selected_id="S01",
+                    candidate_ids=[c.id for c in eligible],
+                ),
+                candidates,
+                eligible_ids={c.id for c in eligible},
             )
-        self.assertIn("strategy_selection_invalid_id", ctx.exception.reasons)
+        self.assertIn("strategy_selection_ineligible_candidate", ctx.exception.reasons)
 
 
 class TestLaterStageBoundary(unittest.TestCase):
@@ -293,13 +293,8 @@ class TestPublicApiUnchanged(unittest.TestCase):
             _strategy_scan_payload(),
             product_description="Reinforced shell product for daily carry",
         )
-        selection, strategy = parse_strategy_selection(
-            {
-                "selectedCandidateId": "S01",
-                "selectionReason": "Best",
-                "strategyFamily": "durability",
-                "scores": {"truth": 9},
-            },
+        selection, strategy, _reviews = parse_strategy_selection(
+            _strategy_selection_payload(selected_id="S01"),
             strategy_candidates,
         )
         conceptual_candidates = parse_conceptual_scan(_conceptual_scan_payload())

@@ -258,7 +258,7 @@ class TestStrategicRestart(unittest.TestCase):
         from engine import builder1_planner as module
 
         source = inspect.getsource(module.plan_builder1)
-        self.assertEqual(source.count("strategic_restart_used = True"), 1)
+        self.assertEqual(source.count('pass_name="strategic_restart"'), 2)
         self.assertIn("BUILDER1_STRATEGIC_RESTART_START", source)
 
 

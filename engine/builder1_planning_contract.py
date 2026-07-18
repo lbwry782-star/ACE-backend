@@ -62,15 +62,38 @@ Rules:
 """.strip()
 
 STAGE_STRATEGY_SELECT_SYSTEM = """
-You are a Builder1 strategy selector for a digital advertising agent.
+You are a Builder1 strategy reviewer and selector for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{"selectedCandidateId":"S07","selectionReason":"...","strategyFamily":"...","scores":{"truth":8,"briefSupport":8,"advertisingExecutability":9,"noConsultationDependency":9,"noMaterialImplementationCost":9,"relevance":8,"distinctiveness":7,"brandOwnership":8,"persuasiveStrength":8,"seriesPotential":8,"conceptualActionPotential":8}}
+{"candidateReviews":[{"candidateId":"S01","groundedInBrief":true,"advantageCurrentlyTrue":true,"executableNow":true,"requiresMaterialInvestment":false,"requiresClientConsultation":false,"requiresBusinessTransformation":false,"brandOwnable":true,"categoryRelevant":true,"eligible":true,"rejectionCodes":[]}],"selectedCandidateId":"S07","selectionReason":"...","strategyFamily":"...","scores":{"truth":8,"briefSupport":8,"advertisingExecutability":9,"noConsultationDependency":9,"noMaterialImplementationCost":9,"relevance":8,"distinctiveness":7,"brandOwnership":8,"persuasiveStrength":8,"seriesPotential":8,"conceptualActionPotential":8}}
 Rules:
-- selectedCandidateId must be one of the provided candidate ids.
-- Every provided candidate is already eligible for immediate advertising execution.
-- Do not rewrite the selected problem or advantage.
-- Prefer truthful brief-supported positioning over dramatic business-transformation ideas.
+- Review every supplied candidate id exactly once in candidateReviews.
+- Do not rewrite any candidate fields.
+- eligible=true requires rejectionCodes to be [].
+- eligible=false requires at least one rejection code from:
+  advantage_not_currently_true, relative_advantage_not_currently_true,
+  material_client_investment_required, client_consultation_required,
+  business_transformation_required, unsupported_future_capability,
+  unsupported_evidence_claim, strategy_not_brand_ownable, category_relevance_patched,
+  campaign_transferable_to_competitor.
+- selectedCandidateId must refer to a candidate with eligible=true.
+- Do not select a candidate requiring material investment, client consultation, or business transformation.
+- Do not select an advantage that becomes true only in the future.
 - Scores are integers 1-10.
+""".strip()
+
+
+STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM = """
+You are a Builder1 strategy candidate repair assistant.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"replacements":[{"id":"S07","lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null}]}
+Rules:
+- Replace ONLY the requested candidate ids.
+- briefSupport may contain only a direct brief fact, faithful brief paraphrase, or clearly labeled category inference.
+- Do not invent percentages, studies, surveys, dates, interview counts, reports, or factual capabilities.
+- Do not request or cite external market evidence.
+- clientActionLevel none requires simpleStrategicAction null.
+- clientActionLevel simple_optional requires a short non-empty simpleStrategicAction.
+- complex_required and material implementation cost are not allowed.
 """.strip()
 
 STAGE_SLOGAN_SCAN_SYSTEM = f"""

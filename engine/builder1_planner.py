@@ -6,6 +6,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, TypeAlias
 
@@ -19,7 +20,16 @@ from engine.builder1_final_stages import (
 )
 from engine.builder1_input_normalizer import normalize_builder1_input
 from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_to_store_dict
-from engine.builder1_creative_methodology import is_foundational_strategic_rejection, methodology_repair_stage
+from engine.builder1_creative_methodology import (
+    earliest_methodology_repair_stage,
+    is_foundational_strategic_rejection,
+)
+from engine.builder1_planning_metrics import (
+    Builder1PlanningMetrics,
+    get_planning_metrics,
+    reset_planning_metrics,
+    set_planning_metrics,
+)
 from engine.builder1_planning_contract import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
     STAGE_CONCEPTUAL_SCAN_SYSTEM,
@@ -70,6 +80,7 @@ from engine.builder1_slogan_stage import (
     parse_slogan_selection,
     validate_selected_slogan,
 )
+from engine.builder1_strategy_selection import StrategySelectionExhausted
 from engine.builder1_strategy_scan import (
     STRATEGY_SCAN_REPLACEMENT_SYSTEM,
     ensure_strategy_scan_from_raw,
@@ -170,6 +181,9 @@ def _invoke_model_caller(
     *,
     stage: Optional[str] = None,
 ) -> object:
+    metrics = get_planning_metrics()
+    if metrics is not None:
+        metrics.record_model_call(stage)
     try:
         sig = inspect.signature(model_caller)
     except (TypeError, ValueError):
@@ -192,46 +206,61 @@ def _run_stage(
     last_raw = ""
     current_prompt = user_prompt
     for attempt in (1, 2):
+        metrics = get_planning_metrics()
+        if metrics is not None:
+            metrics.begin_stage(stage, attempt=attempt)
         logger.info("BUILDER1_STAGE_START stage=%s attempt=%s", stage, attempt)
+        started_at = time.perf_counter()
         try:
-            raw = _invoke_model_caller(
-                model_caller, system_prompt, current_prompt, stage=stage
-            )
-            last_raw = _raw_to_text(raw)
-            result = parse_fn(raw)
-            logger.info("BUILDER1_STAGE_PARSE_OK stage=%s", stage)
-            return result
-        except StrictSchemaConfigurationError as exc:
-            logger.error(
-                "BUILDER1_STRICT_SCHEMA_INVALID stage=%s paths=%s",
-                stage,
-                exc.errors[:5],
-            )
-            raise Builder1PlannerError(f"{stage}_failed") from exc
-        except StageParseError as exc:
-            last_reasons = exc.reasons
-            logger.error("BUILDER1_STAGE_FAILED stage=%s reasons=%s", stage, last_reasons)
-            if repair_builder and attempt == 1:
-                logger.info("BUILDER1_STAGE_REPAIR stage=%s", stage)
-                current_prompt = repair_builder(last_raw, last_reasons)
-                try:
-                    raw = _invoke_model_caller(
-                        model_caller, system_prompt, current_prompt, stage=stage
-                    )
-                    last_raw = _raw_to_text(raw)
-                    result = parse_fn(raw)
-                    logger.info("BUILDER1_STAGE_PARSE_OK stage=%s after_repair", stage)
-                    return result
-                except StageParseError as exc2:
-                    last_reasons = exc2.reasons
-                    logger.error("BUILDER1_STAGE_FAILED stage=%s repair reasons=%s", stage, last_reasons)
-            logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
-            current_prompt = user_prompt
-        except Exception as exc:
-            logger.error("BUILDER1_STAGE_FAILED stage=%s err=%s", stage, exc)
-            if attempt == 2:
+            try:
+                raw = _invoke_model_caller(
+                    model_caller, system_prompt, current_prompt, stage=stage
+                )
+                last_raw = _raw_to_text(raw)
+                result = parse_fn(raw)
+                logger.info("BUILDER1_STAGE_PARSE_OK stage=%s", stage)
+                return result
+            except StrictSchemaConfigurationError as exc:
+                logger.error(
+                    "BUILDER1_STRICT_SCHEMA_INVALID stage=%s paths=%s",
+                    stage,
+                    exc.errors[:5],
+                )
                 raise Builder1PlannerError(f"{stage}_failed") from exc
-            logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
+            except StageParseError as exc:
+                last_reasons = exc.reasons
+                logger.error("BUILDER1_STAGE_FAILED stage=%s reasons=%s", stage, last_reasons)
+                if repair_builder and attempt == 1:
+                    logger.info("BUILDER1_STAGE_REPAIR stage=%s", stage)
+                    current_prompt = repair_builder(last_raw, last_reasons)
+                    try:
+                        raw = _invoke_model_caller(
+                            model_caller, system_prompt, current_prompt, stage=stage
+                        )
+                        last_raw = _raw_to_text(raw)
+                        result = parse_fn(raw)
+                        logger.info("BUILDER1_STAGE_PARSE_OK stage=%s after_repair", stage)
+                        return result
+                    except StageParseError as exc2:
+                        last_reasons = exc2.reasons
+                        logger.error("BUILDER1_STAGE_FAILED stage=%s repair reasons=%s", stage, last_reasons)
+                logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
+                current_prompt = user_prompt
+            except Exception as exc:
+                logger.error("BUILDER1_STAGE_FAILED stage=%s err=%s", stage, exc)
+                if attempt == 2:
+                    raise Builder1PlannerError(f"{stage}_failed") from exc
+                logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
+        finally:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            logger.info(
+                "BUILDER1_STAGE_DURATION stage=%s attempt=%s durationMs=%s",
+                stage,
+                attempt,
+                duration_ms,
+            )
+            if metrics is not None:
+                metrics.end_stage(stage, attempt=attempt)
     raise Builder1PlannerError(f"{stage}_failed: {';'.join(last_reasons)}")
 
 
@@ -255,15 +284,18 @@ def _run_strategy_scan_stage(
     last_reasons: List[str] = []
     raw: object = {}
 
-    def _strategy_scan_replacement_caller(system: str, user: str) -> object:
+    def _strategy_scan_replacement_caller(system: str, user: str, **kwargs: Any) -> object:
         return _invoke_model_caller(
             model_caller,
             system,
             user,
-            stage="strategy_scan",
+            stage=kwargs.get("stage") or "strategy_candidate_repair",
         )
 
     for attempt in (1, 2):
+        metrics = get_planning_metrics()
+        if metrics is not None:
+            metrics.begin_stage("strategy_scan", attempt=attempt)
         logger.info("BUILDER1_STAGE_START stage=strategy_scan attempt=%s", attempt)
         try:
             raw = _invoke_model_caller(
@@ -272,12 +304,15 @@ def _run_strategy_scan_stage(
                 user_prompt,
                 stage="strategy_scan",
             )
-            return ensure_strategy_scan_from_raw(
+            result = ensure_strategy_scan_from_raw(
                 raw,
                 product_name=product_name,
                 product_description=product_description,
                 model_caller=_strategy_scan_replacement_caller,
             )
+            if metrics is not None:
+                metrics.end_stage("strategy_scan", attempt=attempt)
+            return result
         except StrictSchemaConfigurationError as exc:
             logger.error(
                 "BUILDER1_STRICT_SCHEMA_INVALID stage=strategy_scan paths=%s",
@@ -286,6 +321,10 @@ def _run_strategy_scan_stage(
             raise Builder1PlannerError("strategy_scan_failed") from exc
         except StageParseError as exc:
             last_reasons = exc.reasons
+            if exc.stage == "strategy_candidate_repair":
+                if metrics is not None:
+                    metrics.end_stage("strategy_scan", attempt=attempt)
+                raise Builder1PlannerError("strategy_candidate_repair_failed") from exc
             logger.error("BUILDER1_STAGE_FAILED stage=strategy_scan reasons=%s", last_reasons)
             if is_global_strategy_scan_failure(last_reasons) and attempt == 1:
                 logger.info("BUILDER1_STAGE_REPAIR stage=strategy_scan global")
@@ -308,12 +347,24 @@ def _run_strategy_scan_stage(
                     )
                 except StageParseError as exc2:
                     last_reasons = exc2.reasons
+                    if exc2.stage == "strategy_candidate_repair":
+                        if metrics is not None:
+                            metrics.end_stage("strategy_scan", attempt=attempt)
+                        raise Builder1PlannerError("strategy_candidate_repair_failed") from exc2
                     logger.error(
                         "BUILDER1_STAGE_FAILED stage=strategy_scan global_repair reasons=%s",
                         last_reasons,
                     )
-            if attempt == 2:
+            elif not is_global_strategy_scan_failure(last_reasons):
+                if metrics is not None:
+                    metrics.end_stage("strategy_scan", attempt=attempt)
                 raise Builder1PlannerError("strategy_scan_failed") from exc
+            if attempt == 2:
+                if metrics is not None:
+                    metrics.end_stage("strategy_scan", attempt=attempt)
+                raise Builder1PlannerError("strategy_scan_failed") from exc
+            if metrics is not None:
+                metrics.end_stage("strategy_scan", attempt=attempt)
             logger.info("BUILDER1_STAGE_RETRY stage=strategy_scan")
         except Exception as exc:
             logger.error("BUILDER1_STAGE_FAILED stage=strategy_scan err=%s", exc)
@@ -390,9 +441,10 @@ def _resolve_builder1_product_name(
 
 
 def _judge_repair_stage(codes: List[str]) -> Optional[str]:
-    if is_marketing_word_count_rejection(codes) or is_marketing_language_rejection(codes):
+    unique = list(dict.fromkeys(codes))
+    if is_marketing_word_count_rejection(unique) or is_marketing_language_rejection(unique):
         return "marketing_text"
-    methodology_stage = methodology_repair_stage(codes)
+    methodology_stage = earliest_methodology_repair_stage(unique)
     if methodology_stage:
         return methodology_stage
     if is_no_logo_rejection_code(codes):
@@ -495,100 +547,132 @@ def plan_builder1(
         brand_guidelines=brand_guidelines,
     )
 
-    strategic_restart_used = False
-    ctx = run_builder1_campaign_pipeline(
-        normalized=normalized,
-        product_name_resolved=product_name_resolved,
-        detected_language=detected_language,
-        exploration_seed=exploration_seed,
-        lens_order=lens_order,
-        model_caller=model_caller,
-        brand_guidelines=brand_guidelines,
+    metrics = Builder1PlanningMetrics(
+        campaign_id=campaign_id or "",
+        job_id=job_id or "",
     )
+    metrics_token = set_planning_metrics(metrics)
 
-    while not ctx.judge_result.passed:
-        codes = ctx.judge_result.rejection_reason_codes
-        if is_foundational_strategic_rejection(codes):
+    def _run_pipeline(*, seed: str, lenses: List[str], pass_name: str) -> Any:
+        metrics.begin_pipeline_pass(pass_name)
+        try:
+            return run_builder1_campaign_pipeline(
+                normalized=normalized,
+                product_name_resolved=product_name_resolved,
+                detected_language=detected_language,
+                exploration_seed=seed,
+                lens_order=lenses,
+                model_caller=model_caller,
+                brand_guidelines=brand_guidelines,
+            )
+        finally:
+            metrics.end_pipeline_pass()
+
+    strategic_restart_used = False
+    try:
+        try:
+            ctx = _run_pipeline(seed=exploration_seed, lenses=lens_order, pass_name="initial")
+        except StrategySelectionExhausted:
             if strategic_restart_used:
-                logger.error(
-                    "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
-                    campaign_id or "",
-                    job_id or "",
-                    codes,
-                )
                 raise Builder1PlannerError("planning_failed")
             logger.info(
-                "BUILDER1_STRATEGIC_RESTART_START campaignId=%s jobId=%s",
+                "BUILDER1_STRATEGIC_RESTART_START campaignId=%s jobId=%s reason=strategy_selection_exhausted",
                 campaign_id or "",
                 job_id or "",
-            )
-            logger.info(
-                "BUILDER1_STRATEGIC_RESTART_REASON campaignId=%s jobId=%s codes=%s",
-                campaign_id or "",
-                job_id or "",
-                codes,
             )
             exploration_seed = str(uuid.uuid4())
             lens_order = shuffled_exploration_lens_order()
             strategic_restart_used = True
-            ctx = run_builder1_campaign_pipeline(
-                normalized=normalized,
-                product_name_resolved=product_name_resolved,
-                detected_language=detected_language,
-                exploration_seed=exploration_seed,
-                lens_order=lens_order,
-                model_caller=model_caller,
-                brand_guidelines=brand_guidelines,
+            ctx = _run_pipeline(
+                seed=exploration_seed,
+                lenses=lens_order,
+                pass_name="strategic_restart",
             )
-            if ctx.judge_result.passed:
-                logger.info(
-                    "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
-                    campaign_id or "",
-                    job_id or "",
-                    ctx.exploration_seed,
-                )
-                logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
-                return ctx.plan
-            if is_foundational_strategic_rejection(ctx.judge_result.rejection_reason_codes):
-                logger.error(
-                    "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
-                    campaign_id or "",
-                    job_id or "",
-                    ctx.judge_result.rejection_reason_codes,
-                )
-                raise Builder1PlannerError("planning_failed")
+
+        while not ctx.judge_result.passed:
             codes = ctx.judge_result.rejection_reason_codes
+            if is_foundational_strategic_rejection(codes):
+                if strategic_restart_used:
+                    logger.error(
+                        "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
+                        campaign_id or "",
+                        job_id or "",
+                        codes,
+                    )
+                    raise Builder1PlannerError("planning_failed")
+                logger.info(
+                    "BUILDER1_STRATEGIC_RESTART_START campaignId=%s jobId=%s",
+                    campaign_id or "",
+                    job_id or "",
+                )
+                logger.info(
+                    "BUILDER1_STRATEGIC_RESTART_REASON campaignId=%s jobId=%s codes=%s",
+                    campaign_id or "",
+                    job_id or "",
+                    codes,
+                )
+                exploration_seed = str(uuid.uuid4())
+                lens_order = shuffled_exploration_lens_order()
+                strategic_restart_used = True
+                metrics.strategic_restart_used = True
+                ctx = _run_pipeline(
+                    seed=exploration_seed,
+                    lenses=lens_order,
+                    pass_name="strategic_restart",
+                )
+                if ctx.judge_result.passed:
+                    logger.info(
+                        "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
+                        campaign_id or "",
+                        job_id or "",
+                        ctx.exploration_seed,
+                    )
+                    logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
+                    return ctx.plan
+                if is_foundational_strategic_rejection(ctx.judge_result.rejection_reason_codes):
+                    logger.error(
+                        "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
+                        campaign_id or "",
+                        job_id or "",
+                        ctx.judge_result.rejection_reason_codes,
+                    )
+                    raise Builder1PlannerError("planning_failed")
+                codes = ctx.judge_result.rejection_reason_codes
 
-        repair_stage = _judge_repair_stage(codes)
-        logger.info(
-            "BUILDER1_STAGE_REPAIR stage=%s_judge reasons=%s",
-            repair_stage,
-            codes,
-        )
-        try:
-            ctx = apply_targeted_judge_repair(
-                ctx,
-                normalized=normalized,
-                product_name_resolved=product_name_resolved,
-                detected_language=detected_language,
-                model_caller=model_caller,
-                brand_guidelines=brand_guidelines,
-                repair_stage=repair_stage or "series_ads",
-                rejection_codes=codes,
+            repair_stage = _judge_repair_stage(codes)
+            logger.info(
+                "BUILDER1_STAGE_REPAIR stage=%s_judge reasons=%s",
+                repair_stage,
+                codes,
             )
-            break
-        except Builder1PlannerError:
-            raise
-        except Exception as exc:
-            raise Builder1PlannerError("final_judge_failed") from exc
+            try:
+                ctx = apply_targeted_judge_repair(
+                    ctx,
+                    normalized=normalized,
+                    product_name_resolved=product_name_resolved,
+                    detected_language=detected_language,
+                    model_caller=model_caller,
+                    brand_guidelines=brand_guidelines,
+                    repair_stage=repair_stage or "series_ads",
+                    rejection_codes=codes,
+                )
+                break
+            except Builder1PlannerError:
+                raise
+            except Exception as exc:
+                raise Builder1PlannerError("final_judge_failed") from exc
 
-    if strategic_restart_used and ctx.judge_result.passed:
-        logger.info(
-            "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
-            campaign_id or "",
-            job_id or "",
-            ctx.exploration_seed,
-        )
+        if strategic_restart_used and ctx.judge_result.passed:
+            logger.info(
+                "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
+                campaign_id or "",
+                job_id or "",
+                ctx.exploration_seed,
+            )
 
-    logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
-    return ctx.plan
+        logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
+        return ctx.plan
+    finally:
+        metrics.strategic_restart_used = strategic_restart_used
+        metrics.log_summary()
+        reset_planning_metrics(metrics_token)

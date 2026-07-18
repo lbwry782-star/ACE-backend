@@ -306,20 +306,54 @@ def _slogan_quality_review_payload() -> Dict[str, Any]:
     }
 
 
+def _strategy_selection_payload(
+    *,
+    selected_id: str = "S01",
+    candidate_ids: List[str] | None = None,
+) -> Dict[str, Any]:
+    ids = candidate_ids or [f"S{i:02d}" for i in range(1, 13)]
+    return {
+        "candidateReviews": [
+            {
+                "candidateId": cid,
+                "groundedInBrief": True,
+                "advantageCurrentlyTrue": True,
+                "executableNow": True,
+                "requiresMaterialInvestment": False,
+                "requiresClientConsultation": False,
+                "requiresBusinessTransformation": False,
+                "brandOwnable": True,
+                "categoryRelevant": True,
+                "eligible": True,
+                "rejectionCodes": [],
+            }
+            for cid in ids
+        ],
+        "selectedCandidateId": selected_id,
+        "selectionReason": "Strongest brief fit",
+        "strategyFamily": "durability",
+        "scores": {
+            "truth": 9,
+            "briefSupport": 9,
+            "advertisingExecutability": 9,
+            "noConsultationDependency": 9,
+            "noMaterialImplementationCost": 9,
+            "relevance": 8,
+            "distinctiveness": 8,
+            "brandOwnership": 8,
+            "persuasiveStrength": 8,
+            "seriesPotential": 9,
+            "conceptualActionPotential": 9,
+        },
+    }
+
+
 def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
+    eligible_ids = [f"S{i:02d}" for i in range(1, 13)]
     return {
         STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM: {"productNameResolved": "TestBrand"},
         STAGE_STRATEGY_SCAN_SYSTEM: _strategy_scan_payload(),
-        STAGE_STRATEGY_SELECT_SYSTEM: {
-            "selectedCandidateId": "S01",
-            "selectionReason": "Strongest brief fit",
-            "strategyFamily": "durability",
-            "scores": {
-                "truth": 9, "briefSupport": 9, "relevance": 8, "distinctiveness": 8,
-                "brandOwnership": 8, "persuasiveStrength": 8, "seriesPotential": 9,
-                "conceptualActionPotential": 9,
-            },
-        },
+        STAGE_STRATEGY_SELECT_SYSTEM: _strategy_selection_payload(candidate_ids=eligible_ids),
         STAGE_SLOGAN_SCAN_SYSTEM: _slogan_scan_payload(),
         STAGE_SLOGAN_QUALITY_REVIEW_SYSTEM: _slogan_quality_review_payload(),
         STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM: {"replacements": []},
@@ -448,14 +482,7 @@ class TestDeterministicAssembly(unittest.TestCase):
             product_name_resolved="TestBrand",
             strategy=strategy,
             strategy_selection=parse_strategy_selection(
-                {
-                    "selectedCandidateId": strategy.id,
-                    "selectionReason": "Best",
-                    "strategyFamily": "durability",
-                    "scores": {"truth": 8, "briefSupport": 8, "relevance": 8, "distinctiveness": 7,
-                               "brandOwnership": 8, "persuasiveStrength": 8, "seriesPotential": 8,
-                               "conceptualActionPotential": 8},
-                },
+                _strategy_selection_payload(selected_id=strategy.id),
                 parse_strategy_scan(_strategy_scan_payload(), product_description=self.BRIEF),
             )[0],
             selected_slogan=_selected_slogan(),

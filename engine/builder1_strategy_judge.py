@@ -23,6 +23,8 @@ from engine.builder1_marketing_copy import (
 from engine.builder1_plan_parser import _word_count
 from engine.builder1_plan_spec import BRAND_SLOGAN_MAX_WORDS, HEADLINE_MAX_WORDS
 
+from engine.builder1_planning_metrics import get_planning_metrics
+
 logger = logging.getLogger(__name__)
 
 JudgeModelCaller: TypeAlias = Callable[[str, str], object]
@@ -99,6 +101,12 @@ SUPPORTING MARKETING TEXT BELOW THE IMAGE:
 - more than 50 words is invalid
 - do NOT reject marketingText merely because 50 words feels visually long
 - marketingText is displayed below the ad, not inside the image
+
+SLOGAN DERIVATION (semantic, not lexical):
+- A slogan may validly derive from the relative advantage without repeating the same words.
+- Accept semantic compression, synonym-based expression, noun-to-action transformation, natural consequences, and concise metaphors.
+- Do not require shared words or substrings between relativeAdvantage and brandSlogan.
+- When planningEvidence.sloganQualityValidated is true, treat the slogan as pre-validated unless you find a clear semantic mismatch.
 
 Evaluate marketingText for relevance, advantage consistency, factual support, grammar,
 language match, and absence of internal methodology terms.
@@ -304,6 +312,7 @@ def build_strategy_judge_user_prompt(
     return (
         f"Brief:\n{product_description.strip()}\n\n"
         f"Authoritative detectedLanguage: {detected}\n\n"
+        f"Planning evidence:\n{json.dumps(plan_dict.get('planningEvidence') or {}, ensure_ascii=False, indent=2)}\n\n"
         f"Proposed campaign plan:\n{json.dumps(public_plan, ensure_ascii=False, indent=2)}\n\n"
         "Audit this plan. marketingText must contain exactly 50 words below the image in detectedLanguage. "
         "Do not apply image-copy brevity limits to marketingText. "
@@ -325,6 +334,9 @@ def judge_builder1_strategy(
         product_description=product_description,
         plan_dict=plan_dict,
     )
+    metrics = get_planning_metrics()
+    if metrics is not None:
+        metrics.record_model_call("strategy_judge")
     try:
         raw_payload = model_caller(BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT, user_prompt)
         data = _coerce_judge_dict(raw_payload)

@@ -90,17 +90,18 @@ def is_methodology_rejection(codes: List[str]) -> bool:
 
 def methodology_repair_stage(codes: List[str]) -> Optional[str]:
     """Map methodology rejection codes to restart/repair stage."""
-    if is_slogan_rejection(codes):
+    unique = list(dict.fromkeys(codes))
+    if is_slogan_rejection(unique) and not is_foundational_strategic_rejection(unique):
         return "slogan_scan"
     if any(
-        code in codes
+        code in unique
         for code in (
             "conceptual_generator_not_derived_from_slogan",
             "campaign_transferable_to_competitor",
             "category_relevance_patched",
         )
     ):
-        if "campaign_transferable_to_competitor" in codes or "category_relevance_patched" in codes:
+        if "campaign_transferable_to_competitor" in unique or "category_relevance_patched" in unique:
             return "strategy_scan"
         return "conceptual_scan"
     if any(
@@ -124,6 +125,59 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
     if "graphic_generator_inconsistent" in codes or "hebrew_composition_rule_broken" in codes:
         return "graphic_system"
     return None
+
+
+def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
+    unique = list(dict.fromkeys(codes))
+    stage_checks = (
+        ("strategy_scan", FOUNDATIONAL_STRATEGIC_REJECTION_CODES),
+        ("slogan_scan", SLOGAN_REJECTION_CODES),
+        (
+            "conceptual_scan",
+            frozenset(
+                {
+                    "conceptual_generator_not_derived_from_slogan",
+                    "campaign_transferable_to_competitor",
+                    "category_relevance_patched",
+                }
+            ),
+        ),
+        (
+            "brand_physical",
+            frozenset(
+                {
+                    "physical_generator_not_derived_from_concept",
+                    "literal_product_depiction_unjustified",
+                }
+            ),
+        ),
+        (
+            "graphic_system",
+            frozenset(
+                {
+                    "graphic_generator_inconsistent",
+                    "hebrew_composition_rule_broken",
+                }
+            ),
+        ),
+        (
+            "series_ads",
+            frozenset(
+                {
+                    "visual_requires_explanatory_headline",
+                    "series_lacks_shared_visual_law",
+                    "same_image_different_headlines",
+                    "no_mechanism_reuse_inside_campaign",
+                }
+            ),
+        ),
+    )
+    for stage, stage_codes in stage_checks:
+        if any(code in unique for code in stage_codes):
+            if stage == "strategy_scan" and is_slogan_rejection(unique) and not is_foundational_strategic_rejection(unique):
+                continue
+            return stage
+    return methodology_repair_stage(unique)
 
 
 def scan_prompt_for_reused_mechanisms(text: str) -> Optional[str]:
@@ -248,14 +302,6 @@ def deterministic_methodology_checks(plan_dict: Dict[str, Any]) -> List[str]:
         no_reuse = _norm(ad.get("noReuseCheck")).lower()
         if no_reuse in {"duplicate", "same", "reused"}:
             reasons.append("no_mechanism_reuse_inside_campaign")
-
-    if relative_advantage and slogan:
-        adv_tokens = set(re.findall(r"[a-zA-Z\u0590-\u05FF]{4,}", relative_advantage.lower()))
-        slogan_tokens = set(re.findall(r"[a-zA-Z\u0590-\u05FF]{4,}", slogan.lower()))
-        derivation = _norm(plan_dict.get("sloganDerivation"))
-        deriv_tokens = set(re.findall(r"[a-zA-Z\u0590-\u05FF]{4,}", derivation.lower()))
-        if adv_tokens and not (adv_tokens & (slogan_tokens | deriv_tokens)):
-            reasons.append("slogan_not_derived_from_advantage")
 
     return list(dict.fromkeys(reasons))
 

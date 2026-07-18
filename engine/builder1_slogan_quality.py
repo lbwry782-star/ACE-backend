@@ -266,7 +266,23 @@ def _run_semantic_quality_review(
         user_prompt,
         stage="slogan_quality_review",
     )
-    review = parse_slogan_quality_review(raw, expected_ids=SLOGAN_IDS)
+    expected = [c.id for c in candidates]
+    if isinstance(raw, dict):
+        reviews_raw = raw.get("reviews")
+        if isinstance(reviews_raw, list):
+            allowed = set(expected)
+            raw = {
+                **raw,
+                "reviews": [
+                    item
+                    for item in reviews_raw
+                    if isinstance(item, dict) and str(item.get("candidateId", "")).strip().upper() in allowed
+                ],
+            }
+    review = parse_slogan_quality_review(
+        raw,
+        expected_ids=expected,
+    )
     return review
 
 
@@ -318,6 +334,7 @@ def validate_and_prepare_slogan_candidates(
     detected_language: str,
     model_caller: PlanningModelCaller,
     repair_used: bool = False,
+    preserved_semantic: Optional[Dict[str, SloganCandidateValidationResult]] = None,
 ) -> Tuple[List[SloganCandidate], Set[str], bool]:
     """Return updated candidates, eligible ids, and whether repair was attempted."""
     deterministic = _validate_candidates_deterministic(
@@ -327,15 +344,30 @@ def validate_and_prepare_slogan_candidates(
         product_description=product_description,
         detected_language=detected_language,
     )
-    semantic = _run_semantic_quality_review(
-        model_caller,
-        candidates=candidates,
-        strategic_problem=strategic_problem,
-        relative_advantage=relative_advantage,
-        brief_support=brief_support,
-        product_name=product_name,
-        detected_language=detected_language,
-    )
+    if preserved_semantic is None:
+        semantic = _run_semantic_quality_review(
+            model_caller,
+            candidates=candidates,
+            strategic_problem=strategic_problem,
+            relative_advantage=relative_advantage,
+            brief_support=brief_support,
+            product_name=product_name,
+            detected_language=detected_language,
+        )
+    else:
+        semantic = dict(preserved_semantic)
+        review_candidates = [c for c in candidates if c.id not in preserved_semantic]
+        if review_candidates:
+            partial = _run_semantic_quality_review(
+                model_caller,
+                candidates=review_candidates,
+                strategic_problem=strategic_problem,
+                relative_advantage=relative_advantage,
+                brief_support=brief_support,
+                product_name=product_name,
+                detected_language=detected_language,
+            )
+            semantic.update(partial)
     combined = _combine_candidate_validations(deterministic, semantic)
     _log_candidate_validation(combined)
 
@@ -350,6 +382,11 @@ def validate_and_prepare_slogan_candidates(
             for candidate in candidates
             for cid in (candidate.id,)
             if combined.get(cid) and combined[cid].eligible
+        }
+        preserved_reviews = {
+            cid: validation
+            for cid, validation in combined.items()
+            if validation.eligible
         }
         try:
             replacements = _run_focused_candidate_repair(
@@ -381,6 +418,7 @@ def validate_and_prepare_slogan_candidates(
             detected_language=detected_language,
             model_caller=model_caller,
             repair_used=True,
+            preserved_semantic=preserved_reviews,
         )
         return merged, eligible_ids, True
 

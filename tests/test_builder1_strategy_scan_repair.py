@@ -38,6 +38,7 @@ from tests.test_builder1_staged_planning import (
     _graphic,
     _series_ads,
     _strategy_scan_payload,
+    _strategy_selection_payload,
 )
 
 
@@ -190,7 +191,7 @@ class TestStrategyScanCandidateRepair(unittest.TestCase):
 
         replacement_calls: List[str] = []
 
-        def replacement_caller(system: str, user: str) -> Dict[str, Any]:
+        def replacement_caller(system: str, user: str, **kwargs: Any) -> Dict[str, Any]:
             replacement_calls.append(user)
             return {
                 "replacements": [
@@ -250,14 +251,14 @@ class TestStrategyScanCandidateRepair(unittest.TestCase):
                 allowed_ids=["S01"],
             )
         self.assertTrue(
-            any("strategy_scan_repair_unexpected_id" in r for r in ctx.exception.reasons)
+            any("strategy_candidate_repair_unexpected_id" in r for r in ctx.exception.reasons)
         )
 
     def test_repaired_scan_reaches_strategy_selection(self) -> None:
         payload = _strategy_scan_payload()
         payload["candidates"][0]["simpleStrategicAction"] = "Do something now"
 
-        def replacement_caller(_system: str, _user: str) -> Dict[str, Any]:
+        def replacement_caller(_system: str, _user: str, **kwargs: Any) -> Dict[str, Any]:
             fixed = copy.deepcopy(_strategy_scan_payload()["candidates"][0])
             fixed["simpleStrategicAction"] = None
             return {"replacements": [fixed]}
@@ -269,25 +270,8 @@ class TestStrategyScanCandidateRepair(unittest.TestCase):
             model_caller=replacement_caller,
         )
         eligible = [c for c in candidates if strategy_candidate_is_eligible(c)]
-        selection, _selected = parse_strategy_selection(
-            {
-                "selectedCandidateId": "S01",
-                "selectionReason": "Strongest brief fit",
-                "strategyFamily": "durability",
-                "scores": {
-                    "truth": 9,
-                    "briefSupport": 9,
-                    "advertisingExecutability": 9,
-                    "noConsultationDependency": 9,
-                    "noMaterialImplementationCost": 9,
-                    "relevance": 8,
-                    "distinctiveness": 8,
-                    "brandOwnership": 8,
-                    "persuasiveStrength": 8,
-                    "seriesPotential": 8,
-                    "conceptualActionPotential": 8,
-                },
-            },
+        selection, _selected, _reviews = parse_strategy_selection(
+            _strategy_selection_payload(selected_id="S01"),
             eligible,
         )
         self.assertEqual(selection.selected_candidate_id, "S01")

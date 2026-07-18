@@ -44,11 +44,14 @@ from engine.builder1_staged_parsers import (
     filter_eligible_strategy_candidates,
     parse_conceptual_scan,
     parse_conceptual_selection,
-    parse_strategy_selection,
 )
 from engine.builder1_slogan_quality import (
     SloganFullRescanRequired,
     execute_slogan_scan_through_selection,
+)
+from engine.builder1_strategy_selection import (
+    StrategySelectionExhausted,
+    run_strategy_selection_with_gate,
 )
 from engine.builder1_slogan_stage import (
     parse_slogan_scan,
@@ -128,19 +131,19 @@ def run_builder1_campaign_pipeline(
     ]
     eligible_strategy = filter_eligible_strategy_candidates(strategy_candidates)
     if not eligible_strategy:
-        raise Builder1PlannerError("strategy_selection_failed")
-    eligible_dicts = [c for c in cand_dicts if c["id"] in {e.id for e in eligible_strategy}]
+        raise StrategySelectionExhausted()
+    eligible_ids = {c.id for c in eligible_strategy}
 
-    def _parse_selection(raw: object):
-        return parse_strategy_selection(raw, eligible_strategy)
-
-    strategy_selection, selected_strategy = _run_stage(
-        "strategy_selection",
-        model_caller,
-        STAGE_STRATEGY_SELECT_SYSTEM,
-        build_strategy_select_user_prompt(eligible_dicts, exploration_seed),
-        _parse_selection,
-    )
+    try:
+        strategy_selection, selected_strategy, _strategy_reviews = run_strategy_selection_with_gate(
+            strategy_candidates=strategy_candidates,
+            eligible_ids=eligible_ids,
+            exploration_seed=exploration_seed,
+            model_caller=model_caller,
+            run_stage=_run_stage,
+        )
+    except StrategySelectionExhausted:
+        raise
 
     slogan_candidates = _run_stage(
         "slogan_scan",
@@ -354,9 +357,16 @@ def run_builder1_campaign_pipeline(
         series_ads=series_ads,
     )
 
+    plan_dict = series_plan_to_store_dict(plan)
+    plan_dict["planningEvidence"] = {
+        "sloganQualityValidated": True,
+        "sloganDerivedFromAdvantageValidated": True,
+        "semanticDerivationStandard": "overlap_not_required",
+        "selectedSloganId": selected_slogan.id,
+    }
     judge_result = judge_builder1_strategy(
         product_description=normalized.product_description,
-        plan_dict=series_plan_to_store_dict(plan),
+        plan_dict=plan_dict,
         model_caller=model_caller,
     )
 
