@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from engine.builder1_consolidated_stages import Builder1UpstreamSnapshot
+from engine.builder1_consolidated_stages import Builder1UpstreamSnapshot, build_conceptual_lineage
 from engine.builder1_creative_methodology import deterministic_builder1_integrity_checks
 from engine.builder1_plan_parser import _norm_text, _word_count
 from engine.builder1_plan_spec import MARKETING_TEXT_WORD_COUNT, Builder1SeriesPlan, series_plan_to_store_dict
@@ -44,11 +44,37 @@ def make_upstream_snapshot(
         relative_advantage=_norm_text(selected_strategy.relative_advantage),
         brand_slogan=_norm_text(selected_slogan.brand_slogan),
         implied_action=_norm_text(selected_slogan.implied_action),
+        selected_slogan_id=_norm_text(getattr(selected_slogan, "id", "")).upper(),
         conceptual_generator=_norm_text(selected_conceptual.generator),
+        selected_conceptual_id=_norm_text(getattr(selected_conceptual, "id", "")).upper(),
         physical_generator=_norm_text(brand_physical.physical_generator),
         graphic_layout_template=layout,
         graphic_recurring_device=device,
     )
+
+
+def _validate_conceptual_lineage(
+    plan: Builder1SeriesPlan,
+    *,
+    upstream: Builder1UpstreamSnapshot,
+    reasons: List[str],
+) -> None:
+    lineage = plan.planning_internals.get("conceptualLineage")
+    if not isinstance(lineage, dict) or not lineage:
+        reasons.append("conceptual_lineage_missing")
+        return
+    if not plan.conceptual_generator.strip():
+        reasons.append("conceptual_generator_missing")
+    selected_concept_id = str(lineage.get("selectedConceptCandidateId") or "").strip().upper()
+    source_slogan_id = str(lineage.get("sourceSloganCandidateId") or "").strip().upper()
+    if upstream.selected_conceptual_id and selected_concept_id != upstream.selected_conceptual_id:
+        reasons.append("conceptual_candidate_id_mismatch")
+    if upstream.selected_slogan_id and source_slogan_id != upstream.selected_slogan_id:
+        reasons.append("conceptual_source_slogan_mismatch")
+    if lineage.get("fixedBrandSlogan") != plan.brand_slogan:
+        reasons.append("conceptual_source_slogan_mismatch")
+    if lineage.get("fixedImpliedAction") != plan.slogan_action:
+        reasons.append("conceptual_source_action_mismatch")
 
 
 def validate_builder1_campaign_integrity(
@@ -79,7 +105,7 @@ def validate_builder1_campaign_integrity(
         reasons.append("upstream_implied_action_mutated")
         upstream_mutation = True
     if _norm_text(plan.conceptual_generator) != upstream.conceptual_generator:
-        reasons.append("upstream_conceptual_generator_mutated")
+        reasons.append("conceptual_generator_mutated")
         upstream_mutation = True
     if _norm_text(plan.physical_generator) != upstream.physical_generator:
         reasons.append("upstream_physical_generator_mutated")
@@ -105,6 +131,8 @@ def validate_builder1_campaign_integrity(
     if len(set(indices)) != len(indices):
         reasons.append("duplicate_ad_indices")
         needs_series_stage_retry = True
+
+    _validate_conceptual_lineage(plan, upstream=upstream, reasons=reasons)
 
     fixed_slogan = plan.brand_slogan
     for ad in plan.ads:

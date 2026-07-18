@@ -235,6 +235,48 @@ def deterministic_methodology_checks(plan_dict: Dict[str, Any]) -> List[str]:
             if action_tokens and concept_tokens and not (action_tokens & concept_tokens):
                 reasons.append("conceptual_generator_not_derived_from_slogan")
 
+    reasons.extend(
+        _deterministic_methodology_checks_without_semantic_concept_derivation(
+            plan_dict,
+            slogan=slogan,
+            slogan_action=slogan_action,
+            relative_advantage=relative_advantage,
+            conceptual_action=conceptual_action,
+            physical=physical,
+            campaign_rationale=campaign_rationale,
+            detected=detected,
+            embodiment=embodiment,
+            visibility_reason=visibility_reason,
+        )
+    )
+    return list(dict.fromkeys(reasons))
+
+
+def _deterministic_methodology_checks_without_semantic_concept_derivation(
+    plan_dict: Dict[str, Any],
+    *,
+    slogan: str = "",
+    slogan_action: str = "",
+    relative_advantage: str = "",
+    conceptual_action: str = "",
+    physical: str = "",
+    campaign_rationale: str = "",
+    detected: str = "",
+    embodiment: str = "",
+    visibility_reason: str = "",
+) -> List[str]:
+    reasons: List[str] = []
+    if not any([slogan, slogan_action, relative_advantage, conceptual_action, physical]):
+        slogan = _norm(plan_dict.get("brandSlogan"))
+        slogan_action = _norm(plan_dict.get("sloganAction"))
+        relative_advantage = _norm(plan_dict.get("relativeAdvantage"))
+        conceptual_action = _norm(plan_dict.get("conceptualGeneratorAction"))
+        physical = _norm(plan_dict.get("physicalGenerator"))
+        campaign_rationale = _norm(plan_dict.get("campaignRationale"))
+        detected = _norm(plan_dict.get("detectedLanguage")).lower()
+        embodiment = _norm(plan_dict.get("embodimentChoice")).lower()
+        visibility_reason = _norm(plan_dict.get("productVisibilityJustification"))
+
     if physical and conceptual_action:
         physical_role = _norm(plan_dict.get("physicalGeneratorCampaignRole"))
         physical_purpose = _norm(plan_dict.get("physicalGeneratorNaturalPurpose"))
@@ -307,8 +349,11 @@ def deterministic_methodology_checks(plan_dict: Dict[str, Any]) -> List[str]:
 
 
 def deterministic_builder1_integrity_checks(plan_dict: Dict[str, Any]) -> List[str]:
-    """Objective campaign invariants for post-series validation — no slogan creative judgment."""
-    return deterministic_methodology_checks(plan_dict)
+    """Objective campaign invariants for post-series validation — no creative semantic judging."""
+    reasons: List[str] = []
+    reasons.extend(deterministic_no_logo_checks(plan_dict))
+    reasons.extend(_deterministic_methodology_checks_without_semantic_concept_derivation(plan_dict))
+    return list(dict.fromkeys(reasons))
 
 
 def strip_internal_ad_fields(ad: Dict[str, Any]) -> Dict[str, Any]:

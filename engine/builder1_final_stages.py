@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from engine.builder1_consolidated_stages import build_conceptual_lineage
 from engine.builder1_plan_parser import (
     _norm_text,
     _parse_graphic_generator,
@@ -542,9 +543,14 @@ def assemble_builder1_campaign(
     from dataclasses import replace
 
     ad_internals = build_series_ad_internals(assembled_ads, fixed_slogan=fixed_slogan)
+    conceptual_lineage = build_conceptual_lineage(
+        selected_slogan=selected_slogan,
+        selected_conceptual=conceptual,
+    )
     return replace(
         plan,
         planning_internals={
+            "conceptualLineage": conceptual_lineage,
             "conceptualGeneratorWhyItExpressesSlogan": conceptual.why_it_expresses_slogan,
             "embodimentChoice": brand_physical.embodiment_choice,
             "productVisibilityJustification": brand_physical.product_visibility_justification,

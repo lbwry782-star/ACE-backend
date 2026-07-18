@@ -111,10 +111,26 @@ class Builder1UpstreamSnapshot:
     relative_advantage: str
     brand_slogan: str
     implied_action: str
+    selected_slogan_id: str
     conceptual_generator: str
+    selected_conceptual_id: str
     physical_generator: str
     graphic_layout_template: str
     graphic_recurring_device: str
+
+
+def build_conceptual_lineage(
+    *,
+    selected_slogan: Any,
+    selected_conceptual: Any,
+) -> Dict[str, str]:
+    """Server-owned lineage metadata for structural final integrity checks."""
+    return {
+        "selectedConceptCandidateId": str(getattr(selected_conceptual, "id", "") or "").strip().upper(),
+        "sourceSloganCandidateId": str(getattr(selected_slogan, "id", "") or "").strip().upper(),
+        "fixedBrandSlogan": str(getattr(selected_slogan, "brand_slogan", "") or ""),
+        "fixedImpliedAction": str(getattr(selected_slogan, "implied_action", "") or ""),
+    }
 
 
 def _norm_id(value: object) -> str:
