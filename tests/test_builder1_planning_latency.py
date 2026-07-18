@@ -40,7 +40,7 @@ from engine.builder1_strategy_judge import StrategyJudgeResult
 from engine.builder1_planning_contract import STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM
 from tests.test_builder1_staged_planning import (
     STAGE_STRATEGY_SCAN_SYSTEM,
-    STAGE_STRATEGY_SELECT_SYSTEM,
+    STAGE_STRATEGY_STAGE_SYSTEM,
     _brand_physical,
     _early_stage_responses,
     _full_final_responses,
@@ -48,6 +48,7 @@ from tests.test_builder1_staged_planning import (
     _series_ads,
     _strategy_scan_payload,
     _strategy_selection_payload,
+    _strategy_stage_payload,
 )
 
 BRIEF = "Reinforced shell product for daily carry"
@@ -138,9 +139,9 @@ class TestStrategySelectionReview(unittest.TestCase):
         import inspect
 
         source = inspect.getsource(run_builder1_campaign_pipeline)
-        gate_idx = source.index("run_strategy_selection_with_gate")
-        slogan_idx = source.index('"slogan_scan"')
-        self.assertLess(gate_idx, slogan_idx)
+        strategy_idx = source.index("run_strategy_stage")
+        slogan_idx = source.index("run_slogan_stage")
+        self.assertLess(strategy_idx, slogan_idx)
 
 
 class TestFinalJudgeRouting(unittest.TestCase):
@@ -196,20 +197,17 @@ class TestProductionShapedLatencyRegression(unittest.TestCase):
                     ]
                 }
             responses = _full_final_responses(2)
-            responses[STAGE_STRATEGY_SCAN_SYSTEM] = broken_scan
-            return copy.deepcopy(responses.get(system, {"pass": True, "rejectionReasonCodes": []}))
+            responses[STAGE_STRATEGY_STAGE_SYSTEM] = _strategy_stage_payload()
+            responses[STAGE_STRATEGY_STAGE_SYSTEM]["candidates"] = broken_scan["candidates"]
+            return copy.deepcopy(responses.get(system, {}))
 
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            return_value=StrategyJudgeResult(True, []),
-        ):
-            plan = plan_builder1(
-                product_name="CarryShell",
-                product_description=BRIEF,
-                format_value="portrait",
-                model_caller=model_caller,
-                ad_count=2,
-            )
+        plan = plan_builder1(
+            product_name="CarryShell",
+            product_description=BRIEF,
+            format_value="portrait",
+            model_caller=model_caller,
+            ad_count=2,
+        )
         self.assertEqual(plan.ad_count, 2)
         self.assertEqual(repair_calls, 2)
 
@@ -229,24 +227,23 @@ class TestLoggingAndMetrics(unittest.TestCase):
         self.assertTrue(any("BUILDER1_STAGE_DURATION" in line for line in captured.output))
 
     def test_planning_call_summary_emitted(self) -> None:
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            return_value=StrategyJudgeResult(True, []),
-        ):
-            with self.assertLogs("engine.builder1_planning_metrics", level="INFO") as captured:
-                plan_builder1(
-                    product_name="CarryShell",
-                    product_description=BRIEF,
-                    format_value="portrait",
-                    model_caller=lambda system, user, stage=None: _full_final_responses(2).get(
-                        system,
-                        {"pass": True, "rejectionReasonCodes": []},
-                    ),
-                    ad_count=2,
-                    campaign_id="cid-latency",
-                    job_id="job-latency",
-                )
+        with self.assertLogs("engine.builder1_planning_metrics", level="INFO") as captured:
+            plan_builder1(
+                product_name="CarryShell",
+                product_description=BRIEF,
+                format_value="portrait",
+                model_caller=lambda system, user, stage=None: _full_final_responses(2).get(
+                    system,
+                    {},
+                ),
+                ad_count=2,
+                campaign_id="cid-latency",
+                job_id="job-latency",
+            )
         self.assertTrue(any("BUILDER1_PLANNING_CALL_SUMMARY" in line for line in captured.output))
+        summary_line = next(line for line in captured.output if "BUILDER1_PLANNING_CALL_SUMMARY" in line)
+        self.assertIn("strategyStageCalls=", summary_line)
+        self.assertNotIn("finalJudgeCalls=", summary_line)
 
 
 if __name__ == "__main__":

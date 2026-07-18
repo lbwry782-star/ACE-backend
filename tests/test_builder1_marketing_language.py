@@ -21,7 +21,8 @@ from engine.builder1_marketing_text_repair import (
     MARKETING_TEXT_REPAIR_SYSTEM,
     ensure_series_ads_marketing_text,
 )
-from engine.builder1_planner import _judge_repair_stage, plan_builder1
+from engine.builder1_creative_methodology import methodology_repair_stage
+from engine.builder1_planner import plan_builder1
 from engine.builder1_planning_contract import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
@@ -177,8 +178,22 @@ class TestMarketingLanguageRepair(unittest.TestCase):
 class TestPlannerLanguageIntegration(unittest.TestCase):
     HEBREW_BRIEF = "מגן מחוזק למוצר יומיומי לנשיאה"
 
-    def test_marketing_copy_wrong_language_routes_to_marketing_text(self) -> None:
-        self.assertEqual(_judge_repair_stage(["marketing_copy_wrong_language"]), "marketing_text")
+    def test_marketing_copy_wrong_language_is_repaired_in_series_flow(self) -> None:
+        ads = _sample_ads(language_text=marketing_text_hebrew(50))
+        ads[1]["marketingText"] = marketing_text_words(50)
+
+        def model_caller(_s: str, _u: str) -> object:
+            return {"repairs": [{"index": 1, "marketingText": marketing_text_words(50)}]}
+
+        result = ensure_series_ads_marketing_text(
+            ads,
+            detected_language="en",
+            relative_advantage="Distinct advantage",
+            product_name="TestBrand",
+            brand_slogan="Built To Last",
+            model_caller=model_caller,
+        )
+        self.assertEqual(count_marketing_words(result[0]["marketingText"]), 50)
 
     def test_valid_language_does_not_rerun_series_ads(self) -> None:
         series_calls = {"n": 0}
@@ -190,8 +205,6 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
                 payload["ads"][0]["marketingText"] = marketing_text_words(50)
                 payload["ads"][1]["marketingText"] = marketing_text_words(50, prefix="b")
                 return payload
-            if system == BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT:
-                return {"pass": False, "rejectionReasonCodes": ["marketing_copy_wrong_language"]}
             if system == MARKETING_TEXT_REPAIR_SYSTEM:
                 return {
                     "repairs": [
@@ -202,7 +215,7 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
             responses = _early_stage_responses(2)
             responses[STAGE_BRAND_PHYSICAL_SYSTEM] = _brand_physical()
             responses[STAGE_GRAPHIC_SYSTEM_SYSTEM] = _graphic()
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
+            return responses.get(system, {})
 
         with patch(
             "engine.builder1_planner.detect_brief_language",
@@ -220,14 +233,12 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
             self.assertEqual(count_marketing_words(ad.marketing_text), MARKETING_TEXT_WORD_COUNT)
             self.assertTrue(validate_marketing_text_language(ad.marketing_text, "he")["valid"])
 
-    def test_successful_language_repair_reaches_final_judge(self) -> None:
-        judge_calls = {"n": 0}
+    def test_successful_language_repair_completes_planning_without_judge(self) -> None:
+        repair_calls = {"n": 0}
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if system == BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT:
-                judge_calls["n"] += 1
-                return {"pass": False, "rejectionReasonCodes": ["marketing_copy_wrong_language"]}
             if system == MARKETING_TEXT_REPAIR_SYSTEM:
+                repair_calls["n"] += 1
                 return {
                     "repairs": [
                         {"index": 1, "marketingText": marketing_text_hebrew(50)},
@@ -242,7 +253,7 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
             responses = _early_stage_responses(2)
             responses[STAGE_BRAND_PHYSICAL_SYSTEM] = _brand_physical()
             responses[STAGE_GRAPHIC_SYSTEM_SYSTEM] = _graphic()
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
+            return responses.get(system, {})
 
         with patch(
             "engine.builder1_planner.detect_brief_language",
@@ -255,13 +266,11 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
                 model_caller=model_caller,
                 ad_count=2,
             )
-        self.assertGreaterEqual(judge_calls["n"], 1)
+        self.assertGreaterEqual(repair_calls["n"], 1)
         self.assertEqual(plan.ad_count, 2)
 
     def test_successful_repair_reaches_image_generation(self) -> None:
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if system == BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT:
-                return {"pass": True, "rejectionReasonCodes": []}
             if system == MARKETING_TEXT_REPAIR_SYSTEM:
                 return {
                     "repairs": [
@@ -277,7 +286,7 @@ class TestPlannerLanguageIntegration(unittest.TestCase):
             responses = _early_stage_responses(2)
             responses[STAGE_BRAND_PHYSICAL_SYSTEM] = _brand_physical()
             responses[STAGE_GRAPHIC_SYSTEM_SYSTEM] = _graphic()
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
+            return responses.get(system, {})
 
         with patch(
             "engine.builder1_planner.detect_brief_language",

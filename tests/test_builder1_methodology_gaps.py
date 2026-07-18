@@ -26,18 +26,14 @@ from engine.builder1_image_compliance import (
     review_builder1_ad_image_compliance,
 )
 from engine.builder1_image_generator import generate_builder1_ad_image
-from engine.builder1_planner import Builder1PlannerError, _judge_repair_stage, plan_builder1
+from engine.builder1_planner import Builder1PlannerError, plan_builder1
 from engine.builder1_planning_contract import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
-    STAGE_CONCEPTUAL_SCAN_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
-    STAGE_SLOGAN_SCAN_SYSTEM,
-    STAGE_SLOGAN_SELECT_SYSTEM,
-    STAGE_STRATEGY_SCAN_SYSTEM,
-    STAGE_STRATEGY_SELECT_SYSTEM,
+    STAGE_SLOGAN_STAGE_SYSTEM,
+    STAGE_STRATEGY_STAGE_SYSTEM,
 )
-from engine.builder1_strategy_judge import StrategyJudgeResult
 from tests.test_builder1_staged_planning import (
     _brand_physical,
     _full_final_responses,
@@ -58,35 +54,22 @@ def _fail_compliance_reviewer(*, violations: List[str], **_kwargs: Any) -> Image
     return ImageComplianceResult(passed=False, violations=violations, confidence="high")
 
 
-class TestStrategicRestart(unittest.TestCase):
-    def _plan_with_judge_sequence(self, judge_sequence: List[StrategyJudgeResult], *, ad_count: int = 2):
+class TestNoJudgeOrStrategicRestart(unittest.TestCase):
+    def test_plan_builder1_completes_without_judge(self) -> None:
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            return copy.deepcopy(_full_final_responses(ad_count).get(system, {"pass": True}))
+            return copy.deepcopy(_full_final_responses(2).get(system, {}))
 
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            side_effect=judge_sequence,
-        ) as mock_judge:
-            plan = plan_builder1(
-                product_name="CarryShell",
-                product_description=BRIEF,
-                format_value="portrait",
-                model_caller=model_caller,
-                ad_count=ad_count,
-            )
-        return plan, mock_judge
-
-    def test_foundational_failure_triggers_full_restart(self) -> None:
-        plan, mock_judge = self._plan_with_judge_sequence(
-            [
-                StrategyJudgeResult(False, ["campaign_transferable_to_competitor"]),
-                StrategyJudgeResult(True, []),
-            ]
+        plan = plan_builder1(
+            product_name="CarryShell",
+            product_description=BRIEF,
+            format_value="portrait",
+            model_caller=model_caller,
+            ad_count=2,
         )
         self.assertEqual(plan.ad_count, 2)
-        self.assertEqual(mock_judge.call_count, 2)
+        self.assertEqual(plan.product_name_resolved, "CarryShell")
 
-    def test_restart_uses_new_exploration_seed(self) -> None:
+    def test_pipeline_runs_once_without_strategic_restart(self) -> None:
         seeds: List[str] = []
         real_run = __import__(
             "engine.builder1_planning_pipeline", fromlist=["run_builder1_campaign_pipeline"]
@@ -97,17 +80,11 @@ class TestStrategicRestart(unittest.TestCase):
             return real_run(**kwargs)
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True}))
+            return copy.deepcopy(_full_final_responses(2).get(system, {}))
 
         with patch(
             "engine.builder1_planning_pipeline.run_builder1_campaign_pipeline",
             side_effect=tracking_run,
-        ), patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            side_effect=[
-                StrategyJudgeResult(False, ["category_relevance_patched"]),
-                StrategyJudgeResult(True, []),
-            ],
         ):
             plan_builder1(
                 product_name="CarryShell",
@@ -116,101 +93,25 @@ class TestStrategicRestart(unittest.TestCase):
                 model_caller=model_caller,
                 ad_count=2,
             )
-        self.assertEqual(len(seeds), 2)
-        self.assertNotEqual(seeds[0], seeds[1])
+        self.assertEqual(len(seeds), 1)
 
-    def test_restart_preserves_product_name_resolved(self) -> None:
-        plan, _ = self._plan_with_judge_sequence(
-            [
-                StrategyJudgeResult(False, ["strategy_not_brand_ownable"]),
-                StrategyJudgeResult(True, []),
-            ]
-        )
-        self.assertEqual(plan.product_name_resolved, "CarryShell")
+    def test_planner_source_has_no_strategic_restart(self) -> None:
+        from engine import builder1_planner as module
 
-    def test_restart_preserves_target_ad_count(self) -> None:
-        plan, _ = self._plan_with_judge_sequence(
-            [
-                StrategyJudgeResult(False, ["business_transformation_required"]),
-                StrategyJudgeResult(True, []),
-            ],
-            ad_count=4,
-        )
-        self.assertEqual(plan.ad_count, 4)
-        self.assertEqual(len(plan.ads), 4)
+        source = inspect.getsource(module.plan_builder1)
+        self.assertNotIn("strategic_restart", source)
+        self.assertNotIn("judge_builder1_strategy", source)
 
-    def test_restart_discards_rejected_slogan(self) -> None:
-        slogan_stages: List[str] = []
+    def test_pipeline_source_has_no_final_judge(self) -> None:
+        from engine import builder1_planning_pipeline as module
 
-        def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if system == STAGE_SLOGAN_SCAN_SYSTEM:
-                slogan_stages.append("scan")
-            if system == STAGE_SLOGAN_SELECT_SYSTEM:
-                slogan_stages.append("select")
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True}))
+        source = inspect.getsource(module)
+        self.assertNotIn("judge_builder1_strategy", source)
 
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            side_effect=[
-                StrategyJudgeResult(False, ["client_consultation_required"]),
-                StrategyJudgeResult(True, []),
-            ],
-        ):
-            plan_builder1(
-                product_name="CarryShell",
-                product_description=BRIEF,
-                format_value="portrait",
-                model_caller=model_caller,
-                ad_count=2,
-            )
-        self.assertGreaterEqual(slogan_stages.count("scan"), 2)
-        self.assertGreaterEqual(slogan_stages.count("select"), 2)
 
-    def test_second_foundational_failure_returns_planning_failed(self) -> None:
-        def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True}))
-
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            side_effect=[
-                StrategyJudgeResult(False, ["unsupported_future_capability"]),
-                StrategyJudgeResult(False, ["campaign_transferable_to_competitor"]),
-            ],
-        ):
-            with self.assertRaises(Builder1PlannerError) as ctx:
-                plan_builder1(
-                    product_name="CarryShell",
-                    product_description=BRIEF,
-                    format_value="portrait",
-                    model_caller=model_caller,
-                    ad_count=2,
-                )
-        self.assertEqual(str(ctx.exception), "planning_failed")
-
-    def test_no_infinite_strategic_restart_loop(self) -> None:
-        def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True}))
-
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            side_effect=[
-                StrategyJudgeResult(False, ["material_client_investment_required"]),
-                StrategyJudgeResult(False, ["advantage_not_currently_true"]),
-            ],
-        ) as mock_judge:
-            with self.assertRaises(Builder1PlannerError):
-                plan_builder1(
-                    product_name="CarryShell",
-                    product_description=BRIEF,
-                    format_value="portrait",
-                    model_caller=model_caller,
-                    ad_count=2,
-                )
-        self.assertEqual(mock_judge.call_count, 2)
-
-    def test_minor_structural_failure_gets_targeted_repair(self) -> None:
+class TestGraphicStageRepairWithoutJudge(unittest.TestCase):
+    def test_minor_structural_failure_gets_graphic_repair(self) -> None:
         graphic_calls = {"n": 0}
-        judge_calls = {"n": 0}
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
             if system == STAGE_GRAPHIC_SYSTEM_SYSTEM:
@@ -218,28 +119,20 @@ class TestStrategicRestart(unittest.TestCase):
                 if "Repair ONLY" in user:
                     return _graphic()
                 return _graphic(missing_palette=True)
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True}))
+            return copy.deepcopy(_full_final_responses(2).get(system, {}))
 
-        def judge_side_effect(*_args, **_kwargs):
-            judge_calls["n"] += 1
-            if judge_calls["n"] == 1:
-                return StrategyJudgeResult(False, ["invented_product_logo"])
-            return StrategyJudgeResult(True, [])
-
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            side_effect=judge_side_effect,
-        ):
-            plan = plan_builder1(
-                product_name="CarryShell",
-                product_description=BRIEF,
-                format_value="portrait",
-                model_caller=model_caller,
-                ad_count=2,
-            )
+        plan = plan_builder1(
+            product_name="CarryShell",
+            product_description=BRIEF,
+            format_value="portrait",
+            model_caller=model_caller,
+            ad_count=2,
+        )
         self.assertEqual(plan.ad_count, 2)
         self.assertGreaterEqual(graphic_calls["n"], 2)
 
+
+class TestFoundationalRejectionCodes(unittest.TestCase):
     def test_foundational_codes_are_complete(self) -> None:
         expected = {
             "campaign_transferable_to_competitor",
@@ -253,13 +146,6 @@ class TestStrategicRestart(unittest.TestCase):
             "unsupported_future_capability",
         }
         self.assertTrue(expected.issubset(FOUNDATIONAL_STRATEGIC_REJECTION_CODES))
-
-    def test_only_one_restart_in_planner_source(self) -> None:
-        from engine import builder1_planner as module
-
-        source = inspect.getsource(module.plan_builder1)
-        self.assertEqual(source.count('pass_name="strategic_restart"'), 2)
-        self.assertIn("BUILDER1_STRATEGIC_RESTART_START", source)
 
 
 class TestNoHistoricBlacklist(unittest.TestCase):

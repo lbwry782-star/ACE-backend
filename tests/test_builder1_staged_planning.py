@@ -24,17 +24,18 @@ from engine.builder1_image_generator import generate_builder1_ad_image
 from engine.builder1_plan_spec import campaign_identity_to_dict, series_plan_to_store_dict
 from engine.builder1_planning_contract import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
-    STAGE_CONCEPTUAL_SCAN_SYSTEM,
-    STAGE_CONCEPTUAL_SELECT_SYSTEM,
+    STAGE_CONCEPTUAL_STAGE_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
     STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM,
-    STAGE_SLOGAN_QUALITY_REVIEW_SYSTEM,
-    STAGE_SLOGAN_SCAN_SYSTEM,
-    STAGE_SLOGAN_SELECT_SYSTEM,
+    STAGE_SLOGAN_STAGE_SYSTEM,
+    STAGE_STRATEGY_STAGE_SYSTEM,
+    STAGE_CONCEPTUAL_SCAN_SYSTEM,
+    STAGE_CONCEPTUAL_SELECT_SYSTEM,
     STAGE_STRATEGY_SCAN_SYSTEM,
     STAGE_STRATEGY_SELECT_SYSTEM,
+    STAGE_SLOGAN_SCAN_SYSTEM,
 )
 from engine.builder1_planner import Builder1PlannerError, plan_builder1
 from engine.builder1_staged_parsers import (
@@ -46,7 +47,6 @@ from engine.builder1_staged_parsers import (
     parse_strategy_scan,
     parse_strategy_selection,
 )
-from engine.builder1_strategy_judge import BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT
 
 
 def _graphic(*, missing_palette: bool = False, missing_color: bool = False, snake_case: bool = False) -> Dict[str, Any]:
@@ -306,6 +306,80 @@ def _slogan_quality_review_payload() -> Dict[str, Any]:
     }
 
 
+def _strategy_stage_payload(
+    *,
+    selected_id: str = "S01",
+    candidate_ids: List[str] | None = None,
+) -> Dict[str, Any]:
+    ids = candidate_ids or [f"S{i:02d}" for i in range(1, 13)]
+    return {
+        "candidates": _strategy_scan_payload()["candidates"],
+        "evaluations": [
+            {
+                "candidateId": cid,
+                "groundedInBrief": True,
+                "advantageCurrentlyTrue": True,
+                "executableNow": True,
+                "requiresMaterialInvestment": False,
+                "requiresClientConsultation": False,
+                "requiresBusinessTransformation": False,
+                "brandOwnable": True,
+                "categoryRelevant": True,
+                "eligible": True,
+                "rejectionCodes": [],
+            }
+            for cid in ids
+        ],
+        "selectedCandidateId": selected_id,
+        "selectionReason": "Strongest brief fit",
+    }
+
+
+def _slogan_stage_payload(*, selected_id: str = "L01") -> Dict[str, Any]:
+    return {
+        "candidates": _slogan_scan_payload()["candidates"],
+        "evaluations": [
+            {
+                "candidateId": f"L{i:02d}",
+                "derivedFromAdvantage": True,
+                "naturalInLanguage": True,
+                "credible": True,
+                "ownable": True,
+                "impliedActionValid": True,
+                "campaignGenerative": True,
+                "eligible": True,
+                "rejectionCodes": [],
+            }
+            for i in range(1, 7)
+        ],
+        "selectedCandidateId": selected_id,
+        "selectionReason": "Strongest advantage expression",
+    }
+
+
+def _conceptual_stage_payload(*, selected_id: str = "C01") -> Dict[str, Any]:
+    return {
+        "candidates": _conceptual_scan_payload()["candidates"],
+        "evaluations": [
+            {
+                "candidateId": f"C{i:02d}",
+                "derivedFromSelectedSloganAction": True,
+                "expressesRelativeAdvantage": True,
+                "visuallyClear": True,
+                "seriesGenerative": True,
+                "brandOwnable": True,
+                "categoryRelevant": True,
+                "executableByImageModel": True,
+                "eligible": True,
+                "rejectionCodes": [],
+            }
+            for i in range(1, 7)
+        ],
+        "selectedCandidateId": selected_id,
+        "selectionReason": "Clearest slogan action",
+    }
+
+
 def _strategy_selection_payload(
     *,
     selected_id: str = "S01",
@@ -352,46 +426,10 @@ def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
     eligible_ids = [f"S{i:02d}" for i in range(1, 13)]
     return {
         STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM: {"productNameResolved": "TestBrand"},
-        STAGE_STRATEGY_SCAN_SYSTEM: _strategy_scan_payload(),
-        STAGE_STRATEGY_SELECT_SYSTEM: _strategy_selection_payload(candidate_ids=eligible_ids),
-        STAGE_SLOGAN_SCAN_SYSTEM: _slogan_scan_payload(),
-        STAGE_SLOGAN_QUALITY_REVIEW_SYSTEM: _slogan_quality_review_payload(),
+        STAGE_STRATEGY_STAGE_SYSTEM: _strategy_stage_payload(candidate_ids=eligible_ids),
+        STAGE_SLOGAN_STAGE_SYSTEM: _slogan_stage_payload(),
         STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM: {"replacements": []},
-        STAGE_SLOGAN_SELECT_SYSTEM: {
-            "selectedCandidateId": "L01",
-            "selectionReason": "Strongest advantage expression",
-            "scores": {
-                "directAdvantageExpression": 9,
-                "naturalness": 8,
-                "memorability": 8,
-                "credibility": 9,
-                "brandOwnership": 8,
-                "competitorTransferResistance": 8,
-                "actionClarity": 9,
-                "campaignGenerativePower": 9,
-            },
-        },
-        STAGE_CONCEPTUAL_SCAN_SYSTEM: _conceptual_scan_payload(),
-        STAGE_CONCEPTUAL_SELECT_SYSTEM: {
-            "selectedCandidateId": "C01",
-            "selectionReason": "Clearest slogan action",
-            "scores": {
-                "sloganConnection": 9,
-                "advantageConnection": 9,
-                "actionClarity": 9,
-                "visualPower": 8,
-                "seriesPotential": 9,
-                "brandOwnership": 8,
-                "categoryRelevance": 8,
-                "physicalIndependence": 8,
-                "noClientOperationalAction": 9,
-            },
-        },
-        BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT: {
-            "pass": True,
-            "rejectionReasonCodes": [],
-            "unsupportedClaimDetected": False,
-        },
+        STAGE_CONCEPTUAL_STAGE_SYSTEM: _conceptual_stage_payload(),
     }
 
 
@@ -522,7 +560,7 @@ class TestProductionShapedPlanner(unittest.TestCase):
                 counters[key] = idx + 1
                 seq = sequences[key]
                 return copy.deepcopy(seq[min(idx, len(seq) - 1)])
-            return copy.deepcopy(_full_final_responses(ad_count).get(key, {"pass": True, "rejectionReasonCodes": []}))
+            return copy.deepcopy(_full_final_responses(ad_count).get(key, {}))
 
         return plan_builder1(
             product_name="",
@@ -544,7 +582,7 @@ class TestProductionShapedPlanner(unittest.TestCase):
                 if len(brand_calls) == 0:
                     pass
                 return _graphic(missing_palette=True)
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True, "rejectionReasonCodes": []}))
+            return copy.deepcopy(_full_final_responses(2).get(system, {}))
 
         plan = plan_builder1(
             product_name="",
@@ -571,7 +609,7 @@ class TestProductionShapedPlanner(unittest.TestCase):
                 if "Repair ONLY" in user:
                     return _series_ads(2)
                 return _series_ads(2, series_string=True)
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True, "rejectionReasonCodes": []}))
+            return copy.deepcopy(_full_final_responses(2).get(system, {}))
 
         plan = plan_builder1(
             product_name="",

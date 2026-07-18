@@ -436,9 +436,24 @@ def _o3_pro_planning_model_caller(
     )
     from engine.builder1_planning_model import call_planning_model
 
+    stage_model_env = {
+        "strategy_stage": "BUILDER1_STRATEGY_STAGE_MODEL",
+        "slogan_stage": "BUILDER1_SLOGAN_STAGE_MODEL",
+        "conceptual_stage": "BUILDER1_CONCEPTUAL_STAGE_MODEL",
+        "brand_physical": "BUILDER1_PHYSICAL_STAGE_MODEL",
+        "graphic_system": "BUILDER1_GRAPHIC_STAGE_MODEL",
+        "series_ads": "BUILDER1_SERIES_STAGE_MODEL",
+        "product_name_resolution": "BUILDER1_PRODUCT_NAME_MODEL",
+    }
+    default_model = (os.environ.get("BUILDER1_PLANNING_MODEL") or "o3-pro").strip()
+    env_key = stage_model_env.get(stage or "", "")
+    model = (os.environ.get(env_key) or default_model).strip() if env_key else default_model
+    if stage:
+        logger.info("BUILDER1_STAGE_MODEL stage=%s model=%s", stage, model)
+
     return call_planning_model(
         client,
-        model="o3-pro",
+        model=model,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         stage=stage,

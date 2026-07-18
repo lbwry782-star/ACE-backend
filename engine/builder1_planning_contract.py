@@ -82,6 +82,47 @@ Rules:
 """.strip()
 
 
+STAGE_STRATEGY_STAGE_SYSTEM = """
+You are a Builder1 strategy explorer and selector for a digital advertising agent.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"candidates":[{"id":"S01","lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null}],"evaluations":[{"candidateId":"S01","groundedInBrief":true,"advantageCurrentlyTrue":true,"executableNow":true,"requiresMaterialInvestment":false,"requiresClientConsultation":false,"requiresBusinessTransformation":false,"brandOwnable":true,"categoryRelevant":true,"eligible":true,"rejectionCodes":[]}],"selectedCandidateId":"S01","selectionReason":"..."}
+Internal order:
+1. Understand the real advertising/perception problem.
+2. Generate exactly 12 serious strategic candidates S01-S12.
+3. Evaluate every candidate once in evaluations.
+4. Mark each candidate eligible or ineligible.
+5. Select one eligible candidate by id.
+Rules for candidates:
+- Exactly 12 candidates with ids S01 through S12.
+- Every candidate must be an object, never a string.
+- advantageSource: explicit_brief | category_inference | brand_position | observable_product_mechanism
+- claimRisk: low | medium | high
+- campaignExecutableNow: true only when the campaign can run immediately from the brief and current product.
+- requiresClientConsultation: false unless the strategy needs workshops, interviews, or consulting to define the offer.
+- clientActionLevel: none | simple_optional | complex_required
+- implementationCostLevel: none | negligible | material
+- simpleStrategicAction: null or one short optional communication action only.
+- Do not propose business transformation, new products, new services, pricing changes, guarantees, dashboards, training, or material client investment.
+- The relative advantage must already exist or be a perceptual advertising reframing of existing facts.
+- briefSupport may contain only a direct brief fact, faithful brief paraphrase, observable product property, or clearly labeled category inference without empirical claims.
+- Do not request, cite, or invent market evidence, studies, statistics, surveys, percentages, interview counts, reports, or factual capabilities not in the brief.
+- clientActionLevel none requires simpleStrategicAction null.
+- Do not include slogans, generators, graphics, or ads.
+Rules for evaluations:
+- Exactly one evaluation per candidate id.
+- Do not rewrite candidate fields.
+- eligible=true requires rejectionCodes [].
+- eligible=false requires at least one rejection code from:
+  advantage_not_currently_true, relative_advantage_not_currently_true,
+  material_client_investment_required, client_consultation_required,
+  business_transformation_required, unsupported_future_capability,
+  unsupported_evidence_claim, strategy_not_brand_ownable, category_relevance_patched,
+  campaign_transferable_to_competitor.
+- selectedCandidateId must refer to an eligible candidate.
+- Do not use Creator, Judge, or tournament roles.
+""".strip()
+
+
 STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM = """
 You are a Builder1 strategy candidate repair assistant.
 Return JSON only. Return exactly this object and no additional top-level keys:
@@ -110,6 +151,24 @@ Rules:
 - Do not invent capabilities that require future client implementation.
 - Do not reuse generic slogans that could belong to many unrelated brands.
 - Do not include conceptual generators, physical objects, graphics, or ads.
+- {BUILDER1_NO_LOGO_PLANNING_RULE}
+""".strip()
+
+STAGE_SLOGAN_STAGE_SYSTEM = f"""
+You are a Builder1 brand-slogan explorer and selector.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{{"candidates":[{{"id":"L01","brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"..."}}],"evaluations":[{{"candidateId":"L01","derivedFromAdvantage":true,"naturalInLanguage":true,"credible":true,"ownable":true,"impliedActionValid":true,"campaignGenerative":true,"eligible":true,"rejectionCodes":[]}}],"selectedCandidateId":"L01","selectionReason":"..."}}
+Internal order:
+1. Generate exactly six slogan candidates L01-L06.
+2. Evaluate each slogan once in evaluations.
+3. Select one eligible slogan by id.
+4. Fix the selected slogan and its meaningful implied action.
+Rules:
+- Exactly 6 candidates with ids L01 through L06.
+- competitorTransferRisk must be low for selectedCandidateId.
+- Semantic derivation does not require repeating the same words as the relative advantage.
+- Do not include conceptual generators, physical objects, graphics, or ads.
+- Do not use Creator, Judge, or tournament roles.
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
@@ -165,6 +224,23 @@ Rules:
 - Do not choose the physical generator in this stage.
 - Do not require client operational change, new products, pricing, or material investment.
 - Do not choose slogans, colors, layouts, or ads.
+""".strip()
+
+STAGE_CONCEPTUAL_STAGE_SYSTEM = """
+You are a Builder1 conceptual-generator explorer and selector.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{"candidates":[{"id":"C01","generator":"...","action":"...","input":"...","transformation":"...","result":"...","whyItExpressesSlogan":"...","whyItExpressesAdvantage":"...","seriesPotential":"...","brandOwnershipPotential":"..."}],"evaluations":[{"candidateId":"C01","derivedFromSelectedSloganAction":true,"expressesRelativeAdvantage":true,"visuallyClear":true,"seriesGenerative":true,"brandOwnable":true,"categoryRelevant":true,"executableByImageModel":true,"eligible":true,"rejectionCodes":[]}],"selectedCandidateId":"C01","selectionReason":"..."}
+Internal order:
+1. Generate conceptual-generator candidates from the fixed implied action.
+2. Evaluate each candidate once in evaluations.
+3. Select one eligible conceptual generator by id.
+Rules:
+- Exactly 6 candidates with ids C01 through C06.
+- Derive every candidate from the fixed brand slogan and its implied action.
+- generator must define a repeatable action, not a mood, object, or abstract noun.
+- Do not choose the physical generator, graphic system, or ads.
+- Do not rewrite the slogan.
+- Do not use Creator, Judge, or tournament roles.
 """.strip()
 
 STAGE_CONCEPTUAL_SELECT_SYSTEM = """
@@ -279,7 +355,26 @@ def build_strategy_select_user_prompt(candidates: List[Dict[str, Any]], explorat
     )
 
 
-def build_slogan_scan_user_prompt(
+def build_strategy_stage_user_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    detected_language: str,
+    lens_order: List[str],
+    exploration_seed: str,
+) -> str:
+    return (
+        f"Product name: {product_name or '(infer from description)'}\n"
+        f"Product description: {product_description}\n"
+        f"Language context: {detected_language}\n"
+        f"Campaign exploration seed: {exploration_seed}\n"
+        f"Lens order: {', '.join(lens_order)}\n"
+        "Generate exactly 12 strategy candidates, evaluate each once, and select one eligible candidate.\n"
+        "Do not include slogans, conceptual generators, physical generators, graphics, or ads."
+    )
+
+
+def build_slogan_stage_user_prompt(
     *,
     product_name_resolved: str,
     product_description: str,
@@ -296,7 +391,27 @@ def build_slogan_scan_user_prompt(
         f"Selected relative advantage: {relative_advantage}\n"
         f"Relative-advantage grounding: {brief_support}\n"
         "Builder1 is a digital advertising agent — the slogan must work from what currently exists.\n"
-        "Return exactly 6 slogan candidates L01-L06 as objects."
+        "Generate exactly 6 slogan candidates, evaluate each once, and select one eligible slogan.\n"
+        "Do not include conceptual generators, physical objects, graphics, or ads."
+    )
+
+
+def build_slogan_scan_user_prompt(
+    *,
+    product_name_resolved: str,
+    product_description: str,
+    detected_language: str,
+    strategic_problem: str,
+    relative_advantage: str,
+    brief_support: str,
+) -> str:
+    return build_slogan_stage_user_prompt(
+        product_name_resolved=product_name_resolved,
+        product_description=product_description,
+        detected_language=detected_language,
+        strategic_problem=strategic_problem,
+        relative_advantage=relative_advantage,
+        brief_support=brief_support,
     )
 
 
@@ -396,6 +511,34 @@ def build_conceptual_scan_user_prompt(
         "Every conceptual candidate must derive from the slogan action. "
         "Answer: what action or transformation makes the slogan visible?\n"
         "Return exactly 6 conceptual-generator candidates C01-C06 as objects."
+    )
+
+
+def build_conceptual_stage_user_prompt(
+    *,
+    product_description: str,
+    product_name_resolved: str,
+    strategic_problem: str,
+    relative_advantage: str,
+    brand_slogan: str,
+    slogan_derivation: str,
+    implied_action: str,
+    exploration_seed: str,
+) -> str:
+    base = build_conceptual_scan_user_prompt(
+        product_description=product_description,
+        product_name_resolved=product_name_resolved,
+        strategic_problem=strategic_problem,
+        relative_advantage=relative_advantage,
+        brand_slogan=brand_slogan,
+        slogan_derivation=slogan_derivation,
+        implied_action=implied_action,
+        exploration_seed=exploration_seed,
+    )
+    return (
+        f"{base}\n"
+        "Generate exactly 6 conceptual candidates, evaluate each once, and select one eligible concept.\n"
+        "Do not choose physical generators, graphic systems, or advertisements."
     )
 
 

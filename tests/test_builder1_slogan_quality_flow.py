@@ -306,17 +306,13 @@ class TestQualityPipelineIntegration(unittest.TestCase):
         self.assertIn("L03", eligible)
 
     def test_plan_builder1_preserves_product_name_and_ad_count(self) -> None:
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            return_value=StrategyJudgeResult(True, []),
-        ):
-            plan = plan_builder1(
-                product_name="CarryShell",
-                product_description="Reinforced shell product for daily carry",
-                format_value="portrait",
-                model_caller=self._model_caller(),
-                ad_count=4,
-            )
+        plan = plan_builder1(
+            product_name="CarryShell",
+            product_description="Reinforced shell product for daily carry",
+            format_value="portrait",
+            model_caller=self._model_caller(),
+            ad_count=4,
+        )
         self.assertEqual(plan.product_name_resolved, "CarryShell")
         self.assertEqual(plan.ad_count, 4)
 
@@ -340,17 +336,13 @@ class TestQualityPipelineIntegration(unittest.TestCase):
             validate_next_ad_request("slogan-next", 2)
 
     def test_conceptual_scan_receives_final_selected_slogan(self) -> None:
-        with patch(
-            "engine.builder1_planning_pipeline.judge_builder1_strategy",
-            return_value=StrategyJudgeResult(True, []),
-        ):
-            plan = plan_builder1(
-                product_name="CarryShell",
-                product_description="Reinforced shell product for daily carry",
-                format_value="portrait",
-                model_caller=self._model_caller(),
-                ad_count=4,
-            )
+        plan = plan_builder1(
+            product_name="CarryShell",
+            product_description="Reinforced shell product for daily carry",
+            format_value="portrait",
+            model_caller=self._model_caller(),
+            ad_count=4,
+        )
         self.assertEqual(plan.brand_slogan, "Built To Last")
 
     def test_no_eligible_candidates_signals_bounded_full_rescan(self) -> None:

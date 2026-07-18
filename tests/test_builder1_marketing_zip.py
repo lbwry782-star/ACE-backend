@@ -25,14 +25,11 @@ from engine.builder1_marketing_text_repair import (
 from engine.builder1_planner import Builder1PlannerError, plan_builder1
 from engine.builder1_planning_contract import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
-    STAGE_CONCEPTUAL_SCAN_SYSTEM,
-    STAGE_CONCEPTUAL_SELECT_SYSTEM,
+    STAGE_CONCEPTUAL_STAGE_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
-    STAGE_STRATEGY_SCAN_SYSTEM,
-    STAGE_STRATEGY_SELECT_SYSTEM,
+    STAGE_STRATEGY_STAGE_SYSTEM,
 )
-from engine.builder1_strategy_judge import BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT
 from engine.builder1_zip import build_builder1_single_ad_zip_bytes, build_builder1_zip_bytes
 from tests.builder1_test_helpers import (
     marketing_text_hebrew,
@@ -180,9 +177,9 @@ class TestPlannerMarketingIntegration(unittest.TestCase):
         counters = {"strategy": 0, "conceptual": 0, "repair": 0}
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if system == STAGE_STRATEGY_SCAN_SYSTEM:
+            if system == STAGE_STRATEGY_STAGE_SYSTEM:
                 counters["strategy"] += 1
-            if system == STAGE_CONCEPTUAL_SCAN_SYSTEM:
+            if system == STAGE_CONCEPTUAL_STAGE_SYSTEM:
                 counters["conceptual"] += 1
             if system == MARKETING_TEXT_REPAIR_SYSTEM:
                 counters["repair"] += 1
@@ -201,7 +198,7 @@ class TestPlannerMarketingIntegration(unittest.TestCase):
                 payload["ads"][0]["marketingText"] = marketing_text_words(49)
                 payload["ads"][1]["marketingText"] = marketing_text_words(51)
                 return payload
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
+            return responses.get(system, {})
 
         plan = plan_builder1(
             product_name="",

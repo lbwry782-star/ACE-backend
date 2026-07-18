@@ -16,14 +16,13 @@ from engine.builder1_creative_methodology import (
     methodology_repair_stage,
 )
 from engine.builder1_final_stages import parse_brand_physical_output
-from engine.builder1_planner import _judge_repair_stage, plan_builder1
+from engine.builder1_planner import plan_builder1
 from engine.builder1_planning_contract import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
-    STAGE_CONCEPTUAL_SCAN_SYSTEM,
-    STAGE_SLOGAN_SCAN_SYSTEM,
-    STAGE_SLOGAN_SELECT_SYSTEM,
-    STAGE_STRATEGY_SELECT_SYSTEM,
-    build_conceptual_scan_user_prompt,
+    STAGE_CONCEPTUAL_STAGE_SYSTEM,
+    STAGE_SLOGAN_STAGE_SYSTEM,
+    STAGE_STRATEGY_STAGE_SYSTEM,
+    build_conceptual_stage_user_prompt,
 )
 from engine.builder1_slogan_stage import (
     parse_slogan_scan,
@@ -46,16 +45,13 @@ from tests.test_builder1_series import _base_campaign, _parse
 class TestPlanningOrder(unittest.TestCase):
     def test_planner_source_order_has_slogan_before_conceptual(self) -> None:
         from engine import builder1_planning_pipeline as module
-        from engine import builder1_slogan_quality as quality_module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("slogan_scan"), source.index("conceptual_scan"))
-        quality_source = inspect.getsource(quality_module.run_slogan_selection_with_quality_gate)
-        self.assertIn("slogan_selection", quality_source)
-        self.assertLess(source.index("strategy_selection"), source.index("slogan_scan"))
+        self.assertLess(source.index("run_slogan_stage"), source.index("run_conceptual_stage"))
+        self.assertLess(source.index("run_strategy_stage"), source.index("run_slogan_stage"))
 
-    def test_conceptual_scan_prompt_receives_selected_slogan(self) -> None:
-        prompt = build_conceptual_scan_user_prompt(
+    def test_conceptual_stage_prompt_receives_selected_slogan(self) -> None:
+        prompt = build_conceptual_stage_user_prompt(
             product_description="Reinforced shell product",
             product_name_resolved="TestBrand",
             strategic_problem="Buyers doubt durability",
@@ -144,7 +140,6 @@ class TestConceptualAndPhysical(unittest.TestCase):
 class TestRepairRouting(unittest.TestCase):
     def test_generic_slogan_routes_to_slogan_scan(self) -> None:
         self.assertEqual(methodology_repair_stage(["slogan_generic"]), "slogan_scan")
-        self.assertEqual(_judge_repair_stage(["slogan_generic"]), "slogan_scan")
 
     def test_weak_concept_routes_to_conceptual_scan(self) -> None:
         self.assertEqual(
@@ -173,7 +168,7 @@ class TestPlannerIntegration(unittest.TestCase):
             if stage:
                 stage_order.append(stage)
             responses = _full_final_responses(2)
-            return responses.get(system, {"pass": True, "rejectionReasonCodes": []})
+            return responses.get(system, {})
 
         plan = plan_builder1(
             product_name="TestBrand",
@@ -182,8 +177,8 @@ class TestPlannerIntegration(unittest.TestCase):
             model_caller=model_caller,
             ad_count=2,
         )
-        self.assertIn("slogan_scan", stage_order)
-        self.assertLess(stage_order.index("slogan_scan"), stage_order.index("conceptual_scan"))
+        self.assertIn("slogan_stage", stage_order)
+        self.assertLess(stage_order.index("slogan_stage"), stage_order.index("conceptual_stage"))
         self.assertEqual(plan.brand_slogan, "Built To Last")
         prompt = build_visual_prompt(plan, plan.ads[0])
         self.assertIn("Fixed brand slogan (campaign-wide): Built To Last.", prompt)
@@ -193,8 +188,10 @@ class TestRegressionAndBoundaries(unittest.TestCase):
     def test_brand_physical_system_forbids_slogan_creation(self) -> None:
         self.assertIn("Do NOT create, replace, or modify the brand slogan", STAGE_BRAND_PHYSICAL_SYSTEM)
 
-    def test_judge_prompt_documents_slogan_derivation(self) -> None:
-        self.assertIn("sloganDerivesFromAdvantage", BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT)
+    def test_integrity_validation_exists_without_judge(self) -> None:
+        from engine.builder1_campaign_integrity import validate_builder1_campaign_integrity
+
+        self.assertTrue(callable(validate_builder1_campaign_integrity))
 
     def test_builder2_unchanged(self) -> None:
         root = Path(__file__).resolve().parents[1]

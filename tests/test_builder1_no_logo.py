@@ -31,7 +31,7 @@ from engine.builder1_planning_contract import (
     build_brand_physical_user_prompt,
     build_product_name_resolution_user_prompt,
 )
-from engine.builder1_planner import _judge_repair_stage
+from engine.builder1_creative_methodology import methodology_repair_stage
 from engine.builder1_strategy_judge import (
     BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT,
     deterministic_judge_checks,
@@ -200,10 +200,10 @@ class TestFinalJudgeNoLogo(unittest.TestCase):
         self.assertIn("invented_product_logo", BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT)
         self.assertIn("campaign_device_used_as_logo", BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT)
 
-    def test_judge_repair_routes_logo_violations(self) -> None:
-        self.assertEqual(_judge_repair_stage(["invented_product_logo"]), "graphic_system")
-        self.assertEqual(_judge_repair_stage(["packaging_contains_brand_mark"]), "series_ads")
-        self.assertEqual(_judge_repair_stage(["supplied_logo_displayed"]), "brand_physical")
+    def test_logo_violations_are_not_methodology_restart_codes(self) -> None:
+        self.assertIsNone(methodology_repair_stage(["invented_product_logo"]))
+        self.assertIsNone(methodology_repair_stage(["packaging_contains_brand_mark"]))
+        self.assertIsNone(methodology_repair_stage(["supplied_logo_displayed"]))
 
 
 class TestPlanningStagesNoLogoRule(unittest.TestCase):

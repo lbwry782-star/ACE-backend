@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -14,34 +15,38 @@ _metrics_ctx: ContextVar[Optional["Builder1PlanningMetrics"]] = ContextVar(
     default=None,
 )
 
+NORMAL_PLANNING_CALLS_WITH_NAME = 6
+NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME = 7
+
 
 @dataclass
 class Builder1PlanningMetrics:
     campaign_id: str = ""
     job_id: str = ""
-    strategic_restart_used: bool = False
-    strategy_scan_calls: int = 0
-    strategy_repair_calls: int = 0
-    strategy_selection_calls: int = 0
-    slogan_scan_calls: int = 0
-    slogan_review_calls: int = 0
-    slogan_repair_calls: int = 0
-    final_judge_calls: int = 0
+    product_name_call_used: bool = False
+    strategy_stage_calls: int = 0
+    slogan_stage_calls: int = 0
+    conceptual_stage_calls: int = 0
+    physical_stage_calls: int = 0
+    graphic_stage_calls: int = 0
+    series_stage_calls: int = 0
+    focused_repair_calls: int = 0
     total_planning_model_calls: int = 0
+    prompt_tokens: Optional[int] = None
+    output_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    total_planning_duration_ms: int = 0
     _stage_starts: Dict[str, float] = field(default_factory=dict, repr=False)
     _pipeline_start: float = field(default_factory=time.perf_counter, repr=False)
-    _pipeline_pass: str = "initial"
 
     def begin_pipeline_pass(self, pass_name: str) -> None:
-        self._pipeline_pass = pass_name
         self._pipeline_start = time.perf_counter()
 
     def end_pipeline_pass(self) -> None:
-        duration_ms = int((time.perf_counter() - self._pipeline_start) * 1000)
+        self.total_planning_duration_ms = int((time.perf_counter() - self._pipeline_start) * 1000)
         logger.info(
-            "BUILDER1_PIPELINE_DURATION pass=%s durationMs=%s",
-            self._pipeline_pass,
-            duration_ms,
+            "BUILDER1_PIPELINE_DURATION durationMs=%s",
+            self.total_planning_duration_ms,
         )
 
     def begin_stage(self, stage: str, *, attempt: int = 1) -> None:
@@ -54,38 +59,84 @@ class Builder1PlanningMetrics:
         self.total_planning_model_calls += 1
         if not stage:
             return
-        if stage == "strategy_scan":
-            self.strategy_scan_calls += 1
-        elif stage == "strategy_candidate_repair":
-            self.strategy_repair_calls += 1
-        elif stage == "strategy_selection":
-            self.strategy_selection_calls += 1
-        elif stage == "slogan_scan":
-            self.slogan_scan_calls += 1
-        elif stage == "slogan_quality_review":
-            self.slogan_review_calls += 1
-        elif stage == "slogan_candidate_repair":
-            self.slogan_repair_calls += 1
-        elif stage == "strategy_judge":
-            self.final_judge_calls += 1
+        if stage == "product_name_resolution":
+            self.product_name_call_used = True
+        elif stage == "strategy_stage":
+            self.strategy_stage_calls += 1
+        elif stage == "slogan_stage":
+            self.slogan_stage_calls += 1
+        elif stage == "conceptual_stage":
+            self.conceptual_stage_calls += 1
+        elif stage == "brand_physical":
+            self.physical_stage_calls += 1
+        elif stage == "graphic_system":
+            self.graphic_stage_calls += 1
+        elif stage == "series_ads":
+            self.series_stage_calls += 1
+        elif stage in {
+            "strategy_candidate_repair",
+            "slogan_candidate_repair",
+            "conceptual_candidate_repair",
+            "marketing_text_repair",
+        }:
+            self.focused_repair_calls += 1
+
+    def record_token_usage(self, *, prompt_tokens: Optional[int], output_tokens: Optional[int]) -> None:
+        if prompt_tokens is None and output_tokens is None:
+            return
+        if prompt_tokens is not None:
+            self.prompt_tokens = (self.prompt_tokens or 0) + int(prompt_tokens)
+        if output_tokens is not None:
+            self.output_tokens = (self.output_tokens or 0) + int(output_tokens)
+        if self.prompt_tokens is not None or self.output_tokens is not None:
+            self.total_tokens = (self.prompt_tokens or 0) + (self.output_tokens or 0)
 
     def log_summary(self) -> None:
+        expected = (
+            NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME
+            if self.product_name_call_used
+            else NORMAL_PLANNING_CALLS_WITH_NAME
+        )
+        threshold_ms = int(os.environ.get("BUILDER1_PLANNING_LATENCY_WARN_MS", "120000"))
+        if self.total_planning_duration_ms > threshold_ms:
+            logger.warning(
+                "BUILDER1_PLANNING_LATENCY_HIGH campaignId=%s jobId=%s durationMs=%s thresholdMs=%s",
+                self.campaign_id or "",
+                self.job_id or "",
+                self.total_planning_duration_ms,
+                threshold_ms,
+            )
+        if self.total_planning_model_calls > expected + self.focused_repair_calls:
+            logger.warning(
+                "BUILDER1_PLANNING_CALL_COUNT_HIGH campaignId=%s jobId=%s total=%s expected=%s repairs=%s",
+                self.campaign_id or "",
+                self.job_id or "",
+                self.total_planning_model_calls,
+                expected,
+                self.focused_repair_calls,
+            )
+
         logger.info(
             "BUILDER1_PLANNING_CALL_SUMMARY campaignId=%s jobId=%s "
-            "strategicRestartUsed=%s strategyScanCalls=%s strategyRepairCalls=%s "
-            "strategySelectionCalls=%s sloganScanCalls=%s sloganReviewCalls=%s "
-            "sloganRepairCalls=%s finalJudgeCalls=%s totalPlanningModelCalls=%s",
+            "productNameCallUsed=%s strategyStageCalls=%s sloganStageCalls=%s "
+            "conceptualStageCalls=%s physicalStageCalls=%s graphicStageCalls=%s "
+            "seriesStageCalls=%s focusedRepairCalls=%s totalPlanningModelCalls=%s "
+            "promptTokens=%s outputTokens=%s totalTokens=%s totalPlanningDurationMs=%s",
             self.campaign_id or "",
             self.job_id or "",
-            str(self.strategic_restart_used).lower(),
-            self.strategy_scan_calls,
-            self.strategy_repair_calls,
-            self.strategy_selection_calls,
-            self.slogan_scan_calls,
-            self.slogan_review_calls,
-            self.slogan_repair_calls,
-            self.final_judge_calls,
+            str(self.product_name_call_used).lower(),
+            self.strategy_stage_calls,
+            self.slogan_stage_calls,
+            self.conceptual_stage_calls,
+            self.physical_stage_calls,
+            self.graphic_stage_calls,
+            self.series_stage_calls,
+            self.focused_repair_calls,
             self.total_planning_model_calls,
+            self.prompt_tokens if self.prompt_tokens is not None else "",
+            self.output_tokens if self.output_tokens is not None else "",
+            self.total_tokens if self.total_tokens is not None else "",
+            self.total_planning_duration_ms,
         )
 
 

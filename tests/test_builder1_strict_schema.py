@@ -251,27 +251,37 @@ class TestStrictSchemaIntegration(unittest.TestCase):
         self.assertEqual(plan.ad_count, 4)
         self.assertEqual(len(plan.ads), 4)
 
-    def test_successful_series_ads_reaches_judge(self) -> None:
-        judge_calls: List[int] = []
+    def test_successful_series_ads_reaches_integrity_validation(self) -> None:
+        integrity_calls: List[int] = []
 
-        def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if system == BUILDER1_STRATEGY_JUDGE_SYSTEM_PROMPT:
-                judge_calls.append(1)
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True}))
+        real_validate = __import__(
+            "engine.builder1_campaign_integrity",
+            fromlist=["validate_builder1_campaign_integrity"],
+        ).validate_builder1_campaign_integrity
 
-        plan = plan_builder1(
-            product_name="",
-            product_description=self.BRIEF,
-            format_value="portrait",
-            model_caller=model_caller,
-            ad_count=2,
-        )
+        def tracking_validate(*args, **kwargs):
+            integrity_calls.append(1)
+            return real_validate(*args, **kwargs)
+
+        with patch(
+            "engine.builder1_planning_pipeline.validate_builder1_campaign_integrity",
+            side_effect=tracking_validate,
+        ):
+            plan = plan_builder1(
+                product_name="",
+                product_description=self.BRIEF,
+                format_value="portrait",
+                model_caller=lambda system, user, stage=None: copy.deepcopy(
+                    _full_final_responses(2).get(system, {})
+                ),
+                ad_count=2,
+            )
         self.assertEqual(plan.ad_count, 2)
-        self.assertEqual(len(judge_calls), 1)
+        self.assertGreaterEqual(len(integrity_calls), 1)
 
-    def test_successful_judge_reaches_image_generation(self) -> None:
+    def test_successful_plan_reaches_image_generation(self) -> None:
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            return copy.deepcopy(_full_final_responses(2).get(system, {"pass": True}))
+            return copy.deepcopy(_full_final_responses(2).get(system, {}))
 
         plan = plan_builder1(
             product_name="",

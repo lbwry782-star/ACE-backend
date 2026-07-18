@@ -28,7 +28,7 @@ from tests.test_builder1_staged_planning import (
     STAGE_BRAND_PHYSICAL_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
-    STAGE_STRATEGY_SCAN_SYSTEM,
+    STAGE_STRATEGY_STAGE_SYSTEM,
     _brand_physical,
     _early_stage_responses,
     _full_final_responses,
@@ -123,7 +123,7 @@ class TestProductNameResolutionStage(unittest.TestCase):
         )
         self.assertEqual(plan.product_name_resolved, GENERATED_NAME)
         self.assertEqual(calls.count(STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM), 1)
-        self.assertGreater(calls.count(STAGE_STRATEGY_SCAN_SYSTEM), 0)
+        self.assertGreater(calls.count(STAGE_STRATEGY_STAGE_SYSTEM), 0)
 
     def test_supplied_product_name_bypasses_naming_stage(self) -> None:
         calls: List[str] = []
@@ -147,7 +147,7 @@ class TestProductNameResolutionStage(unittest.TestCase):
         seen: Dict[str, str] = {}
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if system == STAGE_STRATEGY_SCAN_SYSTEM:
+            if system == STAGE_STRATEGY_STAGE_SYSTEM:
                 seen["strategy_user_prompt"] = user
             responses = _planner_responses(ad_count=2)
             return copy.deepcopy(responses.get(system, {"pass": True, "rejectionReasonCodes": []}))

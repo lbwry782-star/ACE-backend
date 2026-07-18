@@ -20,10 +20,6 @@ from engine.builder1_final_stages import (
 )
 from engine.builder1_input_normalizer import normalize_builder1_input
 from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_to_store_dict
-from engine.builder1_creative_methodology import (
-    earliest_methodology_repair_stage,
-    is_foundational_strategic_rejection,
-)
 from engine.builder1_planning_metrics import (
     Builder1PlanningMetrics,
     get_planning_metrics,
@@ -82,16 +78,8 @@ from engine.builder1_slogan_stage import (
 )
 from engine.builder1_strategy_selection import StrategySelectionExhausted
 from engine.builder1_strategy_scan import (
-    STRATEGY_SCAN_REPLACEMENT_SYSTEM,
     ensure_strategy_scan_from_raw,
     is_global_strategy_scan_failure,
-)
-from engine.builder1_strategy_judge import (
-    is_client_boundary_rejection,
-    is_marketing_language_rejection,
-    is_marketing_word_count_rejection,
-    is_no_logo_rejection_code,
-    judge_builder1_strategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -440,65 +428,6 @@ def _resolve_builder1_product_name(
     return resolved
 
 
-def _judge_repair_stage(codes: List[str]) -> Optional[str]:
-    unique = list(dict.fromkeys(codes))
-    if is_marketing_word_count_rejection(unique) or is_marketing_language_rejection(unique):
-        return "marketing_text"
-    methodology_stage = earliest_methodology_repair_stage(unique)
-    if methodology_stage:
-        return methodology_stage
-    if is_no_logo_rejection_code(codes):
-        if any(
-            code in codes
-            for code in ("supplied_logo_displayed", "product_name_not_text_only")
-        ):
-            return "brand_physical"
-        if "packaging_contains_brand_mark" in codes:
-            return "series_ads"
-        return "graphic_system"
-    if is_client_boundary_rejection(codes):
-        joined = " ".join(codes).lower()
-        if "unsupported_future_capability" in joined or "marketing" in joined:
-            return "series_ads"
-        if any(
-            code in codes
-            for code in (
-                "business_transformation_required",
-                "advantage_not_currently_true",
-                "client_consultation_required",
-                "material_client_investment_required",
-            )
-        ):
-            return "strategy_scan"
-        return "brand_physical"
-    joined = " ".join(codes).lower()
-    if any(k in joined for k in ("graphic", "palette", "layout", "typography", "device")):
-        return "graphic_system"
-    if any(
-        k in joined
-        for k in (
-            "series",
-            "conceptual_execution",
-            "physical_execution",
-            "visual_execution",
-            "scene_description",
-            "new_contribution",
-            "contribution",
-        )
-    ) and "marketing_copy" not in joined:
-        return "series_ads"
-    if any(k in joined for k in ("headline_too_long",)):
-        return "marketing_text"
-    if any(
-        k in joined
-        for k in ("slogan", "physical", "medium", "rationale", "brand", "unsupported_evidence")
-    ):
-        return "brand_physical"
-    if any(k in joined for k in ("marketing_copy", "marketing_text")):
-        return "marketing_text"
-    return "series_ads"
-
-
 def plan_builder1(
     product_name: object,
     product_description: object,
@@ -510,11 +439,8 @@ def plan_builder1(
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
 ) -> Builder1SeriesPlan:
-    """Plan one Builder1 campaign via staged pipeline. No creative-output memory."""
-    from engine.builder1_planning_pipeline import (
-        apply_targeted_judge_repair,
-        run_builder1_campaign_pipeline,
-    )
+    """Plan one Builder1 campaign via consolidated staged pipeline."""
+    from engine.builder1_planning_pipeline import run_builder1_campaign_pipeline
 
     normalized = normalize_builder1_input(
         product_name=product_name,
@@ -550,129 +476,29 @@ def plan_builder1(
     metrics = Builder1PlanningMetrics(
         campaign_id=campaign_id or "",
         job_id=job_id or "",
+        product_name_call_used=not bool(normalized.product_name),
     )
     metrics_token = set_planning_metrics(metrics)
 
-    def _run_pipeline(*, seed: str, lenses: List[str], pass_name: str) -> Any:
-        metrics.begin_pipeline_pass(pass_name)
+    try:
+        metrics.begin_pipeline_pass("initial")
         try:
-            return run_builder1_campaign_pipeline(
+            ctx = run_builder1_campaign_pipeline(
                 normalized=normalized,
                 product_name_resolved=product_name_resolved,
                 detected_language=detected_language,
-                exploration_seed=seed,
-                lens_order=lenses,
+                exploration_seed=exploration_seed,
+                lens_order=lens_order,
                 model_caller=model_caller,
                 brand_guidelines=brand_guidelines,
             )
+        except StrategySelectionExhausted as exc:
+            raise Builder1PlannerError("strategy_stage_failed") from exc
         finally:
             metrics.end_pipeline_pass()
-
-    strategic_restart_used = False
-    try:
-        try:
-            ctx = _run_pipeline(seed=exploration_seed, lenses=lens_order, pass_name="initial")
-        except StrategySelectionExhausted:
-            if strategic_restart_used:
-                raise Builder1PlannerError("planning_failed")
-            logger.info(
-                "BUILDER1_STRATEGIC_RESTART_START campaignId=%s jobId=%s reason=strategy_selection_exhausted",
-                campaign_id or "",
-                job_id or "",
-            )
-            exploration_seed = str(uuid.uuid4())
-            lens_order = shuffled_exploration_lens_order()
-            strategic_restart_used = True
-            ctx = _run_pipeline(
-                seed=exploration_seed,
-                lenses=lens_order,
-                pass_name="strategic_restart",
-            )
-
-        while not ctx.judge_result.passed:
-            codes = ctx.judge_result.rejection_reason_codes
-            if is_foundational_strategic_rejection(codes):
-                if strategic_restart_used:
-                    logger.error(
-                        "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
-                        campaign_id or "",
-                        job_id or "",
-                        codes,
-                    )
-                    raise Builder1PlannerError("planning_failed")
-                logger.info(
-                    "BUILDER1_STRATEGIC_RESTART_START campaignId=%s jobId=%s",
-                    campaign_id or "",
-                    job_id or "",
-                )
-                logger.info(
-                    "BUILDER1_STRATEGIC_RESTART_REASON campaignId=%s jobId=%s codes=%s",
-                    campaign_id or "",
-                    job_id or "",
-                    codes,
-                )
-                exploration_seed = str(uuid.uuid4())
-                lens_order = shuffled_exploration_lens_order()
-                strategic_restart_used = True
-                metrics.strategic_restart_used = True
-                ctx = _run_pipeline(
-                    seed=exploration_seed,
-                    lenses=lens_order,
-                    pass_name="strategic_restart",
-                )
-                if ctx.judge_result.passed:
-                    logger.info(
-                        "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
-                        campaign_id or "",
-                        job_id or "",
-                        ctx.exploration_seed,
-                    )
-                    logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
-                    return ctx.plan
-                if is_foundational_strategic_rejection(ctx.judge_result.rejection_reason_codes):
-                    logger.error(
-                        "BUILDER1_STRATEGIC_RESTART_FAILED campaignId=%s jobId=%s codes=%s",
-                        campaign_id or "",
-                        job_id or "",
-                        ctx.judge_result.rejection_reason_codes,
-                    )
-                    raise Builder1PlannerError("planning_failed")
-                codes = ctx.judge_result.rejection_reason_codes
-
-            repair_stage = _judge_repair_stage(codes)
-            logger.info(
-                "BUILDER1_STAGE_REPAIR stage=%s_judge reasons=%s",
-                repair_stage,
-                codes,
-            )
-            try:
-                ctx = apply_targeted_judge_repair(
-                    ctx,
-                    normalized=normalized,
-                    product_name_resolved=product_name_resolved,
-                    detected_language=detected_language,
-                    model_caller=model_caller,
-                    brand_guidelines=brand_guidelines,
-                    repair_stage=repair_stage or "series_ads",
-                    rejection_codes=codes,
-                )
-                break
-            except Builder1PlannerError:
-                raise
-            except Exception as exc:
-                raise Builder1PlannerError("final_judge_failed") from exc
-
-        if strategic_restart_used and ctx.judge_result.passed:
-            logger.info(
-                "BUILDER1_STRATEGIC_RESTART_OK campaignId=%s jobId=%s seed=%s",
-                campaign_id or "",
-                job_id or "",
-                ctx.exploration_seed,
-            )
 
         logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
         return ctx.plan
     finally:
-        metrics.strategic_restart_used = strategic_restart_used
         metrics.log_summary()
         reset_planning_metrics(metrics_token)

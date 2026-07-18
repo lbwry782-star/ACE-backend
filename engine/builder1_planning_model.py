@@ -20,11 +20,14 @@ logger = logging.getLogger(__name__)
 
 STRICT_SCHEMA_STAGES = frozenset(
     {
+        "strategy_stage",
         "strategy_scan",
         "strategy_candidate_repair",
+        "slogan_stage",
         "slogan_scan",
         "slogan_quality_review",
         "slogan_candidate_repair",
+        "conceptual_stage",
         "brand_physical",
         "graphic_system",
         "series_ads",
@@ -412,12 +415,168 @@ STRATEGY_CANDIDATE_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
     },
 }
 
+STRATEGY_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "candidateId",
+        "groundedInBrief",
+        "advantageCurrentlyTrue",
+        "executableNow",
+        "requiresMaterialInvestment",
+        "requiresClientConsultation",
+        "requiresBusinessTransformation",
+        "brandOwnable",
+        "categoryRelevant",
+        "eligible",
+        "rejectionCodes",
+    ],
+    "properties": {
+        "candidateId": {"type": "string"},
+        "groundedInBrief": {"type": "boolean"},
+        "advantageCurrentlyTrue": {"type": "boolean"},
+        "executableNow": {"type": "boolean"},
+        "requiresMaterialInvestment": {"type": "boolean"},
+        "requiresClientConsultation": {"type": "boolean"},
+        "requiresBusinessTransformation": {"type": "boolean"},
+        "brandOwnable": {"type": "boolean"},
+        "categoryRelevant": {"type": "boolean"},
+        "eligible": {"type": "boolean"},
+        "rejectionCodes": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+STRATEGY_STAGE_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidates", "evaluations", "selectedCandidateId", "selectionReason"],
+    "properties": {
+        "candidates": STRATEGY_SCAN_JSON_SCHEMA["properties"]["candidates"],
+        "evaluations": {"type": "array", "items": STRATEGY_EVALUATION_ITEM_SCHEMA},
+        "selectedCandidateId": {"type": "string"},
+        "selectionReason": {"type": "string"},
+    },
+}
+
+SLOGAN_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "candidateId",
+        "derivedFromAdvantage",
+        "naturalInLanguage",
+        "credible",
+        "ownable",
+        "impliedActionValid",
+        "campaignGenerative",
+        "eligible",
+        "rejectionCodes",
+    ],
+    "properties": {
+        "candidateId": {"type": "string"},
+        "derivedFromAdvantage": {"type": "boolean"},
+        "naturalInLanguage": {"type": "boolean"},
+        "credible": {"type": "boolean"},
+        "ownable": {"type": "boolean"},
+        "impliedActionValid": {"type": "boolean"},
+        "campaignGenerative": {"type": "boolean"},
+        "eligible": {"type": "boolean"},
+        "rejectionCodes": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+SLOGAN_STAGE_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidates", "evaluations", "selectedCandidateId", "selectionReason"],
+    "properties": {
+        "candidates": SLOGAN_SCAN_JSON_SCHEMA["properties"]["candidates"],
+        "evaluations": {"type": "array", "items": SLOGAN_EVALUATION_ITEM_SCHEMA},
+        "selectedCandidateId": {"type": "string"},
+        "selectionReason": {"type": "string"},
+    },
+}
+
+CONCEPTUAL_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "candidateId",
+        "derivedFromSelectedSloganAction",
+        "expressesRelativeAdvantage",
+        "visuallyClear",
+        "seriesGenerative",
+        "brandOwnable",
+        "categoryRelevant",
+        "executableByImageModel",
+        "eligible",
+        "rejectionCodes",
+    ],
+    "properties": {
+        "candidateId": {"type": "string"},
+        "derivedFromSelectedSloganAction": {"type": "boolean"},
+        "expressesRelativeAdvantage": {"type": "boolean"},
+        "visuallyClear": {"type": "boolean"},
+        "seriesGenerative": {"type": "boolean"},
+        "brandOwnable": {"type": "boolean"},
+        "categoryRelevant": {"type": "boolean"},
+        "executableByImageModel": {"type": "boolean"},
+        "eligible": {"type": "boolean"},
+        "rejectionCodes": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+CONCEPTUAL_STAGE_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["candidates", "evaluations", "selectedCandidateId", "selectionReason"],
+    "properties": {
+        "candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "generator",
+                    "action",
+                    "input",
+                    "transformation",
+                    "result",
+                    "whyItExpressesSlogan",
+                    "whyItExpressesAdvantage",
+                    "seriesPotential",
+                    "brandOwnershipPotential",
+                ],
+                "properties": {
+                    "id": {"type": "string"},
+                    "generator": {"type": "string"},
+                    "action": {"type": "string"},
+                    "input": {"type": "string"},
+                    "transformation": {"type": "string"},
+                    "result": {"type": "string"},
+                    "whyItExpressesSlogan": {"type": "string"},
+                    "whyItExpressesAdvantage": {"type": "string"},
+                    "seriesPotential": {"type": "string"},
+                    "brandOwnershipPotential": {"type": "string"},
+                },
+            },
+        },
+        "evaluations": {"type": "array", "items": CONCEPTUAL_EVALUATION_ITEM_SCHEMA},
+        "selectedCandidateId": {"type": "string"},
+        "selectionReason": {"type": "string"},
+    },
+}
+
 STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
+    "strategy_stage": STRATEGY_STAGE_JSON_SCHEMA,
     "strategy_scan": STRATEGY_SCAN_JSON_SCHEMA,
     "strategy_candidate_repair": STRATEGY_CANDIDATE_REPAIR_JSON_SCHEMA,
+    "slogan_stage": SLOGAN_STAGE_JSON_SCHEMA,
     "slogan_scan": SLOGAN_SCAN_JSON_SCHEMA,
     "slogan_quality_review": SLOGAN_QUALITY_REVIEW_JSON_SCHEMA,
     "slogan_candidate_repair": SLOGAN_CANDIDATE_REPAIR_JSON_SCHEMA,
+    "conceptual_stage": CONCEPTUAL_STAGE_JSON_SCHEMA,
     "brand_physical": BRAND_PHYSICAL_JSON_SCHEMA,
     "graphic_system": GRAPHIC_SYSTEM_JSON_SCHEMA,
     "series_ads": SERIES_ADS_JSON_SCHEMA,
@@ -522,4 +681,25 @@ def call_planning_model(
                 if getattr(content, "type", None) == "output_text":
                     parts.append(getattr(content, "text", "") or "")
         out_text = "".join(parts)
+
+    try:
+        from engine.builder1_planning_metrics import get_planning_metrics
+
+        metrics = get_planning_metrics()
+        if metrics is not None:
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                prompt_tokens = getattr(usage, "input_tokens", None)
+                if prompt_tokens is None:
+                    prompt_tokens = getattr(usage, "prompt_tokens", None)
+                output_tokens = getattr(usage, "output_tokens", None)
+                if output_tokens is None:
+                    output_tokens = getattr(usage, "completion_tokens", None)
+                metrics.record_token_usage(
+                    prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
+                    output_tokens=int(output_tokens) if output_tokens is not None else None,
+                )
+    except Exception:
+        pass
+
     return parse_json_text(out_text)
