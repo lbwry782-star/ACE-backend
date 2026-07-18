@@ -14,7 +14,9 @@ METHODOLOGY_REJECTION_CODES = frozenset(
     | {
         "conceptual_generator_not_derived_from_slogan",
         "physical_generator_not_derived_from_concept",
-        "literal_product_depiction_unjustified",
+        "physical_generator_is_product",
+        "physical_generator_is_packaging",
+        "unauthorized_product_visibility",
         "visual_requires_explanatory_headline",
         "campaign_transferable_to_competitor",
         "category_relevance_patched",
@@ -70,8 +72,10 @@ INTERNAL_AD_FIELDS = (
     "categoryRelevanceReason",
     "headlineRequired",
     "headlineReason",
-    "productVisibilityRequired",
-    "productVisibilityReason",
+    "productVisible",
+    "packagingVisible",
+    "productIsMainVisual",
+    "productIsPhysicalGenerator",
     "sameVisualLawProof",
     "distinctFromOtherAdsReason",
     "noReuseCheck",
@@ -108,7 +112,9 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
         code in codes
         for code in (
             "physical_generator_not_derived_from_concept",
-            "literal_product_depiction_unjustified",
+            "physical_generator_is_product",
+            "physical_generator_is_packaging",
+            "unauthorized_product_visibility",
         )
     ):
         return "brand_physical"
@@ -147,7 +153,9 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
             frozenset(
                 {
                     "physical_generator_not_derived_from_concept",
-                    "literal_product_depiction_unjustified",
+                    "physical_generator_is_product",
+                    "physical_generator_is_packaging",
+                    "unauthorized_product_visibility",
                 }
             ),
         ),
@@ -226,6 +234,7 @@ def deterministic_methodology_checks(plan_dict: Dict[str, Any]) -> List[str]:
     detected = _norm(plan_dict.get("detectedLanguage")).lower()
     embodiment = _norm(plan_dict.get("embodimentChoice")).lower()
     visibility_reason = _norm(plan_dict.get("productVisibilityJustification"))
+    visibility_policy = _norm(plan_dict.get("productVisibilityPolicy")).upper() or "FORBIDDEN"
 
     if slogan_action and conceptual_action:
         why_slogan = _norm(plan_dict.get("conceptualGeneratorWhyItExpressesSlogan"))
@@ -247,6 +256,7 @@ def deterministic_methodology_checks(plan_dict: Dict[str, Any]) -> List[str]:
             detected=detected,
             embodiment=embodiment,
             visibility_reason=visibility_reason,
+            visibility_policy=visibility_policy,
         )
     )
     return list(dict.fromkeys(reasons))
@@ -264,6 +274,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
     detected: str = "",
     embodiment: str = "",
     visibility_reason: str = "",
+    visibility_policy: str = "FORBIDDEN",
 ) -> List[str]:
     reasons: List[str] = []
     if not any([slogan, slogan_action, relative_advantage, conceptual_action, physical]):
@@ -276,6 +287,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
         detected = _norm(plan_dict.get("detectedLanguage")).lower()
         embodiment = _norm(plan_dict.get("embodimentChoice")).lower()
         visibility_reason = _norm(plan_dict.get("productVisibilityJustification"))
+        visibility_policy = _norm(plan_dict.get("productVisibilityPolicy")).upper() or "FORBIDDEN"
 
     if physical and conceptual_action:
         physical_role = _norm(plan_dict.get("physicalGeneratorCampaignRole"))
@@ -290,11 +302,19 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
         )
         if any(marker in combined for marker in disconnected_markers):
             reasons.append("physical_generator_not_derived_from_concept")
-        if embodiment == "literal" and not visibility_reason and not physical_role:
-            reasons.append("physical_generator_not_derived_from_concept")
 
-    if embodiment == "literal" and not visibility_reason:
-        reasons.append("literal_product_depiction_unjustified")
+    if visibility_policy == "FORBIDDEN":
+        for ad in _ads_from_plan(plan_dict):
+            if ad.get("productVisible") is True or ad.get("productIsMainVisual") is True:
+                reasons.append("unauthorized_product_visibility")
+            if ad.get("packagingVisible") is True:
+                reasons.append("unauthorized_product_visibility")
+            if ad.get("productIsPhysicalGenerator") is True:
+                reasons.append("physical_generator_is_product")
+        if embodiment == "literal":
+            reasons.append("unauthorized_product_visibility")
+        if visibility_reason and "show" in visibility_reason.lower():
+            reasons.append("unauthorized_product_visibility")
 
     transfer = _norm(plan_dict.get("competitorTransferTest")).lower()
     if transfer in {"yes", "true", "transferable", "high"}:
@@ -365,6 +385,11 @@ def strip_internal_plan_fields(plan_dict: Dict[str, Any]) -> Dict[str, Any]:
     for key in (
         "embodimentChoice",
         "productVisibilityJustification",
+        "productVisibilityPolicy",
+        "productVisibilitySource",
+        "transferredObject",
+        "transferredObjectAction",
+        "whyClearerThanShowingProduct",
         "competitorTransferTest",
         "transferRisk",
         "categoryRelevancePatched",

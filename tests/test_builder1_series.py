@@ -170,6 +170,9 @@ def _base_campaign(ad_count: int = 2) -> Dict[str, Any]:
         "physicalGenerator": "Rubber ball family",
         "physicalGeneratorNaturalPurpose": "Bounce and absorb impact",
         "physicalGeneratorCampaignRole": "Impact survival metaphor",
+        "transferredObject": "Rubber ball family",
+        "transferredObjectAction": "Bounces after a drop without cracking",
+        "productVisibilityPolicy": "FORBIDDEN",
         "graphicGenerator": _graphic(),
         "seriesGenerator": {
             "type": "situations",

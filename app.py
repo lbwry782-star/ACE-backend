@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -60,12 +61,21 @@ from engine.builder1_image_compliance import (
     ImageComplianceUnavailableError,
     log_builder1_image_compliance_config,
 )
+from engine.builder1_planning_profile import (
+    log_builder1_planning_profile_config,
+    resolve_stage_routing,
+)
 from engine.builder1_input_normalizer import Builder1InputError, normalize_ad_count
 from engine.builder1_plan_spec import (
     ad_to_public_api_dict,
     campaign_identity_to_dict,
 )
 from engine.builder1_planner import Builder1PlannerError, plan_builder1
+from engine.builder1_planning_metrics import (
+    get_planning_metrics,
+    log_builder1_initial_ad_timing,
+    log_builder1_next_ad_timing,
+)
 from engine.builder1_zip import build_builder1_zip_bytes, build_builder1_zip_from_request
 
 app = Flask(__name__)
@@ -85,6 +95,11 @@ try:
     log_builder1_image_compliance_config()
 except Exception as e:
     logger.warning("BUILDER1_IMAGE_COMPLIANCE_CONFIG startup failed err=%s", e)
+
+try:
+    log_builder1_planning_profile_config()
+except Exception as e:
+    logger.warning("BUILDER1_PLANNING_PROFILE_CONFIG startup failed err=%s", e)
 
 
 @app.before_request
@@ -436,24 +451,18 @@ def _o3_pro_planning_model_caller(
     )
     from engine.builder1_planning_model import call_planning_model
 
-    stage_model_env = {
-        "strategy_stage": "BUILDER1_STRATEGY_STAGE_MODEL",
-        "slogan_stage": "BUILDER1_SLOGAN_STAGE_MODEL",
-        "conceptual_stage": "BUILDER1_CONCEPTUAL_STAGE_MODEL",
-        "brand_physical": "BUILDER1_PHYSICAL_STAGE_MODEL",
-        "graphic_system": "BUILDER1_GRAPHIC_STAGE_MODEL",
-        "series_ads": "BUILDER1_SERIES_STAGE_MODEL",
-        "product_name_resolution": "BUILDER1_PRODUCT_NAME_MODEL",
-    }
-    default_model = (os.environ.get("BUILDER1_PLANNING_MODEL") or "o3-pro").strip()
-    env_key = stage_model_env.get(stage or "", "")
-    model = (os.environ.get(env_key) or default_model).strip() if env_key else default_model
+    routing = resolve_stage_routing(stage)
     if stage:
-        logger.info("BUILDER1_STAGE_MODEL stage=%s model=%s", stage, model)
+        logger.info(
+            "BUILDER1_STAGE_MODEL stage=%s model=%s reasoningEffort=%s",
+            stage,
+            routing.model,
+            routing.reasoning_effort or "none",
+        )
 
     return call_planning_model(
         client,
-        model=model,
+        model=routing.model,
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         stage=stage,
@@ -574,10 +583,17 @@ def _builder1_generate_single_ad(
     campaign_id: str,
     ad_index: int,
     already_reserved: bool,
+    log_next_ad_timing: bool = False,
+    initial_request_started_at: float | None = None,
+    planning_duration_ms: int = 0,
+    campaign_persistence_duration_ms: int = 0,
 ) -> dict[str, Any]:
+    started_at = time.perf_counter()
     session = None
     reservation_held = already_reserved
     lock_token = ""
+    reservation_started = time.perf_counter()
+    reservation_duration_ms = 0
     try:
         if already_reserved:
             session = get_campaign_session(campaign_id)
@@ -596,6 +612,8 @@ def _builder1_generate_single_ad(
             session = reserve_next_ad_index(campaign_id, ad_index, job_id=job_id)
             lock_token = session.generating_lock_token or ""
             reservation_held = True
+
+        reservation_duration_ms = int((time.perf_counter() - reservation_started) * 1000)
 
         logger.info(
             "BUILDER1_NEXT_AD_INDEX jobId=%s campaignId=%s adIndex=%s targetAdCount=%s",
@@ -623,6 +641,28 @@ def _builder1_generate_single_ad(
         reservation_held = False
 
         logger.info("BUILDER1_AD_GENERATED campaignId=%s adIndex=%s", campaign_id, ad_index)
+        if log_next_ad_timing:
+            log_builder1_next_ad_timing(
+                campaign_id=campaign_id,
+                job_id=job_id,
+                ad_index=ad_index,
+                image_generation_duration_ms=getattr(image_result, "image_generation_duration_ms", 0),
+                compliance_review_duration_ms=getattr(image_result, "compliance_review_duration_ms", 0),
+                compliance_regeneration_count=getattr(image_result, "compliance_regeneration_count", 0),
+                total_next_ad_duration_ms=int((time.perf_counter() - started_at) * 1000),
+            )
+        elif initial_request_started_at is not None:
+            log_builder1_initial_ad_timing(
+                campaign_id=campaign_id,
+                job_id=job_id,
+                planning_duration_ms=planning_duration_ms,
+                campaign_persistence_duration_ms=campaign_persistence_duration_ms,
+                reservation_duration_ms=reservation_duration_ms,
+                image_generation_duration_ms=getattr(image_result, "image_generation_duration_ms", 0),
+                compliance_review_duration_ms=getattr(image_result, "compliance_review_duration_ms", 0),
+                compliance_regeneration_count=getattr(image_result, "compliance_regeneration_count", 0),
+                total_initial_request_duration_ms=int((time.perf_counter() - initial_request_started_at) * 1000),
+            )
         return _builder1_build_incremental_result(
             campaign_id=campaign_id,
             session=session,
@@ -717,6 +757,7 @@ def _builder1_generate_initial(
     ad_count: int,
     brand_guidelines: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
+    initial_started_at = time.perf_counter()
     logger.info(
         "BUILDER1_SERIES_REQUEST jobId=%s campaignId=%s adCount=%s format=%s",
         job_id,
@@ -725,6 +766,7 @@ def _builder1_generate_initial(
         format_val,
     )
     _builder1_update_job(job_id, stage="planning", completedAds=0, totalAds=ad_count)
+    planning_started_at = time.perf_counter()
     try:
         series_plan = plan_builder1(
             product_name=product_name,
@@ -748,17 +790,27 @@ def _builder1_generate_initial(
         logger.error("BUILDER1_SERIES_PLAN_REJECTED jobId=%s err=%s", job_id, err_message)
         return {"ok": False, "error": "planning_failed", "message": err_message}
 
+    planning_duration_ms = int((time.perf_counter() - planning_started_at) * 1000)
+    metrics = get_planning_metrics()
+    if metrics is not None and metrics.total_planning_duration_ms:
+        planning_duration_ms = metrics.total_planning_duration_ms
+
+    persistence_started_at = time.perf_counter()
     create_campaign_session(
         campaign_id=campaign_id,
         plan=series_plan,
         target_ad_count=ad_count,
     )
+    campaign_persistence_duration_ms = int((time.perf_counter() - persistence_started_at) * 1000)
     _builder1_update_job(job_id, stage="building_prompts", targetAdCount=ad_count, totalAds=ad_count)
     return _builder1_generate_single_ad(
         job_id=job_id,
         campaign_id=campaign_id,
         ad_index=1,
         already_reserved=False,
+        initial_request_started_at=initial_started_at,
+        planning_duration_ms=planning_duration_ms,
+        campaign_persistence_duration_ms=campaign_persistence_duration_ms,
     )
 
 
@@ -795,6 +847,7 @@ def _builder1_run_next_job(job_id: str, campaign_id: str, expected_next_index: i
             campaign_id=campaign_id,
             ad_index=expected_next_index,
             already_reserved=True,
+            log_next_ad_timing=True,
         )
         target_ad_count = get_campaign_session(campaign_id).target_ad_count
         _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)

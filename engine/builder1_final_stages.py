@@ -100,8 +100,12 @@ class BrandPhysicalOutput:
     physical_generator: str
     physical_generator_natural_purpose: str
     physical_generator_campaign_role: str
-    embodiment_choice: str
-    product_visibility_justification: str
+    physical_generator_is_product: bool
+    physical_generator_is_packaging: bool
+    works_without_product_visible: bool
+    transferred_object: str
+    transferred_object_action: str
+    why_clearer_than_showing_product: str
     medium_participates: bool
     medium_role: str
     campaign_rationale: str
@@ -126,8 +130,10 @@ _AD_INTERNAL_FIELD_KEYS = frozenset(
         "categoryRelevanceReason",
         "headlineRequired",
         "headlineReason",
-        "productVisibilityRequired",
-        "productVisibilityReason",
+        "productVisible",
+        "packagingVisible",
+        "productIsMainVisual",
+        "productIsPhysicalGenerator",
         "sameVisualLawProof",
         "distinctFromOtherAdsReason",
         "noReuseCheck",
@@ -235,12 +241,24 @@ def parse_brand_physical_output(
     _reject_forbidden_keys(obj, BRAND_PHYSICAL_FORBIDDEN, reasons, "brand_physical")
     _reject_legacy_fields(obj, reasons)
 
+    forbidden_legacy = (
+        "embodimentChoice",
+        "productVisibilityJustification",
+        "productVisibilityRequired",
+        "productVisibilityReason",
+    )
+    for key in forbidden_legacy:
+        if key in obj:
+            reasons.append(f"brand_physical_forbidden_field:{key}")
+
     required = [
         ("productNameResolved", "missing_productNameResolved"),
         ("physicalGenerator", "missing_physicalGenerator"),
         ("physicalGeneratorNaturalPurpose", "missing_physicalGeneratorNaturalPurpose"),
         ("physicalGeneratorCampaignRole", "missing_physicalGeneratorCampaignRole"),
-        ("embodimentChoice", "missing_embodimentChoice"),
+        ("transferredObject", "missing_transferredObject"),
+        ("transferredObjectAction", "missing_transferredObjectAction"),
+        ("whyClearerThanShowingProduct", "missing_whyClearerThanShowingProduct"),
         ("campaignRationale", "missing_campaignRationale"),
     ]
     for field, code in required:
@@ -250,13 +268,22 @@ def parse_brand_physical_output(
     if obj.get("brandSlogan") or obj.get("sloganDerivation") or obj.get("sloganAction"):
         reasons.append("brand_physical_must_not_create_slogan")
 
-    embodiment_choice = _norm_text(obj.get("embodimentChoice")).lower()
-    if embodiment_choice not in {"literal", "transferred"}:
-        reasons.append("invalid_embodiment_choice")
+    try:
+        physical_generator_is_product = bool(obj.get("physicalGeneratorIsProduct"))
+        physical_generator_is_packaging = bool(obj.get("physicalGeneratorIsPackaging"))
+        works_without_product_visible = bool(obj.get("worksWithoutProductVisible"))
+    except (TypeError, ValueError):
+        reasons.append("brand_physical_invariant_not_boolean")
+        physical_generator_is_product = True
+        physical_generator_is_packaging = True
+        works_without_product_visible = False
 
-    product_visibility_justification = _norm_text(obj.get("productVisibilityJustification"))
-    if embodiment_choice == "literal" and not product_visibility_justification:
-        reasons.append("literal_product_depiction_unjustified")
+    if physical_generator_is_product:
+        reasons.append("physical_generator_is_product")
+    if physical_generator_is_packaging:
+        reasons.append("physical_generator_is_packaging")
+    if not works_without_product_visible:
+        reasons.append("physical_generator_requires_product_visible")
 
     try:
         medium_participates = _normalize_bool(obj.get("mediumParticipates"), default=False)
@@ -293,8 +320,12 @@ def parse_brand_physical_output(
         physical_generator=_norm_text(obj.get("physicalGenerator")),
         physical_generator_natural_purpose=_norm_text(obj.get("physicalGeneratorNaturalPurpose")),
         physical_generator_campaign_role=physical_campaign_role,
-        embodiment_choice=embodiment_choice,
-        product_visibility_justification=product_visibility_justification,
+        physical_generator_is_product=physical_generator_is_product,
+        physical_generator_is_packaging=physical_generator_is_packaging,
+        works_without_product_visible=works_without_product_visible,
+        transferred_object=_norm_text(obj.get("transferredObject")),
+        transferred_object_action=_norm_text(obj.get("transferredObjectAction")),
+        why_clearer_than_showing_product=_norm_text(obj.get("whyClearerThanShowingProduct")),
         medium_participates=medium_participates,
         medium_role=medium_role,
         campaign_rationale=campaign_rationale,
@@ -391,6 +422,7 @@ def parse_series_ads_output(
     *,
     expected_ad_count: int,
     product_description: str = "",
+    visibility_policy: Optional[Any] = None,
 ) -> SeriesAdsOutput:
     reasons: List[str] = []
     try:
@@ -422,6 +454,10 @@ def parse_series_ads_output(
     ads_raw = obj.get("ads")
     normalized_ads = _normalize_ad_indexes(ads_raw if isinstance(ads_raw, list) else [], expected_ad_count, reasons)
     normalized_ads = strip_model_slogan_fields_from_series_ads(normalized_ads)
+    if visibility_policy is not None:
+        from engine.builder1_product_visibility import enforce_series_ad_visibility_fields
+
+        normalized_ads = enforce_series_ad_visibility_fields(normalized_ads, policy=visibility_policy)
     reasons.extend(
         validate_series_ads_boundary_text(normalized_ads, product_description=product_description)
     )
@@ -449,8 +485,19 @@ def assemble_builder1_campaign(
     brand_physical: BrandPhysicalOutput,
     graphic: Builder1GraphicGenerator,
     series_ads: SeriesAdsOutput,
+    visibility_policy: Any = None,
+    visibility_source: Any = None,
 ) -> Builder1SeriesPlan:
     """Deterministic final plan assembly — server injects authoritative fields."""
+    from engine.builder1_product_visibility import (
+        ProductVisibilityPolicy,
+        ProductVisibilitySource,
+    )
+
+    if visibility_policy is None:
+        visibility_policy = ProductVisibilityPolicy.FORBIDDEN
+    if visibility_source is None:
+        visibility_source = ProductVisibilitySource.DEFAULT
     evidence = strategy.brief_support
     if check_unsupported_evidence(evidence, product_description):
         raise StageParseError("assemble", ["unsupported_evidence_claim"])
@@ -482,8 +529,9 @@ def assemble_builder1_campaign(
         "conceptualGeneratorResult": conceptual.result,
         "conceptualGeneratorWhyItExpressesSlogan": conceptual.why_it_expresses_slogan,
         "conceptualGeneratorWhyItExpressesAdvantage": conceptual.why_it_expresses_advantage,
-        "embodimentChoice": brand_physical.embodiment_choice,
-        "productVisibilityJustification": brand_physical.product_visibility_justification,
+        "transferredObject": brand_physical.transferred_object,
+        "transferredObjectAction": brand_physical.transferred_object_action,
+        "whyClearerThanShowingProduct": brand_physical.why_clearer_than_showing_product,
         "brandOwnershipReason": selected_slogan.why_ownable,
         "competitorTransferTest": selected_slogan.competitor_transfer_risk,
         "transferRisk": selected_slogan.competitor_transfer_risk,
@@ -526,6 +574,7 @@ def assemble_builder1_campaign(
         "mediumParticipates": brand_physical.medium_participates,
         "mediumRole": brand_physical.medium_role,
         "campaignRationale": brand_physical.campaign_rationale,
+        "productVisibilityPolicy": getattr(visibility_policy, "value", str(visibility_policy)),
         "ads": assembled_ads,
     }
 
@@ -552,8 +601,11 @@ def assemble_builder1_campaign(
         planning_internals={
             "conceptualLineage": conceptual_lineage,
             "conceptualGeneratorWhyItExpressesSlogan": conceptual.why_it_expresses_slogan,
-            "embodimentChoice": brand_physical.embodiment_choice,
-            "productVisibilityJustification": brand_physical.product_visibility_justification,
+            "productVisibilityPolicy": getattr(visibility_policy, "value", str(visibility_policy)),
+            "productVisibilitySource": getattr(visibility_source, "value", str(visibility_source)),
+            "transferredObject": brand_physical.transferred_object,
+            "transferredObjectAction": brand_physical.transferred_object_action,
+            "whyClearerThanShowingProduct": brand_physical.why_clearer_than_showing_product,
             "brandOwnershipReason": selected_slogan.why_ownable,
             "competitorTransferTest": selected_slogan.competitor_transfer_risk,
             "transferRisk": selected_slogan.competitor_transfer_risk,

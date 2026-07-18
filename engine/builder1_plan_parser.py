@@ -687,6 +687,11 @@ def validate_series_plan_structure(
             physical_generator=_norm_text(obj.get("physicalGenerator")),
             physical_generator_natural_purpose=_norm_text(obj.get("physicalGeneratorNaturalPurpose")),
             physical_generator_campaign_role=_norm_text(obj.get("physicalGeneratorCampaignRole")),
+            transferred_object=_norm_text(obj.get("transferredObject") or obj.get("physicalGenerator")),
+            transferred_object_action=_norm_text(
+                obj.get("transferredObjectAction") or obj.get("physicalGeneratorCampaignRole")
+            ),
+            product_visibility_policy=_norm_text(obj.get("productVisibilityPolicy") or "FORBIDDEN"),
             graphic_generator=graphic,  # type: ignore[arg-type]
             series_generator=series_gen,  # type: ignore[arg-type]
             medium_participates=medium_participates,

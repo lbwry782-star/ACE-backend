@@ -5,11 +5,28 @@ from __future__ import annotations
 
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
+from engine.builder1_product_visibility import (
+    ProductVisibilityPolicy,
+    build_product_visibility_image_block,
+)
 
 MEDIUM_PROHIBITION = (
     "Do not show this advertisement inside a billboard, framed poster mockup, phone screen, "
     "presentation board, magazine mockup, or floating canvas. The image itself IS the finished advertisement."
 )
+
+
+def _resolve_visibility_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
+    raw = (series_plan.product_visibility_policy or "").strip().upper()
+    try:
+        return ProductVisibilityPolicy(raw)
+    except ValueError:
+        internals = series_plan.planning_internals or {}
+        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
+        try:
+            return ProductVisibilityPolicy(raw)
+        except ValueError:
+            return ProductVisibilityPolicy.FORBIDDEN
 
 
 def build_campaign_graphic_identity_block(series_plan: Builder1SeriesPlan) -> str:
@@ -76,7 +93,8 @@ def _campaign_strategy_block(series_plan: Builder1SeriesPlan) -> str:
             f"Conceptual transformation: Take {series_plan.conceptual_generator_input} → {series_plan.conceptual_generator_transformation} → {series_plan.conceptual_generator_result}.",
             f"Why this expresses the slogan and advantage: {series_plan.conceptual_generator_why_it_expresses_advantage}.",
             f"Relative advantage proven: {series_plan.relative_advantage}.",
-            f"Physical generator family: {series_plan.physical_generator}.",
+            f"Transferred physical generator: {series_plan.transferred_object or series_plan.physical_generator}.",
+            f"Transferred object action: {series_plan.transferred_object_action or series_plan.physical_generator_campaign_role}.",
         ]
     )
 
@@ -95,6 +113,13 @@ def _ad_execution_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
 
 
 def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
+    policy = _resolve_visibility_policy(series_plan)
+    visibility_block = build_product_visibility_image_block(
+        policy=policy,
+        transferred_object=series_plan.transferred_object or series_plan.physical_generator,
+        transferred_object_action=series_plan.transferred_object_action or series_plan.physical_generator_campaign_role,
+        product_name=series_plan.product_name_resolved,
+    )
     medium_block = (
         f"Medium participation (justified): {series_plan.medium_role}."
         if series_plan.medium_participates
@@ -115,6 +140,7 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
         "Create a complete finished advertisement that fills the entire image frame edge to edge.",
         f"Format: {series_plan.format}. The output is the final ad itself, not a background for later overlay.",
         BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK,
+        visibility_block,
         "BRAND SLOGAN is fixed across the campaign. MARKETING TEXT must NOT appear inside the image.",
         headline_rule,
         hebrew_block,

@@ -111,8 +111,12 @@ def _brand_physical_to_dict(bp: BrandPhysicalOutput) -> Dict[str, Any]:
         "physicalGenerator": bp.physical_generator,
         "physicalGeneratorNaturalPurpose": bp.physical_generator_natural_purpose,
         "physicalGeneratorCampaignRole": bp.physical_generator_campaign_role,
-        "embodimentChoice": bp.embodiment_choice,
-        "productVisibilityJustification": bp.product_visibility_justification,
+        "physicalGeneratorIsProduct": bp.physical_generator_is_product,
+        "physicalGeneratorIsPackaging": bp.physical_generator_is_packaging,
+        "worksWithoutProductVisible": bp.works_without_product_visible,
+        "transferredObject": bp.transferred_object,
+        "transferredObjectAction": bp.transferred_object_action,
+        "whyClearerThanShowingProduct": bp.why_clearer_than_showing_product,
         "mediumParticipates": bp.medium_participates,
         "mediumRole": bp.medium_role,
         "campaignRationale": bp.campaign_rationale,
@@ -498,6 +502,28 @@ def plan_builder1(
             metrics.end_pipeline_pass()
 
         logger.info("BUILDER1_SERIES_PLANNING_OK adCount=%s", ctx.plan.ad_count)
+        from engine.builder1_product_visibility import (
+            ProductVisibilityPolicy,
+            ProductVisibilitySource,
+            log_builder1_product_visibility_policy,
+        )
+
+        internals = ctx.plan.planning_internals or {}
+        policy_raw = internals.get("productVisibilityPolicy", ProductVisibilityPolicy.FORBIDDEN.value)
+        source_raw = internals.get("productVisibilitySource", ProductVisibilitySource.DEFAULT.value)
+        try:
+            policy = ProductVisibilityPolicy(str(policy_raw))
+        except ValueError:
+            policy = ProductVisibilityPolicy.FORBIDDEN
+        try:
+            source = ProductVisibilitySource(str(source_raw))
+        except ValueError:
+            source = ProductVisibilitySource.DEFAULT
+        log_builder1_product_visibility_policy(
+            campaign_id=campaign_id or "",
+            policy=policy,
+            source=source,
+        )
         return ctx.plan
     finally:
         metrics.log_summary()

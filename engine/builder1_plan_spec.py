@@ -109,6 +109,11 @@ INTERNAL_PLAN_FIELDS = {
     "conceptualGeneratorWhyItExpressesSlogan",
     "embodimentChoice",
     "productVisibilityJustification",
+    "productVisibilityPolicy",
+    "productVisibilitySource",
+    "transferredObject",
+    "transferredObjectAction",
+    "whyClearerThanShowingProduct",
     "brandOwnershipReason",
     "competitorTransferTest",
     "transferRisk",
@@ -205,6 +210,9 @@ class Builder1SeriesPlan:
     physical_generator: str
     physical_generator_natural_purpose: str
     physical_generator_campaign_role: str
+    transferred_object: str
+    transferred_object_action: str
+    product_visibility_policy: str
     graphic_generator: Builder1GraphicGenerator
     series_generator: Builder1SeriesGenerator
     medium_participates: bool
@@ -278,6 +286,9 @@ def campaign_identity_to_dict(plan: Builder1SeriesPlan) -> Dict[str, Any]:
         "physicalGenerator": plan.physical_generator,
         "physicalGeneratorNaturalPurpose": plan.physical_generator_natural_purpose,
         "physicalGeneratorCampaignRole": plan.physical_generator_campaign_role,
+        "transferredObject": plan.transferred_object,
+        "transferredObjectAction": plan.transferred_object_action,
+        "productVisibilityPolicy": plan.product_visibility_policy,
         "graphicGenerator": graphic_generator_to_dict(plan.graphic_generator),
         "seriesGenerator": series_generator_to_dict(plan.series_generator),
         "mediumParticipates": plan.medium_participates,

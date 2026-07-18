@@ -201,8 +201,12 @@ BRAND_PHYSICAL_JSON_SCHEMA: Dict[str, Any] = {
         "physicalGenerator",
         "physicalGeneratorNaturalPurpose",
         "physicalGeneratorCampaignRole",
-        "embodimentChoice",
-        "productVisibilityJustification",
+        "physicalGeneratorIsProduct",
+        "physicalGeneratorIsPackaging",
+        "worksWithoutProductVisible",
+        "transferredObject",
+        "transferredObjectAction",
+        "whyClearerThanShowingProduct",
         "mediumParticipates",
         "mediumRole",
         "campaignRationale",
@@ -212,8 +216,12 @@ BRAND_PHYSICAL_JSON_SCHEMA: Dict[str, Any] = {
         "physicalGenerator": {"type": "string"},
         "physicalGeneratorNaturalPurpose": {"type": "string"},
         "physicalGeneratorCampaignRole": {"type": "string"},
-        "embodimentChoice": {"type": "string", "enum": ["literal", "transferred"]},
-        "productVisibilityJustification": {"type": "string"},
+        "physicalGeneratorIsProduct": {"type": "boolean"},
+        "physicalGeneratorIsPackaging": {"type": "boolean"},
+        "worksWithoutProductVisible": {"type": "boolean"},
+        "transferredObject": {"type": "string"},
+        "transferredObjectAction": {"type": "string"},
+        "whyClearerThanShowingProduct": {"type": "string"},
         "mediumParticipates": {"type": "boolean"},
         "mediumRole": {"type": "string"},
         "campaignRationale": {"type": "string"},
@@ -328,8 +336,6 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "categoryRelevanceReason": {"type": "string"},
                     "headlineRequired": {"type": "boolean"},
                     "headlineReason": {"type": "string"},
-                    "productVisibilityRequired": {"type": "boolean"},
-                    "productVisibilityReason": {"type": "string"},
                     "sameVisualLawProof": {"type": "string"},
                     "distinctFromOtherAdsReason": {"type": "string"},
                     "noReuseCheck": {"type": "string"},
@@ -355,8 +361,6 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "categoryRelevanceReason",
                     "headlineRequired",
                     "headlineReason",
-                    "productVisibilityRequired",
-                    "productVisibilityReason",
                     "sameVisualLawProof",
                     "distinctFromOtherAdsReason",
                     "noReuseCheck",
@@ -643,12 +647,26 @@ def call_planning_model(
     reasoning: Optional[Dict[str, Any]] = None,
     parse_json_text: Callable[[str], object],
 ) -> object:
-    combined = f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
+    from engine.builder1_planning_profile import resolve_stage_reasoning_effort
+
+    if reasoning is None:
+        effort = resolve_stage_reasoning_effort(stage, model)
+        reasoning_payload = {"effort": effort} if effort else None
+    else:
+        reasoning_payload = reasoning
+
     kwargs: Dict[str, Any] = {
         "model": model,
-        "input": combined,
-        "reasoning": reasoning or {"effort": "low"},
+        "input": [
+            {"role": "system", "content": system_prompt.strip()},
+            {"role": "user", "content": user_prompt.strip()},
+        ],
     }
+    if reasoning_payload is not None:
+        kwargs["reasoning"] = reasoning_payload
+    cache_key = (os.environ.get("BUILDER1_PLANNING_PROMPT_CACHE_KEY") or "builder1-planning-v1").strip()
+    if cache_key and stage in STRICT_SCHEMA_STAGES:
+        kwargs["prompt_cache_key"] = cache_key
     try:
         text_format = build_text_format_for_stage(stage)
     except StrictSchemaConfigurationError as exc:
@@ -668,6 +686,13 @@ def call_planning_model(
         response = client.responses.create(**kwargs)
     except StrictSchemaConfigurationError:
         raise
+    except TypeError as exc:
+        if "prompt_cache_key" in kwargs:
+            kwargs.pop("prompt_cache_key", None)
+            logger.info("BUILDER1_PROMPT_CACHE stage=%s supported=false", stage or "")
+            response = client.responses.create(**kwargs)
+        else:
+            raise
     except Exception as exc:
         if is_invalid_json_schema_api_error(exc):
             logger.error("BUILDER1_STRICT_SCHEMA_INVALID stage=%s err=%s", stage, exc)
@@ -698,6 +723,13 @@ def call_planning_model(
                 metrics.record_token_usage(
                     prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
                     output_tokens=int(output_tokens) if output_tokens is not None else None,
+                )
+            cache_status = getattr(getattr(response, "usage", None), "prompt_cache_status", None)
+            if cache_status is not None:
+                logger.info(
+                    "BUILDER1_PROMPT_CACHE stage=%s status=%s",
+                    stage or "",
+                    cache_status,
                 )
     except Exception:
         pass

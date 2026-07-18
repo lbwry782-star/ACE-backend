@@ -35,6 +35,10 @@ from engine.builder1_planning_contract import (
     build_series_ads_user_prompt,
 )
 from engine.builder1_product_name import enforce_authoritative_product_name
+from engine.builder1_product_visibility import (
+    derive_product_visibility_policy,
+    log_builder1_product_visibility_policy,
+)
 from engine.builder1_slogan_stage import slogan_candidate_to_dict
 from engine.builder1_staged_parsers import StageParseError
 from engine.builder1_strategy_selection import StrategySelectionExhausted
@@ -129,6 +133,12 @@ def run_builder1_campaign_pipeline(
     ]
     conceptual_fixed = _conceptual_to_dict(selected_conceptual)
 
+    visibility_decision = derive_product_visibility_policy(
+        product_name=product_name_resolved,
+        product_description=normalized.product_description,
+        brand_guidelines=brand_guidelines,
+    )
+
     brand_physical = _run_stage(
         "brand_physical",
         model_caller,
@@ -145,6 +155,7 @@ def run_builder1_campaign_pipeline(
             implied_action=selected_slogan.implied_action,
             conceptual=conceptual_fixed,
             brand_guidelines=brand_guidelines,
+            visibility_policy=visibility_decision.policy.value,
         ),
         lambda raw: parse_brand_physical_output(
             raw, product_description=normalized.product_description
@@ -200,6 +211,7 @@ def run_builder1_campaign_pipeline(
         model_caller=model_caller,
         run_stage=_run_stage,
         series_retry_used=False,
+        visibility_policy=visibility_decision.policy,
     )
 
     plan = assemble_builder1_campaign(
@@ -217,6 +229,8 @@ def run_builder1_campaign_pipeline(
         brand_physical=brand_physical,
         graphic=graphic,
         series_ads=series_ads,
+        visibility_policy=visibility_decision.policy,
+        visibility_source=visibility_decision.source,
     )
 
     plan_dict = series_plan_to_store_dict(plan)
@@ -280,6 +294,7 @@ def _run_series_stage_with_integrity(
     model_caller: Any,
     run_stage: Any,
     series_retry_used: bool,
+    visibility_policy: Any,
 ) -> SeriesAdsOutput:
     from engine.builder1_planner import Builder1PlannerError
 
@@ -298,11 +313,13 @@ def _run_series_stage_with_integrity(
             conceptual=conceptual_fixed,
             brand_physical=brand_physical_dict,
             graphic_generator=graphic_dict,
+            visibility_policy=getattr(visibility_policy, "value", str(visibility_policy)),
         ),
         lambda raw: parse_series_ads_output(
             raw,
             expected_ad_count=normalized.ad_count,
             product_description=normalized.product_description,
+            visibility_policy=visibility_policy,
         ),
         repair_builder=lambda broken, reasons: build_series_ads_repair_prompt(
             broken_json=broken, reasons=reasons, ad_count=normalized.ad_count
@@ -335,6 +352,7 @@ def _run_series_stage_with_integrity(
             model_caller=model_caller,
             run_stage=run_stage,
             series_retry_used=True,
+            visibility_policy=visibility_policy,
         )
     return series_ads
 

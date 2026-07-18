@@ -20,6 +20,10 @@ IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
         "packaging_contains_brand_mark",
         "campaign_device_used_as_logo",
         "product_name_rendered_as_logo",
+        "product_visible_without_explicit_request",
+        "packaging_visible_without_explicit_request",
+        "product_used_as_physical_generator",
+        "product_used_as_main_visual",
     }
 )
 
@@ -46,6 +50,7 @@ Allowed:
 - ordinary non-brand scene objects
 - decorative campaign graphics clearly not attached to product identity
 - generic packaging decoration that cannot reasonably be interpreted as a logo
+- when explicit secondary product visibility is permitted: an unbranded product may appear small and secondary only
 
 Prohibited:
 - invented product logo
@@ -55,15 +60,21 @@ Prohibited:
 - brand symbol printed on packaging
 - campaign graphic device converted into a package logo
 - product name stylized into a pictorial logo mark
+- when product visibility is forbidden: any depiction of the advertised product, its packaging, container, bottle, can, box, carton, jar, bag, device, or ordinary category unit
+- when product visibility is forbidden: product shot, hero product, or product used as the main visual or physical generator
+- when secondary visibility is permitted: product dominating the composition, product as the joke, or any logo/mark on the product
 
 Return JSON only:
 {"pass": true, "violations": [], "confidence": "high"}
 
 When failing, set pass to false and list violation codes from:
 invented_product_logo, supplied_logo_displayed, logo_like_brand_symbol,
-packaging_contains_brand_mark, campaign_device_used_as_logo, product_name_rendered_as_logo
+packaging_contains_brand_mark, campaign_device_used_as_logo, product_name_rendered_as_logo,
+product_visible_without_explicit_request, packaging_visible_without_explicit_request,
+product_used_as_physical_generator, product_used_as_main_visual
 
 Do not use OCR as the primary mechanism. Judge the visible composition.
+Fail only when the advertised product, product unit, or package is actually depicted contrary to policy.
 """.strip()
 
 ComplianceReviewer = Callable[..., "ImageComplianceResult"]
@@ -194,6 +205,9 @@ def _openai_compliance_review_call(
     *,
     image_bytes: bytes,
     product_name: str,
+    product_description: str = "",
+    visibility_policy: str = "FORBIDDEN",
+    transferred_object: str = "",
 ) -> object:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
@@ -209,7 +223,10 @@ def _openai_compliance_review_call(
     client = OpenAI(api_key=api_key, timeout=httpx.Timeout(120.0), max_retries=0)
     user_text = (
         f'Product name allowed as plain text only: "{product_name}".\n'
-        "Review this generated Builder1 advertisement image for logo compliance."
+        f"Product visibility policy: {visibility_policy}.\n"
+        f"Approved transferred physical generator: {transferred_object or '(see campaign plan)'}.\n"
+        f"Product description (for identifying unauthorized product depictions): {product_description}\n"
+        "Review this generated Builder1 advertisement image for logo and product-visibility compliance."
     )
     last_exc: Optional[Exception] = None
     for attempt in (1, 2):
@@ -267,6 +284,9 @@ def review_builder1_ad_image_compliance(
     ad_index: int,
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
+    product_description: str = "",
+    visibility_policy: str = "FORBIDDEN",
+    transferred_object: str = "",
     reviewer: Optional[ComplianceReviewer] = None,
 ) -> ImageComplianceResult:
     logger.info(
@@ -290,7 +310,13 @@ def review_builder1_ad_image_compliance(
                 result = parse_image_compliance_response(raw)
         else:
             log_builder1_image_compliance_config()
-            raw = _openai_compliance_review_call(image_bytes=image_bytes, product_name=product_name)
+            raw = _openai_compliance_review_call(
+                image_bytes=image_bytes,
+                product_name=product_name,
+                product_description=product_description,
+                visibility_policy=visibility_policy,
+                transferred_object=transferred_object,
+            )
             result = parse_image_compliance_response(raw)
     except ImageComplianceUnavailableError as exc:
         reason_code = exc.reason_code

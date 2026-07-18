@@ -231,6 +231,10 @@ class TestImageCompliance(unittest.TestCase):
                     "packaging_contains_brand_mark",
                     "campaign_device_used_as_logo",
                     "product_name_rendered_as_logo",
+                    "product_visible_without_explicit_request",
+                    "packaging_visible_without_explicit_request",
+                    "product_used_as_physical_generator",
+                    "product_used_as_main_visual",
                 }
             ),
         )

@@ -17,6 +17,9 @@ _metrics_ctx: ContextVar[Optional["Builder1PlanningMetrics"]] = ContextVar(
 
 NORMAL_PLANNING_CALLS_WITH_NAME = 6
 NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME = 7
+PLANNING_LATENCY_PREFERRED_MS = 150_000
+PLANNING_LATENCY_WARN_MS = 180_000
+PLANNING_LATENCY_ALERT_MS = 240_000
 
 
 @dataclass
@@ -97,14 +100,34 @@ class Builder1PlanningMetrics:
             if self.product_name_call_used
             else NORMAL_PLANNING_CALLS_WITH_NAME
         )
-        threshold_ms = int(os.environ.get("BUILDER1_PLANNING_LATENCY_WARN_MS", "120000"))
-        if self.total_planning_duration_ms > threshold_ms:
+        warn_ms = int(os.environ.get("BUILDER1_PLANNING_LATENCY_WARN_MS", str(PLANNING_LATENCY_WARN_MS)))
+        alert_ms = int(os.environ.get("BUILDER1_PLANNING_LATENCY_ALERT_MS", str(PLANNING_LATENCY_ALERT_MS)))
+        preferred_ms = int(
+            os.environ.get("BUILDER1_PLANNING_LATENCY_PREFERRED_MS", str(PLANNING_LATENCY_PREFERRED_MS))
+        )
+        if self.total_planning_duration_ms > alert_ms:
+            logger.error(
+                "BUILDER1_PLANNING_LATENCY_ALERT campaignId=%s jobId=%s durationMs=%s thresholdMs=%s",
+                self.campaign_id or "",
+                self.job_id or "",
+                self.total_planning_duration_ms,
+                alert_ms,
+            )
+        elif self.total_planning_duration_ms > warn_ms:
             logger.warning(
                 "BUILDER1_PLANNING_LATENCY_HIGH campaignId=%s jobId=%s durationMs=%s thresholdMs=%s",
                 self.campaign_id or "",
                 self.job_id or "",
                 self.total_planning_duration_ms,
-                threshold_ms,
+                warn_ms,
+            )
+        elif self.total_planning_duration_ms > preferred_ms:
+            logger.info(
+                "BUILDER1_PLANNING_LATENCY_ABOVE_PREFERRED campaignId=%s jobId=%s durationMs=%s preferredMs=%s",
+                self.campaign_id or "",
+                self.job_id or "",
+                self.total_planning_duration_ms,
+                preferred_ms,
             )
         if self.total_planning_model_calls > expected + self.focused_repair_calls:
             logger.warning(
@@ -138,6 +161,59 @@ class Builder1PlanningMetrics:
             self.total_tokens if self.total_tokens is not None else "",
             self.total_planning_duration_ms,
         )
+
+
+def log_builder1_initial_ad_timing(
+    *,
+    campaign_id: str,
+    job_id: str,
+    planning_duration_ms: int,
+    campaign_persistence_duration_ms: int,
+    reservation_duration_ms: int,
+    image_generation_duration_ms: int,
+    compliance_review_duration_ms: int,
+    compliance_regeneration_count: int,
+    total_initial_request_duration_ms: int,
+) -> None:
+    logger.info(
+        "BUILDER1_INITIAL_AD_TIMING campaignId=%s jobId=%s planningDurationMs=%s "
+        "campaignPersistenceDurationMs=%s reservationDurationMs=%s "
+        "imageGenerationDurationMs=%s complianceReviewDurationMs=%s "
+        "complianceRegenerationCount=%s totalInitialRequestDurationMs=%s",
+        campaign_id,
+        job_id,
+        planning_duration_ms,
+        campaign_persistence_duration_ms,
+        reservation_duration_ms,
+        image_generation_duration_ms,
+        compliance_review_duration_ms,
+        compliance_regeneration_count,
+        total_initial_request_duration_ms,
+    )
+
+
+def log_builder1_next_ad_timing(
+    *,
+    campaign_id: str,
+    job_id: str,
+    ad_index: int,
+    image_generation_duration_ms: int,
+    compliance_review_duration_ms: int,
+    compliance_regeneration_count: int,
+    total_next_ad_duration_ms: int,
+) -> None:
+    logger.info(
+        "BUILDER1_NEXT_AD_TIMING campaignId=%s jobId=%s adIndex=%s "
+        "imageGenerationDurationMs=%s complianceReviewDurationMs=%s "
+        "complianceRegenerationCount=%s totalNextAdDurationMs=%s",
+        campaign_id,
+        job_id,
+        ad_index,
+        image_generation_duration_ms,
+        compliance_review_duration_ms,
+        compliance_regeneration_count,
+        total_next_ad_duration_ms,
+    )
 
 
 def get_planning_metrics() -> Optional[Builder1PlanningMetrics]:

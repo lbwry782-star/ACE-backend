@@ -264,15 +264,16 @@ Rules:
 STAGE_BRAND_PHYSICAL_SYSTEM = f"""
 You are a Builder1 physical-system builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","embodimentChoice":"transferred","productVisibilityJustification":"","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
+{{"productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","physicalGeneratorIsProduct":false,"physicalGeneratorIsPackaging":false,"worksWithoutProductVisible":true,"transferredObject":"...","transferredObjectAction":"...","whyClearerThanShowingProduct":"...","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
 Rules:
 - Do NOT create, replace, or modify the brand slogan. It is fixed before this stage.
 - productNameResolved must exactly match the fixed productNameResolved value provided in the user prompt. Do not rename it.
-- Compare literal embodiment (show the product directly) versus transferred embodiment (another object/mechanism that communicates the meaning more clearly).
-- Prefer transferred embodiment when it is clearer, simpler, more surprising, or more emotionally direct.
-- embodimentChoice must be literal or transferred.
-- When embodimentChoice is literal, productVisibilityJustification must explain why showing the product is essential.
-- When embodimentChoice is transferred, productVisibilityJustification may be "".
+- Compare at least one serious transferred-object embodiment versus showing the product directly.
+- The selected physical generator must NOT be the advertised product, its packaging, or a category package.
+- physicalGeneratorIsProduct, physicalGeneratorIsPackaging must be false and worksWithoutProductVisible must be true.
+- transferredObject is the external familiar object that performs the fixed slogan action.
+- transferredObjectAction is one concrete visual action the transferred object performs.
+- whyClearerThanShowingProduct: one sentence maximum.
 - The physical generator must derive from: relative advantage → fixed slogan → implied action → selected conceptual generator.
 - Do not include graphic generator, series generator, ads, format, adCount, detectedLanguage, strategy fields, or slogan fields.
 - mediumParticipates must be JSON boolean true or false, never a string.
@@ -298,7 +299,7 @@ Rules:
 STAGE_SERIES_ADS_SYSTEM = f"""
 You are a Builder1 series and ads builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","productVisibilityRequired":false,"productVisibilityReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"..."}}]}}
+{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"..."}}]}}
 Rules:
 - seriesGenerator must be an object with type, principle, progression.
 - ads must contain exactly the requested ad count ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
@@ -314,6 +315,8 @@ Rules:
 - marketingText must be exactly 50 words in the server target language — one paragraph below the image, not inside it.
 - marketingText must be written in the target language provided in the user prompt.
 - Product identification in rendered ads must use the written product name as plain text only; never request a logo or brand symbol.
+- Do not decide whether the product or packaging should appear — the server owns product visibility policy.
+- Do not return productVisible, packagingVisible, productVisibilityRequired, or related visibility fields.
 - Populate all internal methodology fields on every ad.
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
@@ -625,6 +628,7 @@ def build_brand_physical_user_prompt(
     implied_action: str,
     conceptual: Dict[str, str],
     brand_guidelines: Optional[Dict[str, Any]] = None,
+    visibility_policy: str = "FORBIDDEN",
 ) -> str:
     guidelines = ""
     safe_guidelines = brand_guidelines_for_prompt(brand_guidelines)
@@ -641,8 +645,9 @@ def build_brand_physical_user_prompt(
         f"Fixed slogan derivation: {slogan_derivation}\n"
         f"Fixed implied slogan action: {implied_action}\n"
         f"Fixed conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
-        "Compare literal versus transferred embodiment before choosing the physical generator.\n"
-        "Return physical-generator system only. Do NOT return or modify the brand slogan."
+        f"Server product visibility policy: {visibility_policy}\n"
+        "When policy is FORBIDDEN, do not choose the product or its packaging as the physical generator.\n"
+        "Compare transferred-object embodiments only. Return physical-generator system only. Do NOT return or modify the brand slogan."
         f"{guidelines}"
     )
 
@@ -651,8 +656,10 @@ def build_brand_physical_repair_prompt(*, broken_json: str, reasons: List[str]) 
     return (
         "Repair ONLY the physical-system JSON object. Return exactly:\n"
         '{"productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...",'
-        '"physicalGeneratorCampaignRole":"...","embodimentChoice":"transferred",'
-        '"productVisibilityJustification":"","mediumParticipates":false,"mediumRole":"",'
+        '"physicalGeneratorCampaignRole":"...","physicalGeneratorIsProduct":false,'
+        '"physicalGeneratorIsPackaging":false,"worksWithoutProductVisible":true,'
+        '"transferredObject":"...","transferredObjectAction":"...","whyClearerThanShowingProduct":"...",'
+        '"mediumParticipates":false,"mediumRole":"",'
         '"campaignRationale":"..."}\n'
         f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"
@@ -709,6 +716,7 @@ def build_series_ads_user_prompt(
     conceptual: Dict[str, str],
     brand_physical: Dict[str, Any],
     graphic_generator: Dict[str, Any],
+    visibility_policy: str = "FORBIDDEN",
 ) -> str:
     indexes = ", ".join(str(i) for i in range(1, ad_count + 1))
     lang_name = "Hebrew" if detected_language == "he" else "English"
@@ -738,6 +746,8 @@ def build_series_ads_user_prompt(
         f"Conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
         f"Physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
         f"Graphic system:\n{json.dumps(graphic_generator, ensure_ascii=False, indent=2)}\n"
+        f"Server product visibility policy: {visibility_policy}\n"
+        "Do not decide product or packaging visibility in ad output — the server injects visibility fields.\n"
         f"Return seriesGenerator and exactly {ad_count} ads obeying the graphic system and internal methodology fields."
     )
 

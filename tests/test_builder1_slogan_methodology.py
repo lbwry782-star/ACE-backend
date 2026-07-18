@@ -127,14 +127,23 @@ class TestConceptualAndPhysical(unittest.TestCase):
             "conceptualGeneratorAction": plan.conceptual_generator_action,
             "conceptualGeneratorWhyItExpressesSlogan": "Shows slogan",
             "physicalGenerator": plan.physical_generator,
+            "productVisibilityPolicy": "FORBIDDEN",
             "embodimentChoice": "literal",
             "productVisibilityJustification": "",
             "detectedLanguage": "en",
             "relativeAdvantage": plan.relative_advantage,
             "sloganDerivation": plan.slogan_derivation,
-            "ads": [{"index": 1, "sceneDescription": "Scene", "headline": None, "marketingText": marketing_text_words(50)}],
+            "ads": [
+                {
+                    "index": 1,
+                    "sceneDescription": "Scene",
+                    "headline": None,
+                    "marketingText": marketing_text_words(50),
+                    "productVisible": True,
+                }
+            ],
         }
-        self.assertIn("literal_product_depiction_unjustified", deterministic_methodology_checks(store))
+        self.assertIn("unauthorized_product_visibility", deterministic_methodology_checks(store))
 
 
 class TestRepairRouting(unittest.TestCase):

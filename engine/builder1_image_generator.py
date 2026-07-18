@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -16,11 +17,21 @@ from engine.builder1_image_compliance import (
     review_builder1_ad_image_compliance,
 )
 from engine.builder1_plan_spec import Builder1SeriesPlan
+from engine.builder1_product_visibility import build_visibility_compliance_correction
 from engine.builder1_visual_prompt import build_visual_prompt
 
 logger = logging.getLogger(__name__)
 
 ImageCaller = Callable[[str, str], bytes]
+
+VISIBILITY_VIOLATION_CODES = frozenset(
+    {
+        "product_visible_without_explicit_request",
+        "packaging_visible_without_explicit_request",
+        "product_used_as_physical_generator",
+        "product_used_as_main_visual",
+    }
+)
 
 
 class ImageRateLimitError(Exception):
@@ -34,6 +45,9 @@ class Builder1AdImageResult:
     index: int
     visual_prompt: str
     image_bytes: bytes
+    image_generation_duration_ms: int = 0
+    compliance_review_duration_ms: int = 0
+    compliance_regeneration_count: int = 0
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -92,6 +106,14 @@ def _generate_with_retry(
     raise RuntimeError(f"image_generation_failed_ad_{ad_index}") from last_exc
 
 
+def _build_compliance_correction_block(violations: list[str]) -> str:
+    blocks = [BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK]
+    visibility_violations = [code for code in violations if code in VISIBILITY_VIOLATION_CODES]
+    if visibility_violations:
+        blocks.append(build_visibility_compliance_correction(visibility_violations))
+    return "\n\n".join(blocks)
+
+
 def generate_builder1_ad_image(
     series_plan: Builder1SeriesPlan,
     ad_index: int,
@@ -107,23 +129,37 @@ def generate_builder1_ad_image(
     """
     ad = next(a for a in series_plan.ads if a.index == ad_index)
     prompt = build_visual_prompt(series_plan, ad)
+    image_started = time.perf_counter()
     image_bytes = _generate_with_retry(
         ad_index=ad_index,
         prompt=prompt,
         format_value=series_plan.format,
         image_caller=image_caller,
     )
+    image_generation_duration_ms = int((time.perf_counter() - image_started) * 1000)
 
+    compliance_started = time.perf_counter()
     review = review_builder1_ad_image_compliance(
         image_bytes,
         product_name=series_plan.product_name_resolved,
         ad_index=ad_index,
         campaign_id=campaign_id,
         job_id=job_id,
+        product_description=series_plan.product_description,
+        visibility_policy=series_plan.product_visibility_policy,
+        transferred_object=series_plan.transferred_object or series_plan.physical_generator,
         reviewer=compliance_reviewer,
     )
+    compliance_review_duration_ms = int((time.perf_counter() - compliance_started) * 1000)
     if review.passed:
-        return Builder1AdImageResult(index=ad_index, visual_prompt=prompt, image_bytes=image_bytes)
+        return Builder1AdImageResult(
+            index=ad_index,
+            visual_prompt=prompt,
+            image_bytes=image_bytes,
+            image_generation_duration_ms=image_generation_duration_ms,
+            compliance_review_duration_ms=compliance_review_duration_ms,
+            compliance_regeneration_count=0,
+        )
 
     logger.info(
         "BUILDER1_IMAGE_COMPLIANCE_REGENERATE campaignId=%s jobId=%s adIndex=%s violations=%s",
@@ -132,26 +168,36 @@ def generate_builder1_ad_image(
         ad_index,
         review.violations,
     )
-    corrected_prompt = f"{prompt}\n\n{BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK}"
+    corrected_prompt = f"{prompt}\n\n{_build_compliance_correction_block(review.violations)}"
+    regen_started = time.perf_counter()
     image_bytes = _generate_with_retry(
         ad_index=ad_index,
         prompt=corrected_prompt,
         format_value=series_plan.format,
         image_caller=image_caller,
     )
+    image_generation_duration_ms += int((time.perf_counter() - regen_started) * 1000)
+    review2_started = time.perf_counter()
     review2 = review_builder1_ad_image_compliance(
         image_bytes,
         product_name=series_plan.product_name_resolved,
         ad_index=ad_index,
         campaign_id=campaign_id,
         job_id=job_id,
+        product_description=series_plan.product_description,
+        visibility_policy=series_plan.product_visibility_policy,
+        transferred_object=series_plan.transferred_object or series_plan.physical_generator,
         reviewer=compliance_reviewer,
     )
+    compliance_review_duration_ms += int((time.perf_counter() - review2_started) * 1000)
     if review2.passed:
         return Builder1AdImageResult(
             index=ad_index,
             visual_prompt=corrected_prompt,
             image_bytes=image_bytes,
+            image_generation_duration_ms=image_generation_duration_ms,
+            compliance_review_duration_ms=compliance_review_duration_ms,
+            compliance_regeneration_count=1,
         )
     if not review2.violations:
         raise ImageComplianceUnavailableError("malformed_response", ad_index=ad_index)
