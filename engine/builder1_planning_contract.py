@@ -666,6 +666,22 @@ def build_brand_physical_repair_prompt(*, broken_json: str, reasons: List[str]) 
     )
 
 
+BUILDER1_BRAND_PHYSICAL_IDENTITY_CORRECTION = (
+    "The previous selection used the advertised product itself. "
+    "Select a different external physical object."
+)
+
+
+def build_brand_physical_identity_retry_prompt(*, base_user_prompt: str) -> str:
+    return (
+        f"{base_user_prompt}\n\n"
+        "=== PHYSICAL GENERATOR CORRECTION (MANDATORY) ===\n"
+        f"{BUILDER1_BRAND_PHYSICAL_IDENTITY_CORRECTION}\n"
+        "The transferred object must not be the advertised product, its packaging, or the same category unit.\n"
+        "=== END PHYSICAL GENERATOR CORRECTION ==="
+    )
+
+
 def build_graphic_system_user_prompt(
     *,
     product_description: str,

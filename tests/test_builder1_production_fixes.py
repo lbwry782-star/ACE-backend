@@ -20,10 +20,8 @@ from engine.builder1_campaign_store import (
     mark_image_retry_required,
 )
 from engine.builder1_image_generator import generate_builder1_ad_image
-from engine.builder1_image_prompt_preflight import (
-    ImagePromptPreflightError,
-    run_image_prompt_preflight,
-)
+from engine.builder1_failure_classification import PlanProductVisibilityConflictError
+from engine.builder1_image_prompt_preflight import run_image_prompt_preflight
 from engine.builder1_planning_metrics import (
     NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME,
     NORMAL_PLANNING_CALLS_WITH_NAME,
@@ -159,7 +157,7 @@ class TestImagePreflightAndCorrection(unittest.TestCase):
         plan.transferred_object = ""
         plan.physical_generator = ""
         ad = plan.ads[0]
-        with self.assertRaises(ImagePromptPreflightError):
+        with self.assertRaises(PlanProductVisibilityConflictError):
             run_image_prompt_preflight(
                 series_plan=plan,
                 ad_plan=ad,

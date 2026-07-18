@@ -41,8 +41,10 @@ from engine.builder1_campaign_store import (
     get_campaign_session,
     mark_ad_generated,
     mark_image_retry_required,
+    mark_physical_repair_required,
     release_generation_lock,
     reserve_next_ad_index,
+    update_campaign_plan,
 )
 from engine.builder1_jobs_store import (
     create_builder1_job,
@@ -52,12 +54,18 @@ from engine.builder1_jobs_store import (
 )
 from engine.builder2_zip import build_builder2_video_zip_bytes
 from engine.builder1_composition import build_builder1_series_composition_metadata
+from engine.builder1_failure_classification import (
+    Builder1FailureClass,
+    PlanContradictionComplianceError,
+    PlanProductVisibilityConflictError,
+    classify_compliance_failure,
+)
 from engine.builder1_image_generator import (
     ImageRateLimitError,
     generate_builder1_ad_image,
     image_bytes_to_base64,
 )
-from engine.builder1_image_prompt_preflight import ImagePromptPreflightError
+from engine.builder1_physical_repair import repair_builder1_campaign_from_physical
 from engine.builder1_image_compliance import (
     ImageComplianceError,
     ImageComplianceUnavailableError,
@@ -561,12 +569,22 @@ def _builder1_build_incremental_result(
     }
 
 
-def _builder1_image_compliance_error_response(
+BUILDER1_PUBLIC_IMAGE_RETRY_MESSAGE = (
+    "התמונה לא עמדה בדרישות. ניתן לנסות ליצור את אותה מודעה שוב."
+)
+BUILDER1_PUBLIC_PHYSICAL_REPAIR_MESSAGE = (
+    "נמצאה סתירה בתכנון החזותי. המערכת תתקן את המודעה בלי להתחיל את הקמפיין מחדש."
+)
+
+
+def _builder1_retry_error_response(
     *,
     campaign_id: str,
     ad_index: int,
     session,
     error_code: str,
+    retry_mode: str,
+    user_message: str,
     violations: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     return {
@@ -574,14 +592,37 @@ def _builder1_image_compliance_error_response(
         "error": error_code,
         "retryable": True,
         "planningComplete": True,
+        "retryMode": retry_mode,
         "retryAdIndex": ad_index,
         "campaignId": campaign_id,
         "nextAdIndex": ad_index,
         "generatedCount": session.generated_count,
         "targetAdCount": session.target_ad_count,
         "status": getattr(session, "status", None) or "image_retry_required",
+        "preservedThroughStage": getattr(session, "preserved_through_stage", None),
+        "userMessage": user_message,
         "lastImageViolations": violations or getattr(session, "last_image_violations", None) or [],
     }
+
+
+def _builder1_image_compliance_error_response(
+    *,
+    campaign_id: str,
+    ad_index: int,
+    session,
+    error_code: str,
+    violations: Optional[list[str]] = None,
+    retry_mode: str = "image_only",
+) -> dict[str, Any]:
+    return _builder1_retry_error_response(
+        campaign_id=campaign_id,
+        ad_index=ad_index,
+        session=session,
+        error_code=error_code,
+        retry_mode=retry_mode,
+        user_message=BUILDER1_PUBLIC_IMAGE_RETRY_MESSAGE,
+        violations=violations,
+    )
 
 
 def _builder1_generate_single_ad(
@@ -684,6 +725,33 @@ def _builder1_generate_single_ad(
                 job_id=job_id,
                 lock_token=lock_token,
             )
+        session = get_campaign_session(campaign_id)
+        failure_class, _action, _details = classify_compliance_failure(
+            violations=list(e.violations),
+            series_plan=session.plan,
+        )
+        if failure_class == Builder1FailureClass.PLAN_CONTRADICTION:
+            session = mark_physical_repair_required(
+                campaign_id,
+                failed_ad_index=ad_index,
+                violations=list(e.violations),
+            )
+            logger.error(
+                "BUILDER1_PLAN_CONTRADICTION campaignId=%s jobId=%s adIndex=%s violations=%s",
+                campaign_id,
+                job_id,
+                ad_index,
+                e.violations,
+            )
+            return _builder1_retry_error_response(
+                campaign_id=campaign_id,
+                ad_index=ad_index,
+                session=session,
+                error_code="physical_plan_conflict",
+                retry_mode="repair_from_physical",
+                user_message=BUILDER1_PUBLIC_PHYSICAL_REPAIR_MESSAGE,
+                violations=list(e.violations),
+            )
         session = mark_image_retry_required(
             campaign_id,
             failed_ad_index=ad_index,
@@ -702,31 +770,48 @@ def _builder1_generate_single_ad(
             session=session,
             error_code="image_compliance_failed",
             violations=list(e.violations),
+            retry_mode="image_only",
         )
-    except ImagePromptPreflightError as e:
+    except PlanContradictionComplianceError as e:
         if reservation_held:
             release_generation_lock(
                 campaign_id,
                 job_id=job_id,
                 lock_token=lock_token,
             )
-        session = mark_image_retry_required(
+        session = mark_physical_repair_required(
+            campaign_id,
+            failed_ad_index=ad_index,
+            violations=list(e.violations),
+        )
+        return _builder1_retry_error_response(
+            campaign_id=campaign_id,
+            ad_index=ad_index,
+            session=session,
+            error_code="physical_plan_conflict",
+            retry_mode="repair_from_physical",
+            user_message=BUILDER1_PUBLIC_PHYSICAL_REPAIR_MESSAGE,
+            violations=list(e.violations),
+        )
+    except PlanProductVisibilityConflictError as e:
+        if reservation_held:
+            release_generation_lock(
+                campaign_id,
+                job_id=job_id,
+                lock_token=lock_token,
+            )
+        session = mark_physical_repair_required(
             campaign_id,
             failed_ad_index=ad_index,
             violations=list(e.reasons),
         )
-        logger.error(
-            "BUILDER1_IMAGE_PROMPT_PREFLIGHT_BLOCKED campaignId=%s jobId=%s adIndex=%s reasons=%s",
-            campaign_id,
-            job_id,
-            ad_index,
-            e.reasons,
-        )
-        return _builder1_image_compliance_error_response(
+        return _builder1_retry_error_response(
             campaign_id=campaign_id,
             ad_index=ad_index,
             session=session,
-            error_code="image_prompt_preflight_failed",
+            error_code="plan_product_visibility_conflict",
+            retry_mode="repair_from_physical",
+            user_message=BUILDER1_PUBLIC_PHYSICAL_REPAIR_MESSAGE,
             violations=list(e.reasons),
         )
     except ImageComplianceUnavailableError as e:
@@ -884,6 +969,36 @@ def _builder1_run_next_job(job_id: str, campaign_id: str, expected_next_index: i
             job_id=job_id,
             campaign_id=campaign_id,
             ad_index=expected_next_index,
+            already_reserved=True,
+            log_next_ad_timing=True,
+        )
+        target_ad_count = get_campaign_session(campaign_id).target_ad_count
+        _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
+    except Exception as e:
+        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
+        logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+
+
+def _builder1_run_physical_repair_job(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
+    logger.info(
+        "BUILDER1_PHYSICAL_REPAIR_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
+        job_id,
+        campaign_id,
+        retry_ad_index,
+    )
+    try:
+        session = get_campaign_session(campaign_id)
+        _builder1_update_job(job_id, stage="repairing_physical", completedAds=session.generated_count)
+        repaired_plan = repair_builder1_campaign_from_physical(
+            session.plan,
+            model_caller=_o3_pro_planning_model_caller,
+        )
+        update_campaign_plan(campaign_id, repaired_plan)
+        reserve_next_ad_index(campaign_id, retry_ad_index, job_id=job_id)
+        result = _builder1_generate_single_ad(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            ad_index=retry_ad_index,
             already_reserved=True,
             log_next_ad_timing=True,
         )
@@ -1056,6 +1171,70 @@ def builder1_retry_image():
                 "totalAds": session.target_ad_count,
                 "targetAdCount": session.target_ad_count,
                 "retryAdIndex": retry_ad_index,
+                "retryMode": "image_only",
+                "planningComplete": True,
+                "pollUrl": f"/api/builder1-status?jobId={job_id}",
+            }
+        ),
+        202,
+    )
+
+
+@app.route("/api/builder1-repair-physical", methods=["POST"])
+def builder1_repair_physical():
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON body"}), 200
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON object"}), 200
+
+    campaign_id = (body.get("campaignId") or "").strip()
+    if not campaign_id:
+        return jsonify({"ok": False, "error": "invalid_input", "message": "campaignId is required"}), 200
+
+    try:
+        retry_ad_index = int(body.get("retryAdIndex") or body.get("adIndex") or body.get("expectedNextIndex"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "invalid_input", "message": "retryAdIndex must be an integer"}), 200
+
+    try:
+        session = get_campaign_session(campaign_id)
+    except CampaignStoreError as e:
+        return jsonify({"ok": False, "error": e.code, "message": e.message}), 200
+
+    if not session.planning_complete:
+        return jsonify({"ok": False, "error": "planning_incomplete", "campaignId": campaign_id}), 200
+
+    job_id = str(uuid.uuid4())
+    create_builder1_job(
+        job_id=job_id,
+        campaign_id=campaign_id,
+        target_ad_count=session.target_ad_count,
+        stage="repairing_physical",
+    )
+    update_builder1_job(
+        job_id,
+        completedAds=session.generated_count,
+        totalAds=session.target_ad_count,
+    )
+    _builder1_executor.submit(
+        _builder1_run_physical_repair_job,
+        job_id,
+        campaign_id,
+        retry_ad_index,
+    )
+    return (
+        jsonify(
+            {
+                "status": "running",
+                "jobId": job_id,
+                "campaignId": campaign_id,
+                "stage": "repairing_physical",
+                "completedAds": session.generated_count,
+                "totalAds": session.target_ad_count,
+                "targetAdCount": session.target_ad_count,
+                "retryAdIndex": retry_ad_index,
+                "retryMode": "repair_from_physical",
                 "planningComplete": True,
                 "pollUrl": f"/api/builder1-status?jobId={job_id}",
             }

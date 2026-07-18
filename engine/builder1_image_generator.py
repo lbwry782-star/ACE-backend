@@ -9,6 +9,14 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from engine.builder1_failure_classification import (
+    Builder1FailureAction,
+    Builder1FailureClass,
+    PlanContradictionComplianceError,
+    PlanProductVisibilityConflictError,
+    classify_compliance_failure,
+    log_failure_classification,
+)
 from engine.builder1_image_compliance import (
     BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK,
     ComplianceReviewer,
@@ -16,10 +24,7 @@ from engine.builder1_image_compliance import (
     ImageComplianceUnavailableError,
     review_builder1_ad_image_compliance,
 )
-from engine.builder1_image_prompt_preflight import (
-    ImagePromptPreflightError,
-    run_image_prompt_preflight,
-)
+from engine.builder1_image_prompt_preflight import run_image_prompt_preflight
 from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_product_visibility import (
     ProductVisibilityPolicy,
@@ -170,13 +175,16 @@ def generate_builder1_ad_image(
     """
     ad = next(a for a in series_plan.ads if a.index == ad_index)
     prompt = build_visual_prompt(series_plan, ad)
-    run_image_prompt_preflight(
-        series_plan=series_plan,
-        ad_plan=ad,
-        prompt=prompt,
-        campaign_id=campaign_id or "",
-        ad_index=ad_index,
-    )
+    try:
+        run_image_prompt_preflight(
+            series_plan=series_plan,
+            ad_plan=ad,
+            prompt=prompt,
+            campaign_id=campaign_id or "",
+            ad_index=ad_index,
+        )
+    except PlanProductVisibilityConflictError:
+        raise
 
     image_started = time.perf_counter()
     image_bytes = _generate_with_retry(
@@ -216,6 +224,19 @@ def generate_builder1_ad_image(
             compliance_review_duration_ms=compliance_review_duration_ms,
             compliance_regeneration_count=0,
         )
+
+    failure_class, action, _details = classify_compliance_failure(
+        violations=list(review.violations),
+        series_plan=series_plan,
+    )
+    log_failure_classification(
+        campaign_id=campaign_id or "",
+        ad_index=ad_index,
+        failure_class=failure_class,
+        action=action,
+    )
+    if failure_class == Builder1FailureClass.PLAN_CONTRADICTION:
+        raise PlanContradictionComplianceError(list(review.violations), ad_index=ad_index)
 
     logger.info(
         "BUILDER1_IMAGE_COMPLIANCE_REGENERATE campaignId=%s jobId=%s adIndex=%s violations=%s",
@@ -257,6 +278,19 @@ def generate_builder1_ad_image(
         )
     if not review2.violations:
         raise ImageComplianceUnavailableError("malformed_response", ad_index=ad_index)
+
+    failure_class2, action2, _details2 = classify_compliance_failure(
+        violations=list(review2.violations),
+        series_plan=series_plan,
+    )
+    log_failure_classification(
+        campaign_id=campaign_id or "",
+        ad_index=ad_index,
+        failure_class=failure_class2,
+        action=action2,
+    )
+    if failure_class2 == Builder1FailureClass.PLAN_CONTRADICTION:
+        raise PlanContradictionComplianceError(list(review2.violations), ad_index=ad_index)
     raise ImageComplianceError(review2.violations, ad_index=ad_index)
 
 

@@ -158,6 +158,10 @@ def validate_builder1_campaign_integrity(
     plan_dict["detectedLanguage"] = detected_language
     reasons.extend(deterministic_builder1_integrity_checks(plan_dict))
 
+    from engine.builder1_failure_classification import validate_forbidden_plan_visibility
+
+    reasons.extend(validate_forbidden_plan_visibility(plan))
+
     structural_series_codes = {
         "ad_count_mismatch",
         "ad_index_sequence_invalid",

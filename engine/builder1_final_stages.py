@@ -231,6 +231,8 @@ def parse_brand_physical_output(
     raw_payload: object,
     *,
     product_description: str = "",
+    product_name_resolved: str = "",
+    visibility_policy: Optional[Any] = None,
 ) -> BrandPhysicalOutput:
     reasons: List[str] = []
     try:
@@ -269,9 +271,15 @@ def parse_brand_physical_output(
         reasons.append("brand_physical_must_not_create_slogan")
 
     try:
-        physical_generator_is_product = bool(obj.get("physicalGeneratorIsProduct"))
-        physical_generator_is_packaging = bool(obj.get("physicalGeneratorIsPackaging"))
-        works_without_product_visible = bool(obj.get("worksWithoutProductVisible"))
+        physical_generator_is_product = bool(
+            obj.get("physicalGeneratorIsProduct") or obj.get("physicalGeneratorIsAdvertisedProduct")
+        )
+        physical_generator_is_packaging = bool(
+            obj.get("physicalGeneratorIsPackaging") or obj.get("physicalGeneratorIsProductPackaging")
+        )
+        works_without_product_visible = bool(
+            obj.get("worksWithoutProductVisible", obj.get("worksWithoutAdvertisedProduct"))
+        )
     except (TypeError, ValueError):
         reasons.append("brand_physical_invariant_not_boolean")
         physical_generator_is_product = True
@@ -308,6 +316,31 @@ def parse_brand_physical_output(
             campaign_rationale=campaign_rationale,
             physical_generator_campaign_role=physical_campaign_role,
             product_description=product_description,
+        )
+    )
+
+    from engine.builder1_product_identity_guard import detect_product_identity_conflicts
+    from engine.builder1_product_visibility import ProductVisibilityPolicy
+
+    policy = visibility_policy or ProductVisibilityPolicy.FORBIDDEN
+    if isinstance(policy, str):
+        try:
+            policy = ProductVisibilityPolicy(policy.upper())
+        except ValueError:
+            policy = ProductVisibilityPolicy.FORBIDDEN
+    resolved_name = _norm_text(obj.get("productNameResolved")) or _norm_text(product_name_resolved)
+    reasons.extend(
+        detect_product_identity_conflicts(
+            product_name=resolved_name,
+            product_description=product_description,
+            physical_generator=_norm_text(obj.get("physicalGenerator")),
+            transferred_object=_norm_text(obj.get("transferredObject")),
+            physical_generator_natural_purpose=_norm_text(obj.get("physicalGeneratorNaturalPurpose")),
+            physical_generator_campaign_role=physical_campaign_role,
+            transferred_object_action=_norm_text(obj.get("transferredObjectAction")),
+            campaign_rationale=campaign_rationale,
+            why_clearer_than_showing_product=_norm_text(obj.get("whyClearerThanShowingProduct")),
+            visibility_policy=policy,
         )
     )
 

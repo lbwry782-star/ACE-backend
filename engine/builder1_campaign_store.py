@@ -204,6 +204,7 @@ class Builder1CampaignSession:
     planning_complete: bool = True
     failed_ad_index: Optional[int] = None
     last_image_violations: Optional[List[str]] = None
+    preserved_through_stage: Optional[str] = None
 
 
 def get_campaign_store_backend() -> str:
@@ -268,6 +269,7 @@ def _session_from_raw(campaign_id: str, raw: Dict[str, Any]) -> Builder1Campaign
         planning_complete=bool(raw.get("planningComplete", True)),
         failed_ad_index=_optional_int(raw.get("failedAdIndex")),
         last_image_violations=list(raw.get("lastImageViolations") or []) or None,
+        preserved_through_stage=str(raw.get("preservedThroughStage") or "").strip() or None,
     )
 
 
@@ -289,6 +291,8 @@ def _session_to_raw(session: Builder1CampaignSession) -> Dict[str, Any]:
         raw["failedAdIndex"] = session.failed_ad_index
     if session.last_image_violations:
         raw["lastImageViolations"] = list(session.last_image_violations)
+    if session.preserved_through_stage:
+        raw["preservedThroughStage"] = session.preserved_through_stage
     if session.next_ad_index is not None:
         raw["nextAdIndex"] = session.next_ad_index
     if session.generating_index is not None:
@@ -470,6 +474,7 @@ def _mark_ad_generated_memory(campaign_id: str, ad_index: int) -> Builder1Campai
         raw["status"] = "active"
         raw.pop("failedAdIndex", None)
         raw.pop("lastImageViolations", None)
+        raw.pop("preservedThroughStage", None)
         raw.pop("generatingIndex", None)
         raw.pop("generatingLockOwnerJobId", None)
         raw.pop("generatingLockToken", None)
@@ -691,6 +696,53 @@ def _validate_next_index(session: Builder1CampaignSession, expected_index: int) 
         raise CampaignStoreError("campaign_index_conflict")
     if session.generated_count >= session.target_ad_count:
         raise CampaignStoreError("campaign_complete")
+
+
+def mark_physical_repair_required(
+    campaign_id: str,
+    *,
+    failed_ad_index: int,
+    violations: List[str],
+    preserved_through_stage: str = "conceptual_stage",
+) -> Builder1CampaignSession:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    raw["status"] = "physical_repair_required"
+    raw["planningComplete"] = True
+    raw["failedAdIndex"] = int(failed_ad_index)
+    raw["lastImageViolations"] = list(violations)
+    raw["preservedThroughStage"] = preserved_through_stage
+    _save_raw(cid, raw)
+    session = _session_from_raw(cid, raw)
+    logger.info(
+        "BUILDER1_PHYSICAL_REPAIR_REQUIRED campaignId=%s failedAdIndex=%s preservedThroughStage=%s generatedCount=%s violations=%s",
+        cid,
+        failed_ad_index,
+        preserved_through_stage,
+        session.generated_count,
+        violations,
+    )
+    return session
+
+
+def update_campaign_plan(campaign_id: str, plan: Builder1SeriesPlan) -> Builder1CampaignSession:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    raw["plan"] = series_plan_to_store_dict(plan)
+    raw["status"] = "active"
+    raw.pop("failedAdIndex", None)
+    raw.pop("lastImageViolations", None)
+    raw.pop("preservedThroughStage", None)
+    _save_raw(cid, raw)
+    session = _session_from_raw(cid, raw)
+    logger.info("BUILDER1_CAMPAIGN_PLAN_UPDATED campaignId=%s", cid)
+    return session
 
 
 def mark_image_retry_required(

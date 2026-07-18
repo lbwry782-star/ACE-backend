@@ -34,6 +34,7 @@ from engine.builder1_planning_contract import (
     build_series_ads_repair_prompt,
     build_series_ads_user_prompt,
 )
+from engine.builder1_physical_repair import _run_brand_physical_with_identity_guard
 from engine.builder1_product_name import enforce_authoritative_product_name
 from engine.builder1_product_visibility import (
     derive_product_visibility_policy,
@@ -146,30 +147,28 @@ def run_builder1_campaign_pipeline(
         source=visibility_decision.source,
     )
 
-    brand_physical = _run_stage(
-        "brand_physical",
-        model_caller,
-        STAGE_BRAND_PHYSICAL_SYSTEM,
-        build_brand_physical_user_prompt(
-            product_name_resolved=product_name_resolved,
-            product_description=normalized.product_description,
-            detected_language=detected_language,
-            format_value=normalized.format,
-            strategic_problem=selected_strategy.strategic_problem,
-            relative_advantage=selected_strategy.relative_advantage,
-            brand_slogan=selected_slogan.brand_slogan,
-            slogan_derivation=selected_slogan.derivation_from_advantage,
-            implied_action=selected_slogan.implied_action,
-            conceptual=conceptual_fixed,
-            brand_guidelines=brand_guidelines,
-            visibility_policy=visibility_decision.policy.value,
-        ),
-        lambda raw: parse_brand_physical_output(
-            raw, product_description=normalized.product_description
-        ),
-        repair_builder=lambda broken, reasons: build_brand_physical_repair_prompt(
-            broken_json=broken, reasons=reasons
-        ),
+    brand_physical_user_prompt = build_brand_physical_user_prompt(
+        product_name_resolved=product_name_resolved,
+        product_description=normalized.product_description,
+        detected_language=detected_language,
+        format_value=normalized.format,
+        strategic_problem=selected_strategy.strategic_problem,
+        relative_advantage=selected_strategy.relative_advantage,
+        brand_slogan=selected_slogan.brand_slogan,
+        slogan_derivation=selected_slogan.derivation_from_advantage,
+        implied_action=selected_slogan.implied_action,
+        conceptual=conceptual_fixed,
+        brand_guidelines=brand_guidelines,
+        visibility_policy=visibility_decision.policy.value,
+    )
+    brand_physical = _run_brand_physical_with_identity_guard(
+        model_caller=model_caller,
+        user_prompt=brand_physical_user_prompt,
+        parse_kwargs={
+            "product_description": normalized.product_description,
+            "product_name_resolved": product_name_resolved,
+        },
+        visibility_policy=visibility_decision.policy,
     )
     brand_physical = enforce_authoritative_product_name(
         brand_physical,
@@ -253,6 +252,15 @@ def run_builder1_campaign_pipeline(
         upstream=upstream_snapshot,
         detected_language=detected_language,
     )
+    from engine.builder1_failure_classification import validate_forbidden_plan_visibility
+
+    visibility_conflicts = validate_forbidden_plan_visibility(plan)
+    if visibility_conflicts:
+        logger.error(
+            "BUILDER1_INTEGRITY_FAILED reasons=%s",
+            visibility_conflicts,
+        )
+        raise Builder1PlannerError("campaign_visibility_integrity_failed")
     if integrity.upstream_mutation:
         logger.error(
             "BUILDER1_INTEGRITY_FAILED reasons=%s",

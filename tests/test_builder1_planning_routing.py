@@ -85,7 +85,7 @@ class TestStageOrderAndCallCounts(unittest.TestCase):
             "run_strategy_stage",
             "run_slogan_stage",
             "run_conceptual_stage",
-            '_run_stage(\n        "brand_physical"',
+            "_run_brand_physical_with_identity_guard",
             '_run_stage(\n        "graphic_system"',
             "_run_series_stage_with_integrity",
         ]
