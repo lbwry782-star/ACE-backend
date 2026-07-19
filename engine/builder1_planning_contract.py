@@ -8,6 +8,11 @@ from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_PLANNING_RULE, brand_guidelines_for_prompt
+from engine.builder1_graphic_contract import (
+    descriptive_field_prompt_lines,
+    repair_instructions_for_reasons,
+    structured_enum_prompt_lines,
+)
 from engine.builder1_methodology_reasons import (
     BRAND_PHYSICAL_STAGE_METHODOLOGY,
     CONCEPTUAL_STAGE_METHODOLOGY,
@@ -334,12 +339,15 @@ Rules:
 STAGE_GRAPHIC_SYSTEM_SYSTEM = f"""
 You are a Builder1 graphic-system builder.
 Return JSON only. Return the graphic generator object directly with no wrapper and no additional top-level keys:
-{{"palette":{{"dominant":"#111111","secondary":"#EEEEEE","accent":"#FF5500","background":"#F5F5F5","text":"#222222"}},"layoutTemplate":"visual_right_copy_left","headlinePlacement":"top_left","headlineAlignment":"right","headlineMaxWidthPercent":34,"brandBlockPlacement":"bottom_left","sloganPlacement":"bottom_left","sloganPlacementReason":"","copySafeArea":{{"side":"left","widthPercent":38}},"typographyStyle":"bold_geometric_sans","headlineScale":"large","brandScale":"small","sloganScale":"medium","imageStyle":"editorial_photography","backgroundTreatment":"solid","borderTreatment":"none","recurringGraphicDevice":"...","recurringGraphicDeviceRule":"...","shapeLanguage":"...","framingRule":"...","spacingRule":"..."}}
+{{"palette":{{"dominant":"#111111","secondary":"#EEEEEE","accent":"#FF5500","background":"#F5F5F5","text":"#222222"}},"layoutTemplate":"visual_right_copy_left","headlinePlacement":"top_left","headlineAlignment":"right","headlineMaxWidthPercent":34,"brandBlockPlacement":"bottom_left","sloganPlacement":"bottom_left","sloganPlacementReason":"","copySafeArea":{{"side":"left","widthPercent":38}},"typographyStyle":"Bold geometric sans with high legibility and strong campaign hierarchy","headlineScale":"large","brandScale":"small","sloganScale":"medium","imageStyle":"Editorial studio photography with crisp natural light on the transferred object","backgroundTreatment":"Clean solid campaign background with subtle tonal depth","borderTreatment":"none","recurringGraphicDevice":"Orange corner bracket framing the main visual","recurringGraphicDeviceRule":"Identical bracket appears on the top-left of every ad","shapeLanguage":"Angular geometric frames with generous negative space","framingRule":"Main visual cropped with copy-safe margin on the designated side","spacingRule":"Wide outer margins with tight copy grouping"}}
 {GRAPHIC_GENERATOR_REASON}
 {NO_LOGO_REASON}
+{structured_enum_prompt_lines()}
+{descriptive_field_prompt_lines()}
 Rules:
 - All five palette colors required as #RRGGBB hex.
-- Use only valid layout, placement, typography, image, background, and border enum values.
+- Structured enum fields must use exactly one allowed value from the lists above.
+- typographyStyle, imageStyle, and backgroundTreatment are descriptive campaign-direction strings — not closed enums.
 - recurringGraphicDevice must be visibly repeatable across ads and must remain a campaign composition device, not a product logo or packaging brand mark.
 - For Hebrew campaigns default sloganPlacement to bottom_left to preserve RTL reading flow: see visual → understand → read brand interpretation.
 - Use another sloganPlacement only when sloganPlacementReason explains the strategic RTL-preserving reason.
@@ -787,10 +795,14 @@ def build_graphic_system_user_prompt(
 
 
 def build_graphic_system_repair_prompt(*, broken_json: str, reasons: List[str]) -> str:
+    instructions = repair_instructions_for_reasons(reasons)
+    instruction_block = "\n".join(f"- {line}" for line in instructions) if instructions else (
+        "- Repair only the rejected fields listed below. Preserve every already-valid field unchanged."
+    )
     return (
-        "Repair ONLY the graphic generator object. Return exactly the graphic object with all palette colors, "
-        "layout/placement enums, copySafeArea, typography scales, and recurring device rules.\n"
-        f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        "Repair ONLY the rejected graphic-generator fields. Return the complete graphic object.\n"
+        f"{instruction_block}\n"
+        f"Rejected fields and reasons:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"
     )
 

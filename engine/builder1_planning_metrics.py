@@ -35,6 +35,9 @@ class Builder1PlanningMetrics:
     graphic_stage_calls: int = 0
     series_stage_calls: int = 0
     focused_repair_calls: int = 0
+    stage_repair_calls: int = 0
+    stage_retry_calls: int = 0
+    stage_model_fallback_calls: int = 0
     total_planning_model_calls: int = 0
     prompt_tokens: Optional[int] = None
     output_tokens: Optional[int] = None
@@ -86,6 +89,15 @@ class Builder1PlanningMetrics:
         }:
             self.focused_repair_calls += 1
 
+    def record_stage_repair(self, stage: str) -> None:
+        self.stage_repair_calls += 1
+
+    def record_stage_retry(self, stage: str) -> None:
+        self.stage_retry_calls += 1
+
+    def record_stage_model_fallback(self, stage: str) -> None:
+        self.stage_model_fallback_calls += 1
+
     def record_token_usage(self, *, prompt_tokens: Optional[int], output_tokens: Optional[int]) -> None:
         if prompt_tokens is None and output_tokens is None:
             return
@@ -107,6 +119,7 @@ class Builder1PlanningMetrics:
         preferred_ms = int(
             os.environ.get("BUILDER1_PLANNING_LATENCY_PREFERRED_MS", str(PLANNING_LATENCY_PREFERRED_MS))
         )
+        actual_planning_calls = self.total_planning_model_calls
         if self.total_planning_duration_ms > alert_ms:
             logger.error(
                 "BUILDER1_PLANNING_LATENCY_ALERT campaignId=%s jobId=%s durationMs=%s thresholdMs=%s",
@@ -131,21 +144,27 @@ class Builder1PlanningMetrics:
                 self.total_planning_duration_ms,
                 preferred_ms,
             )
-        if self.total_planning_model_calls > expected + self.focused_repair_calls:
+        if actual_planning_calls > expected:
             logger.warning(
-                "BUILDER1_PLANNING_CALL_COUNT_HIGH campaignId=%s jobId=%s total=%s expected=%s repairs=%s",
+                "BUILDER1_PLANNING_CALL_COUNT_HIGH campaignId=%s jobId=%s total=%s expected=%s "
+                "marketingTextRepairs=%s stageRepairs=%s stageRetries=%s stageModelFallbacks=%s",
                 self.campaign_id or "",
                 self.job_id or "",
-                self.total_planning_model_calls,
+                actual_planning_calls,
                 expected,
                 self.focused_repair_calls,
+                self.stage_repair_calls,
+                self.stage_retry_calls,
+                self.stage_model_fallback_calls,
             )
 
         logger.info(
             "BUILDER1_PLANNING_CALL_SUMMARY campaignId=%s jobId=%s "
             "productNameCallUsed=%s productNameStageCalls=%s strategyStageCalls=%s sloganStageCalls=%s "
             "conceptualStageCalls=%s physicalStageCalls=%s graphicStageCalls=%s "
-            "seriesStageCalls=%s focusedRepairCalls=%s totalPlanningModelCalls=%s "
+            "seriesStageCalls=%s marketingTextRepairCalls=%s stageRepairCalls=%s stageRetryCalls=%s "
+            "stageModelFallbackCalls=%s normalExpectedCalls=%s actualPlanningCalls=%s "
+            "totalPlanningModelCalls=%s "
             "promptTokens=%s outputTokens=%s totalTokens=%s totalPlanningDurationMs=%s",
             self.campaign_id or "",
             self.job_id or "",
@@ -158,6 +177,11 @@ class Builder1PlanningMetrics:
             self.graphic_stage_calls,
             self.series_stage_calls,
             self.focused_repair_calls,
+            self.stage_repair_calls,
+            self.stage_retry_calls,
+            self.stage_model_fallback_calls,
+            expected,
+            actual_planning_calls,
             self.total_planning_model_calls,
             self.prompt_tokens if self.prompt_tokens is not None else "",
             self.output_tokens if self.output_tokens is not None else "",

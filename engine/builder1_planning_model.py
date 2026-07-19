@@ -300,72 +300,70 @@ BRAND_PHYSICAL_JSON_SCHEMA: Dict[str, Any] = {
     },
 }
 
-GRAPHIC_SYSTEM_JSON_SCHEMA: Dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": [
-        "palette",
-        "layoutTemplate",
-        "headlinePlacement",
-        "headlineAlignment",
-        "headlineMaxWidthPercent",
-        "brandBlockPlacement",
-        "sloganPlacement",
-        "sloganPlacementReason",
-        "copySafeArea",
-        "typographyStyle",
-        "headlineScale",
-        "brandScale",
-        "sloganScale",
-        "imageStyle",
-        "backgroundTreatment",
-        "borderTreatment",
-        "recurringGraphicDevice",
-        "recurringGraphicDeviceRule",
-        "shapeLanguage",
-        "framingRule",
-        "spacingRule",
-    ],
-    "properties": {
-        "palette": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["dominant", "secondary", "accent", "background", "text"],
-            "properties": {
-                "dominant": {"type": "string"},
-                "secondary": {"type": "string"},
-                "accent": {"type": "string"},
-                "background": {"type": "string"},
-                "text": {"type": "string"},
+
+def _build_graphic_system_json_schema() -> Dict[str, Any]:
+    from engine.builder1_graphic_contract import graphic_schema_descriptive_properties, graphic_schema_enum_properties
+    from engine.builder1_plan_spec import COPY_SAFE_SIDES
+
+    enum_props = graphic_schema_enum_properties()
+    desc_props = graphic_schema_descriptive_properties()
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "palette",
+            "layoutTemplate",
+            "headlinePlacement",
+            "headlineAlignment",
+            "headlineMaxWidthPercent",
+            "brandBlockPlacement",
+            "sloganPlacement",
+            "sloganPlacementReason",
+            "copySafeArea",
+            "typographyStyle",
+            "headlineScale",
+            "brandScale",
+            "sloganScale",
+            "imageStyle",
+            "backgroundTreatment",
+            "borderTreatment",
+            "recurringGraphicDevice",
+            "recurringGraphicDeviceRule",
+            "shapeLanguage",
+            "framingRule",
+            "spacingRule",
+        ],
+        "properties": {
+            "palette": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["dominant", "secondary", "accent", "background", "text"],
+                "properties": {
+                    "dominant": {"type": "string"},
+                    "secondary": {"type": "string"},
+                    "accent": {"type": "string"},
+                    "background": {"type": "string"},
+                    "text": {"type": "string"},
+                },
             },
+            "headlineMaxWidthPercent": {"type": "integer"},
+            "sloganPlacementReason": {"type": "string"},
+            "copySafeArea": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["side", "widthPercent"],
+                "properties": {
+                    "side": {"type": "string", "enum": sorted(COPY_SAFE_SIDES)},
+                    "widthPercent": {"type": "integer"},
+                },
+            },
+            **enum_props,
+            **desc_props,
         },
-        "layoutTemplate": {"type": "string"},
-        "headlinePlacement": {"type": "string"},
-        "headlineAlignment": {"type": "string"},
-        "headlineMaxWidthPercent": {"type": "integer"},
-        "brandBlockPlacement": {"type": "string"},
-        "sloganPlacement": {"type": "string"},
-        "sloganPlacementReason": {"type": "string"},
-        "copySafeArea": {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["side", "widthPercent"],
-            "properties": {"side": {"type": "string"}, "widthPercent": {"type": "integer"}},
-        },
-        "typographyStyle": {"type": "string"},
-        "headlineScale": {"type": "string"},
-        "brandScale": {"type": "string"},
-        "sloganScale": {"type": "string"},
-        "imageStyle": {"type": "string"},
-        "backgroundTreatment": {"type": "string"},
-        "borderTreatment": {"type": "string"},
-        "recurringGraphicDevice": {"type": "string"},
-        "recurringGraphicDeviceRule": {"type": "string"},
-        "shapeLanguage": {"type": "string"},
-        "framingRule": {"type": "string"},
-        "spacingRule": {"type": "string"},
-    },
-}
+    }
+
+
+GRAPHIC_SYSTEM_JSON_SCHEMA: Dict[str, Any] = _build_graphic_system_json_schema()
 
 SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -737,15 +735,18 @@ def call_planning_model(
     user_prompt: str,
     stage: Optional[str] = None,
     reasoning: Optional[Dict[str, Any]] = None,
+    reasoning_effort: Optional[str] = None,
     parse_json_text: Callable[[str], object],
 ) -> object:
     from engine.builder1_planning_profile import resolve_stage_reasoning_effort
 
-    if reasoning is None:
+    if reasoning is not None:
+        reasoning_payload = reasoning or None
+    elif reasoning_effort is not None:
+        reasoning_payload = {"effort": reasoning_effort} if reasoning_effort else None
+    else:
         effort = resolve_stage_reasoning_effort(stage, model)
         reasoning_payload = {"effort": effort} if effort else None
-    else:
-        reasoning_payload = reasoning
 
     kwargs: Dict[str, Any] = {
         "model": model,

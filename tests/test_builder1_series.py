@@ -55,12 +55,12 @@ def _graphic() -> Dict[str, Any]:
         "brandBlockPlacement": "bottom_left",
         "sloganPlacement": "bottom_left",
         "copySafeArea": {"side": "left", "widthPercent": 38},
-        "typographyStyle": "bold_geometric_sans",
+        "typographyStyle": "Bold geometric sans with high legibility and strong hierarchy",
         "headlineScale": "large",
         "brandScale": "small",
         "sloganScale": "medium",
-        "imageStyle": "editorial_photography",
-        "backgroundTreatment": "solid",
+        "imageStyle": "Editorial studio photography with crisp natural light",
+        "backgroundTreatment": "Clean solid campaign background with subtle depth",
         "borderTreatment": "none",
         "recurringGraphicDevice": "Orange corner bracket",
         "recurringGraphicDeviceRule": "Identical bracket appears on top-left of every ad",
@@ -291,7 +291,7 @@ class TestBuilder1VisualPrompt(unittest.TestCase):
         for p in prompts:
             self.assertIn(block, p)
             self.assertIn("#111111", p)
-            self.assertIn("bold_geometric_sans", p)
+            self.assertIn("Bold geometric sans", p)
             self.assertIn("Orange corner bracket", p)
 
     def test_full_frame_and_no_mockups(self) -> None:

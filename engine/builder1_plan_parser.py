@@ -10,17 +10,14 @@ from engine.builder1_marketing_copy import MARKETING_TEXT_WORD_COUNT, count_mark
 from engine.builder1_plan_spec import (
     AD_COUNT_MAX,
     AD_COUNT_MIN,
-    BACKGROUND_TREATMENT_ENUMS,
     BORDER_TREATMENT_ENUMS,
     COPY_SAFE_SIDES,
     HEADLINE_ALIGNMENTS,
     HEADLINE_MAX_WORDS,
     HEADLINE_PLACEMENTS,
-    IMAGE_STYLE_ENUMS,
     LAYOUT_TEMPLATES,
     RELATIVE_ADVANTAGE_SOURCES,
     TEXT_SCALE_ENUMS,
-    TYPOGRAPHY_STYLE_ENUMS,
     WEAK_CONCEPTUAL_TERMS,
     Builder1AdPlan,
     Builder1CopySafeArea,
@@ -28,6 +25,11 @@ from engine.builder1_plan_spec import (
     Builder1Palette,
     Builder1SeriesGenerator,
     Builder1SeriesPlan,
+)
+from engine.builder1_graphic_contract import (
+    GRAPHIC_DESCRIPTIVE_FIELDS,
+    validate_descriptive_graphic_text,
+    validate_structured_enum,
 )
 
 SUPPORTED_LANGUAGES = {"he", "en", "ar", "ru", "fr", "de", "es", "it", "pt", "nl"}
@@ -243,6 +245,10 @@ def _check_unsupported_claims(
             break
 
 
+def _validate_structured(value: str, *, field: str, allowed: set[str]) -> Optional[str]:
+    return validate_structured_enum(value, field=field, allowed=frozenset(allowed))
+
+
 def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builder1GraphicGenerator]:
     if not isinstance(raw, dict):
         reasons.append("graphic_generator_not_object")
@@ -263,16 +269,16 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
             break
 
     layout = _norm_text(raw.get("layoutTemplate"))
-    if layout not in LAYOUT_TEMPLATES:
-        reasons.append("graphic_generator_invalid_layout")
+    if (code := _validate_structured(layout, field="layoutTemplate", allowed=LAYOUT_TEMPLATES)):
+        reasons.append(code)
 
     headline_placement = _norm_text(raw.get("headlinePlacement"))
-    if headline_placement not in HEADLINE_PLACEMENTS:
-        reasons.append("graphic_generator_invalid_headline_placement")
+    if (code := _validate_structured(headline_placement, field="headlinePlacement", allowed=HEADLINE_PLACEMENTS)):
+        reasons.append(code)
 
     headline_alignment = _norm_text(raw.get("headlineAlignment"))
-    if headline_alignment not in HEADLINE_ALIGNMENTS:
-        reasons.append("graphic_generator_invalid_headline_alignment")
+    if (code := _validate_structured(headline_alignment, field="headlineAlignment", allowed=HEADLINE_ALIGNMENTS)):
+        reasons.append(code)
 
     try:
         headline_max_width = int(raw.get("headlineMaxWidthPercent"))
@@ -283,20 +289,20 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
         reasons.append("graphic_generator_invalid_headline_width")
 
     brand_block = _norm_text(raw.get("brandBlockPlacement"))
-    if brand_block not in HEADLINE_PLACEMENTS:
-        reasons.append("graphic_generator_invalid_brand_placement")
+    if (code := _validate_structured(brand_block, field="brandBlockPlacement", allowed=HEADLINE_PLACEMENTS)):
+        reasons.append(code)
 
     slogan_placement = _norm_text(raw.get("sloganPlacement"))
-    if slogan_placement not in HEADLINE_PLACEMENTS:
-        reasons.append("graphic_generator_invalid_slogan_placement")
+    if (code := _validate_structured(slogan_placement, field="sloganPlacement", allowed=HEADLINE_PLACEMENTS)):
+        reasons.append(code)
 
     copy_raw = raw.get("copySafeArea")
     if not isinstance(copy_raw, dict):
         reasons.append("graphic_generator_missing_copy_safe_area")
         return None
     side = _norm_text(copy_raw.get("side"))
-    if side not in COPY_SAFE_SIDES:
-        reasons.append("graphic_generator_invalid_copy_safe_side")
+    if (code := validate_structured_enum(side, field="copySafeArea.side", allowed=COPY_SAFE_SIDES)):
+        reasons.append(code)
     try:
         width_percent = int(copy_raw.get("widthPercent"))
     except (TypeError, ValueError):
@@ -306,47 +312,46 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
         reasons.append("graphic_generator_invalid_copy_safe_width")
 
     typography_style = _norm_text(raw.get("typographyStyle"))
-    if typography_style not in TYPOGRAPHY_STYLE_ENUMS:
-        reasons.append("graphic_generator_invalid_typography_style")
+    if code := validate_descriptive_graphic_text(typography_style, field="typographyStyle"):
+        reasons.append(code)
 
     headline_scale = _norm_text(raw.get("headlineScale"))
     brand_scale = _norm_text(raw.get("brandScale"))
     slogan_scale = _norm_text(raw.get("sloganScale"))
-    for scale, code in (
-        (headline_scale, "graphic_generator_invalid_headline_scale"),
-        (brand_scale, "graphic_generator_invalid_brand_scale"),
-        (slogan_scale, "graphic_generator_invalid_slogan_scale"),
+    for scale, field in (
+        (headline_scale, "headlineScale"),
+        (brand_scale, "brandScale"),
+        (slogan_scale, "sloganScale"),
     ):
-        if scale not in TEXT_SCALE_ENUMS:
+        if (code := _validate_structured(scale, field=field, allowed=TEXT_SCALE_ENUMS)):
             reasons.append(code)
 
     image_style = _norm_text(raw.get("imageStyle"))
-    if image_style not in IMAGE_STYLE_ENUMS:
-        reasons.append("graphic_generator_invalid_image_style")
+    if code := validate_descriptive_graphic_text(image_style, field="imageStyle"):
+        reasons.append(code)
 
     background = _norm_text(raw.get("backgroundTreatment"))
-    if background not in BACKGROUND_TREATMENT_ENUMS:
-        reasons.append("graphic_generator_invalid_background")
+    if code := validate_descriptive_graphic_text(background, field="backgroundTreatment"):
+        reasons.append(code)
 
     border = _norm_text(raw.get("borderTreatment"))
-    if border not in BORDER_TREATMENT_ENUMS:
-        reasons.append("graphic_generator_invalid_border")
+    if (code := _validate_structured(border, field="borderTreatment", allowed=BORDER_TREATMENT_ENUMS)):
+        reasons.append(code)
 
     device = _norm_text(raw.get("recurringGraphicDevice"))
     device_rule = _norm_text(raw.get("recurringGraphicDeviceRule"))
     framing = _norm_text(raw.get("framingRule"))
     shape_language = _norm_text(raw.get("shapeLanguage"))
     spacing_rule = _norm_text(raw.get("spacingRule"))
-    if not device:
-        reasons.append("graphic_generator_missing_recurring_device")
-    if not device_rule:
-        reasons.append("graphic_generator_missing_device_rule")
-    if not framing:
-        reasons.append("graphic_generator_missing_framing_rule")
-    if not shape_language:
-        reasons.append("graphic_generator_missing_shape_language")
-    if not spacing_rule:
-        reasons.append("graphic_generator_missing_spacing_rule")
+    for value, field in (
+        (device, "recurringGraphicDevice"),
+        (device_rule, "recurringGraphicDeviceRule"),
+        (framing, "framingRule"),
+        (shape_language, "shapeLanguage"),
+        (spacing_rule, "spacingRule"),
+    ):
+        if code := validate_descriptive_graphic_text(value, field=field):
+            reasons.append(code)
 
     if reasons:
         return None

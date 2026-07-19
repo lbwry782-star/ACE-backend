@@ -86,7 +86,7 @@ class TestStageOrderAndCallCounts(unittest.TestCase):
             "run_slogan_stage",
             "run_conceptual_stage",
             "_run_brand_physical_with_identity_guard",
-            '_run_stage(\n        "graphic_system"',
+            "_run_graphic_system_stage",
             "_run_series_stage_with_integrity",
         ]
         indices = [source.index(token) for token in ordered_tokens]

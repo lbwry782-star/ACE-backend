@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional
@@ -72,6 +74,11 @@ VALID_REASONING_EFFORTS = frozenset({"low", "medium", "high"})
 
 _config_logged = False
 _execution_model_warning_logged = False
+_reasoning_effort_omit_logged: set[tuple[str, str, str]] = set()
+_stage_model_overrides: ContextVar[Dict[str, str]] = ContextVar(
+    "builder1_stage_model_overrides",
+    default={},
+)
 _available_models_cache: Optional[frozenset[str]] = None
 
 
@@ -193,6 +200,9 @@ def _log_missing_execution_model_warning(profile: PlanningProfile) -> None:
 
 
 def resolve_stage_model(stage: Optional[str]) -> str:
+    overrides = _stage_model_overrides.get()
+    if stage and stage in overrides:
+        return overrides[stage]
     profile = resolve_planning_profile()
     _log_missing_execution_model_warning(profile)
     if not stage:
@@ -245,14 +255,26 @@ def resolve_stage_reasoning_effort(stage: Optional[str], model: str) -> Optional
 
     if not model_supports_reasoning_effort(model):
         if effort:
-            logger.warning(
-                "BUILDER1_REASONING_EFFORT_UNSUPPORTED stage=%s model=%s effort=%s action=omit",
-                stage or "",
-                model,
-                effort,
-            )
+            warn_key = (stage or "", model, effort)
+            if warn_key not in _reasoning_effort_omit_logged:
+                _reasoning_effort_omit_logged.add(warn_key)
+                logger.warning(
+                    "BUILDER1_REASONING_EFFORT_UNSUPPORTED stage=%s model=%s effort=%s action=omit",
+                    stage or "",
+                    model,
+                    effort,
+                )
         return None
     return effort
+
+
+@contextmanager
+def stage_model_override(overrides: Dict[str, str]):
+    token = _stage_model_overrides.set(dict(overrides))
+    try:
+        yield
+    finally:
+        _stage_model_overrides.reset(token)
 
 
 def resolve_stage_routing(stage: Optional[str]) -> StageRoutingDecision:

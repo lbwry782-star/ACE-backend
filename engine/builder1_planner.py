@@ -88,7 +88,10 @@ PlanningModelCaller: TypeAlias = Callable[..., object]
 
 
 class Builder1PlannerError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, reasons: Optional[List[str]] = None, stage: Optional[str] = None):
+        self.reasons = list(reasons or [])
+        self.stage = stage
+        super().__init__(message)
 
 
 def _conceptual_to_dict(c: Any) -> dict[str, str]:
@@ -201,6 +204,8 @@ def _run_stage(
     current_prompt = user_prompt
     for attempt in (1, 2):
         metrics = get_planning_metrics()
+        if metrics is not None and attempt == 2:
+            metrics.record_stage_retry(stage)
         if metrics is not None:
             metrics.begin_stage(stage, attempt=attempt)
         logger.info("BUILDER1_STAGE_START stage=%s attempt=%s", stage, attempt)
@@ -226,6 +231,8 @@ def _run_stage(
                 logger.error("BUILDER1_STAGE_FAILED stage=%s reasons=%s", stage, last_reasons)
                 if repair_builder and attempt == 1:
                     logger.info("BUILDER1_STAGE_REPAIR stage=%s", stage)
+                    if metrics is not None:
+                        metrics.record_stage_repair(stage)
                     current_prompt = repair_builder(last_raw, last_reasons)
                     try:
                         raw = _invoke_model_caller(
@@ -255,7 +262,11 @@ def _run_stage(
             )
             if metrics is not None:
                 metrics.end_stage(stage, attempt=attempt)
-    raise Builder1PlannerError(f"{stage}_failed: {';'.join(last_reasons)}")
+    raise Builder1PlannerError(
+        f"{stage}_failed: {';'.join(last_reasons)}",
+        reasons=last_reasons,
+        stage=stage,
+    )
 
 
 def _run_strategy_scan_stage(

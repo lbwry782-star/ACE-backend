@@ -47,6 +47,61 @@ from engine.builder1_strategy_selection import StrategySelectionExhausted
 logger = logging.getLogger(__name__)
 
 
+def _run_graphic_system_stage(
+    model_caller: Any,
+    *,
+    user_prompt: str,
+    run_stage: Any,
+) -> Any:
+    from engine.builder1_graphic_contract import is_graphic_contract_mismatch
+    from engine.builder1_planning_metrics import get_planning_metrics
+    from engine.builder1_planning_profile import (
+        execution_optimization_active,
+        quality_model,
+        resolve_stage_model,
+        stage_model_override,
+    )
+    from engine.builder1_planner import Builder1PlannerError
+
+    def _attempt() -> Any:
+        return run_stage(
+            "graphic_system",
+            model_caller,
+            STAGE_GRAPHIC_SYSTEM_SYSTEM,
+            user_prompt,
+            parse_graphic_system_output,
+            repair_builder=lambda broken, reasons: build_graphic_system_repair_prompt(
+                broken_json=broken, reasons=reasons
+            ),
+        )
+
+    try:
+        return _attempt()
+    except Builder1PlannerError as exc:
+        reasons = exc.reasons or []
+        if exc.stage != "graphic_system" or not is_graphic_contract_mismatch(reasons):
+            raise
+        exec_model = resolve_stage_model("graphic_system")
+        q_model = quality_model()
+        if not execution_optimization_active() or exec_model == q_model:
+            logger.error(
+                "BUILDER1_GRAPHIC_CONTRACT_UNRESOLVED stage=graphic_system reasons=%s",
+                reasons,
+            )
+            raise
+        metrics = get_planning_metrics()
+        if metrics is not None:
+            metrics.record_stage_model_fallback("graphic_system")
+        logger.info(
+            "BUILDER1_STAGE_MODEL_FALLBACK stage=graphic_system fromModel=%s toModel=%s "
+            "reason=execution_model_contract_failure",
+            exec_model,
+            q_model,
+        )
+        with stage_model_override({"graphic_system": q_model}):
+            return _attempt()
+
+
 @dataclass
 class Builder1PipelineContext:
     exploration_seed: str
@@ -176,11 +231,9 @@ def run_builder1_campaign_pipeline(
     )
     brand_physical_dict = _brand_physical_to_dict(brand_physical)
 
-    graphic = _run_stage(
-        "graphic_system",
+    graphic = _run_graphic_system_stage(
         model_caller,
-        STAGE_GRAPHIC_SYSTEM_SYSTEM,
-        build_graphic_system_user_prompt(
+        user_prompt=build_graphic_system_user_prompt(
             product_description=normalized.product_description,
             detected_language=detected_language,
             relative_advantage=selected_strategy.relative_advantage,
@@ -189,10 +242,7 @@ def run_builder1_campaign_pipeline(
             brand_physical=brand_physical_dict,
             format_value=normalized.format,
         ),
-        parse_graphic_system_output,
-        repair_builder=lambda broken, reasons: build_graphic_system_repair_prompt(
-            broken_json=broken, reasons=reasons
-        ),
+        run_stage=_run_stage,
     )
     graphic_dict = _graphic_to_dict(graphic)
 

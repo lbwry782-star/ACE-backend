@@ -476,6 +476,7 @@ def _o3_pro_planning_model_caller(
         system_prompt=system_prompt,
         user_prompt=user_prompt,
         stage=stage,
+        reasoning_effort=routing.reasoning_effort,
         parse_json_text=_parse_builder1_o3_json_text,
     )
 
