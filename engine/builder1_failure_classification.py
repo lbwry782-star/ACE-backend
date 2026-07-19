@@ -8,11 +8,7 @@ from enum import Enum
 from typing import List, Sequence
 
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
-from engine.builder1_product_identity_guard import (
-    ad_execution_mentions_product_category,
-    detect_product_identity_conflicts,
-    identity_conflict_reasons,
-)
+from engine.builder1_product_identity_guard import detect_series_plan_visual_subject_conflicts
 from engine.builder1_product_visibility import ProductVisibilityPolicy
 
 logger = logging.getLogger(__name__)
@@ -72,17 +68,7 @@ def validate_forbidden_plan_visibility(series_plan: Builder1SeriesPlan) -> List[
     if policy != ProductVisibilityPolicy.FORBIDDEN:
         return []
 
-    reasons = detect_product_identity_conflicts(
-        product_name=series_plan.product_name_resolved,
-        product_description=series_plan.product_description,
-        physical_generator=series_plan.physical_generator,
-        transferred_object=series_plan.transferred_object,
-        physical_generator_natural_purpose=series_plan.physical_generator_natural_purpose,
-        physical_generator_campaign_role=series_plan.physical_generator_campaign_role,
-        transferred_object_action=series_plan.transferred_object_action,
-        campaign_rationale=series_plan.campaign_rationale,
-        visibility_policy=policy,
-    )
+    reasons = detect_series_plan_visual_subject_conflicts(series_plan)
 
     transferred = (series_plan.transferred_object or series_plan.physical_generator or "").strip()
     if not transferred:
@@ -101,22 +87,6 @@ def validate_forbidden_plan_visibility(series_plan: Builder1SeriesPlan) -> List[
                 reasons.append(f"ad_{ad.index}_product_is_main_visual")
             if extra.get("productIsPhysicalGenerator") is True:
                 reasons.append(f"ad_{ad.index}_product_is_physical_generator")
-
-        execution_blob = " ".join(
-            [
-                ad.physical_execution,
-                ad.visual_execution,
-                ad.scene_description,
-                ad.conceptual_execution,
-            ]
-        )
-        reasons.extend(
-            ad_execution_mentions_product_category(
-                product_name=series_plan.product_name_resolved,
-                product_description=series_plan.product_description,
-                execution_text=execution_blob,
-            )
-        )
 
     return list(dict.fromkeys(reasons))
 

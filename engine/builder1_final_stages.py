@@ -29,7 +29,7 @@ from engine.builder1_staged_parsers import (
     StrategySelection,
     coerce_json_dict,
 )
-from engine.builder1_slogan_stage import SloganCandidate
+from engine.builder1_product_shot_methodology import PHYSICAL_PRODUCT_SHOT_REJECTION_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +227,102 @@ def _reject_forbidden_keys(obj: Dict[str, Any], forbidden: set[str], reasons: Li
             reasons.append(f"{prefix}_forbidden_field:{key}")
 
 
+def _norm_physical_world(value: object) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _validate_brand_physical_candidates(
+    obj: Dict[str, Any],
+    *,
+    visibility_policy: Any,
+) -> List[str]:
+    from engine.builder1_product_visibility import ProductVisibilityPolicy
+
+    reasons: List[str] = []
+    candidates_raw = obj.get("physicalCandidates")
+    evaluations_raw = obj.get("physicalEvaluations")
+    selected_id = _norm_text(obj.get("selectedPhysicalCandidateId")).upper()
+
+    if not isinstance(candidates_raw, list) or len(candidates_raw) < 4:
+        reasons.append("physical_insufficient_candidates")
+        return reasons
+
+    candidate_ids: set[str] = set()
+    physical_worlds: set[str] = set()
+    for item in candidates_raw:
+        if not isinstance(item, dict):
+            reasons.append("physical_candidate_not_object")
+            continue
+        cid = _norm_text(item.get("id")).upper()
+        if cid:
+            candidate_ids.add(cid)
+        world = _norm_physical_world(item.get("physicalWorld"))
+        if world:
+            physical_worlds.add(world)
+        if not _norm_text(item.get("externalObject")):
+            reasons.append("physical_no_external_object")
+        if not _norm_text(item.get("whyClearerThanShowingProduct")):
+            reasons.append("physical_conventional_product_shot")
+
+    if len(physical_worlds) < 3:
+        reasons.append("physical_all_candidates_same_world")
+
+    if not isinstance(evaluations_raw, list):
+        reasons.append("physical_missing_evaluations")
+        return reasons
+
+    eligible_ids: set[str] = set()
+    for item in evaluations_raw:
+        if not isinstance(item, dict):
+            reasons.append("physical_evaluation_not_object")
+            continue
+        cid = _norm_text(item.get("candidateId")).upper()
+        if cid not in candidate_ids:
+            reasons.append(f"physical_evaluation_unknown_id:{cid}")
+            continue
+        rejection_codes = [
+            str(code)
+            for code in (item.get("rejectionCodes") or [])
+            if str(code).strip() in PHYSICAL_PRODUCT_SHOT_REJECTION_CODES
+        ]
+        eligible = bool(item.get("eligible"))
+        if eligible and rejection_codes:
+            reasons.append(f"physical_evaluation_contradictory:{cid}")
+        if not eligible and not rejection_codes:
+            reasons.append(f"physical_evaluation_ineligible_without_codes:{cid}")
+        if eligible:
+            if not bool(item.get("clearerThanConventionalProductShot")):
+                reasons.append("physical_conventional_product_shot")
+            if not bool(item.get("supportsTransferredObject")):
+                reasons.append("physical_no_external_object")
+            if not bool(item.get("distinctiveToBrand")):
+                reasons.append("physical_decorative_presentation_only")
+            eligible_ids.add(cid)
+
+    if selected_id and selected_id not in eligible_ids:
+        reasons.append("physical_selected_not_eligible")
+
+    policy = visibility_policy or ProductVisibilityPolicy.FORBIDDEN
+    if isinstance(policy, str):
+        try:
+            policy = ProductVisibilityPolicy(policy.upper())
+        except ValueError:
+            policy = ProductVisibilityPolicy.FORBIDDEN
+
+    product_evidence_required = bool(obj.get("productEvidenceRequired"))
+    product_evidence_reason = _norm_text(obj.get("productEvidenceReason"))
+    if product_evidence_required and not product_evidence_reason:
+        reasons.append("physical_missing_evidence_reason")
+
+    if policy == ProductVisibilityPolicy.FORBIDDEN and not product_evidence_required:
+        if not bool(obj.get("clearerThanConventionalProductShot")):
+            reasons.append("physical_conventional_product_shot")
+        if not bool(obj.get("survivesProductRemoval")):
+            reasons.append("physical_collapses_without_product")
+
+    return list(dict.fromkeys(reasons))
+
+
 def parse_brand_physical_output(
     raw_payload: object,
     *,
@@ -309,6 +405,23 @@ def parse_brand_physical_output(
 
     campaign_rationale = _norm_text(obj.get("campaignRationale"))
     physical_campaign_role = _norm_text(obj.get("physicalGeneratorCampaignRole"))
+
+    from engine.builder1_product_visibility import ProductVisibilityPolicy
+
+    policy = visibility_policy or ProductVisibilityPolicy.FORBIDDEN
+    if isinstance(policy, str):
+        try:
+            policy = ProductVisibilityPolicy(policy.upper())
+        except ValueError:
+            policy = ProductVisibilityPolicy.FORBIDDEN
+
+    reasons.extend(
+        _validate_brand_physical_candidates(
+            obj,
+            visibility_policy=policy,
+        )
+    )
+
     reasons.extend(
         validate_brand_physical_boundary_text(
             brand_slogan="",
@@ -320,14 +433,7 @@ def parse_brand_physical_output(
     )
 
     from engine.builder1_product_identity_guard import detect_product_identity_conflicts
-    from engine.builder1_product_visibility import ProductVisibilityPolicy
 
-    policy = visibility_policy or ProductVisibilityPolicy.FORBIDDEN
-    if isinstance(policy, str):
-        try:
-            policy = ProductVisibilityPolicy(policy.upper())
-        except ValueError:
-            policy = ProductVisibilityPolicy.FORBIDDEN
     resolved_name = _norm_text(obj.get("productNameResolved")) or _norm_text(product_name_resolved)
     reasons.extend(
         detect_product_identity_conflicts(

@@ -3,8 +3,10 @@ Builder1 campaign-series visual prompt builder (active production).
 """
 from __future__ import annotations
 
+from engine.builder1_methodology_reasons import NO_LOGO_REASON, POSITIVE_IMAGE_PROMPT_REASON
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
+from engine.builder1_product_shot_methodology import BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE
 from engine.builder1_product_visibility import ProductVisibilityPolicy
 
 MEDIUM_PROHIBITION = (
@@ -89,7 +91,8 @@ def _forbidden_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Build
             f"ACTION: {action}",
             f"Ad variation: {ad_plan.variation_label}.",
             f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
-            "This transferred external object is the sole hero subject of the advertisement.",
+            "Center the transferred external object and its physical action as the advertisement's visual proof.",
+            "Product Name and slogan appear only as plain typography — not on objects, packaging, or signs.",
             "=== END MAIN VISUAL ===",
             "=== ADVERTISED PRODUCT ===",
             "ADVERTISED PRODUCT: not depicted",
@@ -149,6 +152,9 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
         f"Format: {series_plan.format}. The output is the final ad itself, not a background for later overlay.",
         BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK,
         main_visual_block,
+        POSITIVE_IMAGE_PROMPT_REASON,
+        NO_LOGO_REASON,
+        BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE,
         f"Fixed brand slogan (typography only): {series_plan.brand_slogan}.",
         f"Slogan-implied action for the transferred object: {series_plan.slogan_action}.",
         "MARKETING TEXT must NOT appear inside the image.",

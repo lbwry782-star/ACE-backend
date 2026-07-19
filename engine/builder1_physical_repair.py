@@ -36,6 +36,7 @@ from engine.builder1_planner import (
     _graphic_to_dict,
     _run_stage,
 )
+from engine.builder1_product_identity_guard import VISUAL_CONFLICT_PREFIXES
 from engine.builder1_product_name import enforce_authoritative_product_name
 from engine.builder1_product_visibility import ProductVisibilityPolicy, ProductVisibilitySource
 from engine.builder1_slogan_stage import SloganCandidate
@@ -79,6 +80,8 @@ def _reconstruct_upstream_from_plan(plan: Builder1SeriesPlan):
         input=plan.conceptual_generator_input,
         transformation=plan.conceptual_generator_transformation,
         result=plan.conceptual_generator_result,
+        perception_to_create=str(internals.get("perceptionToCreate") or plan.conceptual_generator_result),
+        implied_physical_law=str(internals.get("impliedPhysicalLaw") or plan.conceptual_generator_action),
         why_it_expresses_slogan=str(internals.get("conceptualGeneratorWhyItExpressesSlogan") or ""),
         why_it_expresses_advantage=plan.conceptual_generator_why_it_expresses_advantage,
         series_potential="preserved",
@@ -118,9 +121,8 @@ def _run_brand_physical_with_identity_guard(
             )
         except Builder1PlannerError as exc:
             message = str(exc)
-            identity_failed = (
-                "physical_generator_product_identity" in message
-                or "physical_generator_is_product" in message
+            identity_failed = any(prefix in message for prefix in VISUAL_CONFLICT_PREFIXES) or (
+                "physical_generator_is_product" in message
                 or "physical_generator_is_packaging" in message
             )
             if identity_failed and not identity_retry_used:

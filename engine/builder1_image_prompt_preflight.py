@@ -14,6 +14,7 @@ from engine.builder1_failure_classification import (
     validate_ad_plan_for_forbidden_image,
 )
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
+from engine.builder1_product_identity_guard import extract_product_category_identities
 from engine.builder1_product_visibility import ProductVisibilityPolicy
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,16 @@ def _resolve_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
             return ProductVisibilityPolicy.FORBIDDEN
 
 
+def _extract_prompt_section(prompt: str, start_marker: str, end_marker: str) -> str:
+    start = prompt.find(start_marker)
+    if start < 0:
+        return ""
+    end = prompt.find(end_marker, start + len(start_marker))
+    if end < 0:
+        return prompt[start:]
+    return prompt[start:end]
+
+
 def classify_image_prompt_plan(
     series_plan: Builder1SeriesPlan,
     ad_plan: Builder1AdPlan,
@@ -122,34 +133,42 @@ def validate_forbidden_visual_prompt_text(
             reasons=[],
         )
 
-    lowered = prompt.lower()
-    if "main visual:" not in lowered and "primary object:" not in lowered:
+    main_visual_section = _extract_prompt_section(prompt, "=== MAIN VISUAL", "=== END MAIN VISUAL")
+    typography_section = _extract_prompt_section(prompt, "=== TEXT TO RENDER EXACTLY ===", "=== END TEXT TO RENDER EXACTLY ===")
+
+    if not main_visual_section:
         reasons.append("missing_main_visual_block")
-    if "advertised product:" not in lowered or "not depicted" not in lowered:
+    lowered_main = main_visual_section.lower()
+    if "advertised product:" not in prompt.lower() or "not depicted" not in prompt.lower():
         reasons.append("missing_advertised_product_not_depicted")
-    if "packaging:" not in lowered or "not depicted" not in lowered.split("packaging:", 1)[-1][:80]:
+    if "packaging:" not in prompt.lower() or "not depicted" not in prompt.lower().split("packaging:", 1)[-1][:80]:
         reasons.append("missing_packaging_not_depicted")
 
+    for identity in extract_product_category_identities(product_description=series_plan.product_description):
+        if identity in lowered_main:
+            reasons.append(f"main_visual_matches_advertised_product:{identity}")
+
     description = _norm(series_plan.product_description).lower()
-    if description and len(description) >= 12:
+    if description and len(description) >= 12 and main_visual_section:
         desc_tokens = [t for t in re.findall(r"[a-zA-Z\u0590-\u05FF]{5,}", description) if t]
-        hits = sum(1 for token in desc_tokens[:8] if token in lowered)
+        hits = sum(1 for token in desc_tokens[:8] if token in lowered_main)
         if hits >= 3:
-            reasons.append("product_description_leaked_into_prompt")
+            reasons.append("main_visual_product_description_leak")
 
     for marker in PREFLIGHT_FORBIDDEN_SECTION_MARKERS:
-        if marker in re.sub(r"[^a-z0-9]", "", lowered):
+        if marker in re.sub(r"[^a-z0-9]", "", lowered_main):
             reasons.append("forbidden_visual_section_present")
 
     product_name = _norm(series_plan.product_name_resolved).lower()
-    if product_name:
+    if product_name and main_visual_section:
         name_on_object_patterns = (
             rf"{re.escape(product_name)}\s+(label|packaging|bottle|box|jar|can)",
             r"label.*" + re.escape(product_name),
         )
         for pattern in name_on_object_patterns:
-            if re.search(pattern, lowered):
+            if re.search(pattern, lowered_main):
                 reasons.append("product_name_on_object_or_package")
+
 
     if reasons:
         return ImagePromptPreflightResult(

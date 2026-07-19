@@ -98,6 +98,8 @@ def _conceptual_to_dict(c: Any) -> dict[str, str]:
         "input": c.input,
         "transformation": c.transformation,
         "result": c.result,
+        "perceptionToCreate": getattr(c, "perception_to_create", "") or c.result,
+        "impliedPhysicalLaw": getattr(c, "implied_physical_law", "") or c.action,
         "whyItExpressesSlogan": c.why_it_expresses_slogan,
         "whyItExpressesAdvantage": c.why_it_expresses_advantage,
         "seriesPotential": c.series_potential,

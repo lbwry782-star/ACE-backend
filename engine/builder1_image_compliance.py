@@ -10,6 +10,8 @@ import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional, TypeAlias
 
+from engine.builder1_methodology_reasons import IMAGE_COMPLIANCE_REASON
+
 logger = logging.getLogger(__name__)
 
 IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
@@ -40,8 +42,10 @@ BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK = "\n".join(
     ]
 )
 
-IMAGE_COMPLIANCE_SYSTEM_PROMPT = """
+IMAGE_COMPLIANCE_SYSTEM_PROMPT = f"""
 You are a strict Builder1 advertisement image compliance reviewer.
+
+{IMAGE_COMPLIANCE_REASON}
 
 Inspect the generated advertisement image only.
 
@@ -65,7 +69,7 @@ Prohibited:
 - when secondary visibility is permitted: product dominating the composition, product as the joke, or any logo/mark on the product
 
 Return JSON only:
-{"pass": true, "violations": [], "confidence": "high"}
+{{"pass": true, "violations": [], "confidence": "high"}}
 
 When failing, set pass to false and list violation codes from:
 invented_product_logo, supplied_logo_displayed, logo_like_brand_symbol,
@@ -76,8 +80,6 @@ product_used_as_physical_generator, product_used_as_main_visual
 Do not use OCR as the primary mechanism. Judge the visible composition.
 Fail only when the advertised product, product unit, or package is actually depicted contrary to policy.
 """.strip()
-
-ComplianceReviewer = Callable[..., "ImageComplianceResult"]
 
 _config_logged = False
 
@@ -96,6 +98,9 @@ class ImageComplianceError(Exception):
         self.violations = violations
         self.ad_index = ad_index
         super().__init__(f"image_compliance_failed:{','.join(violations)}")
+
+
+ComplianceReviewer: TypeAlias = Callable[..., "ImageComplianceResult"]
 
 
 class ImageComplianceResponseError(ValueError):

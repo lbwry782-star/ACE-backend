@@ -21,6 +21,7 @@ from engine.builder1_slogan_stage import (
     SloganSelection,
 )
 from engine.builder1_slogan_stage_parser import parse_consolidated_slogan_stage_response
+from engine.builder1_product_shot_methodology import CONCEPTUAL_PRODUCT_SHOT_REJECTION_CODES
 from engine.builder1_staged_parsers import (
     CONCEPTUAL_IDS,
     STRATEGY_IDS,
@@ -81,12 +82,15 @@ CONCEPTUAL_REJECTION_CODES = frozenset(
         "concept_rewrites_slogan",
         "concept_requires_operational_change",
     }
+    | CONCEPTUAL_PRODUCT_SHOT_REJECTION_CODES
 )
 
 
 @dataclass
 class ConceptualCandidateReview:
     candidate_id: str
+    perception_to_create: str
+    implied_physical_law: str
     derived_from_selected_slogan_action: bool
     expresses_relative_advantage: bool
     visually_clear: bool
@@ -94,6 +98,12 @@ class ConceptualCandidateReview:
     brand_ownable: bool
     category_relevant: bool
     executable_by_image_model: bool
+    survives_product_removal: bool
+    avoids_product_shot_bias: bool
+    supports_transferred_object: bool
+    distinctive_to_brand: bool
+    product_evidence_required: bool
+    product_evidence_reason: str
     eligible: bool
     rejection_codes: List[str]
 
@@ -406,6 +416,8 @@ def _parse_conceptual_evaluations(
             reasons.append(f"conceptual_stage_evaluation_ineligible_without_codes:{cid}")
         parsed[cid] = ConceptualCandidateReview(
             candidate_id=cid,
+            perception_to_create=str(item.get("perceptionToCreate") or "").strip(),
+            implied_physical_law=str(item.get("impliedPhysicalLaw") or "").strip(),
             derived_from_selected_slogan_action=bool(item.get("derivedFromSelectedSloganAction")),
             expresses_relative_advantage=bool(item.get("expressesRelativeAdvantage")),
             visually_clear=bool(item.get("visuallyClear")),
@@ -413,6 +425,12 @@ def _parse_conceptual_evaluations(
             brand_ownable=bool(item.get("brandOwnable")),
             category_relevant=bool(item.get("categoryRelevant")),
             executable_by_image_model=bool(item.get("executableByImageModel")),
+            survives_product_removal=bool(item.get("survivesProductRemoval")),
+            avoids_product_shot_bias=bool(item.get("avoidsProductShotBias")),
+            supports_transferred_object=bool(item.get("supportsTransferredObject")),
+            distinctive_to_brand=bool(item.get("distinctiveToBrand")),
+            product_evidence_required=bool(item.get("productEvidenceRequired")),
+            product_evidence_reason=str(item.get("productEvidenceReason") or "").strip(),
             eligible=eligible_flag,
             rejection_codes=rejection_codes,
         )
@@ -432,6 +450,10 @@ def _conceptual_gate_reasons(review: ConceptualCandidateReview) -> List[str]:
         if not reasons:
             reasons.append("concept_not_derived_from_slogan_action")
         return reasons
+    if not review.perception_to_create:
+        reasons.append("concept_not_visually_clear")
+    if not review.implied_physical_law:
+        reasons.append("concept_not_derived_from_slogan_action")
     if not review.derived_from_selected_slogan_action:
         reasons.append("concept_not_derived_from_slogan_action")
     if not review.expresses_relative_advantage:
@@ -446,6 +468,18 @@ def _conceptual_gate_reasons(review: ConceptualCandidateReview) -> List[str]:
         reasons.append("concept_not_category_relevant")
     if not review.executable_by_image_model:
         reasons.append("concept_not_image_executable")
+    if review.product_evidence_required:
+        if not review.product_evidence_reason:
+            reasons.append("concept_collapses_without_product")
+    else:
+        if not review.survives_product_removal:
+            reasons.append("concept_collapses_without_product")
+        if not review.supports_transferred_object:
+            reasons.append("concept_no_transferred_object_path")
+    if not review.avoids_product_shot_bias:
+        reasons.append("concept_conventional_product_shot")
+    if not review.distinctive_to_brand:
+        reasons.append("concept_not_distinctive")
     return list(dict.fromkeys(reasons))
 
 

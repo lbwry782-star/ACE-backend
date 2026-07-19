@@ -109,8 +109,49 @@ def _graphic(*, missing_palette: bool = False, missing_color: bool = False, snak
     return g
 
 
+def _physical_candidates(*, worlds: List[str] | None = None) -> List[Dict[str, Any]]:
+    worlds = worlds or ["kitchen", "workshop", "street", "nature"]
+    candidates = []
+    for i, world in enumerate(worlds[:4], start=1):
+        candidates.append(
+            {
+                "id": f"P{i:02d}",
+                "externalObject": f"External object {i}",
+                "physicalWorld": world,
+                "physicalAction": f"Demonstrates survival action {i}",
+                "perceptionDemonstrated": "Durability becomes instantly visible",
+                "sloganActionConnection": "Shows Built To Last through external proof",
+                "clearerThanConventionalProductShot": True,
+                "survivesProductRemoval": True,
+                "seriesPotential": "Escalating contexts",
+                "whyClearerThanShowingProduct": "External proof is clearer than a product display.",
+            }
+        )
+    return candidates
+
+
+def _physical_evaluations(candidate_ids: List[str] | None = None) -> List[Dict[str, Any]]:
+    ids = candidate_ids or [f"P{i:02d}" for i in range(1, 5)]
+    return [
+        {
+            "candidateId": cid,
+            "clearerThanConventionalProductShot": True,
+            "survivesProductRemoval": True,
+            "supportsTransferredObject": True,
+            "distinctiveToBrand": True,
+            "eligible": True,
+            "rejectionCodes": [],
+        }
+        for cid in ids
+    ]
+
+
 def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False) -> Dict[str, Any]:
+    candidates = _physical_candidates()
     payload = {
+        "physicalCandidates": candidates,
+        "physicalEvaluations": _physical_evaluations(),
+        "selectedPhysicalCandidateId": "P01",
         "productNameResolved": "TestBrand",
         "physicalGenerator": "Rubber ball family",
         "physicalGeneratorNaturalPurpose": "Absorb impact",
@@ -121,6 +162,10 @@ def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False
         "transferredObject": "Rubber ball family",
         "transferredObjectAction": "Absorbs a drop without cracking",
         "whyClearerThanShowingProduct": "Survival is clearer through an external impact object.",
+        "clearerThanConventionalProductShot": True,
+        "survivesProductRemoval": True,
+        "productEvidenceRequired": False,
+        "productEvidenceReason": "",
         "mediumParticipates": False,
         "mediumRole": "",
         "campaignRationale": "Ownable durability story",
@@ -243,6 +288,8 @@ def _conceptual_scan_payload(*, incomplete: bool = False) -> Dict[str, Any]:
             "input": "Everyday carry item",
             "transformation": f"Impact absorbed step {i}",
             "result": f"Visible durability proof {i}",
+            "perceptionToCreate": "The product survives daily impacts without damage",
+            "impliedPhysicalLaw": "Everyday objects absorb impact instead of breaking",
             "whyItExpressesSlogan": "Makes Built To Last visible through survival action",
             "whyItExpressesAdvantage": "Shows survives daily drops through action",
             "seriesPotential": "Escalating drop contexts",
@@ -359,22 +406,45 @@ def _slogan_stage_payload(*, selected_id: str = "L01") -> Dict[str, Any]:
     }
 
 
+def _conceptual_evaluation(
+    candidate_id: str,
+    *,
+    eligible: bool = True,
+    rejection_codes: List[str] | None = None,
+    survives_product_removal: bool = True,
+    avoids_product_shot_bias: bool = True,
+    supports_transferred_object: bool = True,
+    distinctive_to_brand: bool = True,
+    product_evidence_required: bool = False,
+    product_evidence_reason: str = "",
+) -> Dict[str, Any]:
+    return {
+        "candidateId": candidate_id,
+        "perceptionToCreate": "Durability becomes believable before reading copy",
+        "impliedPhysicalLaw": "External objects survive impact instead of breaking",
+        "derivedFromSelectedSloganAction": True,
+        "expressesRelativeAdvantage": True,
+        "visuallyClear": True,
+        "seriesGenerative": True,
+        "brandOwnable": True,
+        "categoryRelevant": True,
+        "executableByImageModel": True,
+        "survivesProductRemoval": survives_product_removal,
+        "avoidsProductShotBias": avoids_product_shot_bias,
+        "supportsTransferredObject": supports_transferred_object,
+        "distinctiveToBrand": distinctive_to_brand,
+        "productEvidenceRequired": product_evidence_required,
+        "productEvidenceReason": product_evidence_reason,
+        "eligible": eligible,
+        "rejectionCodes": rejection_codes or [],
+    }
+
+
 def _conceptual_stage_payload(*, selected_id: str = "C01") -> Dict[str, Any]:
     return {
         "candidates": _conceptual_scan_payload()["candidates"],
         "evaluations": [
-            {
-                "candidateId": f"C{i:02d}",
-                "derivedFromSelectedSloganAction": True,
-                "expressesRelativeAdvantage": True,
-                "visuallyClear": True,
-                "seriesGenerative": True,
-                "brandOwnable": True,
-                "categoryRelevant": True,
-                "executableByImageModel": True,
-                "eligible": True,
-                "rejectionCodes": [],
-            }
+            _conceptual_evaluation(f"C{i:02d}")
             for i in range(1, 7)
         ],
         "selectedCandidateId": selected_id,

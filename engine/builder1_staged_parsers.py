@@ -103,6 +103,8 @@ class ConceptualCandidate:
     input: str
     transformation: str
     result: str
+    perception_to_create: str
+    implied_physical_law: str
     why_it_expresses_slogan: str
     why_it_expresses_advantage: str
     series_potential: str
@@ -317,12 +319,28 @@ def parse_conceptual_scan(
         inp = _norm_text(item.get("input"))
         transform = _norm_text(item.get("transformation"))
         result = _norm_text(item.get("result"))
+        perception = _norm_text(item.get("perceptionToCreate"))
+        physical_law = _norm_text(item.get("impliedPhysicalLaw"))
         why_slogan = _norm_text(item.get("whyItExpressesSlogan"))
         why = _norm_text(item.get("whyItExpressesAdvantage"))
         series_pot = _norm_text(item.get("seriesPotential"))
         ownership = _norm_text(item.get("brandOwnershipPotential"))
 
-        if not all([generator, action, inp, transform, result, why_slogan, why, series_pot, ownership]):
+        if not all(
+            [
+                generator,
+                action,
+                inp,
+                transform,
+                result,
+                perception,
+                physical_law,
+                why_slogan,
+                why,
+                series_pot,
+                ownership,
+            ]
+        ):
             reasons.append("conceptual_scan_candidate_incomplete")
         if _norm_key(generator) in WEAK_CONCEPTUAL_TERMS:
             reasons.append("conceptual_scan_candidate_too_vague")
@@ -345,6 +363,8 @@ def parse_conceptual_scan(
                 input=inp,
                 transformation=transform,
                 result=result,
+                perception_to_create=perception,
+                implied_physical_law=physical_law,
                 why_it_expresses_slogan=why_slogan,
                 why_it_expresses_advantage=why,
                 series_potential=series_pot,
