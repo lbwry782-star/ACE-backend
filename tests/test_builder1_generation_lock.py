@@ -89,6 +89,12 @@ class TestInitialFlowOwnership(unittest.TestCase):
             (),
             {"visual_prompt": "prompt", "image_bytes": b"img"},
         )()
+        create_builder1_job(
+            job_id="job-prod",
+            campaign_id="cmp-prod",
+            target_ad_count=2,
+            stage="planning",
+        )
 
         result = _builder1_generate_initial(
             job_id="job-prod",
@@ -118,6 +124,12 @@ class TestInitialFlowOwnership(unittest.TestCase):
             (),
             {"visual_prompt": "prompt", "image_bytes": b"img"},
         )()
+        create_builder1_job(
+            job_id="job-done",
+            campaign_id="cmp-done",
+            target_ad_count=2,
+            stage="planning",
+        )
         result = _builder1_generate_initial(
             job_id="job-done",
             campaign_id="cmp-done",
@@ -148,6 +160,12 @@ class TestInitialFlowOwnership(unittest.TestCase):
             return type("ImageResult", (), {"visual_prompt": "prompt", "image_bytes": b"img"})()
 
         mock_image.side_effect = _image
+        create_builder1_job(
+            job_id="job-count",
+            campaign_id="cmp-count",
+            target_ad_count=2,
+            stage="planning",
+        )
         result = _builder1_generate_initial(
             job_id="job-count",
             campaign_id="cmp-count",

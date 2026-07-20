@@ -11,10 +11,11 @@ import os
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_from_store_dict, series_plan_to_store_dict
+from engine.builder1_image_retry import parse_image_attempt_history, union_violations_for_ad
 from engine.builder1_retry_state import (
     RETRY_MODE_IMAGE_ONLY,
     RETRY_MODE_NONE,
@@ -221,6 +222,7 @@ class Builder1CampaignSession:
     retry_mode: str = RETRY_MODE_NONE
     plan_revision: int = 1
     repair_in_progress: bool = False
+    image_attempt_history: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
 
 def get_campaign_store_backend() -> str:
@@ -253,6 +255,19 @@ def _optional_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _resolve_plan_revision_from_raw(raw: Dict[str, Any], *, campaign_id: str = "") -> int:
+    if "planRevision" not in raw:
+        logger.warning(
+            "BUILDER1_PLAN_REVISION_LEGACY_MISSING campaignId=%s fallback=1",
+            campaign_id or raw.get("campaignId") or "",
+        )
+    try:
+        revision = int(raw.get("planRevision") or 1)
+    except (TypeError, ValueError):
+        revision = 1
+    return max(1, revision)
 
 
 def _session_from_raw(campaign_id: str, raw: Dict[str, Any]) -> Builder1CampaignSession:
@@ -290,8 +305,9 @@ def _session_from_raw(campaign_id: str, raw: Dict[str, Any]) -> Builder1Campaign
             status=str(raw.get("status") or "active"),
             retry_mode=str(raw.get("retryMode") or RETRY_MODE_NONE),
         ),
-        plan_revision=max(1, int(raw.get("planRevision") or 1)),
+        plan_revision=_resolve_plan_revision_from_raw(raw, campaign_id=campaign_id),
         repair_in_progress=bool(raw.get("repairInProgress")),
+        image_attempt_history=parse_image_attempt_history(raw.get("imageAttemptHistory")),
     )
 
 
@@ -312,6 +328,8 @@ def _session_to_raw(session: Builder1CampaignSession) -> Dict[str, Any]:
         "planRevision": session.plan_revision,
         "repairInProgress": session.repair_in_progress,
     }
+    if session.image_attempt_history:
+        raw["imageAttemptHistory"] = session.image_attempt_history
     if session.failed_ad_index is not None:
         raw["failedAdIndex"] = session.failed_ad_index
     if session.last_image_violations:
@@ -463,12 +481,13 @@ def _reserve_ad_index_memory(
         _memory_campaigns[campaign_id] = raw
         session = _session_from_raw(campaign_id, raw)
     logger.info(
-        "BUILDER1_NEXT_AD_RESERVED campaignId=%s adIndex=%s targetAdCount=%s generatedCount=%s jobId=%s",
+        "BUILDER1_NEXT_AD_RESERVED campaignId=%s adIndex=%s targetAdCount=%s generatedCount=%s jobId=%s planRevision=%s",
         campaign_id,
         expected_index,
         session.target_ad_count,
         session.generated_count,
         job_id or None,
+        session.plan_revision,
     )
     return session
 
@@ -502,6 +521,12 @@ def _mark_ad_generated_memory(campaign_id: str, ad_index: int) -> Builder1Campai
         raw.pop("lastImageViolations", None)
         raw.pop("preservedThroughStage", None)
         raw["repairInProgress"] = False
+        history = dict(raw.get("imageAttemptHistory") or {})
+        history.pop(str(ad_index), None)
+        if history:
+            raw["imageAttemptHistory"] = history
+        else:
+            raw.pop("imageAttemptHistory", None)
         raw.pop("generatingIndex", None)
         raw.pop("generatingLockOwnerJobId", None)
         raw.pop("generatingLockToken", None)
@@ -545,11 +570,12 @@ def _log_campaign_progress(session: Builder1CampaignSession, *, ad_index: int) -
         session.complete,
     )
     logger.info(
-        "BUILDER1_AD_GENERATED campaignId=%s adIndex=%s generatedCount=%s complete=%s",
+        "BUILDER1_AD_GENERATED campaignId=%s adIndex=%s generatedCount=%s complete=%s planRevision=%s",
         session.campaign_id,
         ad_index,
         session.generated_count,
         session.complete,
+        session.plan_revision,
     )
     if session.complete:
         logger.info("BUILDER1_CAMPAIGN_COMPLETE campaignId=%s", session.campaign_id)
@@ -576,10 +602,11 @@ def create_campaign_session(
     )
     _save_raw(campaign_id, _session_to_raw(session), create=True)
     logger.info(
-        "BUILDER1_CAMPAIGN_CREATED campaignId=%s targetAdCount=%s backend=%s",
+        "BUILDER1_CAMPAIGN_CREATED campaignId=%s targetAdCount=%s backend=%s planRevision=%s",
         campaign_id,
         target,
         get_campaign_store_backend(),
+        session.plan_revision,
     )
     logger.info(
         "BUILDER1_CAMPAIGN_SESSION_CREATED campaignId=%s targetAdCount=%s",
@@ -634,12 +661,13 @@ def reserve_next_ad_index(
                 )
             else:
                 logger.info(
-                    "BUILDER1_NEXT_AD_RESERVED campaignId=%s adIndex=%s targetAdCount=%s generatedCount=%s jobId=%s",
+                    "BUILDER1_NEXT_AD_RESERVED campaignId=%s adIndex=%s targetAdCount=%s generatedCount=%s jobId=%s planRevision=%s",
                     cid,
                     expected_index,
                     session.target_ad_count,
                     session.generated_count,
                     job_id or None,
+                    session.plan_revision,
                 )
             return session
         except CampaignStoreError:
@@ -704,6 +732,8 @@ def mark_ad_generated(campaign_id: str, ad_index: int) -> Builder1CampaignSessio
             if not result.get("ok"):
                 _raise_from_lua(str(result.get("code") or "campaign_store_error"), campaign_id=cid)
             session = get_campaign_session(cid)
+            _clear_image_attempt_history_for_ad(cid, ad_index)
+            session = get_campaign_session(cid)
             _log_campaign_progress(session, ad_index=ad_index)
             return session
         except CampaignStoreError:
@@ -736,6 +766,57 @@ def _validate_next_index(session: Builder1CampaignSession, expected_index: int) 
     _validate_image_generation_allowed(session)
 
 
+def _clear_image_attempt_history_for_ad(campaign_id: str, ad_index: int) -> None:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        return
+    raw = dict(raw)
+    history = dict(raw.get("imageAttemptHistory") or {})
+    history.pop(str(ad_index), None)
+    if history:
+        raw["imageAttemptHistory"] = history
+    else:
+        raw.pop("imageAttemptHistory", None)
+    _save_raw(cid, raw)
+
+
+def cumulative_violations_for_ad(session: Builder1CampaignSession, ad_index: int) -> List[str]:
+    return union_violations_for_ad(session.image_attempt_history or {}, ad_index)
+
+
+def record_image_attempt_violations(
+    campaign_id: str,
+    *,
+    ad_index: int,
+    attempt: int,
+    violations: List[str],
+) -> Builder1CampaignSession:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    history = parse_image_attempt_history(raw.get("imageAttemptHistory"))
+    key = str(ad_index)
+    entries = list(history.get(key) or [])
+    normalized = list(dict.fromkeys(str(v).strip() for v in violations if str(v).strip()))
+    if not normalized:
+        return _session_from_raw(cid, raw)
+    if entries and int(entries[-1].get("attempt") or 0) == int(attempt):
+        prior = list(entries[-1].get("violations") or [])
+        entries[-1] = {
+            "attempt": int(attempt),
+            "violations": list(dict.fromkeys(prior + normalized)),
+        }
+    else:
+        entries.append({"attempt": int(attempt), "violations": normalized})
+    history[key] = entries
+    raw["imageAttemptHistory"] = history
+    _save_raw(cid, raw)
+    return _session_from_raw(cid, raw)
+
+
 def mark_physical_repair_required(
     campaign_id: str,
     *,
@@ -759,11 +840,12 @@ def mark_physical_repair_required(
     _save_raw(cid, raw)
     session = _session_from_raw(cid, raw)
     logger.info(
-        "BUILDER1_PHYSICAL_REPAIR_REQUIRED campaignId=%s failedAdIndex=%s preservedThroughStage=%s generatedCount=%s violations=%s",
+        "BUILDER1_PHYSICAL_REPAIR_REQUIRED campaignId=%s failedAdIndex=%s preservedThroughStage=%s generatedCount=%s planRevision=%s violations=%s",
         cid,
         failed_ad_index,
         preserved_through_stage,
         session.generated_count,
+        session.plan_revision,
         violations,
     )
     return session
@@ -856,11 +938,12 @@ def mark_image_retry_required(
     _save_raw(cid, raw)
     session = _session_from_raw(cid, raw)
     logger.info(
-        "BUILDER1_IMAGE_RETRY_REQUIRED campaignId=%s failedAdIndex=%s generatedCount=%s targetAdCount=%s violations=%s",
+        "BUILDER1_IMAGE_RETRY_REQUIRED campaignId=%s failedAdIndex=%s generatedCount=%s targetAdCount=%s planRevision=%s violations=%s",
         cid,
         failed_ad_index,
         session.generated_count,
         session.target_ad_count,
+        session.plan_revision,
         violations,
     )
     return session

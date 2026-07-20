@@ -160,9 +160,10 @@ def log_failure_classification(
     failure_class: Builder1FailureClass,
     action: Builder1FailureAction,
     evidence: dict[str, object] | None = None,
-    plan_revision: int | None = None,
+    plan_revision: int = 1,
 ) -> None:
     payload = evidence or {}
+    revision = max(1, int(plan_revision or 1))
     logger.info(
         "BUILDER1_FAILURE_CLASSIFIED campaignId=%s adIndex=%s failureClass=%s action=%s "
         "structuredPlanConflict=%s preflightConflict=%s pixelReviewViolations=%s planRevision=%s",
@@ -173,7 +174,7 @@ def log_failure_classification(
         str(payload.get("structuredPlanConflict", False)).lower(),
         str(payload.get("preflightConflict", False)).lower(),
         payload.get("pixelReviewViolations") or [],
-        plan_revision if plan_revision is not None else "",
+        revision,
     )
 
 

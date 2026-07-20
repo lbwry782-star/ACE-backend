@@ -12,6 +12,31 @@ def pass_compliance_reviewer(**_kwargs: Any) -> ImageComplianceResult:
     return ImageComplianceResult(passed=True, violations=[], confidence="high")
 
 
+def seed_builder1_image_job(
+    *,
+    job_id: str,
+    campaign_id: str,
+    ad_index: int,
+    target_ad_count: int,
+    plan_revision: int = 1,
+    stage: str = "generating_images",
+) -> None:
+    from engine.builder1_jobs_store import create_builder1_job, update_builder1_job
+
+    create_builder1_job(
+        job_id=job_id,
+        campaign_id=campaign_id,
+        target_ad_count=target_ad_count,
+        stage=stage,
+    )
+    update_builder1_job(
+        job_id,
+        planRevision=plan_revision,
+        retryAdIndex=ad_index,
+        campaignId=campaign_id,
+    )
+
+
 def marketing_text_words(count: int = 50, prefix: str = "word") -> str:
     return " ".join(f"{prefix}{i}" for i in range(1, count + 1))
 

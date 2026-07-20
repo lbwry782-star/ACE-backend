@@ -367,7 +367,8 @@ class TestImageCompliance(unittest.TestCase):
             compliance_reviewer=reviewer,
         )
         self.assertGreaterEqual(len(prompts), 2)
-        self.assertIn("IMAGE COMPLIANCE CORRECTION", prompts[1])
+        self.assertIn("GLOBAL IMAGE CONSTRAINTS", prompts[1])
+        self.assertIn("ACCUMULATED VIOLATIONS", prompts[1])
 
 
 class TestImageComplianceAppIntegration(unittest.TestCase):
@@ -391,12 +392,19 @@ class TestImageComplianceAppIntegration(unittest.TestCase):
         from app import _builder1_generate_single_ad
         from engine.builder1_campaign_store import clear_memory_store_for_tests, create_campaign_session
         from engine.builder1_image_compliance import ImageComplianceError
+        from tests.builder1_test_helpers import seed_builder1_image_job
         from tests.test_builder1_series import _base_campaign, _parse
 
         clear_memory_store_for_tests()
         plan = _parse(_base_campaign(2), 2)
         session = create_campaign_session(campaign_id="cmp-compliance-res", plan=plan, target_ad_count=2)
         session.generating_index = 1
+        seed_builder1_image_job(
+            job_id="job-1",
+            campaign_id="cmp-compliance-res",
+            ad_index=1,
+            target_ad_count=2,
+        )
 
         def raise_compliance(*_args, **_kwargs):
             raise ImageComplianceError(["invented_product_logo"], ad_index=1)
@@ -422,12 +430,19 @@ class TestImageComplianceAppIntegration(unittest.TestCase):
         from app import _builder1_generate_single_ad
         from engine.builder1_campaign_store import clear_memory_store_for_tests, create_campaign_session
         from engine.builder1_image_compliance import ImageComplianceError
+        from tests.builder1_test_helpers import seed_builder1_image_job
         from tests.test_builder1_series import _base_campaign, _parse
 
         clear_memory_store_for_tests()
         plan = _parse(_base_campaign(2), 2)
         session = create_campaign_session(campaign_id="cmp-retry", plan=plan, target_ad_count=2)
         session.generating_index = 1
+        seed_builder1_image_job(
+            job_id="job-2",
+            campaign_id="cmp-retry",
+            ad_index=1,
+            target_ad_count=2,
+        )
 
         with patch("app.generate_builder1_ad_image", side_effect=ImageComplianceError(["invented_product_logo"], ad_index=1)):
             with patch("app.get_campaign_session", return_value=session):

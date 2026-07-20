@@ -29,7 +29,7 @@ from engine.builder1_image_compliance import (
     review_builder1_ad_image_compliance,
 )
 from engine.builder1_image_generator import generate_builder1_ad_image
-from tests.builder1_test_helpers import pass_compliance_reviewer
+from tests.builder1_test_helpers import pass_compliance_reviewer, seed_builder1_image_job
 from tests.test_builder1_series import _base_campaign, _parse
 
 
@@ -169,7 +169,13 @@ class TestCompliancePublicApiContract(unittest.TestCase):
     def setUp(self) -> None:
         clear_memory_store_for_tests()
 
-    def _reserved_session(self, *, campaign_id: str = "cmp-contract", ad_count: int = 4):
+    def _reserved_session(
+        self,
+        *,
+        campaign_id: str = "cmp-contract",
+        ad_count: int = 4,
+        job_id: str = "job-contract",
+    ):
         plan = _plan(ad_count)
         create_campaign_session(
             campaign_id=campaign_id,
@@ -178,13 +184,19 @@ class TestCompliancePublicApiContract(unittest.TestCase):
         )
         try_acquire_generation_lock(campaign_id, 1)
         mark_ad_generated(campaign_id, 1)
-        session = reserve_next_ad_index(campaign_id, 2)
+        session = reserve_next_ad_index(campaign_id, 2, job_id=job_id)
+        seed_builder1_image_job(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            ad_index=2,
+            target_ad_count=ad_count,
+        )
         return session
 
     def test_compliance_failed_public_payload(self) -> None:
         from app import _builder1_generate_single_ad
 
-        self._reserved_session()
+        self._reserved_session(job_id="job-fail")
         with patch(
             "app.generate_builder1_ad_image",
             side_effect=ImageComplianceError(["invented_product_logo"], ad_index=2),
@@ -209,7 +221,7 @@ class TestCompliancePublicApiContract(unittest.TestCase):
     def test_compliance_unavailable_public_payload(self) -> None:
         from app import _builder1_generate_single_ad
 
-        self._reserved_session(campaign_id="cmp-unavail")
+        self._reserved_session(campaign_id="cmp-unavail", job_id="job-unavail")
         with patch(
             "app.generate_builder1_ad_image",
             side_effect=ImageComplianceUnavailableError("missing_api_key", ad_index=2),
@@ -231,14 +243,20 @@ class TestCompliancePublicApiContract(unittest.TestCase):
     def test_both_errors_share_retryable_and_next_ad_index(self) -> None:
         from app import _builder1_generate_single_ad
 
-        self._reserved_session(campaign_id="cmp-both")
+        self._reserved_session(campaign_id="cmp-both", job_id="job-both")
         errors = (
             ImageComplianceError(["invented_product_logo"], ad_index=2),
             ImageComplianceUnavailableError("review_service_error", ad_index=2),
         )
         for idx, error in enumerate(errors):
             if idx > 0:
-                reserve_next_ad_index("cmp-both", 2)
+                reserve_next_ad_index("cmp-both", 2, job_id="job-both")
+                seed_builder1_image_job(
+                    job_id="job-both",
+                    campaign_id="cmp-both",
+                    ad_index=2,
+                    target_ad_count=4,
+                )
             with patch("app.generate_builder1_ad_image", side_effect=error):
                 result = _builder1_generate_single_ad(
                     job_id="job-both",
@@ -252,7 +270,7 @@ class TestCompliancePublicApiContract(unittest.TestCase):
     def test_generated_count_does_not_advance_on_failed(self) -> None:
         from app import _builder1_generate_single_ad
 
-        self._reserved_session(campaign_id="cmp-no-advance")
+        self._reserved_session(campaign_id="cmp-no-advance", job_id="job-1")
         with patch(
             "app.generate_builder1_ad_image",
             side_effect=ImageComplianceError(["invented_product_logo"], ad_index=2),
@@ -270,7 +288,7 @@ class TestCompliancePublicApiContract(unittest.TestCase):
     def test_retry_same_ad_index_after_lock_release(self) -> None:
         from app import _builder1_generate_single_ad
 
-        self._reserved_session(campaign_id="cmp-retry")
+        self._reserved_session(campaign_id="cmp-retry", job_id="job-r1")
         with patch(
             "app.generate_builder1_ad_image",
             side_effect=ImageComplianceUnavailableError("transient_review_failure", ad_index=2),
@@ -282,7 +300,13 @@ class TestCompliancePublicApiContract(unittest.TestCase):
                 already_reserved=True,
             )
         self.assertEqual(first["nextAdIndex"], 2)
-        reserve_next_ad_index("cmp-retry", 2)
+        reserve_next_ad_index("cmp-retry", 2, job_id="job-r2")
+        seed_builder1_image_job(
+            job_id="job-r2",
+            campaign_id="cmp-retry",
+            ad_index=2,
+            target_ad_count=4,
+        )
         image_result = Mock(visual_prompt="p", image_bytes=b"ok")
         with patch("app.generate_builder1_ad_image", return_value=image_result):
             with patch("app.image_bytes_to_base64", return_value="b2s="):
@@ -297,7 +321,7 @@ class TestCompliancePublicApiContract(unittest.TestCase):
     def test_planning_not_rerun_on_compliance_error(self) -> None:
         from app import _builder1_generate_single_ad
 
-        self._reserved_session(campaign_id="cmp-no-plan")
+        self._reserved_session(campaign_id="cmp-no-plan", job_id="job-no-plan")
         with patch("engine.builder1_planner.plan_builder1") as mock_plan:
             mock_plan.side_effect = AssertionError("planner must not run")
             with patch(
@@ -305,7 +329,7 @@ class TestCompliancePublicApiContract(unittest.TestCase):
                 side_effect=ImageComplianceError(["invented_product_logo"], ad_index=2),
             ):
                 _builder1_generate_single_ad(
-                    job_id="job-np",
+                    job_id="job-no-plan",
                     campaign_id="cmp-no-plan",
                     ad_index=2,
                     already_reserved=True,

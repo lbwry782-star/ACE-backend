@@ -7,10 +7,15 @@ import base64
 import logging
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, List, Optional, Sequence
 
+from engine.builder1_campaign_store import (
+    CampaignStoreError,
+    cumulative_violations_for_ad,
+    get_campaign_session,
+    record_image_attempt_violations,
+)
 from engine.builder1_failure_classification import (
-    Builder1FailureAction,
     Builder1FailureClass,
     PlanContradictionComplianceError,
     PlanProductVisibilityConflictError,
@@ -18,33 +23,26 @@ from engine.builder1_failure_classification import (
     log_failure_classification,
 )
 from engine.builder1_image_compliance import (
-    BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK,
     ComplianceReviewer,
     ImageComplianceError,
     ImageComplianceUnavailableError,
     review_builder1_ad_image_compliance,
 )
 from engine.builder1_image_prompt_preflight import run_image_prompt_preflight
-from engine.builder1_plan_spec import Builder1SeriesPlan
-from engine.builder1_product_visibility import (
-    ProductVisibilityPolicy,
-    build_no_product_strict_correction,
-    build_visibility_compliance_correction,
+from engine.builder1_image_retry import (
+    VISIBILITY_VIOLATION_CODES,
+    build_cumulative_image_correction_block,
+    next_attempt_number,
+    normalize_violation_union,
+    union_violations_for_ad,
 )
+from engine.builder1_plan_spec import Builder1SeriesPlan
+from engine.builder1_product_visibility import ProductVisibilityPolicy
 from engine.builder1_visual_prompt import build_visual_prompt
 
 logger = logging.getLogger(__name__)
 
 ImageCaller = Callable[[str, str], bytes]
-
-VISIBILITY_VIOLATION_CODES = frozenset(
-    {
-        "product_visible_without_explicit_request",
-        "packaging_visible_without_explicit_request",
-        "product_used_as_physical_generator",
-        "product_used_as_main_visual",
-    }
-)
 
 
 class ImageRateLimitError(Exception):
@@ -97,6 +95,34 @@ def _resolve_visibility_policy(series_plan: Builder1SeriesPlan) -> ProductVisibi
             return ProductVisibilityPolicy.FORBIDDEN
 
 
+def _load_history(campaign_id: Optional[str], ad_index: int) -> dict:
+    if not campaign_id:
+        return {}
+    try:
+        session = get_campaign_session(campaign_id)
+    except CampaignStoreError:
+        return {}
+    return dict(session.image_attempt_history or {})
+
+
+def _record_violations(
+    *,
+    campaign_id: Optional[str],
+    ad_index: int,
+    attempt: int,
+    violations: Sequence[str],
+) -> dict:
+    if not campaign_id:
+        return {}
+    session = record_image_attempt_violations(
+        campaign_id,
+        ad_index=ad_index,
+        attempt=attempt,
+        violations=list(violations),
+    )
+    return dict(session.image_attempt_history or {})
+
+
 def _generate_with_retry(
     *,
     ad_index: int,
@@ -132,34 +158,6 @@ def _generate_with_retry(
     raise RuntimeError(f"image_generation_failed_ad_{ad_index}") from last_exc
 
 
-def _build_compliance_correction_block(
-    violations: list[str],
-    *,
-    series_plan: Builder1SeriesPlan,
-    campaign_id: str,
-    ad_index: int,
-) -> str:
-    visibility_violations = [code for code in violations if code in VISIBILITY_VIOLATION_CODES]
-    if "product_visible_without_explicit_request" in visibility_violations:
-        transferred = series_plan.transferred_object or series_plan.physical_generator
-        action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
-        logger.info(
-            "BUILDER1_IMAGE_RETRY_CORRECTION campaignId=%s adIndex=%s "
-            "violation=product_visible_without_explicit_request correctionProfile=NO_PRODUCT_STRICT",
-            campaign_id or "",
-            ad_index,
-        )
-        return build_no_product_strict_correction(
-            transferred_object=transferred,
-            transferred_object_action=action,
-        )
-
-    blocks = [BUILDER1_IMAGE_COMPLIANCE_CORRECTION_BLOCK]
-    if visibility_violations:
-        blocks.append(build_visibility_compliance_correction(visibility_violations))
-    return "\n\n".join(blocks)
-
-
 def generate_builder1_ad_image(
     series_plan: Builder1SeriesPlan,
     ad_index: int,
@@ -168,13 +166,28 @@ def generate_builder1_ad_image(
     compliance_reviewer: Optional[ComplianceReviewer] = None,
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
+    plan_revision: int = 1,
+    cumulative_violations: Optional[Sequence[str]] = None,
 ) -> Builder1AdImageResult:
     """
     Generate exactly one image for one planned ad index.
     One retry on transient non-rate-limit failures. Rate limits are not retried here.
     """
+    if plan_revision < 1:
+        raise CampaignStoreError("missing_plan_revision")
+
     ad = next(a for a in series_plan.ads if a.index == ad_index)
     prompt = build_visual_prompt(series_plan, ad)
+    history = _load_history(campaign_id, ad_index)
+    prior_union = normalize_violation_union(
+        list(cumulative_violations or []) + union_violations_for_ad(history, ad_index)
+    )
+    if prior_union:
+        prompt = (
+            f"{prompt}\n\n"
+            f"{build_cumulative_image_correction_block(violations=prior_union, series_plan=series_plan, ad_plan=ad, campaign_id=campaign_id or '', ad_index=ad_index, plan_revision=plan_revision)}"
+        )
+
     try:
         run_image_prompt_preflight(
             series_plan=series_plan,
@@ -235,18 +248,34 @@ def generate_builder1_ad_image(
         failure_class=failure_class,
         action=action,
         evidence=evidence,
+        plan_revision=plan_revision,
     )
     if failure_class == Builder1FailureClass.PLAN_CONTRADICTION:
         raise PlanContradictionComplianceError(list(review.violations), ad_index=ad_index)
 
+    attempt_one = next_attempt_number(history, ad_index)
+    history = _record_violations(
+        campaign_id=campaign_id,
+        ad_index=ad_index,
+        attempt=attempt_one,
+        violations=review.violations,
+    )
+    union_violations = normalize_violation_union(
+        union_violations_for_ad(history, ad_index) + list(review.violations)
+    )
+
     logger.info(
-        "BUILDER1_IMAGE_COMPLIANCE_REGENERATE campaignId=%s jobId=%s adIndex=%s violations=%s",
+        "BUILDER1_IMAGE_COMPLIANCE_REGENERATE campaignId=%s jobId=%s adIndex=%s planRevision=%s violations=%s",
         campaign_id or "",
         job_id or "",
         ad_index,
-        review.violations,
+        plan_revision,
+        union_violations,
     )
-    corrected_prompt = f"{prompt}\n\n{_build_compliance_correction_block(review.violations, series_plan=series_plan, campaign_id=campaign_id or '', ad_index=ad_index)}"
+    corrected_prompt = (
+        f"{prompt}\n\n"
+        f"{build_cumulative_image_correction_block(violations=union_violations, series_plan=series_plan, ad_plan=ad, campaign_id=campaign_id or '', ad_index=ad_index, plan_revision=plan_revision)}"
+    )
     regen_started = time.perf_counter()
     image_bytes = _generate_with_retry(
         ad_index=ad_index,
@@ -290,6 +319,14 @@ def generate_builder1_ad_image(
         failure_class=failure_class2,
         action=action2,
         evidence=evidence2,
+        plan_revision=plan_revision,
+    )
+    attempt_two = next_attempt_number(history, ad_index)
+    _record_violations(
+        campaign_id=campaign_id,
+        ad_index=ad_index,
+        attempt=attempt_two,
+        violations=review2.violations,
     )
     if failure_class2 == Builder1FailureClass.PLAN_CONTRADICTION:
         raise PlanContradictionComplianceError(list(review2.violations), ad_index=ad_index)

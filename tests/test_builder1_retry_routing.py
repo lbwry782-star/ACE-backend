@@ -208,6 +208,26 @@ class TestImageJobGuards(unittest.TestCase):
         )
         self.assertEqual(result["error"], "stale_plan_revision")
 
+    def test_missing_plan_revision_rejected_before_image(self) -> None:
+        from app import _builder1_generate_single_ad
+        from engine.builder1_jobs_store import create_builder1_job
+
+        plan = _parse(_base_campaign(3), 3)
+        create_campaign_session(campaign_id="cmp-missing-rev", plan=plan, target_ad_count=3)
+        create_builder1_job(
+            job_id="job-missing-rev",
+            campaign_id="cmp-missing-rev",
+            target_ad_count=3,
+            stage="generating_images",
+        )
+        result = _builder1_generate_single_ad(
+            job_id="job-missing-rev",
+            campaign_id="cmp-missing-rev",
+            ad_index=1,
+            already_reserved=False,
+        )
+        self.assertEqual(result["error"], "missing_plan_revision")
+
     def test_physical_repair_pending_rejects_image_worker(self) -> None:
         from app import _builder1_generate_single_ad
 

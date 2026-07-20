@@ -40,6 +40,7 @@ from engine.builder1_campaign_store import (
     apply_repaired_campaign_plan,
     begin_physical_repair,
     create_campaign_session,
+    cumulative_violations_for_ad,
     get_campaign_session,
     mark_ad_generated,
     mark_image_retry_required,
@@ -634,7 +635,9 @@ def _builder1_assert_image_job_allowed(
     session = get_campaign_session(campaign_id)
     job = get_builder1_job(job_id) or {}
     job_revision = job.get("planRevision")
-    if job_revision is not None and int(job_revision) != session.plan_revision:
+    if job_revision is None:
+        raise CampaignStoreError("missing_plan_revision")
+    if int(job_revision) != session.plan_revision:
         raise CampaignStoreError("stale_plan_revision")
     job_ad_index = job.get("retryAdIndex")
     if job_ad_index is not None and int(job_ad_index) != ad_index:
@@ -706,6 +709,12 @@ def _builder1_generate_single_ad(
             job_id=job_id,
             ad_index=ad_index,
         )
+        update_builder1_job(
+            job_id,
+            planRevision=session.plan_revision,
+            retryAdIndex=ad_index,
+            campaignId=campaign_id,
+        )
 
         reservation_duration_ms = int((time.perf_counter() - reservation_started) * 1000)
 
@@ -730,6 +739,8 @@ def _builder1_generate_single_ad(
             _builder1_image_caller,
             campaign_id=campaign_id,
             job_id=job_id,
+            plan_revision=session.plan_revision,
+            cumulative_violations=cumulative_violations_for_ad(session, ad_index),
         )
         session = mark_ad_generated(campaign_id, ad_index)
         reservation_held = False
@@ -905,7 +916,7 @@ def _builder1_generate_single_ad(
                 job_id=job_id,
                 lock_token=lock_token,
             )
-        if e.code in {"physical_repair_not_completed", "stale_plan_revision"}:
+        if e.code in {"physical_repair_not_completed", "stale_plan_revision", "missing_plan_revision"}:
             session = get_campaign_session(campaign_id)
             logger.error(
                 "BUILDER1_IMAGE_JOB_REJECTED campaignId=%s jobId=%s adIndex=%s code=%s planRevision=%s",
@@ -987,6 +998,11 @@ def _builder1_generate_initial(
         campaign_id=campaign_id,
         plan=series_plan,
         target_ad_count=ad_count,
+    )
+    update_builder1_job(
+        job_id,
+        planRevision=1,
+        retryAdIndex=1,
     )
     campaign_persistence_duration_ms = int((time.perf_counter() - persistence_started_at) * 1000)
     _builder1_update_job(job_id, stage="building_prompts", targetAdCount=ad_count, totalAds=ad_count)

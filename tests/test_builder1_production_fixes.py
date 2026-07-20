@@ -193,11 +193,12 @@ class TestImagePreflightAndCorrection(unittest.TestCase):
             return ImageComplianceResult(passed=True, violations=[], confidence="high")
 
         plan = TestImagePromptVisibility()._plan()
-        with self.assertLogs("engine.builder1_image_generator", level="INFO") as logs:
+        with self.assertLogs("engine.builder1_image_retry", level="INFO") as logs:
             generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
         self.assertIn("NO_PRODUCT_STRICT", prompts[1])
+        self.assertIn("GLOBAL IMAGE CONSTRAINTS", prompts[1])
         joined = "\n".join(logs.output)
-        self.assertIn("correctionProfile=NO_PRODUCT_STRICT", joined)
+        self.assertIn("BUILDER1_IMAGE_RETRY_CORRECTION", joined)
 
 
 class TestCampaignPreservationOnImageFailure(unittest.TestCase):
