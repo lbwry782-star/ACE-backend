@@ -730,6 +730,8 @@ def assemble_builder1_campaign(
 
     from dataclasses import replace
 
+    from engine.builder1_product_modality import derive_product_modality
+
     ad_internals = build_series_ad_internals(assembled_ads, fixed_slogan=fixed_slogan)
     conceptual_lineage = build_conceptual_lineage(
         selected_slogan=selected_slogan,
@@ -742,6 +744,10 @@ def assemble_builder1_campaign(
             "conceptualGeneratorWhyItExpressesSlogan": conceptual.why_it_expresses_slogan,
             "productVisibilityPolicy": getattr(visibility_policy, "value", str(visibility_policy)),
             "productVisibilitySource": getattr(visibility_source, "value", str(visibility_source)),
+            "productModality": derive_product_modality(
+                product_name=product_name,
+                product_description=product_description,
+            ).value,
             "transferredObject": brand_physical.transferred_object,
             "transferredObjectAction": brand_physical.transferred_object_action,
             "whyClearerThanShowingProduct": brand_physical.why_clearer_than_showing_product,

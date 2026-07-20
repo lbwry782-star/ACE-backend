@@ -130,7 +130,9 @@ class TestComplianceGenerationFlow(unittest.TestCase):
             if calls["review"] == 1:
                 return ImageComplianceResult(
                     passed=False,
-                    violations=["logo_like_brand_symbol"],
+                    violations=["invented_product_logo"],
+                    hard_violations=["invented_product_logo"],
+                    raw_violations=["invented_product_logo"],
                     confidence="high",
                 )
             return ImageComplianceResult(passed=True, violations=[], confidence="high")

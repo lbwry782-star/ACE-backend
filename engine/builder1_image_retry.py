@@ -81,9 +81,66 @@ PRODUCT_VISIBILITY_CORRECTION = "\n".join(
     ]
 )
 
+MINIMAL_SAFE_EXECUTION_BLOCK = "\n".join(
+    [
+        "=== MINIMAL SAFE EXECUTION (ATTEMPT 3 — MANDATORY) ===",
+        "Preserve the fixed campaign concept, transferred physical generator, transferred-object action,",
+        "Product Name, fixed slogan, campaign palette, and composition family.",
+        "Use one dominant transferred external object as the hero subject.",
+        "Render Product Name and slogan only as plain readable typography.",
+        "Do not add small decorative icons, isolated symbolic marks, badges, seals, monograms, emblems, or hearts beside Product Name.",
+        "Express the recurring graphic device only as a large integrated compositional feature or broad pattern away from the brand block.",
+        "Do not depict the advertised product, packaging, or substitute product objects.",
+        "Do not invent a logo, emblem, or brand mark.",
+        "=== END MINIMAL SAFE EXECUTION ===",
+    ]
+)
+
+CORRECTION_PROFILE_NORMAL = "normal_execution"
+CORRECTION_PROFILE_CUMULATIVE = "cumulative_targeted"
+CORRECTION_PROFILE_MINIMAL_SAFE = "minimal_safe"
+
 
 def normalize_violation_union(violations: Sequence[str]) -> List[str]:
     return list(dict.fromkeys(str(code).strip() for code in violations if str(code).strip()))
+
+
+def build_minimal_safe_execution_block(
+    *,
+    series_plan: Builder1SeriesPlan,
+    ad_plan: Builder1AdPlan,
+) -> str:
+    positive = build_positive_main_visual_block(series_plan=series_plan, ad_plan=ad_plan)
+    return f"{MINIMAL_SAFE_EXECUTION_BLOCK}\n\n{positive}"
+
+
+def entry_hard_violations(entry: Dict[str, object]) -> List[str]:
+    hard = entry.get("hardViolations")
+    if isinstance(hard, list) and hard:
+        return normalize_violation_union(hard)
+    return normalize_violation_union(entry.get("violations") or [])
+
+
+def entry_advisories(entry: Dict[str, object]) -> List[str]:
+    return normalize_violation_union(entry.get("advisories") or [])
+
+
+def union_hard_violations_for_ad(history: Dict[str, List[Dict[str, object]]], ad_index: int) -> List[str]:
+    entries = history.get(str(ad_index)) or history.get(ad_index) or []
+    union: List[str] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            union.extend(entry_hard_violations(entry))
+    return normalize_violation_union(union)
+
+
+def union_advisories_for_ad(history: Dict[str, List[Dict[str, object]]], ad_index: int) -> List[str]:
+    entries = history.get(str(ad_index)) or history.get(ad_index) or []
+    union: List[str] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            union.extend(entry_advisories(entry))
+    return normalize_violation_union(union)
 
 
 def build_positive_main_visual_block(
@@ -174,7 +231,15 @@ def parse_image_attempt_history(raw: object) -> Dict[str, List[Dict[str, object]
             if not isinstance(entry, dict):
                 continue
             violations = entry.get("violations")
+            hard = entry.get("hardViolations")
+            advisories = entry.get("advisories")
             if not isinstance(violations, list):
+                violations = hard if isinstance(hard, list) else []
+            if not isinstance(hard, list):
+                hard = violations if isinstance(violations, list) else []
+            if not isinstance(advisories, list):
+                advisories = []
+            if not violations and not hard and not advisories:
                 continue
             try:
                 attempt = int(entry.get("attempt"))
@@ -183,7 +248,11 @@ def parse_image_attempt_history(raw: object) -> Dict[str, List[Dict[str, object]
             normalized_entries.append(
                 {
                     "attempt": attempt,
-                    "violations": normalize_violation_union(violations),
+                    "violations": normalize_violation_union(violations or hard),
+                    "hardViolations": normalize_violation_union(hard or violations),
+                    "advisories": normalize_violation_union(advisories),
+                    "evidenceSummary": str(entry.get("evidenceSummary") or "").strip(),
+                    "correctionProfile": str(entry.get("correctionProfile") or "").strip(),
                 }
             )
         if normalized_entries:
@@ -192,12 +261,7 @@ def parse_image_attempt_history(raw: object) -> Dict[str, List[Dict[str, object]
 
 
 def union_violations_for_ad(history: Dict[str, List[Dict[str, object]]], ad_index: int) -> List[str]:
-    entries = history.get(str(ad_index)) or history.get(ad_index) or []
-    union: List[str] = []
-    for entry in entries:
-        if isinstance(entry, dict):
-            union.extend(entry.get("violations") or [])
-    return normalize_violation_union(union)
+    return union_hard_violations_for_ad(history, ad_index)
 
 
 def next_attempt_number(history: Dict[str, List[Dict[str, object]]], ad_index: int) -> int:

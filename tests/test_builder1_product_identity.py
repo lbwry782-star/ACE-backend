@@ -281,7 +281,7 @@ class TestImageExecutionVsPlanContradiction(unittest.TestCase):
         generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
         self.assertEqual(calls["gen"], 2)
 
-    def test_pixel_product_generator_regenerates_once(self) -> None:
+    def test_pixel_product_generator_is_advisory_without_structured_conflict(self) -> None:
         calls = {"gen": 0}
 
         def caller(_prompt: str, _fmt: str) -> bytes:
@@ -294,15 +294,13 @@ class TestImageExecutionVsPlanContradiction(unittest.TestCase):
             return ImageComplianceResult(
                 passed=False,
                 violations=["product_used_as_physical_generator"],
+                raw_violations=["product_used_as_physical_generator"],
                 confidence="high",
             )
 
         plan = _parse(_base_campaign(2), 2)
-        from engine.builder1_image_compliance import ImageComplianceError
-
-        with self.assertRaises(ImageComplianceError):
-            generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
-        self.assertEqual(calls["gen"], 2)
+        generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
+        self.assertEqual(calls["gen"], 1)
 
     def test_structured_plan_conflict_preflight_does_not_generate(self) -> None:
         calls = {"gen": 0}

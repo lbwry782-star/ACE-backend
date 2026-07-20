@@ -545,16 +545,26 @@ class TestCumulativeInternalRegeneration(unittest.TestCase):
             if review_n["n"] == 1:
                 return ImageComplianceResult(
                     passed=False,
-                    violations=["campaign_device_used_as_logo"],
+                    violations=["invented_product_logo"],
+                    hard_violations=["invented_product_logo"],
+                    raw_violations=["invented_product_logo"],
                     confidence="high",
                 )
             if review_n["n"] == 2:
                 return ImageComplianceResult(
                     passed=False,
                     violations=["product_visible_without_explicit_request"],
+                    hard_violations=["product_visible_without_explicit_request"],
+                    raw_violations=["product_visible_without_explicit_request"],
                     confidence="high",
                 )
-            return ImageComplianceResult(passed=True, violations=[], confidence="high")
+            return ImageComplianceResult(
+                passed=False,
+                violations=["invented_product_logo"],
+                hard_violations=["invented_product_logo"],
+                raw_violations=["invented_product_logo"],
+                confidence="high",
+            )
 
         create_campaign_session(campaign_id="seq", plan=_plan(3), target_ad_count=3)
         with self.assertRaises(ImageComplianceError):
@@ -569,10 +579,13 @@ class TestCumulativeInternalRegeneration(unittest.TestCase):
         session = get_campaign_session("seq")
         self.assertEqual(
             cumulative_violations_for_ad(session, 1),
-            ["campaign_device_used_as_logo", "product_visible_without_explicit_request"],
+            [
+                "invented_product_logo",
+                "product_visible_without_explicit_request",
+            ],
         )
         self.assertGreaterEqual(len(prompts), 2)
-        self.assertIn("campaign_device_used_as_logo", prompts[1])
+        self.assertIn("invented_product_logo", prompts[1])
         self.assertIn("GLOBAL IMAGE CONSTRAINTS", prompts[1])
 
     def test_parse_image_attempt_history_normalizes_entries(self) -> None:

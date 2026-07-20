@@ -100,55 +100,54 @@ def classify_compliance_failure(
     violations: Sequence[str],
     series_plan: Builder1SeriesPlan,
     preflight_conflict: bool = False,
+    hard_violations: Sequence[str] | None = None,
 ) -> tuple[Builder1FailureClass, Builder1FailureAction, List[str], dict[str, object]]:
+    effective_hard = list(hard_violations if hard_violations is not None else violations)
     plan_reasons = _structured_plan_conflict_reasons(series_plan)
     structured_plan_conflict = bool(plan_reasons)
-    violation_set = set(violations)
+    violation_set = set(effective_hard)
     evidence = {
         "structuredPlanConflict": structured_plan_conflict,
         "preflightConflict": bool(preflight_conflict),
         "pixelReviewViolations": list(violations),
+        "hardViolations": list(effective_hard),
     }
 
     if structured_plan_conflict or preflight_conflict:
         return (
             Builder1FailureClass.PLAN_CONTRADICTION,
             Builder1FailureAction.REPAIR_FROM_PHYSICAL,
-            list(dict.fromkeys(plan_reasons + list(violations))),
+            list(dict.fromkeys(plan_reasons + list(effective_hard))),
+            evidence,
+        )
+
+    if not effective_hard:
+        return (
+            Builder1FailureClass.IMAGE_EXECUTION,
+            Builder1FailureAction.REGENERATE_IMAGE,
+            [],
             evidence,
         )
 
     if violation_set & PIXEL_PLAN_CONTRADICTION_VIOLATIONS:
+        if structured_plan_conflict:
+            return (
+                Builder1FailureClass.PLAN_CONTRADICTION,
+                Builder1FailureAction.REPAIR_FROM_PHYSICAL,
+                list(dict.fromkeys(plan_reasons + list(effective_hard))),
+                evidence,
+            )
         return (
             Builder1FailureClass.IMAGE_EXECUTION,
             Builder1FailureAction.REGENERATE_IMAGE,
-            list(violations),
-            evidence,
-        )
-
-    if violation_set == {"product_visible_without_explicit_request"} or (
-        "product_visible_without_explicit_request" in violation_set
-        and not (violation_set & PIXEL_PLAN_CONTRADICTION_VIOLATIONS)
-    ):
-        return (
-            Builder1FailureClass.IMAGE_EXECUTION,
-            Builder1FailureAction.REGENERATE_IMAGE,
-            list(violations),
-            evidence,
-        )
-
-    if violations:
-        return (
-            Builder1FailureClass.IMAGE_EXECUTION,
-            Builder1FailureAction.REGENERATE_IMAGE,
-            list(violations),
+            list(effective_hard),
             evidence,
         )
 
     return (
         Builder1FailureClass.IMAGE_EXECUTION,
         Builder1FailureAction.REGENERATE_IMAGE,
-        [],
+        list(effective_hard),
         evidence,
     )
 

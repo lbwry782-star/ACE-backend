@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_from_store_dict, series_plan_to_store_dict
-from engine.builder1_image_retry import parse_image_attempt_history, union_violations_for_ad
+from engine.builder1_image_retry import entry_hard_violations, parse_image_attempt_history, union_violations_for_ad
 from engine.builder1_retry_state import (
     RETRY_MODE_IMAGE_ONLY,
     RETRY_MODE_NONE,
@@ -790,7 +790,11 @@ def record_image_attempt_violations(
     *,
     ad_index: int,
     attempt: int,
-    violations: List[str],
+    violations: List[str] | None = None,
+    hard_violations: List[str] | None = None,
+    advisories: List[str] | None = None,
+    evidence_summary: str = "",
+    correction_profile: str = "",
 ) -> Builder1CampaignSession:
     cid = (campaign_id or "").strip()
     raw = _load_raw(cid)
@@ -800,17 +804,39 @@ def record_image_attempt_violations(
     history = parse_image_attempt_history(raw.get("imageAttemptHistory"))
     key = str(ad_index)
     entries = list(history.get(key) or [])
-    normalized = list(dict.fromkeys(str(v).strip() for v in violations if str(v).strip()))
-    if not normalized:
+    hard = list(
+        dict.fromkeys(
+            str(v).strip()
+            for v in (hard_violations if hard_violations is not None else violations or [])
+            if str(v).strip()
+        )
+    )
+    advisory = list(dict.fromkeys(str(v).strip() for v in (advisories or []) if str(v).strip()))
+    if not hard and not advisory:
         return _session_from_raw(cid, raw)
     if entries and int(entries[-1].get("attempt") or 0) == int(attempt):
-        prior = list(entries[-1].get("violations") or [])
-        entries[-1] = {
+        prior_hard = entry_hard_violations(entries[-1])
+        prior_advisories = list(entries[-1].get("advisories") or [])
+        payload = {
             "attempt": int(attempt),
-            "violations": list(dict.fromkeys(prior + normalized)),
+            "violations": list(dict.fromkeys(prior_hard + hard)),
+            "hardViolations": list(dict.fromkeys(prior_hard + hard)),
+            "advisories": list(dict.fromkeys(prior_advisories + advisory)),
+            "evidenceSummary": evidence_summary or str(entries[-1].get("evidenceSummary") or ""),
+            "correctionProfile": correction_profile or str(entries[-1].get("correctionProfile") or ""),
         }
+        entries[-1] = payload
     else:
-        entries.append({"attempt": int(attempt), "violations": normalized})
+        entries.append(
+            {
+                "attempt": int(attempt),
+                "violations": hard,
+                "hardViolations": hard,
+                "advisories": advisory,
+                "evidenceSummary": evidence_summary,
+                "correctionProfile": correction_profile,
+            }
+        )
     history[key] = entries
     raw["imageAttemptHistory"] = history
     _save_raw(cid, raw)

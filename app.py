@@ -597,7 +597,11 @@ def _builder1_retry_error_response(
     retry_mode: str,
     user_message: str,
     violations: Optional[list[str]] = None,
+    hard_violation_codes: Optional[list[str]] = None,
+    advisory_codes: Optional[list[str]] = None,
 ) -> dict[str, Any]:
+    hard_codes = list(hard_violation_codes if hard_violation_codes is not None else violations or [])
+    advisory = list(advisory_codes or [])
     payload = {
         "ok": False,
         "error": error_code,
@@ -612,7 +616,9 @@ def _builder1_retry_error_response(
         "status": getattr(session, "status", None) or "image_retry_required",
         "preservedThroughStage": getattr(session, "preserved_through_stage", None),
         "userMessage": user_message,
-        "lastImageViolations": violations or getattr(session, "last_image_violations", None) or [],
+        "lastImageViolations": hard_codes,
+        "hardViolationCodes": hard_codes,
+        "advisoryCodes": advisory,
         "planRevision": getattr(session, "plan_revision", 1),
     }
     payload.update(
@@ -655,6 +661,7 @@ def _builder1_image_compliance_error_response(
     session,
     error_code: str,
     violations: Optional[list[str]] = None,
+    advisory_codes: Optional[list[str]] = None,
     retry_mode: str = "image_only",
 ) -> dict[str, Any]:
     return _builder1_retry_error_response(
@@ -665,6 +672,8 @@ def _builder1_image_compliance_error_response(
         retry_mode=retry_mode,
         user_message=BUILDER1_PUBLIC_IMAGE_RETRY_MESSAGE,
         violations=violations,
+        hard_violation_codes=violations,
+        advisory_codes=advisory_codes,
     )
 
 
@@ -785,6 +794,7 @@ def _builder1_generate_single_ad(
         session = get_campaign_session(campaign_id)
         failure_class, _action, _details, _evidence = classify_compliance_failure(
             violations=list(e.violations),
+            hard_violations=list(e.hard_violations or e.violations),
             series_plan=session.plan,
         )
         if failure_class == Builder1FailureClass.PLAN_CONTRADICTION:
@@ -812,21 +822,23 @@ def _builder1_generate_single_ad(
         session = mark_image_retry_required(
             campaign_id,
             failed_ad_index=ad_index,
-            violations=list(e.violations),
+            violations=list(e.hard_violations or e.violations),
         )
         logger.error(
-            "BUILDER1_IMAGE_COMPLIANCE_FAILED campaignId=%s jobId=%s adIndex=%s violations=%s",
+            "BUILDER1_IMAGE_COMPLIANCE_FAILED campaignId=%s jobId=%s adIndex=%s hardViolations=%s advisories=%s",
             campaign_id,
             job_id,
             ad_index,
-            e.violations,
+            e.hard_violations,
+            e.advisories,
         )
         return _builder1_image_compliance_error_response(
             campaign_id=campaign_id,
             ad_index=ad_index,
             session=session,
             error_code="image_compliance_failed",
-            violations=list(e.violations),
+            violations=list(e.hard_violations or e.violations),
+            advisory_codes=list(e.advisories or []),
             retry_mode="image_only",
         )
     except PlanContradictionComplianceError as e:

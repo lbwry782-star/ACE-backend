@@ -254,11 +254,11 @@ class TestImageCompliance(unittest.TestCase):
             product_name="EnergyX",
             ad_index=1,
             reviewer=lambda **kw: _fail_compliance_reviewer(
-                violations=["logo_like_brand_symbol"], **kw
+                violations=["invented_product_logo"], **kw
             ),
         )
         self.assertFalse(result.passed)
-        self.assertIn("logo_like_brand_symbol", result.violations)
+        self.assertIn("invented_product_logo", result.hard_violations or result.violations)
 
     def test_monogram_on_package_fails(self) -> None:
         result = review_builder1_ad_image_compliance(

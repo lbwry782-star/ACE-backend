@@ -8,8 +8,15 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Callable, List, Optional, TypeAlias
+from typing import Callable, List, Optional, Sequence, TypeAlias
 
+from engine.builder1_compliance_adjudication import (
+    AdjudicatedComplianceResult,
+    ComplianceEvidenceItem,
+    adjudicate_compliance_review,
+    log_compliance_findings,
+    parse_compliance_evidence,
+)
 from engine.builder1_methodology_reasons import IMAGE_COMPLIANCE_REASON
 
 logger = logging.getLogger(__name__)
@@ -69,16 +76,48 @@ Prohibited:
 - when secondary visibility is permitted: product dominating the composition, product as the joke, or any logo/mark on the product
 
 Return JSON only:
-{{"pass": true, "violations": [], "confidence": "high"}}
+{{
+  "pass": true,
+  "hardViolations": [],
+  "advisories": [],
+  "violations": [],
+  "evidence": [],
+  "overallConfidence": "high"
+}}
 
-When failing, set pass to false and list violation codes from:
+When failing, set pass to false and populate hardViolations and/or advisories.
+Each evidence item should include when available:
+code, symbolDescription, symbolLocation, relationshipToProductName, relationshipToSlogan,
+relationshipToBrandText, compactAndIsolated, enclosedAsBadgeOrSeal, repeatedAsBrandSignature,
+confidence, evidenceType, location.
+
+Use hardViolations only for objective visible violations with sufficient confidence.
+Use advisories for ambiguous resemblance, low-confidence logo/product interpretation,
+or possible campaign-device interpretation away from the brand block.
+
+Violation codes for hardViolations or evidence.code:
 invented_product_logo, supplied_logo_displayed, logo_like_brand_symbol,
 packaging_contains_brand_mark, campaign_device_used_as_logo, product_name_rendered_as_logo,
 product_visible_without_explicit_request, packaging_visible_without_explicit_request,
 product_used_as_physical_generator, product_used_as_main_visual
 
+Advisory codes may include:
+possible_product_resemblance, possible_logo_like_shape,
+possible_campaign_device_interpretation, low_confidence_product_identification,
+low_confidence_logo_identification
+
+For logo_like_brand_symbol or campaign_device_used_as_logo, include evidence showing
+whether the symbol is compact, isolated, emblematic, enclosed, or used as a brand signature
+beside Product Name. Do not fail merely because a large campaign object or background motif
+is visually distinctive.
+
+For product_used_as_physical_generator, note that the campaign's conceptual generator role
+is defined in the structured plan. Only report this when the depicted object clearly matches
+the advertised product itself, not merely a campaign metaphor.
+
 Do not use OCR as the primary mechanism. Judge the visible composition.
-Fail only when the advertised product, product unit, or package is actually depicted contrary to policy.
+Fail hard only when the advertised product, product unit, package, or brand mark is actually
+depicted contrary to policy with concrete supporting evidence.
 """.strip()
 
 _config_logged = False
@@ -89,15 +128,42 @@ class ImageComplianceResult:
     passed: bool
     violations: List[str]
     confidence: str = "high"
+    hard_violations: List[str] | None = None
+    advisories: List[str] | None = None
+    evidence: List[object] | None = None
+    overall_confidence: str = "high"
+    raw_violations: List[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.hard_violations is None:
+            self.hard_violations = list(self.violations)
+        if self.advisories is None:
+            self.advisories = []
+        if self.evidence is None:
+            self.evidence = []
+        if self.raw_violations is None:
+            self.raw_violations = list(self.violations) + list(self.advisories or [])
+        if not self.overall_confidence:
+            self.overall_confidence = self.confidence
 
 
 class ImageComplianceError(Exception):
     """Visual compliance rejection after review (including post-regeneration)."""
 
-    def __init__(self, violations: List[str], *, ad_index: int):
-        self.violations = violations
+    def __init__(
+        self,
+        violations: List[str],
+        *,
+        ad_index: int,
+        hard_violations: List[str] | None = None,
+        advisories: List[str] | None = None,
+    ):
+        self.hard_violations = list(hard_violations if hard_violations is not None else violations)
+        self.advisories = list(advisories or [])
+        self.violations = list(self.hard_violations)
         self.ad_index = ad_index
-        super().__init__(f"image_compliance_failed:{','.join(violations)}")
+        joined = ",".join(self.hard_violations)
+        super().__init__(f"image_compliance_failed:{joined}")
 
 
 ComplianceReviewer: TypeAlias = Callable[..., "ImageComplianceResult"]
@@ -163,28 +229,102 @@ def _coerce_review_dict(raw_payload: object) -> dict:
     raise ImageComplianceResponseError("compliance_output_not_object")
 
 
-def parse_image_compliance_response(raw_payload: object) -> ImageComplianceResult:
-    data = _coerce_review_dict(raw_payload)
+def _extract_raw_compliance(data: dict) -> tuple[bool, List[str], List[ComplianceEvidenceItem], str]:
     if "pass" not in data or not isinstance(data["pass"], bool):
         raise ImageComplianceResponseError("pass_not_boolean")
-    if "violations" not in data or not isinstance(data["violations"], list):
-        raise ImageComplianceResponseError("violations_not_array")
-    violations = [str(v).strip() for v in data["violations"] if str(v).strip()]
-    for code in violations:
-        if code not in IMAGE_COMPLIANCE_VIOLATION_CODES:
+    reviewer_pass = bool(data["pass"])
+
+    hard_raw = data.get("hardViolations")
+    advisory_raw = data.get("advisories")
+    violations_raw = data.get("violations")
+    if not isinstance(hard_raw, list):
+        hard_raw = []
+    if not isinstance(advisory_raw, list):
+        advisory_raw = []
+    if not isinstance(violations_raw, list):
+        violations_raw = []
+
+    candidate_violations = list(
+        dict.fromkeys(
+            str(v).strip()
+            for v in list(hard_raw) + list(advisory_raw) + list(violations_raw)
+            if str(v).strip()
+        )
+    )
+    for code in candidate_violations:
+        if code not in IMAGE_COMPLIANCE_VIOLATION_CODES and not code.startswith("possible_") and not code.startswith(
+            "low_confidence_"
+        ):
             raise ImageComplianceResponseError("invalid_violation_code")
-    confidence_raw = data.get("confidence")
-    if confidence_raw is None:
+
+    overall_confidence_raw = data.get("overallConfidence", data.get("confidence"))
+    if overall_confidence_raw is None:
         raise ImageComplianceResponseError("confidence_missing")
-    confidence = str(confidence_raw).strip().lower()
-    if confidence not in IMAGE_COMPLIANCE_CONFIDENCE_VALUES:
+    overall_confidence = str(overall_confidence_raw).strip().lower()
+    if overall_confidence not in IMAGE_COMPLIANCE_CONFIDENCE_VALUES:
         raise ImageComplianceResponseError("invalid_confidence")
-    passed = data["pass"]
-    if passed and violations:
+
+    evidence_items = parse_compliance_evidence(data.get("evidence"))
+    return reviewer_pass, candidate_violations, evidence_items, overall_confidence
+
+
+def _result_from_adjudication(
+    *,
+    adjudicated: AdjudicatedComplianceResult,
+    reviewer_pass: bool,
+    candidate_violations: List[str],
+) -> ImageComplianceResult:
+    if reviewer_pass and adjudicated.hard_violations:
         raise ImageComplianceResponseError("pass_true_with_violations")
-    if not passed and not violations:
+    if not reviewer_pass and not candidate_violations and not adjudicated.hard_violations:
         raise ImageComplianceResponseError("pass_false_without_violations")
-    return ImageComplianceResult(passed=passed, violations=violations, confidence=confidence)
+    return ImageComplianceResult(
+        passed=adjudicated.passed,
+        violations=list(adjudicated.hard_violations),
+        confidence=adjudicated.overall_confidence,
+        hard_violations=list(adjudicated.hard_violations),
+        advisories=list(adjudicated.advisories),
+        evidence=list(adjudicated.evidence),
+        overall_confidence=adjudicated.overall_confidence,
+        raw_violations=list(candidate_violations),
+    )
+
+
+def finalize_compliance_result(
+    *,
+    reviewer_pass: bool,
+    candidate_violations: Sequence[str],
+    evidence_items: Sequence[ComplianceEvidenceItem],
+    overall_confidence: str,
+    series_plan: Optional[object] = None,
+    structured_plan_conflict: bool = False,
+    preflight_conflict: bool = False,
+) -> ImageComplianceResult:
+    adjudicated = adjudicate_compliance_review(
+        raw_violations=candidate_violations,
+        evidence_items=evidence_items,
+        overall_confidence=overall_confidence,
+        series_plan=series_plan,
+        structured_plan_conflict=structured_plan_conflict,
+        preflight_conflict=preflight_conflict,
+        reviewer_pass=reviewer_pass,
+    )
+    return _result_from_adjudication(
+        adjudicated=adjudicated,
+        reviewer_pass=reviewer_pass,
+        candidate_violations=list(candidate_violations),
+    )
+
+
+def parse_image_compliance_response(raw_payload: object) -> ImageComplianceResult:
+    data = _coerce_review_dict(raw_payload)
+    reviewer_pass, candidate_violations, evidence_items, overall_confidence = _extract_raw_compliance(data)
+    return finalize_compliance_result(
+        reviewer_pass=reviewer_pass,
+        candidate_violations=candidate_violations,
+        evidence_items=evidence_items,
+        overall_confidence=overall_confidence,
+    )
 
 
 def _is_transient_review_error(exc: Exception) -> bool:
@@ -293,6 +433,10 @@ def review_builder1_ad_image_compliance(
     visibility_policy: str = "FORBIDDEN",
     transferred_object: str = "",
     reviewer: Optional[ComplianceReviewer] = None,
+    series_plan: Optional[object] = None,
+    plan_revision: int = 1,
+    structured_plan_conflict: bool = False,
+    preflight_conflict: bool = False,
 ) -> ImageComplianceResult:
     logger.info(
         "BUILDER1_IMAGE_COMPLIANCE_REVIEW_START campaignId=%s jobId=%s adIndex=%s",
@@ -310,9 +454,40 @@ def review_builder1_ad_image_compliance(
                 job_id=job_id,
             )
             if isinstance(raw, ImageComplianceResult):
-                result = raw
+                candidate_violations = list(
+                    dict.fromkeys(
+                        list(raw.raw_violations or [])
+                        + list(raw.violations or [])
+                        + list(raw.hard_violations or [])
+                        + list(raw.advisories or [])
+                    )
+                )
+                evidence_items = [
+                    item
+                    for item in (raw.evidence or [])
+                    if isinstance(item, ComplianceEvidenceItem)
+                ]
+                result = finalize_compliance_result(
+                    reviewer_pass=bool(raw.passed),
+                    candidate_violations=candidate_violations,
+                    evidence_items=evidence_items,
+                    overall_confidence=raw.overall_confidence or raw.confidence,
+                    series_plan=series_plan,
+                    structured_plan_conflict=structured_plan_conflict,
+                    preflight_conflict=preflight_conflict,
+                )
             else:
-                result = parse_image_compliance_response(raw)
+                data = _coerce_review_dict(raw)
+                reviewer_pass, candidate_violations, evidence_items, overall_confidence = _extract_raw_compliance(data)
+                result = finalize_compliance_result(
+                    reviewer_pass=reviewer_pass,
+                    candidate_violations=candidate_violations,
+                    evidence_items=evidence_items,
+                    overall_confidence=overall_confidence,
+                    series_plan=series_plan,
+                    structured_plan_conflict=structured_plan_conflict,
+                    preflight_conflict=preflight_conflict,
+                )
         else:
             log_builder1_image_compliance_config()
             raw = _openai_compliance_review_call(
@@ -322,7 +497,30 @@ def review_builder1_ad_image_compliance(
                 visibility_policy=visibility_policy,
                 transferred_object=transferred_object,
             )
-            result = parse_image_compliance_response(raw)
+            data = _coerce_review_dict(raw)
+            reviewer_pass, candidate_violations, evidence_items, overall_confidence = _extract_raw_compliance(data)
+            result = finalize_compliance_result(
+                reviewer_pass=reviewer_pass,
+                candidate_violations=candidate_violations,
+                evidence_items=evidence_items,
+                overall_confidence=overall_confidence,
+                series_plan=series_plan,
+                structured_plan_conflict=structured_plan_conflict,
+                preflight_conflict=preflight_conflict,
+            )
+        log_compliance_findings(
+            campaign_id=campaign_id or "",
+            ad_index=ad_index,
+            plan_revision=plan_revision,
+            result=AdjudicatedComplianceResult(
+                passed=result.passed,
+                hard_violations=list(result.hard_violations or []),
+                advisories=list(result.advisories or []),
+                evidence=[item for item in (result.evidence or []) if isinstance(item, ComplianceEvidenceItem)],
+                overall_confidence=result.overall_confidence or result.confidence,
+                raw_violations=list(result.raw_violations or []),
+            ),
+        )
     except ImageComplianceUnavailableError as exc:
         reason_code = exc.reason_code
         logger.error(
@@ -354,10 +552,11 @@ def review_builder1_ad_image_compliance(
         )
     else:
         logger.error(
-            "BUILDER1_IMAGE_COMPLIANCE_REVIEW_FAIL campaignId=%s jobId=%s adIndex=%s violations=%s",
+            "BUILDER1_IMAGE_COMPLIANCE_REVIEW_FAIL campaignId=%s jobId=%s adIndex=%s hardViolations=%s advisories=%s",
             campaign_id or "",
             job_id or "",
             ad_index,
-            result.violations,
+            result.hard_violations or [],
+            result.advisories or [],
         )
     return result
