@@ -13,7 +13,7 @@ from engine.builder1_product_visibility import ProductVisibilityPolicy
 
 logger = logging.getLogger(__name__)
 
-PLAN_CONTRADICTION_VIOLATIONS = frozenset(
+PIXEL_PLAN_CONTRADICTION_VIOLATIONS = frozenset(
     {
         "product_used_as_physical_generator",
         "product_used_as_main_visual",
@@ -91,35 +91,50 @@ def validate_forbidden_plan_visibility(series_plan: Builder1SeriesPlan) -> List[
     return list(dict.fromkeys(reasons))
 
 
+def _structured_plan_conflict_reasons(series_plan: Builder1SeriesPlan) -> List[str]:
+    return validate_forbidden_plan_visibility(series_plan)
+
+
 def classify_compliance_failure(
     *,
     violations: Sequence[str],
     series_plan: Builder1SeriesPlan,
-) -> tuple[Builder1FailureClass, Builder1FailureAction, List[str]]:
-    plan_reasons = validate_forbidden_plan_visibility(series_plan)
+    preflight_conflict: bool = False,
+) -> tuple[Builder1FailureClass, Builder1FailureAction, List[str], dict[str, object]]:
+    plan_reasons = _structured_plan_conflict_reasons(series_plan)
+    structured_plan_conflict = bool(plan_reasons)
     violation_set = set(violations)
+    evidence = {
+        "structuredPlanConflict": structured_plan_conflict,
+        "preflightConflict": bool(preflight_conflict),
+        "pixelReviewViolations": list(violations),
+    }
 
-    if violation_set & PLAN_CONTRADICTION_VIOLATIONS:
+    if structured_plan_conflict or preflight_conflict:
         return (
             Builder1FailureClass.PLAN_CONTRADICTION,
             Builder1FailureAction.REPAIR_FROM_PHYSICAL,
             list(dict.fromkeys(plan_reasons + list(violations))),
+            evidence,
         )
 
-    if plan_reasons:
+    if violation_set & PIXEL_PLAN_CONTRADICTION_VIOLATIONS:
         return (
-            Builder1FailureClass.PLAN_CONTRADICTION,
-            Builder1FailureAction.REPAIR_FROM_PHYSICAL,
-            plan_reasons,
+            Builder1FailureClass.IMAGE_EXECUTION,
+            Builder1FailureAction.REGENERATE_IMAGE,
+            list(violations),
+            evidence,
         )
 
     if violation_set == {"product_visible_without_explicit_request"} or (
-        "product_visible_without_explicit_request" in violation_set and not (violation_set & PLAN_CONTRADICTION_VIOLATIONS)
+        "product_visible_without_explicit_request" in violation_set
+        and not (violation_set & PIXEL_PLAN_CONTRADICTION_VIOLATIONS)
     ):
         return (
             Builder1FailureClass.IMAGE_EXECUTION,
             Builder1FailureAction.REGENERATE_IMAGE,
             list(violations),
+            evidence,
         )
 
     if violations:
@@ -127,9 +142,15 @@ def classify_compliance_failure(
             Builder1FailureClass.IMAGE_EXECUTION,
             Builder1FailureAction.REGENERATE_IMAGE,
             list(violations),
+            evidence,
         )
 
-    return Builder1FailureClass.IMAGE_EXECUTION, Builder1FailureAction.REGENERATE_IMAGE, []
+    return (
+        Builder1FailureClass.IMAGE_EXECUTION,
+        Builder1FailureAction.REGENERATE_IMAGE,
+        [],
+        evidence,
+    )
 
 
 def log_failure_classification(
@@ -138,13 +159,21 @@ def log_failure_classification(
     ad_index: int,
     failure_class: Builder1FailureClass,
     action: Builder1FailureAction,
+    evidence: dict[str, object] | None = None,
+    plan_revision: int | None = None,
 ) -> None:
+    payload = evidence or {}
     logger.info(
-        "BUILDER1_FAILURE_CLASSIFIED campaignId=%s adIndex=%s failureClass=%s action=%s",
+        "BUILDER1_FAILURE_CLASSIFIED campaignId=%s adIndex=%s failureClass=%s action=%s "
+        "structuredPlanConflict=%s preflightConflict=%s pixelReviewViolations=%s planRevision=%s",
         campaign_id or "",
         ad_index,
         failure_class.value,
         action.value,
+        str(payload.get("structuredPlanConflict", False)).lower(),
+        str(payload.get("preflightConflict", False)).lower(),
+        payload.get("pixelReviewViolations") or [],
+        plan_revision if plan_revision is not None else "",
     )
 
 

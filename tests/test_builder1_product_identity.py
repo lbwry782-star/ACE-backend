@@ -170,21 +170,35 @@ class TestRealVisualConflicts(unittest.TestCase):
 class TestFailureClassification(unittest.TestCase):
     def test_accidental_product_visible_is_image_execution(self) -> None:
         plan = _parse(_base_campaign(2), 2)
-        failure_class, action, _ = classify_compliance_failure(
+        failure_class, action, _, _evidence = classify_compliance_failure(
             violations=["product_visible_without_explicit_request"],
             series_plan=plan,
         )
         self.assertEqual(failure_class, Builder1FailureClass.IMAGE_EXECUTION)
         self.assertEqual(action, Builder1FailureAction.REGENERATE_IMAGE)
 
-    def test_product_used_as_generator_is_plan_contradiction(self) -> None:
+    def test_product_used_as_generator_without_structured_conflict_is_image_execution(self) -> None:
         plan = _parse(_base_campaign(2), 2)
-        failure_class, action, _ = classify_compliance_failure(
+        failure_class, action, _, evidence = classify_compliance_failure(
+            violations=["product_used_as_physical_generator"],
+            series_plan=plan,
+        )
+        self.assertEqual(failure_class, Builder1FailureClass.IMAGE_EXECUTION)
+        self.assertEqual(action, Builder1FailureAction.REGENERATE_IMAGE)
+        self.assertFalse(evidence["structuredPlanConflict"])
+
+    def test_structured_product_as_generator_is_plan_contradiction(self) -> None:
+        plan = _parse(_base_campaign(2), 2)
+        plan.physical_generator = "running shoe"
+        plan.transferred_object = "running shoe"
+        plan.product_description = "Lightweight running shoe for daily training"
+        failure_class, action, _, evidence = classify_compliance_failure(
             violations=["product_used_as_physical_generator"],
             series_plan=plan,
         )
         self.assertEqual(failure_class, Builder1FailureClass.PLAN_CONTRADICTION)
         self.assertEqual(action, Builder1FailureAction.REPAIR_FROM_PHYSICAL)
+        self.assertTrue(evidence["structuredPlanConflict"])
 
     def test_contradictory_plan_blocks_preflight(self) -> None:
         plan = _parse(_base_campaign(2), 2)
@@ -267,7 +281,7 @@ class TestImageExecutionVsPlanContradiction(unittest.TestCase):
         generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
         self.assertEqual(calls["gen"], 2)
 
-    def test_plan_contradiction_does_not_regenerate_twice(self) -> None:
+    def test_pixel_product_generator_regenerates_once(self) -> None:
         calls = {"gen": 0}
 
         def caller(_prompt: str, _fmt: str) -> bytes:
@@ -284,11 +298,29 @@ class TestImageExecutionVsPlanContradiction(unittest.TestCase):
             )
 
         plan = _parse(_base_campaign(2), 2)
-        from engine.builder1_failure_classification import PlanContradictionComplianceError
+        from engine.builder1_image_compliance import ImageComplianceError
 
-        with self.assertRaises(PlanContradictionComplianceError):
+        with self.assertRaises(ImageComplianceError):
             generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
-        self.assertEqual(calls["gen"], 1)
+        self.assertEqual(calls["gen"], 2)
+
+    def test_structured_plan_conflict_preflight_does_not_generate(self) -> None:
+        calls = {"gen": 0}
+
+        def caller(_prompt: str, _fmt: str) -> bytes:
+            calls["gen"] += 1
+            return b"img"
+
+        plan = _parse(_base_campaign(2), 2)
+        internals = dict(plan.planning_internals or {})
+        ad_internals = dict(internals.get("adInternals") or {})
+        ad_internals[1] = {**(ad_internals.get(1) or {}), "productIsPhysicalGenerator": True}
+        internals["adInternals"] = ad_internals
+        plan.planning_internals = internals
+
+        with self.assertRaises(PlanProductVisibilityConflictError):
+            generate_builder1_ad_image(plan, 1, caller)
+        self.assertEqual(calls["gen"], 0)
 
 
 class TestPublicRetryContract(unittest.TestCase):

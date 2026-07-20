@@ -4,7 +4,7 @@ Repair Builder1 campaigns from brand_physical forward while preserving upstream 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from engine.builder1_campaign_integrity import make_upstream_snapshot, validate_builder1_campaign_integrity
 from engine.builder1_failure_classification import validate_forbidden_plan_visibility
@@ -43,6 +43,39 @@ from engine.builder1_slogan_stage import SloganCandidate
 from engine.builder1_staged_parsers import ConceptualCandidate, StageParseError, StrategyCandidate, StrategySelection
 
 logger = logging.getLogger(__name__)
+
+
+def validate_repaired_plan_preserves_generated_ads(
+    *,
+    original_plan: Builder1SeriesPlan,
+    repaired_plan: Builder1SeriesPlan,
+    generated_indexes: List[int],
+) -> List[str]:
+    reasons: List[str] = []
+    preserved = (
+        ("product_name_resolved", original_plan.product_name_resolved, repaired_plan.product_name_resolved),
+        ("strategic_problem", original_plan.strategic_problem, repaired_plan.strategic_problem),
+        ("relative_advantage", original_plan.relative_advantage, repaired_plan.relative_advantage),
+        ("brand_slogan", original_plan.brand_slogan, repaired_plan.brand_slogan),
+        ("slogan_action", original_plan.slogan_action, repaired_plan.slogan_action),
+        ("conceptual_generator", original_plan.conceptual_generator, repaired_plan.conceptual_generator),
+    )
+    for field, before, after in preserved:
+        if str(before or "").strip() != str(after or "").strip():
+            reasons.append(f"upstream_{field}_changed")
+
+    repaired_indexes = {ad.index for ad in repaired_plan.ads}
+    for idx in generated_indexes:
+        if idx not in repaired_indexes:
+            reasons.append(f"generated_ad_{idx}_missing_after_repair")
+
+    if generated_indexes:
+        original_series_type = str((original_plan.series_generator or {}).get("type") or "").strip()
+        repaired_series_type = str((repaired_plan.series_generator or {}).get("type") or "").strip()
+        if original_series_type and repaired_series_type and original_series_type != repaired_series_type:
+            reasons.append("repaired_series_type_breaks_generated_ads")
+
+    return list(dict.fromkeys(reasons))
 
 
 def _reconstruct_upstream_from_plan(plan: Builder1SeriesPlan):

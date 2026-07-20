@@ -225,7 +225,7 @@ def generate_builder1_ad_image(
             compliance_regeneration_count=0,
         )
 
-    failure_class, action, _details = classify_compliance_failure(
+    failure_class, action, _details, evidence = classify_compliance_failure(
         violations=list(review.violations),
         series_plan=series_plan,
     )
@@ -234,6 +234,7 @@ def generate_builder1_ad_image(
         ad_index=ad_index,
         failure_class=failure_class,
         action=action,
+        evidence=evidence,
     )
     if failure_class == Builder1FailureClass.PLAN_CONTRADICTION:
         raise PlanContradictionComplianceError(list(review.violations), ad_index=ad_index)
@@ -279,7 +280,7 @@ def generate_builder1_ad_image(
     if not review2.violations:
         raise ImageComplianceUnavailableError("malformed_response", ad_index=ad_index)
 
-    failure_class2, action2, _details2 = classify_compliance_failure(
+    failure_class2, action2, _details2, evidence2 = classify_compliance_failure(
         violations=list(review2.violations),
         series_plan=series_plan,
     )
@@ -288,6 +289,7 @@ def generate_builder1_ad_image(
         ad_index=ad_index,
         failure_class=failure_class2,
         action=action2,
+        evidence=evidence2,
     )
     if failure_class2 == Builder1FailureClass.PLAN_CONTRADICTION:
         raise PlanContradictionComplianceError(list(review2.violations), ad_index=ad_index)

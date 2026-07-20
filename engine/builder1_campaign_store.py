@@ -15,6 +15,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_from_store_dict, series_plan_to_store_dict
+from engine.builder1_retry_state import (
+    RETRY_MODE_IMAGE_ONLY,
+    RETRY_MODE_NONE,
+    RETRY_MODE_REPAIR_FROM_PHYSICAL,
+    normalize_retry_mode,
+    resolve_authoritative_retry_mode,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +140,12 @@ else
 end
 data.complete = complete
 data.generatedCount = generated_count
+data.status = "active"
+data.retryMode = "none"
+data.failedAdIndex = cjson.null
+data.lastImageViolations = cjson.null
+data.preservedThroughStage = cjson.null
+data.repairInProgress = false
 data.generatingIndex = cjson.null
 data.generatingLockOwnerJobId = cjson.null
 data.generatingLockToken = cjson.null
@@ -205,6 +218,9 @@ class Builder1CampaignSession:
     failed_ad_index: Optional[int] = None
     last_image_violations: Optional[List[str]] = None
     preserved_through_stage: Optional[str] = None
+    retry_mode: str = RETRY_MODE_NONE
+    plan_revision: int = 1
+    repair_in_progress: bool = False
 
 
 def get_campaign_store_backend() -> str:
@@ -270,6 +286,12 @@ def _session_from_raw(campaign_id: str, raw: Dict[str, Any]) -> Builder1Campaign
         failed_ad_index=_optional_int(raw.get("failedAdIndex")),
         last_image_violations=list(raw.get("lastImageViolations") or []) or None,
         preserved_through_stage=str(raw.get("preservedThroughStage") or "").strip() or None,
+        retry_mode=resolve_authoritative_retry_mode(
+            status=str(raw.get("status") or "active"),
+            retry_mode=str(raw.get("retryMode") or RETRY_MODE_NONE),
+        ),
+        plan_revision=max(1, int(raw.get("planRevision") or 1)),
+        repair_in_progress=bool(raw.get("repairInProgress")),
     )
 
 
@@ -286,6 +308,9 @@ def _session_to_raw(session: Builder1CampaignSession) -> Dict[str, Any]:
         "plan": series_plan_to_store_dict(session.plan),
         "planningComplete": session.planning_complete,
         "status": session.status,
+        "retryMode": session.retry_mode,
+        "planRevision": session.plan_revision,
+        "repairInProgress": session.repair_in_progress,
     }
     if session.failed_ad_index is not None:
         raw["failedAdIndex"] = session.failed_ad_index
@@ -472,9 +497,11 @@ def _mark_ad_generated_memory(campaign_id: str, ad_index: int) -> Builder1Campai
             raw.pop("nextAdIndex", None)
         raw["complete"] = complete
         raw["status"] = "active"
+        raw["retryMode"] = RETRY_MODE_NONE
         raw.pop("failedAdIndex", None)
         raw.pop("lastImageViolations", None)
         raw.pop("preservedThroughStage", None)
+        raw["repairInProgress"] = False
         raw.pop("generatingIndex", None)
         raw.pop("generatingLockOwnerJobId", None)
         raw.pop("generatingLockToken", None)
@@ -578,6 +605,8 @@ def reserve_next_ad_index(
 ) -> Builder1CampaignSession:
     cid = (campaign_id or "").strip()
     token = lock_token or (_new_lock_token(job_id=job_id, ad_index=expected_index) if job_id else "")
+    pre_session = get_campaign_session(cid)
+    _validate_next_index(pre_session, expected_index)
     if _redis_configured():
         try:
             r = _get_redis()
@@ -685,6 +714,14 @@ def mark_ad_generated(campaign_id: str, ad_index: int) -> Builder1CampaignSessio
     return _mark_ad_generated_memory(cid, ad_index)
 
 
+def _validate_image_generation_allowed(session: Builder1CampaignSession) -> None:
+    if session.repair_in_progress:
+        raise CampaignStoreError("physical_repair_not_completed")
+    mode = resolve_authoritative_retry_mode(status=session.status, retry_mode=session.retry_mode)
+    if mode == RETRY_MODE_REPAIR_FROM_PHYSICAL:
+        raise CampaignStoreError("physical_repair_not_completed")
+
+
 def _validate_next_index(session: Builder1CampaignSession, expected_index: int) -> None:
     if session.complete:
         raise CampaignStoreError("campaign_complete")
@@ -696,6 +733,7 @@ def _validate_next_index(session: Builder1CampaignSession, expected_index: int) 
         raise CampaignStoreError("campaign_index_conflict")
     if session.generated_count >= session.target_ad_count:
         raise CampaignStoreError("campaign_complete")
+    _validate_image_generation_allowed(session)
 
 
 def mark_physical_repair_required(
@@ -715,6 +753,9 @@ def mark_physical_repair_required(
     raw["failedAdIndex"] = int(failed_ad_index)
     raw["lastImageViolations"] = list(violations)
     raw["preservedThroughStage"] = preserved_through_stage
+    raw["retryMode"] = RETRY_MODE_REPAIR_FROM_PHYSICAL
+    raw["repairInProgress"] = False
+    raw["planRevision"] = max(1, int(raw.get("planRevision") or 1))
     _save_raw(cid, raw)
     session = _session_from_raw(cid, raw)
     logger.info(
@@ -728,21 +769,69 @@ def mark_physical_repair_required(
     return session
 
 
-def update_campaign_plan(campaign_id: str, plan: Builder1SeriesPlan) -> Builder1CampaignSession:
+def apply_repaired_campaign_plan(campaign_id: str, plan: Builder1SeriesPlan) -> Builder1CampaignSession:
+    """Atomically persist a repaired downstream plan and advance plan revision."""
     cid = (campaign_id or "").strip()
     raw = _load_raw(cid)
     if raw is None:
         raise CampaignStoreError("campaign_not_found")
     raw = dict(raw)
+    previous_revision = max(1, int(raw.get("planRevision") or 1))
     raw["plan"] = series_plan_to_store_dict(plan)
+    raw["planRevision"] = previous_revision + 1
     raw["status"] = "active"
-    raw.pop("failedAdIndex", None)
-    raw.pop("lastImageViolations", None)
-    raw.pop("preservedThroughStage", None)
+    raw["retryMode"] = RETRY_MODE_IMAGE_ONLY
+    raw["repairInProgress"] = False
     _save_raw(cid, raw)
     session = _session_from_raw(cid, raw)
-    logger.info("BUILDER1_CAMPAIGN_PLAN_UPDATED campaignId=%s", cid)
+    logger.info(
+        "BUILDER1_CAMPAIGN_PLAN_REPAIRED campaignId=%s planRevision=%s failedAdIndex=%s generatedCount=%s",
+        cid,
+        session.plan_revision,
+        session.failed_ad_index,
+        session.generated_count,
+    )
     return session
+
+
+def update_campaign_plan(campaign_id: str, plan: Builder1SeriesPlan) -> Builder1CampaignSession:
+    return apply_repaired_campaign_plan(campaign_id, plan)
+
+
+def begin_physical_repair(campaign_id: str, *, job_id: str = "") -> Builder1CampaignSession:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    mode = resolve_authoritative_retry_mode(
+        status=str(raw.get("status") or "active"),
+        retry_mode=str(raw.get("retryMode") or RETRY_MODE_NONE),
+    )
+    if mode != RETRY_MODE_REPAIR_FROM_PHYSICAL:
+        raise CampaignStoreError("physical_repair_not_required")
+    raw["repairInProgress"] = True
+    _save_raw(cid, raw)
+    session = _session_from_raw(cid, raw)
+    logger.info(
+        "BUILDER1_PHYSICAL_REPAIR_STARTED campaignId=%s jobId=%s failedAdIndex=%s planRevision=%s",
+        cid,
+        job_id or None,
+        session.failed_ad_index,
+        session.plan_revision,
+    )
+    return session
+
+
+def cancel_physical_repair_in_progress(campaign_id: str) -> Builder1CampaignSession:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    raw["repairInProgress"] = False
+    _save_raw(cid, raw)
+    return _session_from_raw(cid, raw)
 
 
 def mark_image_retry_required(
@@ -761,6 +850,9 @@ def mark_image_retry_required(
     raw["planningComplete"] = True
     raw["failedAdIndex"] = int(failed_ad_index)
     raw["lastImageViolations"] = list(violations)
+    raw["retryMode"] = RETRY_MODE_IMAGE_ONLY
+    raw["repairInProgress"] = False
+    raw["planRevision"] = max(1, int(raw.get("planRevision") or 1))
     _save_raw(cid, raw)
     session = _session_from_raw(cid, raw)
     logger.info(
@@ -786,6 +878,8 @@ def validate_next_ad_request(campaign_id: str, expected_next_index: int) -> Buil
         raise CampaignStoreError("campaign_complete")
     if session.generating_index is not None:
         raise CampaignStoreError("campaign_generation_in_progress")
+    if session.repair_in_progress:
+        raise CampaignStoreError("physical_repair_not_completed")
     if expected_next_index != session.next_ad_index:
         raise CampaignStoreError("campaign_index_conflict")
     if expected_next_index in session.generated_indexes:
