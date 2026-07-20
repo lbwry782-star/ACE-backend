@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from engine.builder1_compliance_adjudication import ComplianceEvidenceItem, parse_compliance_evidence
 
@@ -51,20 +51,34 @@ COMPLIANCE_RESPONSE_JSON_SCHEMA: Dict[str, Any] = {
                 "additionalProperties": False,
                 "properties": {
                     "code": {"type": "string"},
-                    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
-                    "evidenceType": {"type": "string"},
-                    "description": {"type": "string"},
-                    "location": {"type": "string"},
-                    "relationshipToBrandText": {"type": "string"},
-                    "symbolDescription": {"type": "string"},
-                    "symbolLocation": {"type": "string"},
-                    "relationshipToProductName": {"type": "string"},
-                    "relationshipToSlogan": {"type": "string"},
-                    "compactAndIsolated": {"type": "boolean"},
-                    "enclosedAsBadgeOrSeal": {"type": "boolean"},
-                    "repeatedAsBrandSignature": {"type": "boolean"},
+                    "confidence": {"type": ["string", "null"], "enum": ["high", "medium", "low", None]},
+                    "evidenceType": {"type": ["string", "null"]},
+                    "description": {"type": ["string", "null"]},
+                    "location": {"type": ["string", "null"]},
+                    "relationshipToBrandText": {"type": ["string", "null"]},
+                    "symbolDescription": {"type": ["string", "null"]},
+                    "symbolLocation": {"type": ["string", "null"]},
+                    "relationshipToProductName": {"type": ["string", "null"]},
+                    "relationshipToSlogan": {"type": ["string", "null"]},
+                    "compactAndIsolated": {"type": ["boolean", "null"]},
+                    "enclosedAsBadgeOrSeal": {"type": ["boolean", "null"]},
+                    "repeatedAsBrandSignature": {"type": ["boolean", "null"]},
                 },
-                "required": ["code"],
+                "required": [
+                    "code",
+                    "confidence",
+                    "evidenceType",
+                    "description",
+                    "location",
+                    "relationshipToBrandText",
+                    "symbolDescription",
+                    "symbolLocation",
+                    "relationshipToProductName",
+                    "relationshipToSlogan",
+                    "compactAndIsolated",
+                    "enclosedAsBadgeOrSeal",
+                    "repeatedAsBrandSignature",
+                ],
             },
         },
         "overallConfidence": {"type": "string", "enum": ["high", "medium", "low"]},
@@ -312,13 +326,19 @@ def response_rejection_details(
     return details
 
 
+def compliance_strict_json_schema() -> Dict[str, Any]:
+    """Authoritative strict schema sent to the Responses API."""
+    from engine.builder1_strict_schema import prepare_strict_json_schema
+
+    return prepare_strict_json_schema(COMPLIANCE_RESPONSE_JSON_SCHEMA)
+
+
 def build_text_format_for_compliance() -> Optional[Dict[str, Any]]:
     from engine.builder1_planning_model import strict_json_schema_available
-    from engine.builder1_strict_schema import prepare_strict_json_schema
 
     if not strict_json_schema_available():
         return None
-    prepared = prepare_strict_json_schema(COMPLIANCE_RESPONSE_JSON_SCHEMA)
+    prepared = compliance_strict_json_schema()
     return {
         "format": {
             "type": "json_schema",
@@ -327,6 +347,62 @@ def build_text_format_for_compliance() -> Optional[Dict[str, Any]]:
             "strict": True,
         }
     }
+
+
+def build_compliance_responses_request_kwargs(
+    *,
+    model: str,
+    image_bytes: bytes,
+    system_prompt: str,
+    product_name: str,
+    product_description: str,
+    visibility_policy: str,
+    transferred_object: str,
+    extra_user_text: str = "",
+    schema_mode: Literal["strict", "plain"] = "strict",
+    text_format: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Single authoritative Builder1 compliance Responses API request builder.
+
+    Used by production review, schema fallback, contract repair, and smoke tests.
+    """
+    import base64
+
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    user_text = (
+        f'Product name allowed as plain text only: "{product_name}".\n'
+        f"Product visibility policy: {visibility_policy}.\n"
+        f"Approved transferred physical generator: {transferred_object or '(see campaign plan)'}.\n"
+        f"Product description (for identifying unauthorized product depictions): {product_description}\n"
+        "Review this generated Builder1 advertisement image for logo and product-visibility compliance."
+    )
+    if extra_user_text:
+        user_text = f"{user_text}\n\n{extra_user_text.strip()}"
+
+    kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": f"{system_prompt}\n\n{user_text}",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:image/jpeg;base64,{image_b64}",
+                    },
+                ],
+            }
+        ],
+    }
+    if schema_mode == "strict":
+        fmt = text_format if text_format is not None else build_text_format_for_compliance()
+        if fmt:
+            kwargs["text"] = fmt
+    return kwargs
 
 
 def compliance_repair_user_prompt(*, parse_error: str, rejected_preview: str) -> str:

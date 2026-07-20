@@ -60,10 +60,15 @@ def find_strict_schema_errors(schema: Any, *, path: str = "") -> List[str]:
             errors.append(f"{node_path}:missing_properties")
         else:
             required = schema.get("required")
-            if isinstance(required, list):
+            if not isinstance(required, list):
+                errors.append(f"{node_path}:missing_required")
+            else:
                 for field in required:
                     if field not in properties:
                         errors.append(f"{node_path}.required.{field}:not_in_properties")
+                for name in properties:
+                    if name not in required:
+                        errors.append(f"{node_path}.properties.{name}:not_in_required")
             for name, subschema in properties.items():
                 sub_path = f"{node_path}.properties.{name}"
                 errors.extend(find_strict_schema_errors(subschema, path=sub_path))
@@ -101,6 +106,18 @@ def normalize_strict_json_schema(schema: Any) -> Any:
         normalized["properties"] = {
             key: normalize_strict_json_schema(value) for key, value in properties.items()
         }
+        if normalized["properties"]:
+            prop_keys = list(normalized["properties"].keys())
+            required = normalized.get("required")
+            if not isinstance(required, list):
+                normalized["required"] = prop_keys
+            else:
+                extra_required = set(required) - set(prop_keys)
+                missing_required = set(prop_keys) - set(required)
+                if extra_required:
+                    pass
+                elif missing_required:
+                    normalized["required"] = prop_keys
 
     if normalized.get("type") == "array" and "items" in normalized:
         normalized["items"] = normalize_strict_json_schema(normalized["items"])
@@ -131,12 +148,85 @@ def is_invalid_json_schema_api_error(exc: BaseException) -> bool:
         return True
     if "invalid schema for response_format" in message:
         return True
-    code = getattr(exc, "code", None)
-    if isinstance(code, str) and code.lower() == "invalid_json_schema":
+    if "json_schema" in message and "schema" in message:
         return True
+    code = getattr(exc, "code", None)
+    if isinstance(code, str) and code.lower() in {"invalid_json_schema", "invalid_request_error"}:
+        param = str(getattr(exc, "param", "") or "").lower()
+        if code.lower() == "invalid_json_schema" or "schema" in message or "response_format" in message:
+            return True
+        if param.startswith("text") or "format" in param or "schema" in param:
+            return True
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
         err = body.get("error") or {}
-        if isinstance(err, dict) and str(err.get("code", "")).lower() == "invalid_json_schema":
-            return True
+        if isinstance(err, dict):
+            err_code = str(err.get("code", "")).lower()
+            err_param = str(err.get("param", "") or "").lower()
+            err_message = str(err.get("message", "")).lower()
+            if err_code == "invalid_json_schema":
+                return True
+            if "invalid schema for response_format" in err_message:
+                return True
+            if err_code == "invalid_request_error" and (
+                "schema" in err_message
+                or "response_format" in err_message
+                or "json_schema" in err_message
+                or err_param.startswith("text")
+                or "format" in err_param
+            ):
+                return True
     return False
+
+
+def extract_openai_api_error_details(exc: BaseException) -> Dict[str, Any]:
+    """Extract safe OpenAI API error fields for logging — never includes secrets."""
+    status_code = getattr(exc, "status_code", None)
+    request_id = getattr(exc, "request_id", None)
+    body = getattr(exc, "body", None)
+    error: Dict[str, Any] = {}
+    if isinstance(body, dict):
+        raw_error = body.get("error")
+        if isinstance(raw_error, dict):
+            error = raw_error
+
+    response = getattr(exc, "response", None)
+    if request_id is None and response is not None:
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            request_id = headers.get("x-request-id") or headers.get("X-Request-Id")
+
+    error_type = str(error.get("type") or type(exc).__name__)
+    error_code = str(error.get("code") or getattr(exc, "code", "") or "")
+    error_param = str(error.get("param") or getattr(exc, "param", "") or "")
+    error_message = str(error.get("message") or str(exc) or "")
+
+    return {
+        "statusCode": status_code,
+        "errorType": error_type,
+        "errorCode": error_code,
+        "errorParam": error_param,
+        "errorMessage": error_message,
+        "requestId": request_id or "",
+    }
+
+
+def classify_compliance_api_error(exc: BaseException) -> str:
+    """Map an OpenAI API exception to a Builder1 compliance reason code."""
+    details = extract_openai_api_error_details(exc)
+    status_code = details.get("statusCode")
+    name = type(exc).__name__
+
+    if name in {"APITimeoutError", "TimeoutError"} or "timeout" in str(exc).lower():
+        return "review_timeout"
+    if name == "RateLimitError" or status_code == 429:
+        return "review_rate_limited"
+    if name == "AuthenticationError" or status_code == 401:
+        return "review_auth_error"
+    if isinstance(status_code, int) and status_code >= 500:
+        return "review_server_error"
+    if status_code == 400 or name == "BadRequestError":
+        return "request_rejected"
+    if name in {"APIConnectionError"}:
+        return "review_timeout"
+    return "review_server_error"

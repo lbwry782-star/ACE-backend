@@ -3,7 +3,6 @@ Builder1 post-generation image compliance review — no-logo visual enforcement.
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import os
@@ -21,12 +20,18 @@ from engine.builder1_image_compliance_contract import (
     IMAGE_COMPLIANCE_CONFIDENCE_VALUES,
     IMAGE_COMPLIANCE_VIOLATION_CODES,
     ImageComplianceResponseError,
+    build_compliance_responses_request_kwargs,
     build_text_format_for_compliance,
     coerce_review_dict,
     compliance_prompt_json_instructions,
     compliance_repair_user_prompt,
     normalize_compliance_payload,
     response_rejection_details,
+)
+from engine.builder1_strict_schema import (
+    classify_compliance_api_error,
+    extract_openai_api_error_details,
+    is_invalid_json_schema_api_error,
 )
 from engine.builder1_methodology_reasons import IMAGE_COMPLIANCE_REASON
 
@@ -346,6 +351,35 @@ def _parse_compliance_raw(
         raise
 
 
+def _log_api_rejected(
+    *,
+    exc: Exception,
+    campaign_id: Optional[str],
+    job_id: Optional[str],
+    ad_index: int,
+    schema_mode: str,
+) -> Dict[str, Any]:
+    details = extract_openai_api_error_details(exc)
+    logger.error(
+        "BUILDER1_IMAGE_COMPLIANCE_API_REJECTED campaignId=%s jobId=%s adIndex=%s "
+        "statusCode=%s errorType=%s errorCode=%s errorParam=%s errorMessage=%s "
+        "requestId=%s schemaVersion=%s model=%s schemaMode=%s",
+        campaign_id or "",
+        job_id or "",
+        ad_index,
+        details.get("statusCode"),
+        details.get("errorType"),
+        details.get("errorCode"),
+        details.get("errorParam"),
+        details.get("errorMessage"),
+        details.get("requestId"),
+        COMPLIANCE_SCHEMA_VERSION,
+        compliance_model_name(),
+        schema_mode,
+    )
+    return details
+
+
 def _is_transient_review_error(exc: Exception) -> bool:
     name = type(exc).__name__
     if name in {"RateLimitError", "APIConnectionError", "APITimeoutError", "TimeoutError"}:
@@ -467,6 +501,8 @@ def _openai_compliance_responses_call(
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
     ad_index: int = -1,
+    schema_mode: str = "strict",
+    allow_schema_fallback: bool = True,
 ) -> str:
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
@@ -478,20 +514,10 @@ def _openai_compliance_responses_call(
         raise ImageComplianceUnavailableError("client_unavailable", ad_index=-1) from exc
 
     model = compliance_model_name()
-    image_b64 = base64.b64encode(image_bytes).decode("ascii")
     client = OpenAI(api_key=api_key, timeout=httpx.Timeout(120.0), max_retries=0)
-    user_text = (
-        f'Product name allowed as plain text only: "{product_name}".\n'
-        f"Product visibility policy: {visibility_policy}.\n"
-        f"Approved transferred physical generator: {transferred_object or '(see campaign plan)'}.\n"
-        f"Product description (for identifying unauthorized product depictions): {product_description}\n"
-        "Review this generated Builder1 advertisement image for logo and product-visibility compliance."
-    )
-    if extra_user_text:
-        user_text = f"{user_text}\n\n{extra_user_text.strip()}"
 
-    text_format = build_text_format_for_compliance()
-    strict_available = text_format is not None
+    text_format = build_text_format_for_compliance() if schema_mode == "strict" else None
+    strict_available = text_format is not None and schema_mode == "strict"
     try:
         from engine.builder1_planning_model import strict_json_schema_available
 
@@ -500,26 +526,20 @@ def _openai_compliance_responses_call(
         strict_probe = False
     _log_strict_schema_once(enabled=strict_available, available=strict_probe)
 
-    kwargs = {
-        "model": model,
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_text",
-                        "text": f"{IMAGE_COMPLIANCE_SYSTEM_PROMPT}\n\n{user_text}",
-                    },
-                    {
-                        "type": "input_image",
-                        "image_url": f"data:image/jpeg;base64,{image_b64}",
-                    },
-                ],
-            }
-        ],
-    }
-    if text_format:
-        kwargs["text"] = text_format
+    active_mode = "strict" if strict_available else "plain"
+    active_text_format = text_format if active_mode == "strict" else None
+    kwargs = build_compliance_responses_request_kwargs(
+        model=model,
+        image_bytes=image_bytes,
+        system_prompt=IMAGE_COMPLIANCE_SYSTEM_PROMPT,
+        product_name=product_name,
+        product_description=product_description,
+        visibility_policy=visibility_policy,
+        transferred_object=transferred_object,
+        extra_user_text=extra_user_text,
+        schema_mode=active_mode,
+        text_format=active_text_format,
+    )
 
     last_exc: Optional[Exception] = None
     for attempt in (1, 2):
@@ -541,15 +561,60 @@ def _openai_compliance_responses_call(
             raise
         except Exception as exc:
             last_exc = exc
+            api_details = _log_api_rejected(
+                exc=exc,
+                campaign_id=campaign_id,
+                job_id=job_id,
+                ad_index=ad_index,
+                schema_mode=active_mode,
+            )
             if _is_unsupported_model_error(exc):
                 raise ImageComplianceUnavailableError("unsupported_model", ad_index=-1) from exc
+            if type(exc).__name__ == "RateLimitError" or api_details.get("statusCode") == 429:
+                raise ImageComplianceUnavailableError("review_rate_limited", ad_index=-1) from exc
+            if type(exc).__name__ == "AuthenticationError" or api_details.get("statusCode") == 401:
+                raise ImageComplianceUnavailableError("review_auth_error", ad_index=-1) from exc
             if _is_transient_review_error(exc) and attempt == 1:
                 logger.info("BUILDER1_IMAGE_COMPLIANCE_REVIEW_RETRY attempt=2")
                 continue
             if _is_transient_review_error(exc):
-                raise ImageComplianceUnavailableError("transient_review_failure", ad_index=-1) from exc
-            raise ImageComplianceUnavailableError("review_service_error", ad_index=-1) from exc
-    raise ImageComplianceUnavailableError("transient_review_failure", ad_index=-1) from last_exc
+                raise ImageComplianceUnavailableError("review_timeout", ad_index=-1) from exc
+
+            if (
+                allow_schema_fallback
+                and active_mode == "strict"
+                and is_invalid_json_schema_api_error(exc)
+            ):
+                logger.info(
+                    "BUILDER1_IMAGE_COMPLIANCE_SCHEMA_FALLBACK campaignId=%s adIndex=%s "
+                    "fromMode=strict_json_schema toMode=plain_json openaiErrorCode=%s openaiErrorParam=%s",
+                    campaign_id or "",
+                    ad_index,
+                    api_details.get("errorCode"),
+                    api_details.get("errorParam"),
+                )
+                kwargs = build_compliance_responses_request_kwargs(
+                    model=model,
+                    image_bytes=image_bytes,
+                    system_prompt=IMAGE_COMPLIANCE_SYSTEM_PROMPT,
+                    product_name=product_name,
+                    product_description=product_description,
+                    visibility_policy=visibility_policy,
+                    transferred_object=transferred_object,
+                    extra_user_text=extra_user_text,
+                    schema_mode="plain",
+                    text_format=None,
+                )
+                active_mode = "plain"
+                allow_schema_fallback = False
+                continue
+
+            reason_code = classify_compliance_api_error(exc)
+            raise ImageComplianceUnavailableError(reason_code, ad_index=-1) from exc
+    if last_exc is not None:
+        reason_code = classify_compliance_api_error(last_exc)
+        raise ImageComplianceUnavailableError(reason_code, ad_index=-1) from last_exc
+    raise ImageComplianceUnavailableError("review_timeout", ad_index=-1)
 
 
 def _openai_compliance_review_call(

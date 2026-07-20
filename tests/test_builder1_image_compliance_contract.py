@@ -263,7 +263,7 @@ class TestCompliancePublicApiContract(unittest.TestCase):
         self._reserved_session(campaign_id="cmp-both", job_id="job-both")
         errors = (
             ImageComplianceError(["invented_product_logo"], ad_index=2),
-            ImageComplianceUnavailableError("review_service_error", ad_index=2),
+            ImageComplianceUnavailableError("request_rejected", ad_index=2),
         )
         for idx, error in enumerate(errors):
             if idx > 0:
@@ -308,7 +308,7 @@ class TestCompliancePublicApiContract(unittest.TestCase):
         self._reserved_session(campaign_id="cmp-retry", job_id="job-r1")
         with patch(
             "app.generate_builder1_ad_image",
-            side_effect=ImageComplianceUnavailableError("transient_review_failure", ad_index=2),
+            side_effect=ImageComplianceUnavailableError("review_timeout", ad_index=2),
         ):
             first = _builder1_generate_single_ad(
                 job_id="job-r1",
