@@ -197,10 +197,9 @@ class TestComplianceContract(unittest.TestCase):
     def test_result_separates_hard_and_advisories(self) -> None:
         parsed = parse_image_compliance_response(
             {
-                "pass": False,
+                "reviewStatus": "completed",
                 "hardViolations": ["invented_product_logo"],
                 "advisories": ["possible_logo_like_shape"],
-                "violations": ["invented_product_logo"],
                 "overallConfidence": "high",
                 "evidence": [],
             }

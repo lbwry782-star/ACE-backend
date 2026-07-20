@@ -16,10 +16,12 @@ from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import Builder1SeriesPlan, series_plan_from_store_dict, series_plan_to_store_dict
 from engine.builder1_image_retry import entry_hard_violations, parse_image_attempt_history, union_violations_for_ad
+from engine.builder1_pending_image_store import delete_pending_image
 from engine.builder1_retry_state import (
     RETRY_MODE_IMAGE_ONLY,
     RETRY_MODE_NONE,
     RETRY_MODE_REPAIR_FROM_PHYSICAL,
+    RETRY_MODE_REVIEW_ONLY,
     normalize_retry_mode,
     resolve_authoritative_retry_mode,
 )
@@ -223,6 +225,11 @@ class Builder1CampaignSession:
     plan_revision: int = 1
     repair_in_progress: bool = False
     image_attempt_history: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    pending_image_key: Optional[str] = None
+    pending_visual_prompt: Optional[str] = None
+    compliance_failure_reason: Optional[str] = None
+    compliance_contract_attempts: int = 0
+    image_generated_pending: bool = False
 
 
 def get_campaign_store_backend() -> str:
@@ -308,6 +315,11 @@ def _session_from_raw(campaign_id: str, raw: Dict[str, Any]) -> Builder1Campaign
         plan_revision=_resolve_plan_revision_from_raw(raw, campaign_id=campaign_id),
         repair_in_progress=bool(raw.get("repairInProgress")),
         image_attempt_history=parse_image_attempt_history(raw.get("imageAttemptHistory")),
+        pending_image_key=str(raw.get("pendingImageKey") or "").strip() or None,
+        pending_visual_prompt=str(raw.get("pendingVisualPrompt") or "").strip() or None,
+        compliance_failure_reason=str(raw.get("complianceFailureReason") or "").strip() or None,
+        compliance_contract_attempts=int(raw.get("complianceContractAttempts") or 0),
+        image_generated_pending=bool(raw.get("imageGeneratedPending")),
     )
 
 
@@ -346,6 +358,16 @@ def _session_to_raw(session: Builder1CampaignSession) -> Dict[str, Any]:
             raw["generatingLockToken"] = session.generating_lock_token
         if session.generating_lock_acquired_at is not None:
             raw["generatingLockAcquiredAt"] = session.generating_lock_acquired_at
+    if session.pending_image_key:
+        raw["pendingImageKey"] = session.pending_image_key
+    if session.pending_visual_prompt:
+        raw["pendingVisualPrompt"] = session.pending_visual_prompt
+    if session.compliance_failure_reason:
+        raw["complianceFailureReason"] = session.compliance_failure_reason
+    if session.compliance_contract_attempts:
+        raw["complianceContractAttempts"] = session.compliance_contract_attempts
+    if session.image_generated_pending:
+        raw["imageGeneratedPending"] = True
     return raw
 
 
@@ -531,8 +553,15 @@ def _mark_ad_generated_memory(campaign_id: str, ad_index: int) -> Builder1Campai
         raw.pop("generatingLockOwnerJobId", None)
         raw.pop("generatingLockToken", None)
         raw.pop("generatingLockAcquiredAt", None)
+        pending_key = str(raw.pop("pendingImageKey", "") or "").strip()
+        raw.pop("pendingVisualPrompt", None)
+        raw.pop("complianceFailureReason", None)
+        raw.pop("complianceContractAttempts", None)
+        raw.pop("imageGeneratedPending", None)
         _memory_campaigns[campaign_id] = raw
         session = _session_from_raw(campaign_id, raw)
+    if pending_key:
+        delete_pending_image(pending_key)
     _log_campaign_progress(session, ad_index=ad_index)
     return session
 
@@ -734,6 +763,9 @@ def mark_ad_generated(campaign_id: str, ad_index: int) -> Builder1CampaignSessio
             session = get_campaign_session(cid)
             _clear_image_attempt_history_for_ad(cid, ad_index)
             session = get_campaign_session(cid)
+            pending_key = session.pending_image_key
+            if pending_key:
+                delete_pending_image(pending_key)
             _log_campaign_progress(session, ad_index=ad_index)
             return session
         except CampaignStoreError:
@@ -750,6 +782,8 @@ def _validate_image_generation_allowed(session: Builder1CampaignSession) -> None
     mode = resolve_authoritative_retry_mode(status=session.status, retry_mode=session.retry_mode)
     if mode == RETRY_MODE_REPAIR_FROM_PHYSICAL:
         raise CampaignStoreError("physical_repair_not_completed")
+    if mode == RETRY_MODE_REVIEW_ONLY:
+        return
 
 
 def _validate_next_index(session: Builder1CampaignSession, expected_index: int) -> None:
@@ -942,6 +976,58 @@ def cancel_physical_repair_in_progress(campaign_id: str) -> Builder1CampaignSess
     return _session_from_raw(cid, raw)
 
 
+def _clear_compliance_review_fields(raw: Dict[str, Any]) -> None:
+    raw.pop("pendingImageKey", None)
+    raw.pop("pendingVisualPrompt", None)
+    raw.pop("complianceFailureReason", None)
+    raw.pop("complianceContractAttempts", None)
+    raw.pop("imageGeneratedPending", None)
+
+
+def mark_compliance_review_required(
+    campaign_id: str,
+    *,
+    failed_ad_index: int,
+    reason: str,
+    pending_image_key: str,
+    visual_prompt: str = "",
+    contract_attempts: int = 1,
+) -> Builder1CampaignSession:
+    """Persist compliance-only retry state while preserving the generated image."""
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    raw["status"] = "compliance_review_required"
+    raw["planningComplete"] = True
+    raw["failedAdIndex"] = int(failed_ad_index)
+    raw["retryMode"] = RETRY_MODE_REVIEW_ONLY
+    raw["repairInProgress"] = False
+    raw["pendingImageKey"] = pending_image_key
+    if visual_prompt:
+        raw["pendingVisualPrompt"] = visual_prompt
+    raw["complianceFailureReason"] = str(reason or "malformed_response")
+    raw["complianceContractAttempts"] = max(1, int(contract_attempts))
+    raw["imageGeneratedPending"] = True
+    raw["planRevision"] = max(1, int(raw.get("planRevision") or 1))
+    _save_raw(cid, raw)
+    session = _session_from_raw(cid, raw)
+    logger.info(
+        "BUILDER1_COMPLIANCE_REVIEW_REQUIRED campaignId=%s failedAdIndex=%s generatedCount=%s "
+        "targetAdCount=%s planRevision=%s reason=%s pendingImageKey=%s contractAttempts=%s",
+        cid,
+        failed_ad_index,
+        session.generated_count,
+        session.target_ad_count,
+        session.plan_revision,
+        reason,
+        pending_image_key,
+        contract_attempts,
+    )
+    return session
+
+
 def mark_image_retry_required(
     campaign_id: str,
     *,
@@ -954,6 +1040,9 @@ def mark_image_retry_required(
     if raw is None:
         raise CampaignStoreError("campaign_not_found")
     raw = dict(raw)
+    pending_key = str(raw.get("pendingImageKey") or "").strip()
+    if pending_key:
+        delete_pending_image(pending_key)
     raw["status"] = "image_retry_required"
     raw["planningComplete"] = True
     raw["failedAdIndex"] = int(failed_ad_index)
@@ -961,6 +1050,7 @@ def mark_image_retry_required(
     raw["retryMode"] = RETRY_MODE_IMAGE_ONLY
     raw["repairInProgress"] = False
     raw["planRevision"] = max(1, int(raw.get("planRevision") or 1))
+    _clear_compliance_review_fields(raw)
     _save_raw(cid, raw)
     session = _session_from_raw(cid, raw)
     logger.info(

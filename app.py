@@ -43,16 +43,23 @@ from engine.builder1_campaign_store import (
     cumulative_violations_for_ad,
     get_campaign_session,
     mark_ad_generated,
+    mark_compliance_review_required,
     mark_image_retry_required,
     mark_physical_repair_required,
     release_generation_lock,
     reserve_next_ad_index,
     validate_next_ad_request,
 )
+from engine.builder1_pending_image_store import (
+    PendingImageStoreError,
+    load_pending_image,
+    save_pending_image,
+)
 from engine.builder1_retry_state import (
     RETRY_MODE_IMAGE_ONLY,
     RETRY_MODE_NONE,
     RETRY_MODE_REPAIR_FROM_PHYSICAL,
+    RETRY_MODE_REVIEW_ONLY,
     public_retry_fields,
     resolve_authoritative_retry_mode,
 )
@@ -80,6 +87,7 @@ from engine.builder1_image_compliance import (
     ImageComplianceError,
     ImageComplianceUnavailableError,
     log_builder1_image_compliance_config,
+    review_builder1_ad_image_compliance,
 )
 from engine.builder1_planning_profile import (
     log_builder1_planning_profile_config,
@@ -586,6 +594,9 @@ BUILDER1_PUBLIC_IMAGE_RETRY_MESSAGE = (
 BUILDER1_PUBLIC_PHYSICAL_REPAIR_MESSAGE = (
     "נמצאה סתירה בתכנון החזותי. המערכת תתקן את המודעה בלי להתחיל את הקמפיין מחדש."
 )
+BUILDER1_PUBLIC_COMPLIANCE_UNAVAILABLE_MESSAGE = (
+    "אימות התמונה אינו זמין כרגע. נא לנסות שוב."
+)
 
 
 def _builder1_retry_error_response(
@@ -651,6 +662,8 @@ def _builder1_assert_image_job_allowed(
     mode = resolve_authoritative_retry_mode(status=session.status, retry_mode=session.retry_mode)
     if session.repair_in_progress or mode == RETRY_MODE_REPAIR_FROM_PHYSICAL:
         raise CampaignStoreError("physical_repair_not_completed")
+    if mode == RETRY_MODE_REVIEW_ONLY and session.failed_ad_index == ad_index:
+        return session
     return session
 
 
@@ -675,6 +688,30 @@ def _builder1_image_compliance_error_response(
         hard_violation_codes=violations,
         advisory_codes=advisory_codes,
     )
+
+
+def _builder1_compliance_unavailable_error_response(
+    *,
+    campaign_id: str,
+    ad_index: int,
+    session,
+    reason_code: str,
+    contract_attempts: int = 1,
+) -> dict[str, Any]:
+    payload = _builder1_retry_error_response(
+        campaign_id=campaign_id,
+        ad_index=ad_index,
+        session=session,
+        error_code="image_compliance_unavailable",
+        retry_mode=RETRY_MODE_REVIEW_ONLY,
+        user_message=BUILDER1_PUBLIC_COMPLIANCE_UNAVAILABLE_MESSAGE,
+    )
+    payload["complianceAvailable"] = False
+    payload["imageGenerated"] = True
+    payload["complianceFailureReason"] = reason_code
+    payload["complianceContractAttempts"] = contract_attempts
+    payload["planningComplete"] = True
+    return payload
 
 
 def _builder1_generate_single_ad(
@@ -891,11 +928,67 @@ def _builder1_generate_single_ad(
                 lock_token=lock_token,
             )
         session = get_campaign_session(campaign_id)
-        return _builder1_image_compliance_error_response(
+        pending_key = None
+        image_bytes = getattr(e, "image_bytes", None)
+        visual_prompt = getattr(e, "visual_prompt", "") or ""
+        contract_attempts = 2 if getattr(e, "contract_repair_attempted", False) else 1
+        if image_bytes and campaign_id:
+            try:
+                pending_key = save_pending_image(
+                    campaign_id=campaign_id,
+                    ad_index=ad_index,
+                    plan_revision=session.plan_revision,
+                    image_bytes=image_bytes,
+                    visual_prompt=visual_prompt,
+                )
+                session = mark_compliance_review_required(
+                    campaign_id,
+                    failed_ad_index=ad_index,
+                    reason=e.reason_code,
+                    pending_image_key=pending_key,
+                    visual_prompt=visual_prompt,
+                    contract_attempts=contract_attempts,
+                )
+            except PendingImageStoreError as store_exc:
+                if store_exc.code == "pending_image_too_large":
+                    logger.error(
+                        "BUILDER1_PENDING_IMAGE_TOO_LARGE campaignId=%s jobId=%s adIndex=%s bytes=%s",
+                        campaign_id,
+                        job_id,
+                        ad_index,
+                        len(image_bytes),
+                    )
+                    return {
+                        "ok": False,
+                        "error": "pending_image_too_large",
+                        "message": store_exc.message,
+                        "retryable": True,
+                        "retryMode": RETRY_MODE_IMAGE_ONLY,
+                        "campaignId": campaign_id,
+                        "nextAdIndex": ad_index,
+                        "generatedCount": session.generated_count,
+                        "targetAdCount": session.target_ad_count,
+                        "planningComplete": True,
+                        "imageGenerated": True,
+                        "complianceAvailable": False,
+                        "planRevision": session.plan_revision,
+                        **public_retry_fields(session=session, retry_ad_index=ad_index),
+                    }
+                raise
+        logger.error(
+            "BUILDER1_IMAGE_COMPLIANCE_UNAVAILABLE campaignId=%s jobId=%s adIndex=%s reasonCode=%s pending=%s",
+            campaign_id,
+            job_id,
+            ad_index,
+            e.reason_code,
+            bool(pending_key),
+        )
+        return _builder1_compliance_unavailable_error_response(
             campaign_id=campaign_id,
             ad_index=ad_index,
             session=session,
-            error_code="image_compliance_unavailable",
+            reason_code=e.reason_code,
+            contract_attempts=contract_attempts,
         )
     except ImageRateLimitError as e:
         if reservation_held:
@@ -956,6 +1049,172 @@ def _builder1_generate_single_ad(
             )
         logger.error("BUILDER1_SERIES_IMAGE_FAILED campaignId=%s adIndex=%s err=%s", campaign_id, ad_index, e)
         return {"ok": False, "error": "image_generation_failed", "message": str(e), "campaignId": campaign_id}
+
+
+def _builder1_generate_review_only_ad(
+    *,
+    job_id: str,
+    campaign_id: str,
+    ad_index: int,
+    already_reserved: bool,
+) -> dict[str, Any]:
+    reservation_held = already_reserved
+    lock_token = ""
+    try:
+        if already_reserved:
+            session = get_campaign_session(campaign_id)
+            if session.generating_index != ad_index:
+                raise CampaignStoreError("campaign_index_conflict")
+            lock_token = session.generating_lock_token or ""
+        else:
+            session = reserve_next_ad_index(campaign_id, ad_index, job_id=job_id)
+            lock_token = session.generating_lock_token or ""
+            reservation_held = True
+
+        session = _builder1_assert_image_job_allowed(
+            campaign_id=campaign_id,
+            job_id=job_id,
+            ad_index=ad_index,
+        )
+        update_builder1_job(
+            job_id,
+            planRevision=session.plan_revision,
+            retryAdIndex=ad_index,
+            campaignId=campaign_id,
+            retryMode=RETRY_MODE_REVIEW_ONLY,
+        )
+        _builder1_update_job(
+            job_id,
+            stage="reviewing_compliance",
+            completedAds=session.generated_count,
+            totalAds=session.target_ad_count,
+            targetAdCount=session.target_ad_count,
+        )
+
+        pending_ref = session.pending_image_key
+        if not pending_ref:
+            raise PendingImageStoreError("pending_image_missing")
+        pending = load_pending_image(pending_ref)
+        if pending.plan_revision != session.plan_revision:
+            raise CampaignStoreError("stale_plan_revision")
+        if pending.ad_index != ad_index:
+            raise CampaignStoreError("campaign_index_conflict")
+
+        visual_prompt = pending.visual_prompt or session.pending_visual_prompt or ""
+        policy = session.plan.product_visibility_policy or "FORBIDDEN"
+        review_product_description = (
+            session.plan.product_description if policy != "FORBIDDEN" else ""
+        )
+        review = review_builder1_ad_image_compliance(
+            pending.image_bytes,
+            product_name=session.plan.product_name_resolved,
+            ad_index=ad_index,
+            campaign_id=campaign_id,
+            job_id=job_id,
+            product_description=review_product_description,
+            visibility_policy=policy,
+            transferred_object=session.plan.transferred_object or session.plan.physical_generator,
+            series_plan=session.plan,
+            plan_revision=session.plan_revision,
+        )
+        if review.passed:
+            session = mark_ad_generated(campaign_id, ad_index)
+            reservation_held = False
+            return _builder1_build_incremental_result(
+                campaign_id=campaign_id,
+                session=session,
+                ad_index=ad_index,
+                visual_prompt=visual_prompt,
+                image_base64=image_bytes_to_base64(pending.image_bytes),
+            )
+
+        failure_class, _action, _details, _evidence = classify_compliance_failure(
+            violations=list(review.hard_violations or review.violations),
+            hard_violations=list(review.hard_violations or review.violations),
+            series_plan=session.plan,
+        )
+        if failure_class == Builder1FailureClass.PLAN_CONTRADICTION:
+            if reservation_held:
+                release_generation_lock(campaign_id, job_id=job_id, lock_token=lock_token)
+            session = mark_physical_repair_required(
+                campaign_id,
+                failed_ad_index=ad_index,
+                violations=list(review.hard_violations or review.violations),
+            )
+            return _builder1_retry_error_response(
+                campaign_id=campaign_id,
+                ad_index=ad_index,
+                session=session,
+                error_code="physical_plan_conflict",
+                retry_mode="repair_from_physical",
+                user_message=BUILDER1_PUBLIC_PHYSICAL_REPAIR_MESSAGE,
+                violations=list(review.hard_violations or review.violations),
+            )
+        if reservation_held:
+            release_generation_lock(campaign_id, job_id=job_id, lock_token=lock_token)
+        session = mark_image_retry_required(
+            campaign_id,
+            failed_ad_index=ad_index,
+            violations=list(review.hard_violations or review.violations),
+        )
+        return _builder1_image_compliance_error_response(
+            campaign_id=campaign_id,
+            ad_index=ad_index,
+            session=session,
+            error_code="image_compliance_failed",
+            violations=list(review.hard_violations or review.violations),
+            advisory_codes=list(review.advisories or []),
+            retry_mode="image_only",
+        )
+    except ImageComplianceUnavailableError as e:
+        if reservation_held:
+            release_generation_lock(campaign_id, job_id=job_id, lock_token=lock_token)
+        session = get_campaign_session(campaign_id)
+        contract_attempts = int(session.compliance_contract_attempts or 0) + 1
+        if session.pending_image_key:
+            session = mark_compliance_review_required(
+                campaign_id,
+                failed_ad_index=ad_index,
+                reason=e.reason_code,
+                pending_image_key=session.pending_image_key,
+                visual_prompt=session.pending_visual_prompt or "",
+                contract_attempts=contract_attempts,
+            )
+        return _builder1_compliance_unavailable_error_response(
+            campaign_id=campaign_id,
+            ad_index=ad_index,
+            session=session,
+            reason_code=e.reason_code,
+            contract_attempts=contract_attempts,
+        )
+    except PendingImageStoreError as e:
+        if reservation_held:
+            release_generation_lock(campaign_id, job_id=job_id, lock_token=lock_token)
+        session = get_campaign_session(campaign_id)
+        return {
+            "ok": False,
+            "error": e.code,
+            "message": e.message,
+            "retryable": True,
+            "campaignId": campaign_id,
+            **public_retry_fields(session=session, retry_ad_index=ad_index),
+        }
+    except CampaignStoreError as e:
+        if reservation_held:
+            release_generation_lock(campaign_id, job_id=job_id, lock_token=lock_token)
+        return {"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}
+    except Exception as e:
+        if reservation_held:
+            release_generation_lock(campaign_id, job_id=job_id, lock_token=lock_token)
+        logger.error(
+            "BUILDER1_REVIEW_ONLY_FAILED campaignId=%s jobId=%s adIndex=%s err=%s",
+            campaign_id,
+            job_id,
+            ad_index,
+            e,
+            exc_info=True,
+        )
+        return {"ok": False, "error": "image_compliance_unavailable", "message": str(e), "campaignId": campaign_id}
 
 
 def _builder1_generate_initial(
@@ -1044,6 +1303,27 @@ def _builder1_run_initial_job(
             job_id, campaign_id, product_name, product_description, format_val, ad_count, brand_guidelines
         )
         _builder1_finalize_job(job_id, result, target_ad_count=ad_count)
+    except Exception as e:
+        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
+        logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+
+
+def _builder1_run_review_only_job(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
+    logger.info(
+        "BUILDER1_REVIEW_ONLY_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
+        job_id,
+        campaign_id,
+        retry_ad_index,
+    )
+    try:
+        result = _builder1_generate_review_only_ad(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            ad_index=retry_ad_index,
+            already_reserved=True,
+        )
+        target_ad_count = get_campaign_session(campaign_id).target_ad_count
+        _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
     except Exception as e:
         update_builder1_job(job_id, status="error", error="builder1_generation_failed")
         logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
@@ -1458,6 +1738,48 @@ def builder1_generate_next():
                         retry_ad_index=expected_next_index,
                         repair_in_progress=True,
                     ),
+                }
+            ),
+            202,
+        )
+
+    if retry_mode == RETRY_MODE_REVIEW_ONLY:
+        try:
+            session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
+        except CampaignStoreError as e:
+            return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
+        create_builder1_job(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            target_ad_count=session.target_ad_count,
+            stage="reviewing_compliance",
+        )
+        update_builder1_job(
+            job_id,
+            completedAds=session.generated_count,
+            totalAds=session.target_ad_count,
+            planRevision=session.plan_revision,
+            retryMode=RETRY_MODE_REVIEW_ONLY,
+            retryAdIndex=expected_next_index,
+        )
+        _builder1_executor.submit(
+            _builder1_run_review_only_job,
+            job_id,
+            campaign_id,
+            expected_next_index,
+        )
+        return (
+            jsonify(
+                {
+                    "status": "running",
+                    "jobId": job_id,
+                    "campaignId": campaign_id,
+                    "stage": "reviewing_compliance",
+                    "completedAds": session.generated_count,
+                    "totalAds": session.target_ad_count,
+                    "targetAdCount": session.target_ad_count,
+                    "pollUrl": f"/api/builder1-status?jobId={job_id}",
+                    **public_retry_fields(session=session, retry_ad_index=expected_next_index),
                 }
             ),
             202,

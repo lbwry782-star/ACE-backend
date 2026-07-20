@@ -168,6 +168,13 @@ class TestComplianceGenerationFlow(unittest.TestCase):
 
 
 class TestCompliancePublicApiContract(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        import sys
+        from unittest.mock import MagicMock
+
+        sys.modules.setdefault("openai", MagicMock())
+
     def setUp(self) -> None:
         clear_memory_store_for_tests()
 
@@ -226,7 +233,12 @@ class TestCompliancePublicApiContract(unittest.TestCase):
         self._reserved_session(campaign_id="cmp-unavail", job_id="job-unavail")
         with patch(
             "app.generate_builder1_ad_image",
-            side_effect=ImageComplianceUnavailableError("missing_api_key", ad_index=2),
+            side_effect=ImageComplianceUnavailableError(
+                "missing_api_key",
+                ad_index=2,
+                image_bytes=b"img",
+                visual_prompt="prompt",
+            ),
         ):
             result = _builder1_generate_single_ad(
                 job_id="job-unavail",
@@ -236,7 +248,10 @@ class TestCompliancePublicApiContract(unittest.TestCase):
             )
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"], "image_compliance_unavailable")
+        self.assertEqual(result["retryMode"], "review_only")
         self.assertTrue(result["retryable"])
+        self.assertTrue(result.get("imageGenerated"))
+        self.assertFalse(result.get("complianceAvailable"))
         self.assertEqual(result["nextAdIndex"], 2)
         self.assertEqual(result["generatedCount"], 1)
         self.assertEqual(result["targetAdCount"], 4)

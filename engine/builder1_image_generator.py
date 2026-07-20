@@ -310,19 +310,28 @@ def generate_builder1_ad_image(
             regeneration_count += 1
 
         compliance_started = time.perf_counter()
-        review = review_builder1_ad_image_compliance(
-            image_bytes,
-            product_name=series_plan.product_name_resolved,
-            ad_index=ad_index,
-            campaign_id=campaign_id,
-            job_id=job_id,
-            product_description=review_product_description,
-            visibility_policy=series_plan.product_visibility_policy,
-            transferred_object=series_plan.transferred_object or series_plan.physical_generator,
-            reviewer=compliance_reviewer,
-            series_plan=series_plan,
-            plan_revision=plan_revision,
-        )
+        try:
+            review = review_builder1_ad_image_compliance(
+                image_bytes,
+                product_name=series_plan.product_name_resolved,
+                ad_index=ad_index,
+                campaign_id=campaign_id,
+                job_id=job_id,
+                product_description=review_product_description,
+                visibility_policy=series_plan.product_visibility_policy,
+                transferred_object=series_plan.transferred_object or series_plan.physical_generator,
+                reviewer=compliance_reviewer,
+                series_plan=series_plan,
+                plan_revision=plan_revision,
+            )
+        except ImageComplianceUnavailableError as exc:
+            raise ImageComplianceUnavailableError(
+                exc.reason_code,
+                ad_index=ad_index,
+                image_bytes=image_bytes,
+                visual_prompt=last_prompt,
+                contract_repair_attempted=getattr(exc, "contract_repair_attempted", False),
+            ) from exc
         compliance_review_duration_ms += int((time.perf_counter() - compliance_started) * 1000)
 
         if review.advisories:
