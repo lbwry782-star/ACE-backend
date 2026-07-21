@@ -60,6 +60,8 @@ class TestMethodologyPrompts(unittest.TestCase):
     def test_conceptual_stage_evaluates_product_shot_bias(self) -> None:
         self.assertIn("avoidsProductShotBias", STAGE_CONCEPTUAL_STAGE_SYSTEM)
         self.assertIn("removed", STAGE_CONCEPTUAL_STAGE_SYSTEM.lower())
+        self.assertIn("If eligible=true: rejectionCodes must be an empty list.", STAGE_CONCEPTUAL_STAGE_SYSTEM)
+        self.assertIn("concept_conventional_product_shot", STAGE_CONCEPTUAL_STAGE_SYSTEM)
 
     def test_brand_physical_requires_external_object_exploration(self) -> None:
         self.assertIn("physicalCandidates", STAGE_BRAND_PHYSICAL_SYSTEM)
@@ -120,6 +122,8 @@ class TestConceptualCandidateSelection(unittest.TestCase):
                 product_name_resolved="TestBrand",
                 brand_slogan="Built To Last",
                 implied_action="Show impact survival",
+                relative_advantage="Survives daily drops",
+                strategic_problem="Buyers doubt durability",
                 model_caller=lambda *_a, **_k: {},
                 run_stage=lambda *_a, **_k: [],
             )

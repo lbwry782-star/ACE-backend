@@ -34,6 +34,7 @@ class Builder1PlanningMetrics:
     strategy_slogan_repair_calls: int = 0
     slogan_only_repair_calls: int = 0
     strategy_candidate_repair_calls: int = 0
+    conceptual_candidate_repair_calls: int = 0
     conceptual_stage_calls: int = 0
     physical_stage_calls: int = 0
     graphic_stage_calls: int = 0
@@ -85,6 +86,8 @@ class Builder1PlanningMetrics:
             self.slogan_only_repair_calls += 1
         elif stage == "strategy_candidate_repair":
             self.strategy_candidate_repair_calls += 1
+        elif stage in {"conceptual_evaluation_repair", "conceptual_candidate_repair"}:
+            self.conceptual_candidate_repair_calls += 1
         elif stage == "conceptual_stage":
             self.conceptual_stage_calls += 1
         elif stage == "brand_physical":
@@ -95,7 +98,6 @@ class Builder1PlanningMetrics:
             self.series_stage_calls += 1
         elif stage in {
             "slogan_candidate_repair",
-            "conceptual_candidate_repair",
             "marketing_text_repair",
         }:
             self.focused_repair_calls += 1
@@ -175,7 +177,7 @@ class Builder1PlanningMetrics:
             "BUILDER1_PLANNING_CALL_SUMMARY campaignId=%s jobId=%s "
             "productNameCallUsed=%s productNameStageCalls=%s strategyStageCalls=%s sloganStageCalls=%s "
             "strategySloganStageCalls=%s strategySloganRepairCalls=%s sloganOnlyRepairCalls=%s "
-            "strategyCandidateRepairCalls=%s conceptualStageCalls=%s physicalStageCalls=%s "
+            "strategyCandidateRepairCalls=%s conceptualCandidateRepairCalls=%s conceptualStageCalls=%s physicalStageCalls=%s "
             "graphicStageCalls=%s seriesStageCalls=%s marketingTextRepairCalls=%s "
             "stageRepairCalls=%s stageRetryCalls=%s stageModelFallbackCalls=%s "
             "normalExpectedCalls=%s actualPlanningCalls=%s totalPlanningModelCalls=%s "
@@ -190,6 +192,7 @@ class Builder1PlanningMetrics:
             self.strategy_slogan_repair_calls,
             self.slogan_only_repair_calls,
             self.strategy_candidate_repair_calls,
+            self.conceptual_candidate_repair_calls,
             self.conceptual_stage_calls,
             self.physical_stage_calls,
             self.graphic_stage_calls,

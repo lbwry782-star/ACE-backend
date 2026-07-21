@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_PLANNING_RULE, brand_guidelines_for_prompt
+from engine.builder1_conceptual_evaluations import CONCEPTUAL_REJECTION_CODE_LIST
 from engine.builder1_graphic_contract import (
     descriptive_field_prompt_lines,
     repair_instructions_for_reasons,
@@ -334,10 +335,31 @@ Rules:
 - categoryRelevant means relevant to the fixed relative advantage — not category literalness.
 - Mark eligible=false with rejectionCodes when the idea collapses without the product, starts from product-shot logic, lacks a transferred-object path, or is generically transferable — unless productEvidenceRequired=true with a convincing productEvidenceReason.
 - eligible=true requires rejectionCodes=[] and all structural booleans true for that candidate.
+- For every evaluation:
+  - If eligible=true: rejectionCodes must be an empty list.
+  - If eligible=false: rejectionCodes must contain at least one valid code from the allowed enum below. Never mark a candidate ineligible without supplying a code. Do not place the reason only in free text.
+- Allowed rejectionCodes only:
+  {", ".join(CONCEPTUAL_REJECTION_CODE_LIST)}
 - Do not choose the physical generator, graphic system, or ads.
 - Do not rewrite the slogan.
 - Do not use Creator, Judge, or tournament roles.
 """.strip()
+
+
+STAGE_CONCEPTUAL_EVALUATION_REPAIR_SYSTEM = f"""
+You are a Builder1 conceptual evaluation repair assistant.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{{"evaluations":[{{"candidateId":"C01","perceptionToCreate":"...","impliedPhysicalLaw":"...","derivedFromSelectedSloganAction":true,"expressesRelativeAdvantage":true,"visuallyClear":true,"seriesGenerative":true,"brandOwnable":true,"categoryRelevant":true,"executableByImageModel":true,"survivesProductRemoval":true,"avoidsProductShotBias":true,"supportsTransferredObject":true,"distinctiveToBrand":true,"productEvidenceRequired":false,"productEvidenceReason":"","eligible":false,"rejectionCodes":["concept_conventional_product_shot"]}}]}}
+Rules:
+- Repair ONLY the requested candidate ids in evaluations.
+- Do not alter valid candidates that were not requested.
+- If eligible=true: rejectionCodes must be [].
+- If eligible=false: rejectionCodes must contain at least one allowed code.
+- Allowed rejectionCodes only:
+  {", ".join(CONCEPTUAL_REJECTION_CODE_LIST)}
+- Do not rewrite candidate objects in candidates[].
+""".strip()
+
 
 STAGE_CONCEPTUAL_SELECT_SYSTEM = """
 You are a Builder1 conceptual-generator selector.
@@ -752,6 +774,58 @@ def build_conceptual_scan_repair_prompt(*, broken_json: str, reasons: List[str])
         '"whyItExpressesAdvantage":"...","seriesPotential":"...","brandOwnershipPotential":"..."}]}\n'
         f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"
+    )
+
+
+def build_conceptual_evaluation_repair_user_prompt(
+    *,
+    invalid_candidate_ids: List[str],
+    invalid_reasons: Dict[str, List[str]],
+    evaluation_items: Dict[str, Dict[str, Any]],
+    candidates: List[Any],
+    product_description: str,
+    brand_slogan: str,
+    implied_action: str,
+    relative_advantage: str,
+    strategic_problem: str,
+) -> str:
+    requested = [
+        {
+            "candidateId": cid,
+            "currentEvaluation": evaluation_items.get(cid, {}),
+            "errors": invalid_reasons.get(cid, []),
+        }
+        for cid in invalid_candidate_ids
+    ]
+    candidate_context = [
+        {
+            "id": getattr(candidate, "id", ""),
+            "generator": getattr(candidate, "generator", ""),
+            "action": getattr(candidate, "action", ""),
+        }
+        for candidate in candidates
+        if getattr(candidate, "id", "") in invalid_candidate_ids
+    ]
+    return (
+        "Repair ONLY the listed evaluation objects.\n"
+        "Return exactly:\n"
+        '{"evaluations":[{"candidateId":"C01","perceptionToCreate":"...","impliedPhysicalLaw":"...",'
+        '"derivedFromSelectedSloganAction":true,"expressesRelativeAdvantage":true,"visuallyClear":true,'
+        '"seriesGenerative":true,"brandOwnable":true,"categoryRelevant":true,"executableByImageModel":true,'
+        '"survivesProductRemoval":true,"avoidsProductShotBias":true,"supportsTransferredObject":true,'
+        '"distinctiveToBrand":true,"productEvidenceRequired":false,"productEvidenceReason":"",'
+        '"eligible":false,"rejectionCodes":["concept_conventional_product_shot"]}]}\n'
+        f"Fixed brand slogan: {brand_slogan}\n"
+        f"Implied slogan action: {implied_action}\n"
+        f"Relative advantage: {relative_advantage}\n"
+        f"Strategic problem: {strategic_problem}\n"
+        f"Product description:\n{product_description.strip()}\n"
+        f"Allowed rejectionCodes only:\n{', '.join(CONCEPTUAL_REJECTION_CODE_LIST)}\n"
+        f"Invalid candidate ids: {', '.join(invalid_candidate_ids)}\n"
+        f"Requested repairs:\n{json.dumps(requested, ensure_ascii=False, indent=2)}\n"
+        f"Candidate context:\n{json.dumps(candidate_context, ensure_ascii=False, indent=2)}\n"
+        "Do not change eligible status unless required to satisfy the eligible/code invariant.\n"
+        "Do not rewrite candidates outside the requested ids."
     )
 
 

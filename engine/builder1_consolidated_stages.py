@@ -7,13 +7,25 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from engine.builder1_client_boundary import strategy_candidate_is_eligible
+from engine.builder1_conceptual_evaluations import (
+    CONCEPTUAL_REJECTION_CODES,
+    extract_repairable_evaluation_error_ids,
+    is_repairable_evaluation_parse_error,
+    merge_conceptual_evaluation_replacements,
+    normalize_conceptual_evaluation_item,
+    normalize_conceptual_evaluations_in_payload,
+    parse_conceptual_evaluation_replacements,
+    validate_normalized_conceptual_evaluation_item,
+)
 from engine.builder1_planning_contract import (
+    STAGE_CONCEPTUAL_EVALUATION_REPAIR_SYSTEM,
     STAGE_CONCEPTUAL_STAGE_SYSTEM,
     STAGE_SLOGAN_ONLY_REPAIR_SYSTEM,
     STAGE_SLOGAN_STAGE_SYSTEM,
     STAGE_STRATEGY_SLOGAN_REPAIR_SYSTEM,
     STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM,
     STAGE_STRATEGY_STAGE_SYSTEM,
+    build_conceptual_evaluation_repair_user_prompt,
     build_conceptual_scan_repair_prompt,
     build_conceptual_stage_user_prompt,
     build_slogan_only_repair_user_prompt,
@@ -28,7 +40,6 @@ from engine.builder1_slogan_stage import (
     validate_selected_slogan,
 )
 from engine.builder1_slogan_stage_parser import parse_consolidated_slogan_stage_response
-from engine.builder1_product_shot_methodology import CONCEPTUAL_PRODUCT_SHOT_REJECTION_CODES
 from engine.builder1_staged_parsers import (
     CONCEPTUAL_IDS,
     STRATEGY_IDS,
@@ -75,22 +86,6 @@ DEFAULT_SLOGAN_SCORES: Dict[str, int] = {
     "actionClarity": 8,
     "campaignGenerativePower": 8,
 }
-
-CONCEPTUAL_REJECTION_CODES = frozenset(
-    {
-        "concept_not_derived_from_slogan_action",
-        "concept_does_not_express_advantage",
-        "concept_not_visually_clear",
-        "concept_not_series_generative",
-        "concept_not_brand_ownable",
-        "concept_not_category_relevant",
-        "concept_not_image_executable",
-        "concept_random_object_first",
-        "concept_rewrites_slogan",
-        "concept_requires_operational_change",
-    }
-    | CONCEPTUAL_PRODUCT_SHOT_REJECTION_CODES
-)
 
 
 @dataclass
@@ -642,33 +637,32 @@ def _parse_conceptual_evaluations(
             reasons.append(f"conceptual_stage_evaluation_duplicate_id:{cid}")
             continue
         seen.add(cid)
-        rejection_codes = [
-            str(code)
-            for code in (item.get("rejectionCodes") or [])
-            if str(code).strip() in CONCEPTUAL_REJECTION_CODES
-        ]
-        eligible_flag = bool(item.get("eligible"))
-        if eligible_flag and rejection_codes:
-            reasons.append(f"conceptual_stage_evaluation_contradictory:{cid}")
-        if not eligible_flag and not rejection_codes:
-            reasons.append(f"conceptual_stage_evaluation_ineligible_without_codes:{cid}")
+        normalized_item, _actions = normalize_conceptual_evaluation_item(item)
+        rejection_codes = list(normalized_item.get("rejectionCodes") or [])
+        eligible_flag = bool(normalized_item.get("eligible"))
+        reasons.extend(
+            validate_normalized_conceptual_evaluation_item(
+                normalized_item,
+                candidate_id=cid,
+            )
+        )
         parsed[cid] = ConceptualCandidateReview(
             candidate_id=cid,
-            perception_to_create=str(item.get("perceptionToCreate") or "").strip(),
-            implied_physical_law=str(item.get("impliedPhysicalLaw") or "").strip(),
-            derived_from_selected_slogan_action=bool(item.get("derivedFromSelectedSloganAction")),
-            expresses_relative_advantage=bool(item.get("expressesRelativeAdvantage")),
-            visually_clear=bool(item.get("visuallyClear")),
-            series_generative=bool(item.get("seriesGenerative")),
-            brand_ownable=bool(item.get("brandOwnable")),
-            category_relevant=bool(item.get("categoryRelevant")),
-            executable_by_image_model=bool(item.get("executableByImageModel")),
-            survives_product_removal=bool(item.get("survivesProductRemoval")),
-            avoids_product_shot_bias=bool(item.get("avoidsProductShotBias")),
-            supports_transferred_object=bool(item.get("supportsTransferredObject")),
-            distinctive_to_brand=bool(item.get("distinctiveToBrand")),
-            product_evidence_required=bool(item.get("productEvidenceRequired")),
-            product_evidence_reason=str(item.get("productEvidenceReason") or "").strip(),
+            perception_to_create=str(normalized_item.get("perceptionToCreate") or "").strip(),
+            implied_physical_law=str(normalized_item.get("impliedPhysicalLaw") or "").strip(),
+            derived_from_selected_slogan_action=bool(normalized_item.get("derivedFromSelectedSloganAction")),
+            expresses_relative_advantage=bool(normalized_item.get("expressesRelativeAdvantage")),
+            visually_clear=bool(normalized_item.get("visuallyClear")),
+            series_generative=bool(normalized_item.get("seriesGenerative")),
+            brand_ownable=bool(normalized_item.get("brandOwnable")),
+            category_relevant=bool(normalized_item.get("categoryRelevant")),
+            executable_by_image_model=bool(normalized_item.get("executableByImageModel")),
+            survives_product_removal=bool(normalized_item.get("survivesProductRemoval")),
+            avoids_product_shot_bias=bool(normalized_item.get("avoidsProductShotBias")),
+            supports_transferred_object=bool(normalized_item.get("supportsTransferredObject")),
+            distinctive_to_brand=bool(normalized_item.get("distinctiveToBrand")),
+            product_evidence_required=bool(normalized_item.get("productEvidenceRequired")),
+            product_evidence_reason=str(normalized_item.get("productEvidenceReason") or "").strip(),
             eligible=eligible_flag,
             rejection_codes=rejection_codes,
         )
@@ -680,6 +674,136 @@ def _parse_conceptual_evaluations(
     if reasons:
         raise StageParseError("conceptual_stage", reasons)
     return parsed
+
+
+def _run_conceptual_evaluation_repair(
+    *,
+    model_caller: PlanningModelCaller,
+    run_stage: RunStageFn,
+    invalid_ids: List[str],
+    invalid_reasons: Dict[str, List[str]],
+    evaluation_items: Dict[str, Dict[str, Any]],
+    candidates: List[ConceptualCandidate],
+    product_description: str,
+    brand_slogan: str,
+    implied_action: str,
+    relative_advantage: str,
+    strategic_problem: str,
+    repair_attempt: int,
+) -> Dict[str, Dict[str, Any]]:
+    user_prompt = build_conceptual_evaluation_repair_user_prompt(
+        invalid_candidate_ids=invalid_ids,
+        invalid_reasons=invalid_reasons,
+        evaluation_items=evaluation_items,
+        candidates=candidates,
+        product_description=product_description,
+        brand_slogan=brand_slogan,
+        implied_action=implied_action,
+        relative_advantage=relative_advantage,
+        strategic_problem=strategic_problem,
+    )
+
+    def _parse(raw: object):
+        return parse_conceptual_evaluation_replacements(
+            raw,
+            allowed_ids=invalid_ids,
+        )
+
+    logger.info(
+        "BUILDER1_CONCEPTUAL_REPAIR_START attempt=%s candidateIds=%s reasonCodes=%s",
+        repair_attempt,
+        ",".join(sorted(invalid_ids)),
+        ",".join(sorted({code for codes in invalid_reasons.values() for code in codes})),
+    )
+    return run_stage(
+        "conceptual_evaluation_repair",
+        model_caller,
+        STAGE_CONCEPTUAL_EVALUATION_REPAIR_SYSTEM,
+        user_prompt,
+        _parse,
+    )
+
+
+def _ensure_conceptual_evaluations(
+    raw_payload: object,
+    *,
+    candidates: List[ConceptualCandidate],
+    product_description: str,
+    brand_slogan: str,
+    implied_action: str,
+    relative_advantage: str,
+    strategic_problem: str,
+    model_caller: PlanningModelCaller,
+    run_stage: RunStageFn,
+) -> Dict[str, ConceptualCandidateReview]:
+    obj = coerce_json_dict(raw_payload)
+    obj, _action_log = normalize_conceptual_evaluations_in_payload(obj)
+
+    try:
+        return _parse_conceptual_evaluations(obj, expected_ids=CONCEPTUAL_IDS)
+    except StageParseError as exc:
+        if not is_repairable_evaluation_parse_error(exc.reasons):
+            raise
+        last_reasons = list(exc.reasons)
+
+    evaluation_items = {
+        _norm_id(item.get("candidateId")): item
+        for item in (obj.get("evaluations") or [])
+        if isinstance(item, dict)
+    }
+
+    for repair_attempt in (1, 2):
+        invalid_reasons = extract_repairable_evaluation_error_ids(last_reasons)
+        invalid_ids = sorted(invalid_reasons.keys())
+        if not invalid_ids:
+            raise StageParseError("conceptual_stage", last_reasons)
+
+        try:
+            replacements = _run_conceptual_evaluation_repair(
+                model_caller=model_caller,
+                run_stage=run_stage,
+                invalid_ids=invalid_ids,
+                invalid_reasons=invalid_reasons,
+                evaluation_items=evaluation_items,
+                candidates=candidates,
+                product_description=product_description,
+                brand_slogan=brand_slogan,
+                implied_action=implied_action,
+                relative_advantage=relative_advantage,
+                strategic_problem=strategic_problem,
+                repair_attempt=repair_attempt,
+            )
+        except StageParseError as repair_exc:
+            logger.info(
+                "BUILDER1_CONCEPTUAL_REPAIR_FAILED attempt=%s reasonCodes=%s",
+                repair_attempt,
+                repair_exc.reasons,
+            )
+            if repair_attempt == 2:
+                raise StageParseError("conceptual_stage", repair_exc.reasons) from repair_exc
+            continue
+
+        obj = merge_conceptual_evaluation_replacements(obj, replacements)
+        obj, _action_log = normalize_conceptual_evaluations_in_payload(obj)
+        try:
+            reviews = _parse_conceptual_evaluations(obj, expected_ids=CONCEPTUAL_IDS)
+            logger.info(
+                "BUILDER1_CONCEPTUAL_REPAIR_OK attempt=%s candidateIds=%s",
+                repair_attempt,
+                ",".join(sorted(replacements.keys())),
+            )
+            return reviews
+        except StageParseError as exc2:
+            last_reasons = exc2.reasons
+            logger.info(
+                "BUILDER1_CONCEPTUAL_REPAIR_FAILED attempt=%s reasonCodes=%s",
+                repair_attempt,
+                exc2.reasons,
+            )
+            if repair_attempt == 2:
+                raise
+
+    raise StageParseError("conceptual_stage", last_reasons or ["conceptual_evaluation_repair_exhausted"])
 
 
 def _conceptual_gate_reasons(review: ConceptualCandidateReview) -> List[str]:
@@ -756,6 +880,8 @@ def process_conceptual_stage_response(
     product_name_resolved: str,
     brand_slogan: str,
     implied_action: str,
+    relative_advantage: str,
+    strategic_problem: str,
     model_caller: PlanningModelCaller,
     run_stage: RunStageFn,
 ) -> Tuple[ConceptualSelection, ConceptualCandidate, List[ConceptualCandidate]]:
@@ -780,7 +906,17 @@ def process_conceptual_stage_response(
             implied_action=implied_action,
         )
 
-    evaluations = _parse_conceptual_evaluations(raw_payload, expected_ids=CONCEPTUAL_IDS)
+    evaluations = _ensure_conceptual_evaluations(
+        raw_payload,
+        candidates=candidates,
+        product_description=product_description,
+        brand_slogan=brand_slogan,
+        implied_action=implied_action,
+        relative_advantage=relative_advantage,
+        strategic_problem=strategic_problem,
+        model_caller=model_caller,
+        run_stage=run_stage,
+    )
     obj = coerce_json_dict(raw_payload)
     preferred_id = _norm_id(obj.get("selectedCandidateId"))
     selection_reason = str(obj.get("selectionReason") or "").strip() or "Strongest eligible concept"
@@ -849,6 +985,8 @@ def run_conceptual_stage(
             product_name_resolved=product_name_resolved,
             brand_slogan=selected_slogan.brand_slogan,
             implied_action=selected_slogan.implied_action,
+            relative_advantage=selected_strategy.relative_advantage,
+            strategic_problem=selected_strategy.strategic_problem,
             model_caller=model_caller,
             run_stage=run_stage,
         )

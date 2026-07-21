@@ -8,6 +8,7 @@ import logging
 import os
 from typing import Any, Callable, Dict, Optional
 
+from engine.builder1_conceptual_evaluations import CONCEPTUAL_REJECTION_CODE_LIST
 from engine.builder1_strict_schema import (
     StrictSchemaConfigurationError,
     find_strict_schema_errors,
@@ -31,6 +32,7 @@ STRICT_SCHEMA_STAGES = frozenset(
         "slogan_quality_review",
         "slogan_candidate_repair",
         "conceptual_stage",
+        "conceptual_evaluation_repair",
         "brand_physical",
         "graphic_system",
         "series_ads",
@@ -615,7 +617,19 @@ CONCEPTUAL_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
         "productEvidenceRequired": {"type": "boolean"},
         "productEvidenceReason": {"type": "string"},
         "eligible": {"type": "boolean"},
-        "rejectionCodes": {"type": "array", "items": {"type": "string"}},
+        "rejectionCodes": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(CONCEPTUAL_REJECTION_CODE_LIST)},
+        },
+    },
+}
+
+CONCEPTUAL_EVALUATION_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["evaluations"],
+    "properties": {
+        "evaluations": {"type": "array", "items": CONCEPTUAL_EVALUATION_ITEM_SCHEMA},
     },
 }
 
@@ -697,6 +711,7 @@ STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "slogan_quality_review": SLOGAN_QUALITY_REVIEW_JSON_SCHEMA,
     "slogan_candidate_repair": SLOGAN_CANDIDATE_REPAIR_JSON_SCHEMA,
     "conceptual_stage": CONCEPTUAL_STAGE_JSON_SCHEMA,
+    "conceptual_evaluation_repair": CONCEPTUAL_EVALUATION_REPAIR_JSON_SCHEMA,
     "brand_physical": BRAND_PHYSICAL_JSON_SCHEMA,
     "graphic_system": GRAPHIC_SYSTEM_JSON_SCHEMA,
     "series_ads": SERIES_ADS_JSON_SCHEMA,
