@@ -334,8 +334,8 @@ class TestPlanningRegression(unittest.TestCase):
     def test_quality_profile_keeps_quality_model(self) -> None:
         import os
 
-        with patch.dict(os.environ, {"BUILDER1_PLANNING_PROFILE": "QUALITY", "BUILDER1_PLANNING_MODEL": "o3-pro"}, clear=False):
-            self.assertEqual(resolve_stage_model("graphic_system"), "o3-pro")
+        with patch.dict(os.environ, {"BUILDER1_PLANNING_PROFILE": "QUALITY", "BUILDER1_PLANNING_MODEL": "gpt-5.6-sol"}, clear=False):
+            self.assertEqual(resolve_stage_model("graphic_system"), "gpt-5.6-sol")
 
 
 class TestPublicRetryFields(unittest.TestCase):

@@ -34,7 +34,7 @@ GOAL_PAIR_BG_MAX_WAIT_SECONDS = 180  # 180s total; only trigger timeout fallback
 GOAL_PAIR_BG_CREATE_TIMEOUT_SECONDS = 15  # create with background=True returns quickly
 GOAL_PAIR_BG_POLL_INTERVAL_SECONDS = 2  # initial backoff (progressive: 2→3→5→8→10s cap)
 
-# Phase 2B: o3-pro single call for advertising_goal + 3 pairs (strict JSON).
+# Phase 2B: GPT-5.6 Sol single call for advertising_goal + 3 pairs (strict JSON).
 GOAL_PAIR_MIN_SIMILARITY_ACCEPT = 40
 
 GOAL_PAIR_RETRY_INSTRUCTION = """Follow the method again: anchor shape from product, shape search for silhouette similarity, cross-domain (A and B from different functional domains), second link (conceptual association only). a_sub and b_sub must be external, separate contextual objects (e.g. straw, bone, flower), never parts of the primary (no sole, horn opening, pip faces, cap, handle, etc.). Derive advertising_goal from the pair. Return the same JSON schema."""
@@ -241,7 +241,7 @@ def create_goal_pair_background(
     retry_instruction: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Create o3-pro GOAL_PAIR request in OpenAI Background Mode. No retries.
+    Create GPT-5.6 Sol GOAL_PAIR request in OpenAI Background Mode. No retries.
     If retry_instruction is set, appends it to the prompt (for one extra attempt after low similarity).
     Returns response_id (str) for polling, or None on create failure.
     """
@@ -261,10 +261,12 @@ def create_goal_pair_background(
     logger.info(f"STAGE2_PROMPT_TOKENS_EST={_tokens_est} request_id={request_id}")
     logger.info(f"STAGE2_PROMPT_PREVIEW {_preview!r} request_id={request_id}")
     try:
+        from engine.openai_reasoning import build_reasoning_payload, resolve_openai_reasoning_model
+
         response = client.responses.create(
-            model="o3-pro",
+            model=resolve_openai_reasoning_model(),
             input=prompt,
-            reasoning={"effort": "low"},
+            reasoning=build_reasoning_payload(),
             background=True,
         )
         response_id = getattr(response, "id", None)

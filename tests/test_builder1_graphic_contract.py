@@ -156,7 +156,7 @@ class TestGraphicPipeline(unittest.TestCase):
             os.environ,
             {
                 "BUILDER1_PLANNING_PROFILE": "BALANCED",
-                "BUILDER1_PLANNING_MODEL": "o3-pro",
+                "BUILDER1_PLANNING_MODEL": "gpt-5.6-sol",
                 "BUILDER1_EXECUTION_MODEL": "gpt-4.1",
             },
             clear=False,
@@ -253,7 +253,7 @@ class TestGraphicPipeline(unittest.TestCase):
             os.environ,
             {
                 "BUILDER1_PLANNING_PROFILE": "BALANCED",
-                "BUILDER1_PLANNING_MODEL": "o3-pro",
+                "BUILDER1_PLANNING_MODEL": "gpt-5.6-sol",
                 "BUILDER1_EXECUTION_MODEL": "gpt-4.1",
             },
             clear=False,
@@ -261,11 +261,11 @@ class TestGraphicPipeline(unittest.TestCase):
             with stage_model_override({"graphic_system": "gpt-4.1"}):
                 with patch(
                     "engine.builder1_planning_profile.resolve_stage_model",
-                    side_effect=lambda stage: "gpt-4.1" if stage == "graphic_system" else "o3-pro",
+                    side_effect=lambda stage: "gpt-4.1" if stage == "graphic_system" else "gpt-5.6-sol",
                 ):
                     with patch(
                         "engine.builder1_planning_profile.quality_model",
-                        return_value="o3-pro",
+                        return_value="gpt-5.6-sol",
                     ):
                         with patch(
                             "engine.builder1_planning_profile.execution_optimization_active",

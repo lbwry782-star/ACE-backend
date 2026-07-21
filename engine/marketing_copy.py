@@ -17,9 +17,10 @@ logger = logging.getLogger("engine.side_by_side_v1")
 
 
 def _get_text_model() -> str:
-    """Resolved text model; o4-mini is deprecated and mapped to o3-pro."""
-    m = os.environ.get("OPENAI_TEXT_MODEL", "o3-pro")
-    return "o3-pro" if m == "o4-mini" else m
+    """Resolved text model; legacy aliases map to the configured reasoning model."""
+    from engine.openai_reasoning import resolve_openai_reasoning_model
+
+    return resolve_openai_reasoning_model()
 
 
 def _repair_verbatim_marketing_product_name(copy_text: str, product_name: str, lang: str) -> str:
@@ -293,10 +294,15 @@ def generate_marketing_copy(
             )
 
             def _copy_call():
-                is_o_model = len(model_name) > 1 and model_name.startswith("o") and model_name[1].isdigit()
-                if is_o_model:
+                from engine.openai_reasoning import build_reasoning_payload, model_uses_responses_api
+
+                if model_uses_responses_api(model_name):
                     full_input = f"{system_msg.strip()}\n\n{prompt}"
-                    r = client.responses.create(model=model_name, input=full_input)
+                    r = client.responses.create(
+                        model=model_name,
+                        input=full_input,
+                        reasoning=build_reasoning_payload(),
+                    )
                     return r.output_text.strip()
                 r = client.chat.completions.create(
                     model=model_name,

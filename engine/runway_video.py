@@ -336,7 +336,7 @@ def _fallback_packaging_marketing_copy(
 ) -> str:
     """
     Promise-only marketing copy generation for Builder2 packaging text.
-    Primary path uses o3-pro with language + anti-repeat checks; deterministic fallback is last resort.
+    Primary path uses GPT-5.6 Sol with language + anti-repeat checks; deterministic fallback is last resort.
     """
     _LRI = "\u2066"
     _PDI = "\u2069"
@@ -450,15 +450,17 @@ def _fallback_packaging_marketing_copy(
         if not api_key:
             raise RuntimeError("openai_unconfigured")
         client = OpenAI(api_key=api_key)
+        from engine.openai_reasoning import build_reasoning_payload, resolve_openai_reasoning_model
+
         out = client.responses.create(
-            model="o3-pro",
+            model=resolve_openai_reasoning_model(),
             input=_promise_only_prompt(
                 promise_text=promise_text,
                 product=product,
                 lang_code=lang_code,
                 previous_texts=previous_texts,
             ),
-            reasoning={"effort": "low"},
+            reasoning=build_reasoning_payload(),
         )
         return (getattr(out, "output_text", None) or "").strip()
 

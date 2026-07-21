@@ -125,6 +125,13 @@ except Exception as e:
     logger.warning("BUILDER1_IMAGE_COMPLIANCE_CONFIG startup failed err=%s", e)
 
 try:
+    from engine.openai_reasoning import log_openai_reasoning_config
+
+    log_openai_reasoning_config()
+except Exception as e:
+    logger.warning("OPENAI_REASONING_CONFIG startup failed err=%s", e)
+
+try:
     log_builder1_planning_profile_config()
 except Exception as e:
     logger.warning("BUILDER1_PLANNING_PROFILE_CONFIG startup failed err=%s", e)
@@ -463,7 +470,7 @@ def _parse_builder1_o3_json_text(raw: str) -> dict[str, Any]:
     return obj
 
 
-def _o3_pro_planning_model_caller(
+def _openai_reasoning_planning_model_caller(
     system_prompt: str,
     user_prompt: str,
     *,
@@ -1241,7 +1248,7 @@ def _builder1_generate_initial(
             product_name=product_name,
             product_description=product_description,
             format_value=format_val,
-            model_caller=_o3_pro_planning_model_caller,
+            model_caller=_openai_reasoning_planning_model_caller,
             ad_count=ad_count,
             brand_guidelines=brand_guidelines,
             campaign_id=campaign_id,
@@ -1367,7 +1374,7 @@ def _builder1_run_physical_repair_job(job_id: str, campaign_id: str, retry_ad_in
         _builder1_update_job(job_id, stage="repairing_physical", completedAds=session.generated_count)
         repaired_plan = repair_builder1_campaign_from_physical(
             session.plan,
-            model_caller=_o3_pro_planning_model_caller,
+            model_caller=_openai_reasoning_planning_model_caller,
         )
         from engine.builder1_physical_repair import validate_repaired_plan_preserves_generated_ads
 

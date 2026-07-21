@@ -485,7 +485,7 @@ class TestProductionSequenceRegression(unittest.TestCase):
             os.environ,
             {
                 "BUILDER1_PLANNING_PROFILE": "QUALITY",
-                "BUILDER1_QUALITY_MODEL": "o3-pro",
+                "BUILDER1_QUALITY_MODEL": "gpt-5.6-sol",
             },
             clear=False,
         ):
@@ -497,7 +497,7 @@ class TestProductionSequenceRegression(unittest.TestCase):
                 "series_ads",
                 "marketing_language",
             ):
-                self.assertEqual(resolve_stage_model(stage), "o3-pro")
+                self.assertEqual(resolve_stage_model(stage), "gpt-5.6-sol")
 
     def test_product_visibility_remains_forbidden_by_default(self) -> None:
         plan = _plan(3)

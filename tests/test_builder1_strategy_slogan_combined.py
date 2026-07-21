@@ -148,7 +148,7 @@ class TestCombinedCallCounts(unittest.TestCase):
 class TestCombinedModelRouting(unittest.TestCase):
     @patch.dict("os.environ", {"BUILDER1_PLANNING_PROFILE": "QUALITY"}, clear=False)
     def test_quality_profile_uses_quality_model(self) -> None:
-        self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "o3-pro")
+        self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "gpt-5.6-sol")
 
 
 class TestCombinedMetrics(unittest.TestCase):

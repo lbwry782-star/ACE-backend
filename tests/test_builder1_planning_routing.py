@@ -35,7 +35,7 @@ class TestPlanningProfiles(unittest.TestCase):
         self._env = patch.dict(
             os.environ,
             {
-                "BUILDER1_PLANNING_MODEL": "o3-pro",
+                "BUILDER1_PLANNING_MODEL": "gpt-5.6-sol",
                 "BUILDER1_EXECUTION_MODEL": "gpt-4.1",
                 "BUILDER1_PLANNING_PROFILE": "BALANCED",
             },
@@ -48,11 +48,11 @@ class TestPlanningProfiles(unittest.TestCase):
 
     def test_quality_profile_uses_quality_model(self) -> None:
         with patch.dict(os.environ, {"BUILDER1_PLANNING_PROFILE": "QUALITY"}, clear=False):
-            self.assertEqual(resolve_stage_model("strategy_stage"), "o3-pro")
-            self.assertEqual(resolve_stage_model("graphic_system"), "o3-pro")
+            self.assertEqual(resolve_stage_model("strategy_stage"), "gpt-5.6-sol")
+            self.assertEqual(resolve_stage_model("graphic_system"), "gpt-5.6-sol")
 
     def test_balanced_profile_routes_execution_stages(self) -> None:
-        self.assertEqual(resolve_stage_model("strategy_stage"), "o3-pro")
+        self.assertEqual(resolve_stage_model("strategy_stage"), "gpt-5.6-sol")
         self.assertEqual(resolve_stage_model("product_name_resolution"), "gpt-4.1")
         self.assertEqual(resolve_stage_model("graphic_system"), "gpt-4.1")
         self.assertEqual(resolve_stage_model("series_ads"), "gpt-4.1")
@@ -66,14 +66,14 @@ class TestPlanningProfiles(unittest.TestCase):
     def test_unsupported_execution_model_falls_back_when_unset(self) -> None:
         with patch.dict(os.environ, {"BUILDER1_EXECUTION_MODEL": ""}, clear=False):
             self.assertFalse(execution_optimization_active())
-            self.assertEqual(resolve_stage_model("series_ads"), "o3-pro")
+            self.assertEqual(resolve_stage_model("series_ads"), "gpt-5.6-sol")
 
     def test_unsupported_reasoning_effort_is_not_sent_for_non_reasoning_model(self) -> None:
         self.assertIsNone(resolve_stage_reasoning_effort("graphic_system", "gpt-4.1"))
 
     def test_reasoning_effort_supported_for_o3(self) -> None:
-        self.assertTrue(model_supports_reasoning_effort("o3-pro"))
-        self.assertEqual(resolve_stage_reasoning_effort("strategy_stage", "o3-pro"), "low")
+        self.assertTrue(model_supports_reasoning_effort("gpt-5.6-sol"))
+        self.assertEqual(resolve_stage_reasoning_effort("strategy_stage", "gpt-5.6-sol"), "high")
 
 
 class TestStageOrderAndCallCounts(unittest.TestCase):
@@ -165,7 +165,7 @@ class TestProductionShapedRegression(unittest.TestCase):
             os.environ,
             {
                 "BUILDER1_PLANNING_PROFILE": "BALANCED",
-                "BUILDER1_PLANNING_MODEL": "o3-pro",
+                "BUILDER1_PLANNING_MODEL": "gpt-5.6-sol",
                 "BUILDER1_EXECUTION_MODEL": "gpt-4.1",
             },
             clear=False,
@@ -195,7 +195,7 @@ class TestProductionShapedRegression(unittest.TestCase):
                 "graphic_system",
                 "series_ads",
             ])
-            self.assertEqual(models["strategy_slogan_stage"], "o3-pro")
+            self.assertEqual(models["strategy_slogan_stage"], "gpt-5.6-sol")
             self.assertEqual(models["series_ads"], "gpt-4.1")
             prompt = __import__(
                 "engine.builder1_visual_prompt", fromlist=["build_visual_prompt"]

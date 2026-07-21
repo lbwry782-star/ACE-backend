@@ -1,7 +1,7 @@
 """
 Shared helper for OpenAI API calls with 429 rate-limit retry and backoff.
 
-Use for both Responses API (o3-pro) and Image generations (gpt-image-1.5).
+Use for both Responses API (GPT-5.6 Sol) and Image generations (gpt-image-1.5).
 - On HTTP 429: exponential backoff (2s, 4s, 8s, 16s) + jitter, respect Retry-After.
 - Max 4 retries; then raise OpenAIRateLimitError for a clean API response.
 """

@@ -1,6 +1,6 @@
 """
 LEGACY — not part of active Builder1 campaign-series production path.
-Builder1 headline text via o3-pro (Object A/B era).
+Builder1 headline text via GPT-5.6 Sol (Object A/B era).
 """
 from __future__ import annotations
 
@@ -226,11 +226,14 @@ def generate_builder1_headline_o3(
         timeout=httpx.Timeout(120.0),
         max_retries=0,
     )
+    from engine.builder1_planning_profile import quality_model
+    from engine.openai_reasoning import build_reasoning_payload
+
     combined = f"{system.strip()}\n\n{user.strip()}"
     response = client.responses.create(
-        model="o3-pro",
+        model=quality_model(),
         input=combined,
-        reasoning={"effort": "low"},
+        reasoning=build_reasoning_payload(),
     )
     out_text = getattr(response, "output_text", None) or ""
     data = _parse_json_object(out_text)

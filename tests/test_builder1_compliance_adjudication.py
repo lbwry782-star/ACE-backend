@@ -325,10 +325,10 @@ class TestRegression(unittest.TestCase):
     def test_quality_planning_on_o3_pro(self) -> None:
         with patch.dict(
             os.environ,
-            {"BUILDER1_PLANNING_PROFILE": "QUALITY", "BUILDER1_QUALITY_MODEL": "o3-pro"},
+            {"BUILDER1_PLANNING_PROFILE": "QUALITY", "BUILDER1_QUALITY_MODEL": "gpt-5.6-sol"},
             clear=False,
         ):
-            self.assertEqual(resolve_stage_model("graphic_system"), "o3-pro")
+            self.assertEqual(resolve_stage_model("graphic_system"), "gpt-5.6-sol")
 
     def test_builder2_unchanged(self) -> None:
         import os

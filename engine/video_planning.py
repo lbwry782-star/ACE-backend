@@ -1,5 +1,5 @@
 """
-ACE video engine — o3-pro planning layer (isolated from image /preview /generate).
+ACE video engine — GPT-5.6 Sol planning layer (isolated from image /preview /generate).
 
 Produces a structured plan for Runway prompt assembly. On failure, video jobs abort (no generic Runway prompt).
 Future: richer ACE video engine (e.g. two outputs); keep this module inspectable and logged.
@@ -615,10 +615,16 @@ _LOG_PREVIEW_CHARS = 240
 class VideoPlanningTimeoutError(Exception):
     """Hard wall-clock deadline exceeded waiting for o3 planning (see fetch_video_plan_o3)."""
 
-# Match codebase: o4-mini maps to o3-pro
+# Match codebase: legacy aliases map to the configured reasoning model.
 def _text_model() -> str:
-    m = (os.environ.get("VIDEO_PLANNER_MODEL") or os.environ.get("OPENAI_TEXT_MODEL", "") or "").strip() or "o3-pro"
-    return "o3-pro" if m == "o4-mini" else m
+    from engine.openai_reasoning import DEFAULT_OPENAI_REASONING_MODEL, normalize_legacy_text_model
+
+    raw = (
+        os.environ.get("VIDEO_PLANNER_MODEL")
+        or os.environ.get("OPENAI_TEXT_MODEL", "")
+        or ""
+    ).strip() or DEFAULT_OPENAI_REASONING_MODEL
+    return normalize_legacy_text_model(raw)
 
 
 # HTTP read timeout for the planning API call (seconds). Slightly raised default vs older 120s to cut false timeouts.
@@ -1703,8 +1709,22 @@ def _log_video_plan_post_ok_diagnostics(plan: Dict[str, Any]) -> None:
 
 
 def _reasoning_effort() -> str:
-    raw = (os.environ.get("VIDEO_PLANNER_REASONING_EFFORT") or "low").strip().lower()
-    return raw if raw in ("low", "medium") else "low"
+    from engine.openai_reasoning import resolve_default_reasoning_effort
+
+    raw = (
+        os.environ.get("VIDEO_PLANNER_REASONING_EFFORT")
+        or os.environ.get("OPENAI_REASONING_EFFORT")
+        or ""
+    ).strip().lower()
+    if raw in ("low", "medium", "high"):
+        return raw
+    return resolve_default_reasoning_effort()
+
+
+def _video_plan_reasoning_payload() -> dict:
+    from engine.openai_reasoning import build_reasoning_payload
+
+    return build_reasoning_payload(effort=_reasoning_effort())
 
 
 def _return_plan_with_promise_persist(
@@ -1840,7 +1860,7 @@ Language: {lang_name} ({lang}).
             client,
             model=model,
             input_text=attempt_input,
-            reasoning={"effort": _reasoning_effort()},
+            reasoning=_video_plan_reasoning_payload(),
             deadline_monotonic=deadline_monotonic,
         )
     except VideoPlanningTimeoutError:
@@ -1905,7 +1925,7 @@ Language: {lang_name} ({lang}).
                     client,
                     model=model,
                     input_text=repair_input,
-                    reasoning={"effort": _reasoning_effort()},
+                    reasoning=_video_plan_reasoning_payload(),
                     deadline_monotonic=deadline_monotonic,
                 )
                 repair_raw = _extract_responses_output_text(repair_response)

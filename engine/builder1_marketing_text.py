@@ -1,6 +1,6 @@
 """
 LEGACY — not part of active Builder1 campaign-series production path.
-Builder1 marketing text generation (~50 words) via o3-pro.
+Builder1 marketing text generation (~50 words) via GPT-5.6 Sol.
 """
 from __future__ import annotations
 

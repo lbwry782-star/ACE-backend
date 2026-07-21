@@ -50,7 +50,7 @@ class TestBalancedRoutingAndConfig(unittest.TestCase):
             os.environ,
             {
                 "BUILDER1_PLANNING_PROFILE": "BALANCED",
-                "BUILDER1_QUALITY_MODEL": "o3-pro",
+                "BUILDER1_QUALITY_MODEL": "gpt-5.6-sol",
                 "BUILDER1_EXECUTION_MODEL": "gpt-4.1",
             },
             clear=False,
@@ -62,12 +62,12 @@ class TestBalancedRoutingAndConfig(unittest.TestCase):
 
     def test_core_stages_keep_quality_model(self) -> None:
         for stage in ("strategy_slogan_stage", "conceptual_stage", "brand_physical"):
-            self.assertEqual(resolve_stage_model(stage), "o3-pro")
+            self.assertEqual(resolve_stage_model(stage), "gpt-5.6-sol")
 
     def test_missing_execution_model_logs_inactive_optimization(self) -> None:
         with patch.dict(os.environ, {"BUILDER1_EXECUTION_MODEL": ""}, clear=False):
             self.assertFalse(execution_optimization_active())
-            self.assertEqual(resolve_stage_model("series_ads"), "o3-pro")
+            self.assertEqual(resolve_stage_model("series_ads"), "gpt-5.6-sol")
             with self.assertLogs("engine.builder1_planning_profile", level="WARNING") as logs:
                 import engine.builder1_planning_profile as profile_module
 

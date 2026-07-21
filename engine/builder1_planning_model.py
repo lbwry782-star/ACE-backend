@@ -765,14 +765,15 @@ def call_planning_model(
     parse_json_text: Callable[[str], object],
 ) -> object:
     from engine.builder1_planning_profile import resolve_stage_reasoning_effort
+    from engine.openai_reasoning import build_reasoning_payload
 
     if reasoning is not None:
         reasoning_payload = reasoning or None
     elif reasoning_effort is not None:
-        reasoning_payload = {"effort": reasoning_effort} if reasoning_effort else None
+        reasoning_payload = build_reasoning_payload(effort=reasoning_effort)
     else:
         effort = resolve_stage_reasoning_effort(stage, model)
-        reasoning_payload = {"effort": effort} if effort else None
+        reasoning_payload = build_reasoning_payload(effort=effort) if effort else None
 
     kwargs: Dict[str, Any] = {
         "model": model,
@@ -802,9 +803,11 @@ def call_planning_model(
         logger.info("BUILDER1_STRICT_SCHEMA stage=%s enabled=false", stage)
 
     logger.info(
-        "BUILDER1_STAGE_MODEL stage=%s model=%s",
+        "BUILDER1_STAGE_MODEL stage=%s model=%s reasoningMode=%s reasoningEffort=%s",
         stage or "",
         model,
+        (reasoning_payload or {}).get("mode", "none") if reasoning_payload else "none",
+        (reasoning_payload or {}).get("effort", "none") if reasoning_payload else "none",
     )
 
     try:

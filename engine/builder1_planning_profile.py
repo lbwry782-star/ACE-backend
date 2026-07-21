@@ -11,6 +11,12 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional
 
+from engine.openai_reasoning import (
+    DEFAULT_OPENAI_REASONING_MODEL,
+    log_openai_reasoning_config,
+    normalize_legacy_text_model,
+)
+
 logger = logging.getLogger(__name__)
 
 PLANNING_STAGES = (
@@ -102,11 +108,11 @@ class StageRoutingDecision:
 def quality_model() -> str:
     configured = (os.environ.get("BUILDER1_QUALITY_MODEL") or "").strip()
     if configured:
-        return configured
+        return normalize_legacy_text_model(configured)
     legacy = (os.environ.get("BUILDER1_PLANNING_MODEL") or "").strip()
     if legacy:
-        return legacy
-    return "o3-pro"
+        return normalize_legacy_text_model(legacy)
+    return DEFAULT_OPENAI_REASONING_MODEL
 
 
 def configured_execution_model() -> Optional[str]:
@@ -178,14 +184,14 @@ def _profile_default_model(stage: str, profile: PlanningProfile) -> str:
 
 def _profile_default_reasoning(stage: str, profile: PlanningProfile) -> str:
     if profile == PlanningProfile.QUALITY:
-        return "low"
+        return "high"
     if profile == PlanningProfile.BALANCED:
         if stage in BALANCED_EXECUTION_STAGES:
-            return "low"
-        return "low"
+            return "high"
+        return "high"
     if stage == "strategy_stage":
-        return "low"
-    return "low"
+        return "high"
+    return "high"
 
 
 def _log_missing_execution_model_warning(profile: PlanningProfile) -> None:
@@ -243,7 +249,7 @@ def resolve_stage_model(stage: Optional[str]) -> str:
 
 def resolve_stage_reasoning_effort(stage: Optional[str], model: str) -> Optional[str]:
     if not stage:
-        effort = "low"
+        effort = "high"
     else:
         env_key = STAGE_REASONING_ENV_KEYS.get(stage, "")
         configured = (os.environ.get(env_key) or "").strip().lower() if env_key else ""
@@ -318,6 +324,7 @@ def log_builder1_planning_profile_config() -> None:
         models["series_ads"],
         str(execution_optimization_active()).lower(),
     )
+    log_openai_reasoning_config(model=q_model)
     _config_logged = True
 
 
