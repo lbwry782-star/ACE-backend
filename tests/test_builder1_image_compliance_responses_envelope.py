@@ -156,7 +156,7 @@ class TestResponsesApiEnvelopeCompliance(unittest.TestCase):
         mock_text_format.return_value = {
             "format": {
                 "type": "json_schema",
-                "name": "builder1_image_compliance_v2",
+                "name": "builder1_image_compliance_v3",
                 "schema": COMPLIANCE_RESPONSE_JSON_SCHEMA,
                 "strict": True,
             }

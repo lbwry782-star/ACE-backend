@@ -7,6 +7,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Sequence
 
+from engine.builder1_compliance_product_grounding import (
+    AdvertisedProductType,
+    ComplianceProductMatch,
+    classify_advertised_product_type,
+    evaluate_product_visible_hard_support,
+    infer_product_match_from_plan,
+    log_false_positive_suppressed,
+    log_product_match_decision,
+)
 from engine.builder1_failure_classification import validate_forbidden_plan_visibility
 from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_product_modality import ProductModality, resolve_product_modality
@@ -212,6 +221,38 @@ def log_compliance_findings(
         )
 
 
+def _resolve_product_match_for_review(
+    *,
+    product_match: Optional[ComplianceProductMatch],
+    evidence_item: Optional[ComplianceEvidenceItem],
+    series_plan: Optional[Builder1SeriesPlan],
+) -> ComplianceProductMatch:
+    resolved = product_match or ComplianceProductMatch()
+    if evidence_item is not None:
+        if not resolved.matched_visual_element:
+            resolved = ComplianceProductMatch(
+                advertised_product_present=resolved.advertised_product_present,
+                product_match_basis=resolved.product_match_basis,
+                matched_visual_element=str(
+                    evidence_item.symbol_description or evidence_item.location or ""
+                ).strip(),
+                relationship_to_advertised_product=resolved.relationship_to_advertised_product,
+                product_match_explanation=resolved.product_match_explanation
+                or str(evidence_item.symbol_description or "").strip(),
+            )
+    if series_plan is not None and resolved.matched_visual_element:
+        inferred = infer_product_match_from_plan(
+            series_plan=series_plan,
+            matched_visual_element=resolved.matched_visual_element,
+        )
+        if inferred is not None and (
+            resolved.product_match_basis == "none"
+            or resolved.relationship_to_advertised_product in {"none", "uncertain", "actual_product"}
+        ):
+            return inferred
+    return resolved
+
+
 def adjudicate_compliance_review(
     *,
     raw_violations: Sequence[str],
@@ -221,6 +262,10 @@ def adjudicate_compliance_review(
     structured_plan_conflict: bool = False,
     preflight_conflict: bool = False,
     reviewer_pass: Optional[bool] = None,
+    product_match: Optional[ComplianceProductMatch] = None,
+    legacy_unstructured: bool = False,
+    campaign_id: str = "",
+    ad_index: int = 0,
 ) -> AdjudicatedComplianceResult:
     plan = series_plan
     structured_conflict = structured_plan_conflict
@@ -236,6 +281,15 @@ def adjudicate_compliance_review(
         )
         if plan is not None
         else ProductModality.PHYSICAL_PRODUCT
+    )
+    advertised_type = (
+        classify_advertised_product_type(
+            product_name=plan.product_name_resolved if plan else "",
+            product_description=plan.product_description if plan else "",
+            planning_internals=(plan.planning_internals if plan else None),
+        )
+        if plan is not None
+        else AdvertisedProductType.UNKNOWN
     )
 
     candidate_codes = list(
@@ -288,15 +342,45 @@ def adjudicate_compliance_review(
         if code == "product_visible_without_explicit_request":
             if policy != ProductVisibilityPolicy.FORBIDDEN:
                 continue
-            if modality == ProductModality.PHYSICAL_PRODUCT:
-                if _confidence_rank(confidence) >= 2:
-                    hard.append(code)
-                else:
-                    advisories.append("low_confidence_product_identification")
-            elif _concrete_product_evidence(item):
+            resolved_match = _resolve_product_match_for_review(
+                product_match=product_match,
+                evidence_item=item,
+                series_plan=plan,
+            )
+            supported, suppress_reason = evaluate_product_visible_hard_support(
+                policy=policy,
+                product_match=resolved_match,
+                advertised_type=advertised_type,
+                series_plan=plan,
+                confidence=confidence,
+                relationship_to_brand_text=(item.relationship_to_brand_text if item else ""),
+                legacy_unstructured=legacy_unstructured,
+            )
+            log_product_match_decision(
+                campaign_id=campaign_id,
+                ad_index=ad_index,
+                product_match=resolved_match,
+                advertised_type=advertised_type,
+                accepted=supported,
+                reason=suppress_reason or "grounded_product_match",
+            )
+            if supported:
+                hard.append(code)
+            elif modality != ProductModality.PHYSICAL_PRODUCT and _concrete_product_evidence(item):
                 hard.append(code)
             else:
-                advisories.append("possible_product_resemblance")
+                if suppress_reason:
+                    log_false_positive_suppressed(
+                        campaign_id=campaign_id,
+                        ad_index=ad_index,
+                        product_match=resolved_match,
+                        advertised_type=advertised_type,
+                        reason=suppress_reason,
+                    )
+                if _confidence_rank(confidence) >= 2:
+                    advisories.append("possible_product_resemblance")
+                else:
+                    advisories.append("low_confidence_product_identification")
             continue
 
         if code == "packaging_visible_without_explicit_request":

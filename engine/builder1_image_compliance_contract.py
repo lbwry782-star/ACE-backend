@@ -9,10 +9,18 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from engine.builder1_compliance_adjudication import ComplianceEvidenceItem, parse_compliance_evidence
+from engine.builder1_compliance_product_grounding import (
+    ComplianceProductMatch,
+    build_compliance_grounding_context,
+    build_compliance_grounding_user_block,
+    parse_product_match,
+    product_match_schema_properties,
+)
+from engine.builder1_plan_spec import Builder1SeriesPlan
 
 logger = logging.getLogger(__name__)
 
-COMPLIANCE_SCHEMA_VERSION = "builder1_image_compliance_v2"
+COMPLIANCE_SCHEMA_VERSION = "builder1_image_compliance_v3"
 
 IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
     {
@@ -82,8 +90,27 @@ COMPLIANCE_RESPONSE_JSON_SCHEMA: Dict[str, Any] = {
             },
         },
         "overallConfidence": {"type": "string", "enum": ["high", "medium", "low"]},
+        "productMatch": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": product_match_schema_properties(),
+            "required": [
+                "advertisedProductPresent",
+                "productMatchBasis",
+                "matchedVisualElement",
+                "relationshipToAdvertisedProduct",
+                "productMatchExplanation",
+            ],
+        },
     },
-    "required": ["reviewStatus", "hardViolations", "advisories", "evidence", "overallConfidence"],
+    "required": [
+        "reviewStatus",
+        "hardViolations",
+        "advisories",
+        "evidence",
+        "overallConfidence",
+        "productMatch",
+    ],
 }
 
 
@@ -98,6 +125,7 @@ class NormalizedCompliancePayload:
     advisories_raw: List[str] = field(default_factory=list)
     evidence_items: List[ComplianceEvidenceItem] = field(default_factory=list)
     overall_confidence: str = "high"
+    product_match: ComplianceProductMatch = field(default_factory=ComplianceProductMatch)
     legacy_normalized: bool = False
     legacy_shape: str = "canonical"
     reviewer_pass: bool = True
@@ -120,7 +148,14 @@ Return JSON only using this exact canonical structure:
       "relationshipToBrandText": "none"
     }
   ],
-  "overallConfidence": "high"
+  "overallConfidence": "high",
+  "productMatch": {
+    "advertisedProductPresent": false,
+    "productMatchBasis": "none",
+    "matchedVisualElement": "",
+    "relationshipToAdvertisedProduct": "none",
+    "productMatchExplanation": ""
+  }
 }
 
 Rules:
@@ -129,6 +164,10 @@ Rules:
 - advisories lists ambiguous or low-confidence findings only.
 - evidence is an array; use [] when no evidence items are needed.
 - overallConfidence is high, medium, or low.
+- productMatch is required. Set advertisedProductPresent=true only when the visible element is specifically
+  the advertised product or an explicit representation of it — not a creative generator, transferred object,
+  generic prop, or unrelated object.
+- productMatchBasis must be "none" unless you can ground the match to the advertised product.
 - Do not include hidden reasoning or prose outside JSON.
 """.strip()
 
@@ -219,6 +258,12 @@ def coerce_review_dict(raw_payload: object) -> dict:
     raise ImageComplianceResponseError("compliance_output_not_object")
 
 
+def _resolve_product_match(data: dict) -> ComplianceProductMatch:
+    if "productMatch" in data:
+        return parse_product_match(data.get("productMatch"))
+    return ComplianceProductMatch()
+
+
 def normalize_compliance_payload(data: dict) -> NormalizedCompliancePayload:
     has_pass = "pass" in data and isinstance(data.get("pass"), bool)
     has_canonical = any(
@@ -230,6 +275,7 @@ def normalize_compliance_payload(data: dict) -> NormalizedCompliancePayload:
     violations_raw = _string_list(data.get("violations"))
     overall_confidence = _normalize_confidence(data.get("overallConfidence", data.get("confidence")))
     evidence_items = parse_compliance_evidence(data.get("evidence"))
+    product_match = _resolve_product_match(data)
 
     if has_pass and not has_canonical:
         legacy_pass = bool(data["pass"])
@@ -250,6 +296,7 @@ def normalize_compliance_payload(data: dict) -> NormalizedCompliancePayload:
             advisories_raw=[],
             evidence_items=evidence_items,
             overall_confidence=overall_confidence,
+            product_match=product_match,
             legacy_normalized=True,
             legacy_shape="pass_violations",
             reviewer_pass=legacy_pass,
@@ -257,7 +304,11 @@ def normalize_compliance_payload(data: dict) -> NormalizedCompliancePayload:
 
     for field in COMPLIANCE_RESPONSE_JSON_SCHEMA["required"]:
         if field not in data:
+            if field == "productMatch":
+                continue
             raise ImageComplianceResponseError(f"missing_required_field:{field}")
+    if "productMatch" not in data:
+        product_match = ComplianceProductMatch()
 
     review_status = str(data.get("reviewStatus") or "").strip().lower()
     if review_status and review_status != "completed":
@@ -293,6 +344,7 @@ def normalize_compliance_payload(data: dict) -> NormalizedCompliancePayload:
         advisories_raw=advisory_raw,
         evidence_items=evidence_items,
         overall_confidence=overall_confidence,
+        product_match=product_match,
         legacy_normalized=legacy_normalized,
         legacy_shape="canonical",
         reviewer_pass=reviewer_pass,
@@ -320,7 +372,14 @@ def response_rejection_details(
         unexpected_fields = sorted(set(parsed_data.keys()) - allowed)
     elif reason_code in {"compliance_output_invalid_json", "compliance_output_not_object", "compliance_output_empty"}:
         if isinstance(raw_payload, str):
-            missing_fields = ["reviewStatus", "hardViolations", "advisories", "evidence", "overallConfidence"]
+            missing_fields = [
+            "reviewStatus",
+            "hardViolations",
+            "advisories",
+            "evidence",
+            "overallConfidence",
+            "productMatch",
+        ]
     details["missingFields"] = missing_fields
     details["unexpectedFields"] = unexpected_fields
     return details
@@ -358,6 +417,8 @@ def build_compliance_responses_request_kwargs(
     product_description: str,
     visibility_policy: str,
     transferred_object: str,
+    series_plan: Optional[Builder1SeriesPlan] = None,
+    ad_index: int = 1,
     extra_user_text: str = "",
     schema_mode: Literal["strict", "plain"] = "strict",
     text_format: Optional[Dict[str, Any]] = None,
@@ -370,6 +431,10 @@ def build_compliance_responses_request_kwargs(
     import base64
 
     image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    grounding_block = ""
+    if series_plan is not None:
+        context = build_compliance_grounding_context(series_plan, ad_index=ad_index)
+        grounding_block = build_compliance_grounding_user_block(context)
     user_text = (
         f'Product name allowed as plain text only: "{product_name}".\n'
         f"Product visibility policy: {visibility_policy}.\n"
@@ -377,6 +442,8 @@ def build_compliance_responses_request_kwargs(
         f"Product description (for identifying unauthorized product depictions): {product_description}\n"
         "Review this generated Builder1 advertisement image for logo and product-visibility compliance."
     )
+    if grounding_block:
+        user_text = f"{user_text}\n\n{grounding_block}"
     if extra_user_text:
         user_text = f"{user_text}\n\n{extra_user_text.strip()}"
 

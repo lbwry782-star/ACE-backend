@@ -71,11 +71,11 @@ CAMPAIGN_DEVICE_AS_LOGO_CORRECTION = "\n".join(
 PRODUCT_VISIBILITY_CORRECTION = "\n".join(
     [
         "=== PRODUCT VISIBILITY CORRECTION (MANDATORY) ===",
-        "Remove all advertised-product units from the image.",
-        "Remove all packaging, containers, bottles, cans, boxes, cartons, jars, bags, and devices matching the product.",
-        "Remove objects matching the advertised product description.",
-        "Preserve ONLY the transferred external physical object as the hero subject.",
-        "Do not replace the product with a disguised substitute object.",
+        "Remove only the specific advertised-product element that violates policy.",
+        "Do not remove or replace the approved physical generator or transferred external object.",
+        "Remove all packaging, containers, bottles, cans, boxes, cartons, jars, bags, and devices matching the advertised product.",
+        "Remove objects matching the advertised product description — not campaign creative objects.",
+        "Preserve the transferred external physical object as the hero subject unchanged.",
         "Preserve Product Name and slogan only as plain readable advertising typography.",
         "=== END PRODUCT VISIBILITY CORRECTION ===",
     ]

@@ -56,6 +56,13 @@ def _canonical_pass_payload() -> dict[str, Any]:
         "advisories": [],
         "evidence": [],
         "overallConfidence": "high",
+        "productMatch": {
+            "advertisedProductPresent": False,
+            "productMatchBasis": "none",
+            "matchedVisualElement": "",
+            "relationshipToAdvertisedProduct": "none",
+            "productMatchExplanation": "",
+        },
     }
 
 
@@ -78,6 +85,7 @@ class TestComplianceContract(unittest.TestCase):
             "advisories": ["possible_logo_like_shape"],
             "evidence": [],
             "overallConfidence": "low",
+            "productMatch": _canonical_pass_payload()["productMatch"],
         }
         result = parse_image_compliance_response(payload)
         self.assertTrue(result.passed)
@@ -90,6 +98,7 @@ class TestComplianceContract(unittest.TestCase):
             "advisories": [],
             "evidence": [],
             "overallConfidence": "high",
+            "productMatch": _canonical_pass_payload()["productMatch"],
         }
         result = parse_image_compliance_response(payload)
         self.assertFalse(result.passed)
@@ -107,9 +116,17 @@ class TestComplianceContract(unittest.TestCase):
                     "description": "small dark mark",
                     "location": "top_left",
                     "relationshipToBrandText": "none",
+                    "symbolDescription": None,
+                    "symbolLocation": None,
+                    "relationshipToProductName": None,
+                    "relationshipToSlogan": None,
+                    "compactAndIsolated": None,
+                    "enclosedAsBadgeOrSeal": None,
+                    "repeatedAsBrandSignature": None,
                 }
             ],
             "overallConfidence": "low",
+            "productMatch": _canonical_pass_payload()["productMatch"],
         }
         result = parse_image_compliance_response(payload)
         self.assertTrue(result.evidence)

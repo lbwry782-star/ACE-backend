@@ -251,7 +251,7 @@ class TestCumulativeCorrectionPrompts(unittest.TestCase):
             plan_revision=1,
         )
         self.assertIn("No supplied or invented logo", block)
-        self.assertIn("Remove all advertised-product units", block)
+        self.assertIn("Remove only the specific advertised-product element", block)
 
     def test_both_violations_apply_both_profiles(self) -> None:
         plan = _plan(3)
@@ -268,7 +268,7 @@ class TestCumulativeCorrectionPrompts(unittest.TestCase):
         self.assertIn("campaign_device_used_as_logo", block)
         self.assertIn("product_visible_without_explicit_request", block)
         self.assertIn(CAMPAIGN_DEVICE_AS_LOGO_CORRECTION, block)
-        self.assertIn("Remove all advertised-product units", block)
+        self.assertIn("Remove only the specific advertised-product element", block)
 
     def test_retry_prompt_includes_global_constraints(self) -> None:
         plan = _plan(3)
@@ -551,12 +551,28 @@ class TestCumulativeInternalRegeneration(unittest.TestCase):
                     confidence="high",
                 )
             if review_n["n"] == 2:
-                return ImageComplianceResult(
-                    passed=False,
-                    violations=["product_visible_without_explicit_request"],
-                    hard_violations=["product_visible_without_explicit_request"],
-                    raw_violations=["product_visible_without_explicit_request"],
-                    confidence="high",
+                from engine.builder1_compliance_adjudication import ComplianceEvidenceItem
+                from engine.builder1_compliance_product_grounding import ComplianceProductMatch
+                from engine.builder1_image_compliance import finalize_compliance_result
+
+                return finalize_compliance_result(
+                    reviewer_pass=False,
+                    candidate_violations=["product_visible_without_explicit_request"],
+                    evidence_items=[
+                        ComplianceEvidenceItem(
+                            code="product_visible_without_explicit_request",
+                            confidence="high",
+                        )
+                    ],
+                    overall_confidence="high",
+                    series_plan=_plan(3),
+                    product_match=ComplianceProductMatch(
+                        advertised_product_present=True,
+                        product_match_basis="explicit_product_shape",
+                        matched_visual_element="TestBrand product unit",
+                        relationship_to_advertised_product="actual_product",
+                        product_match_explanation="Visible product unit matches advertised product.",
+                    ),
                 )
             return ImageComplianceResult(
                 passed=False,

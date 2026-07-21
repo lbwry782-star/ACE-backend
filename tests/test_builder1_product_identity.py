@@ -267,13 +267,30 @@ class TestImageExecutionVsPlanContradiction(unittest.TestCase):
             return b"img"
 
         def reviewer(**_kwargs: Any):
-            from engine.builder1_image_compliance import ImageComplianceResult
+            from engine.builder1_compliance_adjudication import ComplianceEvidenceItem
+            from engine.builder1_compliance_product_grounding import ComplianceProductMatch
+            from engine.builder1_image_compliance import ImageComplianceResult, finalize_compliance_result
 
+            plan = _parse(_base_campaign(2), 2)
             if calls["gen"] == 1:
-                return ImageComplianceResult(
-                    passed=False,
-                    violations=["product_visible_without_explicit_request"],
-                    confidence="high",
+                return finalize_compliance_result(
+                    reviewer_pass=False,
+                    candidate_violations=["product_visible_without_explicit_request"],
+                    evidence_items=[
+                        ComplianceEvidenceItem(
+                            code="product_visible_without_explicit_request",
+                            confidence="high",
+                        )
+                    ],
+                    overall_confidence="high",
+                    series_plan=plan,
+                    product_match=ComplianceProductMatch(
+                        advertised_product_present=True,
+                        product_match_basis="explicit_product_shape",
+                        matched_visual_element="TestBrand product unit",
+                        relationship_to_advertised_product="actual_product",
+                        product_match_explanation="Visible product unit matches advertised product.",
+                    ),
                 )
             return ImageComplianceResult(passed=True, violations=[], confidence="high")
 

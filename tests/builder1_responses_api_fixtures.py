@@ -13,6 +13,18 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 
+def default_product_match(**overrides: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "advertisedProductPresent": False,
+        "productMatchBasis": "none",
+        "matchedVisualElement": "",
+        "relationshipToAdvertisedProduct": "none",
+        "productMatchExplanation": "",
+    }
+    payload.update(overrides)
+    return payload
+
+
 def canonical_compliance_inner(**overrides: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "reviewStatus": "completed",
@@ -20,6 +32,7 @@ def canonical_compliance_inner(**overrides: Any) -> Dict[str, Any]:
         "advisories": [],
         "evidence": [],
         "overallConfidence": "high",
+        "productMatch": default_product_match(),
     }
     payload.update(overrides)
     return payload

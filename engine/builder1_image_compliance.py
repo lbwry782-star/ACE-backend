@@ -15,6 +15,7 @@ from engine.builder1_compliance_adjudication import (
     adjudicate_compliance_review,
     log_compliance_findings,
 )
+from engine.builder1_compliance_product_grounding import ComplianceProductMatch
 from engine.builder1_image_compliance_contract import (
     COMPLIANCE_SCHEMA_VERSION,
     IMAGE_COMPLIANCE_CONFIDENCE_VALUES,
@@ -105,9 +106,18 @@ For product_used_as_physical_generator, note that the campaign's conceptual gene
 is defined in the structured plan. Only report this when the depicted object clearly matches
 the advertised product itself, not merely a campaign metaphor.
 
+Advertised-product grounding (mandatory for product visibility):
+- The physical generator, transferred object, conceptual metaphor, scene prop, and dominant visual
+  object are NOT the advertised product unless the plan explicitly identifies them as such.
+- Before product_visible_without_explicit_request, populate productMatch proving the visible element
+  is specifically the advertised product — not merely central, thematic, metaphorical, or similar.
+- For named_person advertised entities: do not infer identity from appearance; do not treat unrelated
+  objects as that person; only claim visible presence with explicit plan/prompt/reference grounding.
+- Central composition, visual similarity, or thematic association alone is insufficient evidence.
+
 Do not use OCR as the primary mechanism. Judge the visible composition.
 Fail hard only when the advertised product, product unit, package, or brand mark is actually
-depicted contrary to policy with concrete supporting evidence.
+depicted contrary to policy with concrete supporting evidence and grounded productMatch fields.
 """.strip()
 
 _config_logged = False
@@ -124,6 +134,7 @@ class ImageComplianceResult:
     evidence: List[object] | None = None
     overall_confidence: str = "high"
     raw_violations: List[str] | None = None
+    product_match: ComplianceProductMatch | None = None
 
     def __post_init__(self) -> None:
         if self.hard_violations is None:
@@ -256,6 +267,7 @@ def _result_from_adjudication(
     adjudicated: AdjudicatedComplianceResult,
     reviewer_pass: bool,
     candidate_violations: List[str],
+    product_match: ComplianceProductMatch | None = None,
 ) -> ImageComplianceResult:
     if reviewer_pass and adjudicated.hard_violations:
         raise ImageComplianceResponseError("pass_true_with_violations")
@@ -270,6 +282,7 @@ def _result_from_adjudication(
         evidence=list(adjudicated.evidence),
         overall_confidence=adjudicated.overall_confidence,
         raw_violations=list(candidate_violations),
+        product_match=product_match,
     )
 
 
@@ -282,6 +295,10 @@ def finalize_compliance_result(
     series_plan: Optional[object] = None,
     structured_plan_conflict: bool = False,
     preflight_conflict: bool = False,
+    product_match: Optional[ComplianceProductMatch] = None,
+    legacy_unstructured: bool = False,
+    campaign_id: str = "",
+    ad_index: int = 0,
 ) -> ImageComplianceResult:
     adjudicated = adjudicate_compliance_review(
         raw_violations=candidate_violations,
@@ -291,11 +308,16 @@ def finalize_compliance_result(
         structured_plan_conflict=structured_plan_conflict,
         preflight_conflict=preflight_conflict,
         reviewer_pass=reviewer_pass,
+        product_match=product_match or ComplianceProductMatch(),
+        legacy_unstructured=legacy_unstructured,
+        campaign_id=campaign_id,
+        ad_index=ad_index,
     )
     return _result_from_adjudication(
         adjudicated=adjudicated,
         reviewer_pass=reviewer_pass,
         candidate_violations=list(candidate_violations),
+        product_match=product_match or ComplianceProductMatch(),
     )
 
 
@@ -303,6 +325,8 @@ def parse_image_compliance_response(
     raw_payload: object,
     *,
     series_plan: Optional[object] = None,
+    campaign_id: str = "",
+    ad_index: int = 0,
 ) -> ImageComplianceResult:
     data = coerce_review_dict(raw_payload)
     normalized = normalize_compliance_payload(data)
@@ -312,6 +336,10 @@ def parse_image_compliance_response(
         evidence_items=normalized.evidence_items,
         overall_confidence=normalized.overall_confidence,
         series_plan=series_plan,
+        product_match=normalized.product_match,
+        legacy_unstructured=normalized.legacy_normalized,
+        campaign_id=campaign_id,
+        ad_index=ad_index,
     )
 
 
@@ -338,6 +366,10 @@ def _parse_compliance_raw(
             series_plan=series_plan,
             structured_plan_conflict=structured_plan_conflict,
             preflight_conflict=preflight_conflict,
+            product_match=normalized.product_match,
+            legacy_unstructured=normalized.legacy_normalized,
+            campaign_id=campaign_id or "",
+            ad_index=ad_index,
         )
     except ImageComplianceResponseError as exc:
         _log_response_rejected(
@@ -497,10 +529,11 @@ def _openai_compliance_responses_call(
     product_description: str,
     visibility_policy: str,
     transferred_object: str,
+    series_plan: Optional[object] = None,
+    ad_index: int = -1,
     extra_user_text: str = "",
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
-    ad_index: int = -1,
     schema_mode: str = "strict",
     allow_schema_fallback: bool = True,
 ) -> str:
@@ -536,6 +569,8 @@ def _openai_compliance_responses_call(
         product_description=product_description,
         visibility_policy=visibility_policy,
         transferred_object=transferred_object,
+        series_plan=series_plan,
+        ad_index=max(1, ad_index),
         extra_user_text=extra_user_text,
         schema_mode=active_mode,
         text_format=active_text_format,
@@ -601,6 +636,8 @@ def _openai_compliance_responses_call(
                     product_description=product_description,
                     visibility_policy=visibility_policy,
                     transferred_object=transferred_object,
+                    series_plan=series_plan,
+                    ad_index=max(1, ad_index),
                     extra_user_text=extra_user_text,
                     schema_mode="plain",
                     text_format=None,
@@ -624,6 +661,7 @@ def _openai_compliance_review_call(
     product_description: str = "",
     visibility_policy: str = "FORBIDDEN",
     transferred_object: str = "",
+    series_plan: Optional[object] = None,
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
     ad_index: int = -1,
@@ -634,6 +672,7 @@ def _openai_compliance_review_call(
         product_description=product_description,
         visibility_policy=visibility_policy,
         transferred_object=transferred_object,
+        series_plan=series_plan,
         campaign_id=campaign_id,
         job_id=job_id,
         ad_index=ad_index,
@@ -649,6 +688,7 @@ def _openai_compliance_contract_repair_call(
     transferred_object: str,
     parse_error: str,
     rejected_preview: str,
+    series_plan: Optional[object] = None,
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
     ad_index: int = -1,
@@ -663,6 +703,7 @@ def _openai_compliance_contract_repair_call(
         product_description=product_description,
         visibility_policy=visibility_policy,
         transferred_object=transferred_object,
+        series_plan=series_plan,
         extra_user_text=repair_text,
         campaign_id=campaign_id,
         job_id=job_id,
@@ -714,6 +755,7 @@ def _review_with_contract_repair(
             product_description=product_description,
             visibility_policy=visibility_policy,
             transferred_object=transferred_object,
+            series_plan=series_plan,
             parse_error=str(first_exc),
             rejected_preview=preview,
             campaign_id=campaign_id,
@@ -792,6 +834,9 @@ def review_builder1_ad_image_compliance(
                     series_plan=series_plan,
                     structured_plan_conflict=structured_plan_conflict,
                     preflight_conflict=preflight_conflict,
+                    product_match=getattr(raw, "product_match", None),
+                    campaign_id=campaign_id or "",
+                    ad_index=ad_index,
                 )
             else:
                 result = _review_with_contract_repair(
@@ -816,6 +861,7 @@ def review_builder1_ad_image_compliance(
                 product_description=product_description,
                 visibility_policy=visibility_policy,
                 transferred_object=transferred_object,
+                series_plan=series_plan,
                 campaign_id=campaign_id,
                 job_id=job_id,
                 ad_index=ad_index,

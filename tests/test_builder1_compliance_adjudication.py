@@ -95,6 +95,7 @@ class TestProductRoleAdjudication(unittest.TestCase):
             ],
             overall_confidence="high",
             series_plan=_plan(3),
+            legacy_unstructured=True,
         )
         self.assertIn("product_visible_without_explicit_request", result.hard_violations)
 
@@ -202,6 +203,13 @@ class TestComplianceContract(unittest.TestCase):
                 "advisories": ["possible_logo_like_shape"],
                 "overallConfidence": "high",
                 "evidence": [],
+                "productMatch": {
+                    "advertisedProductPresent": False,
+                    "productMatchBasis": "none",
+                    "matchedVisualElement": "",
+                    "relationshipToAdvertisedProduct": "none",
+                    "productMatchExplanation": "",
+                },
             }
         )
         self.assertIn("invented_product_logo", parsed.hard_violations or [])

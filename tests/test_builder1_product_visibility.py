@@ -172,6 +172,8 @@ class TestComplianceVisibility(unittest.TestCase):
 
     def test_product_violation_triggers_same_ad_regeneration_only(self) -> None:
         calls = {"gen": 0, "review": 0}
+        plan = TestImagePromptVisibility()._plan()
+        plan.product_description = "Reinforced shell bottle for daily carry"
 
         def caller(_prompt: str, _fmt: str) -> bytes:
             calls["gen"] += 1
@@ -179,19 +181,33 @@ class TestComplianceVisibility(unittest.TestCase):
 
         def reviewer(**_kwargs: Any):
             calls["review"] += 1
-            if calls["review"] == 1:
-                return __import__(
-                    "engine.builder1_image_compliance", fromlist=["ImageComplianceResult"]
-                ).ImageComplianceResult(
-                    passed=False,
-                    violations=["product_visible_without_explicit_request"],
-                    confidence="high",
-                )
-            return __import__(
-                "engine.builder1_image_compliance", fromlist=["ImageComplianceResult"]
-            ).ImageComplianceResult(passed=True, violations=[], confidence="high")
+            from engine.builder1_compliance_product_grounding import ComplianceProductMatch
+            from engine.builder1_image_compliance import ImageComplianceResult, finalize_compliance_result
+            from engine.builder1_compliance_adjudication import ComplianceEvidenceItem
 
-        plan = TestImagePromptVisibility()._plan()
+            if calls["review"] == 1:
+                return finalize_compliance_result(
+                    reviewer_pass=False,
+                    candidate_violations=["product_visible_without_explicit_request"],
+                    evidence_items=[
+                        ComplianceEvidenceItem(
+                            code="product_visible_without_explicit_request",
+                            confidence="high",
+                            symbol_description="Visible reinforced shell bottle matching product description",
+                        )
+                    ],
+                    overall_confidence="high",
+                    series_plan=plan,
+                    product_match=ComplianceProductMatch(
+                        advertised_product_present=True,
+                        product_match_basis="explicit_product_shape",
+                        matched_visual_element="reinforced shell bottle",
+                        relationship_to_advertised_product="actual_product",
+                        product_match_explanation="Bottle matches advertised tangible product description.",
+                    ),
+                )
+            return ImageComplianceResult(passed=True, violations=[], confidence="high")
+
         generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
         self.assertEqual(calls["gen"], 2)
         self.assertEqual(calls["review"], 2)
