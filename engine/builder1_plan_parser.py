@@ -31,6 +31,7 @@ from engine.builder1_graphic_contract import (
     validate_descriptive_graphic_text,
     validate_structured_enum,
 )
+from engine.builder1_series_distinctness import validate_ad_execution_distinctness
 
 SUPPORTED_LANGUAGES = {"he", "en", "ar", "ru", "fr", "de", "es", "it", "pt", "nl"}
 
@@ -565,11 +566,7 @@ def validate_series_plan_structure(
 
     parsed_ads: List[Builder1AdPlan] = []
     seen_indexes: set[int] = set()
-    phys_set: set[str] = set()
-    vis_set: set[str] = set()
-    scene_set: set[str] = set()
-    conceptual_exec_set: set[str] = set()
-    execution_signatures: List[Tuple[str, str, str, Optional[str]]] = []
+    raw_ads_for_distinctness: List[Dict[str, Any]] = []
 
     for ad_raw in ads_raw:
         if not isinstance(ad_raw, dict):
@@ -615,23 +612,7 @@ def validate_series_plan_structure(
             if marketing_word_count != MARKETING_TEXT_WORD_COUNT:
                 reasons.append("marketing_text_word_count_mismatch")
 
-        pe_key = pe.lower()
-        ve_key = ve.lower()
-        sd_key = sd.lower()
-        ce_key = ce.lower()
-        if pe_key and pe_key in phys_set:
-            reasons.append("duplicate_physical_execution")
-        if ve_key and ve_key in vis_set:
-            reasons.append("duplicate_visual_execution")
-        if sd_key and sd_key in scene_set:
-            reasons.append("duplicate_scene_description")
-        if ce_key and ce_key in conceptual_exec_set:
-            reasons.append("duplicate_conceptual_execution")
-        phys_set.add(pe_key)
-        vis_set.add(ve_key)
-        scene_set.add(sd_key)
-        conceptual_exec_set.add(ce_key)
-        execution_signatures.append((pe_key, ve_key, sd_key, headline))
+        raw_ads_for_distinctness.append(dict(ad_raw))
 
         parsed_ads.append(
             Builder1AdPlan(
@@ -653,9 +634,9 @@ def validate_series_plan_structure(
     if seen_indexes != expected_indexes:
         reasons.append("ad_indexes_not_sequential")
 
-    if len(parsed_ads) == expected_ad_count and len(parsed_ads) >= 2:
-        if len({s[:3] for s in execution_signatures}) == 1 and len({s[3] for s in execution_signatures}) > 1:
-            reasons.append("headline_only_variation")
+    if len(parsed_ads) == expected_ad_count and len(raw_ads_for_distinctness) >= 2 and not reasons:
+        duplicate_reasons, _findings = validate_ad_execution_distinctness(raw_ads_for_distinctness)
+        reasons.extend(duplicate_reasons)
 
     if reasons:
         return None, reasons

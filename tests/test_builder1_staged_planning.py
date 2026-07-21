@@ -178,10 +178,20 @@ def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False
     return payload
 
 
-def _internal_ad_fields(*, headline: str | None = None) -> Dict[str, Any]:
+def _execution_identity(*, ad_index: int) -> Dict[str, Any]:
+    return {
+        "executionSubject": f"Subject variant {ad_index}",
+        "executionAction": f"Action variant {ad_index}",
+        "executionObjectState": f"State variant {ad_index}",
+        "executionScene": f"Scene variant {ad_index}",
+        "executionPunchline": f"Punchline variant {ad_index}",
+    }
+
+
+def _internal_ad_fields(*, headline: str | None = None, ad_index: int = 1) -> Dict[str, Any]:
     return {
         "familiarExpectation": "Everyday object survives normal use",
-        "singleChangedPropertyOrAction": "Impact absorbed instead of breaking",
+        "singleChangedPropertyOrAction": f"Changed property variant {ad_index}",
         "immediateClarityReason": "Viewer instantly sees survival proof",
         "sloganConnection": "Shows Built To Last through visible survival",
         "relativeAdvantageConnection": "Proves reinforced durability advantage",
@@ -190,8 +200,9 @@ def _internal_ad_fields(*, headline: str | None = None) -> Dict[str, Any]:
         "headlineRequired": headline is not None,
         "headlineReason": "Needed" if headline else "Self-explanatory visual",
         "sameVisualLawProof": "Same drop-survival law as other ads",
-        "distinctFromOtherAdsReason": "Different drop context",
-        "noReuseCheck": "Distinct execution",
+        "distinctFromOtherAdsReason": f"Different drop context {ad_index}",
+        "noReuseCheck": f"Distinct execution {ad_index}",
+        **_execution_identity(ad_index=ad_index),
     }
 
 
@@ -212,7 +223,7 @@ def _series_ads(ad_count: int = 2, *, series_string: bool = False, incomplete_se
             "headline": headline,
             "headlineNeededReason": "Needed" if i > 1 else "Self-explanatory",
             "marketingText": marketing_text_words(50, prefix=f"m{i}"),
-            **_internal_ad_fields(headline=headline),
+            **_internal_ad_fields(headline=headline, ad_index=i),
         }
         if not omit_indexes:
             if string_indexes:

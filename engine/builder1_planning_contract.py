@@ -446,7 +446,7 @@ Rules:
 STAGE_SERIES_ADS_SYSTEM = f"""
 You are a Builder1 series and ads builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"..."}}]}}
+{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"...","executionSubject":"...","executionAction":"...","executionObjectState":"...","executionScene":"...","executionPunchline":"..."}}]}}
 {SERIES_STAGE_METHODOLOGY}
 {BUILDER1_SERIES_TRANSFERRED_OBJECT_RULES}
 {BUILDER1_VISIBILITY_POLICY_METHODOLOGY}
@@ -463,6 +463,17 @@ Rules:
 - Use sloganConnection only to explain how each visual execution expresses the fixed slogan.
 - The exact displayed slogan will be inserted by the server into every ad.
 - Create only distinct ad executions of the fixed conceptual, physical, and graphic laws.
+- All advertisements must belong to the same campaign system and preserve the selected generators.
+- Each ad must use a clearly distinct execution. Do not repeat the same subject, central action, object state,
+  visual event, scene arrangement, or punchline across ads.
+- Rewording the same execution does not count as a new advertisement.
+- Changing only camera angle, crop, color, background, or headline does not count as a new execution.
+- Populate executionSubject, executionAction, executionObjectState, executionScene, and executionPunchline on every ad
+  with compact machine-readable ad-specific values that differ meaningfully between ads.
+- Before returning, self-check every ad pair: same campaign family, distinct execution, no repeated
+  subject/action/state/event combination, no cosmetic-only variation, no duplicated visual punchline.
+- For two-ad campaigns, Ad 1 and Ad 2 must differ in at least two meaningful ad-specific dimensions such as
+  subject, action, object state, scene, visual event, or punchline realization.
 - Default headline to null unless the visual alone cannot communicate the idea.
 - Do not use a headline to explain what object changed or what the visual joke means.
 - marketingText must be exactly 50 words in the server target language — one paragraph below the image, not inside it.
@@ -471,6 +482,22 @@ Rules:
 - Do not decide whether the product or packaging should appear — the server owns product visibility policy.
 - Do not return productVisible, packagingVisible, productVisibilityRequired, or related visibility fields.
 - Populate all internal methodology fields on every ad.
+- {BUILDER1_NO_LOGO_PLANNING_RULE}
+""".strip()
+
+
+STAGE_SERIES_EXECUTION_REPAIR_SYSTEM = f"""
+You are a Builder1 series execution repair assistant.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{{"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"...","executionSubject":"...","executionAction":"...","executionObjectState":"...","executionScene":"...","executionPunchline":"..."}}]}}
+Rules:
+- Repair ONLY the duplicated advertisement records requested in the user prompt.
+- Preserve the frozen strategy, slogan, conceptual generator, physical generator, and graphic system.
+- Do not change valid advertisements that were not listed for repair.
+- Rewrite only ad-specific execution fields so the repaired ads are clearly distinct from every other ad.
+- Do not introduce a different campaign generator, slogan, or unrelated creative idea.
+- Keep marketingText at exactly 50 words in the target language for every repaired ad.
+- Populate executionSubject, executionAction, executionObjectState, executionScene, and executionPunchline distinctly.
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
@@ -1095,7 +1122,21 @@ def build_series_ads_user_prompt(
         f"Server product visibility policy: {visibility_policy}\n"
         "Every ad must execute the same transferred physical family — no product-shot fallbacks in later ads.\n"
         "Do not decide product or packaging visibility in ad output — the server injects visibility fields.\n"
-        f"Return seriesGenerator and exactly {ad_count} ads obeying the graphic system and internal methodology fields."
+        "All ads must share the same campaign generators and graphic system, but each ad must use a clearly "
+        "distinct execution.\n"
+        "Do not repeat the same subject, central action, object state, visual event, scene arrangement, or punchline.\n"
+        "Rewording the same execution, or changing only camera angle, crop, color, background, or headline, "
+        "does not count as a new ad.\n"
+        "Populate executionSubject, executionAction, executionObjectState, executionScene, and executionPunchline "
+        "with compact ad-specific values that differ meaningfully between ads.\n"
+        "Before returning, self-check every ad pair for same campaign family plus distinct execution.\n"
+        + (
+            "For this two-ad campaign, Ad 1 and Ad 2 must differ in at least two meaningful ad-specific dimensions "
+            "such as subject, action, object state, scene, visual event, or punchline realization.\n"
+            if ad_count == 2
+            else ""
+        )
+        + f"Return seriesGenerator and exactly {ad_count} ads obeying the graphic system and internal methodology fields."
     )
 
 
@@ -1106,10 +1147,41 @@ def build_series_ads_repair_prompt(*, broken_json: str, reasons: List[str], ad_c
         '"ads":[{"index":1,"variationLabel":"...","newContribution":"...",'
         '"conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...",'
         '"visualExecution":"...","sceneDescription":"...","headline":null,'
-        '"headlineNeededReason":"...","marketingText":"..."}]}\n'
+        '"headlineNeededReason":"...","marketingText":"...",'
+        '"executionSubject":"...","executionAction":"...","executionObjectState":"...",'
+        '"executionScene":"...","executionPunchline":"..."}]}\n'
         f"Required ad count: {ad_count}\n"
         f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"
+    )
+
+
+def build_series_execution_repair_user_prompt(
+    *,
+    duplicate_reasons: List[str],
+    duplicate_ad_indexes: List[int],
+    valid_ads: List[Dict[str, Any]],
+    duplicated_ads: List[Dict[str, Any]],
+    brand_slogan: str,
+    conceptual: Dict[str, str],
+    brand_physical: Dict[str, Any],
+    graphic_generator: Dict[str, Any],
+    detected_language: str,
+) -> str:
+    return (
+        "Repair ONLY the duplicated advertisement records listed below.\n"
+        f"Duplicate reasons: {', '.join(duplicate_reasons)}\n"
+        f"Repair ad indexes: {', '.join(str(idx) for idx in duplicate_ad_indexes)}\n"
+        f"Fixed brand slogan (immutable): {brand_slogan}\n"
+        f"Frozen conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
+        f"Frozen physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
+        f"Frozen graphic system:\n{json.dumps(graphic_generator, ensure_ascii=False, indent=2)}\n"
+        f"Target language: {detected_language}\n"
+        "Valid ads to preserve unchanged:\n"
+        f"{json.dumps(valid_ads, ensure_ascii=False, indent=2)}\n"
+        "Duplicated ads to rewrite with clearly distinct ad-specific execution:\n"
+        f"{json.dumps(duplicated_ads, ensure_ascii=False, indent=2)}\n"
+        "Return only corrected advertisement records in ads[]. Do not return seriesGenerator."
     )
 
 

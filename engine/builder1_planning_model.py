@@ -38,6 +38,7 @@ STRICT_SCHEMA_STAGES = frozenset(
         "physical_evaluation_repair",
         "graphic_system",
         "series_ads",
+        "series_execution_repair",
     }
 )
 
@@ -431,6 +432,11 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "sameVisualLawProof": {"type": "string"},
                     "distinctFromOtherAdsReason": {"type": "string"},
                     "noReuseCheck": {"type": "string"},
+                    "executionSubject": {"type": "string"},
+                    "executionAction": {"type": "string"},
+                    "executionObjectState": {"type": "string"},
+                    "executionScene": {"type": "string"},
+                    "executionPunchline": {"type": "string"},
                 },
                 "required": [
                     "index",
@@ -456,6 +462,11 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "sameVisualLawProof",
                     "distinctFromOtherAdsReason",
                     "noReuseCheck",
+                    "executionSubject",
+                    "executionAction",
+                    "executionObjectState",
+                    "executionScene",
+                    "executionPunchline",
                 ],
             },
         },
@@ -716,6 +727,15 @@ STRATEGY_SLOGAN_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
     },
 }
 
+SERIES_EXECUTION_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["ads"],
+    "properties": {
+        "ads": SERIES_ADS_JSON_SCHEMA["properties"]["ads"],
+    },
+}
+
 STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "strategy_stage": STRATEGY_STAGE_JSON_SCHEMA,
     "strategy_slogan_stage": STRATEGY_SLOGAN_STAGE_JSON_SCHEMA,
@@ -733,6 +753,7 @@ STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "physical_evaluation_repair": PHYSICAL_EVALUATION_REPAIR_JSON_SCHEMA,
     "graphic_system": GRAPHIC_SYSTEM_JSON_SCHEMA,
     "series_ads": SERIES_ADS_JSON_SCHEMA,
+    "series_execution_repair": SERIES_EXECUTION_REPAIR_JSON_SCHEMA,
 }
 
 _strict_schema_probe_done = False

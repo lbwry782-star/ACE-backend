@@ -141,6 +141,11 @@ _AD_INTERNAL_FIELD_KEYS = frozenset(
         "sameVisualLawProof",
         "distinctFromOtherAdsReason",
         "noReuseCheck",
+        "executionSubject",
+        "executionAction",
+        "executionObjectState",
+        "executionScene",
+        "executionPunchline",
         "brandSlogan",
     }
 )

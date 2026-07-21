@@ -40,6 +40,11 @@ from engine.builder1_product_visibility import (
     log_builder1_product_visibility_policy,
 )
 from engine.builder1_slogan_stage import slogan_candidate_to_dict
+from engine.builder1_series_distinctness import (
+    duplicate_assembly_reasons,
+    validate_ad_execution_distinctness,
+)
+from engine.builder1_series_execution_repair import attempt_series_execution_repair
 from engine.builder1_staged_parsers import StageParseError
 from engine.builder1_strategy_selection import StrategySelectionExhausted
 
@@ -277,7 +282,7 @@ def run_builder1_campaign_pipeline(
         visibility_policy=visibility_decision.policy,
     )
 
-    plan = assemble_builder1_campaign(
+    plan = _assemble_campaign_with_duplicate_recovery(
         product_name=normalized.product_name,
         product_description=normalized.product_description,
         format_value=normalized.format,
@@ -294,6 +299,11 @@ def run_builder1_campaign_pipeline(
         series_ads=series_ads,
         visibility_policy=visibility_decision.policy,
         visibility_source=visibility_decision.source,
+        conceptual_fixed=conceptual_fixed,
+        brand_physical_dict=brand_physical_dict,
+        graphic_dict=graphic_dict,
+        model_caller=model_caller,
+        run_stage=_run_stage,
     )
 
     plan_dict = series_plan_to_store_dict(plan)
@@ -427,6 +437,84 @@ def _run_series_stage_with_integrity(
             visibility_policy=visibility_policy,
         )
     return series_ads
+
+
+def _assemble_campaign_with_duplicate_recovery(
+    *,
+    product_name: str,
+    product_description: str,
+    format_value: str,
+    ad_count: int,
+    detected_language: str,
+    exploration_seed: str,
+    product_name_resolved: str,
+    strategy: Any,
+    strategy_selection: Any,
+    selected_slogan: Any,
+    conceptual: Any,
+    brand_physical: Any,
+    graphic: Any,
+    series_ads: SeriesAdsOutput,
+    visibility_policy: Any,
+    visibility_source: Any,
+    conceptual_fixed: Dict[str, str],
+    brand_physical_dict: Dict[str, Any],
+    graphic_dict: Dict[str, Any],
+    model_caller: Any,
+    run_stage: Any,
+) -> Builder1SeriesPlan:
+    from engine.builder1_planner import Builder1PlannerError
+
+    current_series = series_ads
+    repair_used = False
+    while True:
+        try:
+            return assemble_builder1_campaign(
+                product_name=product_name,
+                product_description=product_description,
+                format_value=format_value,
+                ad_count=ad_count,
+                detected_language=detected_language,
+                exploration_seed=exploration_seed,
+                product_name_resolved=product_name_resolved,
+                strategy=strategy,
+                strategy_selection=strategy_selection,
+                selected_slogan=selected_slogan,
+                conceptual=conceptual,
+                brand_physical=brand_physical,
+                graphic=graphic,
+                series_ads=current_series,
+                visibility_policy=visibility_policy,
+                visibility_source=visibility_source,
+            )
+        except StageParseError as exc:
+            if exc.stage != "assemble":
+                raise
+            duplicate_reasons = duplicate_assembly_reasons(exc.reasons)
+            if not duplicate_reasons or repair_used:
+                raise Builder1PlannerError(
+                    "series_assembly_failed",
+                    reasons=exc.reasons,
+                    stage="assemble",
+                ) from exc
+            _, findings = validate_ad_execution_distinctness(current_series.ads)
+            logger.info(
+                "BUILDER1_SERIES_EXECUTION_REPAIR_START duplicateReasons=%s",
+                duplicate_reasons,
+            )
+            current_series = attempt_series_execution_repair(
+                series_ads=current_series,
+                duplicate_reasons=duplicate_reasons,
+                findings=findings,
+                brand_slogan=selected_slogan.brand_slogan,
+                conceptual=conceptual_fixed,
+                brand_physical=brand_physical_dict,
+                graphic_generator=graphic_dict,
+                detected_language=detected_language,
+                model_caller=model_caller,
+                run_stage=run_stage,
+            )
+            repair_used = True
 
 
 def _series_ads_needs_retry(series_ads: SeriesAdsOutput, *, expected_ad_count: int) -> bool:
