@@ -15,6 +15,7 @@ from engine.openai_reasoning import (
     DEFAULT_OPENAI_REASONING_MODEL,
     log_openai_reasoning_config,
     normalize_legacy_text_model,
+    resolve_default_reasoning_effort,
 )
 
 logger = logging.getLogger(__name__)
@@ -183,15 +184,8 @@ def _profile_default_model(stage: str, profile: PlanningProfile) -> str:
 
 
 def _profile_default_reasoning(stage: str, profile: PlanningProfile) -> str:
-    if profile == PlanningProfile.QUALITY:
-        return "high"
-    if profile == PlanningProfile.BALANCED:
-        if stage in BALANCED_EXECUTION_STAGES:
-            return "high"
-        return "high"
-    if stage == "strategy_stage":
-        return "high"
-    return "high"
+    del stage, profile  # All Builder1 stages inherit OPENAI_REASONING_EFFORT (default medium).
+    return resolve_default_reasoning_effort()
 
 
 def _log_missing_execution_model_warning(profile: PlanningProfile) -> None:
@@ -249,7 +243,7 @@ def resolve_stage_model(stage: Optional[str]) -> str:
 
 def resolve_stage_reasoning_effort(stage: Optional[str], model: str) -> Optional[str]:
     if not stage:
-        effort = "high"
+        effort = resolve_default_reasoning_effort()
     else:
         env_key = STAGE_REASONING_ENV_KEYS.get(stage, "")
         configured = (os.environ.get(env_key) or "").strip().lower() if env_key else ""

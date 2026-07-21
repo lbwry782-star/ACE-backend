@@ -10,6 +10,7 @@ from engine.openai_reasoning import (
     DEFAULT_REASONING_MODE,
     build_reasoning_payload,
     normalize_legacy_text_model,
+    resolve_default_reasoning_effort,
     resolve_openai_reasoning_model,
 )
 
@@ -32,13 +33,36 @@ class TestOpenAIReasoningConfig(unittest.TestCase):
     def test_resolve_model_default(self) -> None:
         self.assertEqual(resolve_openai_reasoning_model(), "gpt-5.6-sol")
 
+    @patch.dict("os.environ", {}, clear=True)
     def test_reasoning_payload_defaults(self) -> None:
         self.assertEqual(
             build_reasoning_payload(),
             {"mode": DEFAULT_REASONING_MODE, "effort": DEFAULT_REASONING_EFFORT},
         )
         self.assertEqual(DEFAULT_REASONING_MODE, "standard")
-        self.assertEqual(DEFAULT_REASONING_EFFORT, "high")
+        self.assertEqual(DEFAULT_REASONING_EFFORT, "medium")
+
+    @patch.dict("os.environ", {}, clear=True)
+    def test_default_reasoning_effort_is_medium(self) -> None:
+        self.assertEqual(resolve_default_reasoning_effort(), "medium")
+
+    @patch.dict("os.environ", {"OPENAI_REASONING_EFFORT": "high"}, clear=True)
+    def test_openai_reasoning_effort_high_override(self) -> None:
+        self.assertEqual(resolve_default_reasoning_effort(), "high")
+        self.assertEqual(
+            build_reasoning_payload(),
+            {"mode": "standard", "effort": "high"},
+        )
+
+    @patch.dict("os.environ", {"OPENAI_REASONING_EFFORT": "low"}, clear=True)
+    def test_openai_reasoning_effort_low_override(self) -> None:
+        self.assertEqual(resolve_default_reasoning_effort(), "low")
+        self.assertEqual(build_reasoning_payload()["effort"], "low")
+
+    @patch.dict("os.environ", {"OPENAI_REASONING_EFFORT": "xhigh"}, clear=True)
+    def test_openai_reasoning_effort_xhigh_override(self) -> None:
+        self.assertEqual(resolve_default_reasoning_effort(), "xhigh")
+        self.assertEqual(build_reasoning_payload()["effort"], "xhigh")
 
 
 if __name__ == "__main__":

@@ -73,7 +73,52 @@ class TestPlanningProfiles(unittest.TestCase):
 
     def test_reasoning_effort_supported_for_o3(self) -> None:
         self.assertTrue(model_supports_reasoning_effort("gpt-5.6-sol"))
-        self.assertEqual(resolve_stage_reasoning_effort("strategy_stage", "gpt-5.6-sol"), "high")
+        self.assertEqual(resolve_stage_reasoning_effort("strategy_stage", "gpt-5.6-sol"), "medium")
+
+    def test_all_normal_stages_inherit_default_medium(self) -> None:
+        stages = (
+            "strategy_slogan_stage",
+            "conceptual_stage",
+            "brand_physical",
+            "graphic_system",
+            "series_ads",
+        )
+        for stage in stages:
+            with self.subTest(stage=stage):
+                self.assertEqual(
+                    resolve_stage_reasoning_effort(stage, "gpt-5.6-sol"),
+                    "medium",
+                )
+
+    @patch.dict(os.environ, {"OPENAI_REASONING_EFFORT": "high"}, clear=False)
+    def test_all_normal_stages_inherit_openai_reasoning_effort_override(self) -> None:
+        self.assertEqual(
+            resolve_stage_reasoning_effort("conceptual_stage", "gpt-5.6-sol"),
+            "high",
+        )
+
+    def test_repair_stages_inherit_default_medium(self) -> None:
+        for stage in ("strategy_candidate_repair", "conceptual_evaluation_repair"):
+            with self.subTest(stage=stage):
+                self.assertEqual(
+                    resolve_stage_reasoning_effort(stage, "gpt-5.6-sol"),
+                    "medium",
+                )
+
+    @patch.dict(
+        os.environ,
+        {"BUILDER1_CONCEPTUAL_STAGE_REASONING_EFFORT": "high"},
+        clear=False,
+    )
+    def test_stage_specific_reasoning_effort_override(self) -> None:
+        self.assertEqual(
+            resolve_stage_reasoning_effort("conceptual_stage", "gpt-5.6-sol"),
+            "high",
+        )
+        self.assertEqual(
+            resolve_stage_reasoning_effort("brand_physical", "gpt-5.6-sol"),
+            "medium",
+        )
 
 
 class TestStageOrderAndCallCounts(unittest.TestCase):

@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_OPENAI_REASONING_MODEL = "gpt-5.6-sol"
 DEFAULT_REASONING_MODE = "standard"
-DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_REASONING_EFFORT = "medium"
 
 VALID_REASONING_MODES = frozenset({"standard", "pro"})
 VALID_REASONING_EFFORTS = frozenset(
