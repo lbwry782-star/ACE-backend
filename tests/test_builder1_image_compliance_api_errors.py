@@ -402,8 +402,8 @@ class TestQualityPlanningUnchanged(unittest.TestCase):
             NORMAL_PLANNING_CALLS_WITH_NAME,
         )
 
-        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_NAME, 6)
-        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME, 7)
+        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_NAME, 5)
+        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME, 6)
 
 
 class TestBuilder2Unchanged(unittest.TestCase):

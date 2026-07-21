@@ -256,17 +256,17 @@ class TestSeriesAndRegression(unittest.TestCase):
     def test_no_logo_rules_unchanged_in_series_prompt(self) -> None:
         self.assertIn("never request a logo", STAGE_SERIES_ADS_SYSTEM.lower())
 
-    def test_supplied_name_planning_remains_six_calls(self) -> None:
-        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_NAME, 6)
+    def test_supplied_name_planning_remains_five_calls(self) -> None:
+        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_NAME, 5)
 
-    def test_generated_name_planning_remains_seven_calls(self) -> None:
-        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME, 7)
+    def test_generated_name_planning_remains_six_calls(self) -> None:
+        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME, 6)
 
     def test_stage_order_unchanged_in_pipeline(self) -> None:
         from engine import builder1_planning_pipeline as module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("run_slogan_stage"), source.index("run_conceptual_stage"))
+        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
         self.assertLess(source.index("run_conceptual_stage"), source.index("build_brand_physical_user_prompt"))
         self.assertLess(source.index("build_brand_physical_user_prompt"), source.index("_run_graphic_system_stage"))
         self.assertLess(source.index("_run_graphic_system_stage"), source.index("_run_series_stage_with_integrity"))

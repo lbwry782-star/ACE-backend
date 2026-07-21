@@ -193,17 +193,17 @@ class TestArchitectureRegression(unittest.TestCase):
         self.assertNotIn("strategy_judge", source)
         self.assertNotIn("creative_judge", source)
 
-    def test_supplied_name_six_calls(self) -> None:
-        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_NAME, 6)
+    def test_supplied_name_five_calls(self) -> None:
+        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_NAME, 5)
 
-    def test_generated_name_seven_calls(self) -> None:
-        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME, 7)
+    def test_generated_name_six_calls(self) -> None:
+        self.assertEqual(NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME, 6)
 
     def test_stage_order_unchanged(self) -> None:
         from engine import builder1_planning_pipeline as module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("run_slogan_stage"), source.index("run_conceptual_stage"))
+        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
         self.assertLess(source.index("run_conceptual_stage"), source.index("build_brand_physical_user_prompt"))
 
     def test_candidate_counts_unchanged(self) -> None:
@@ -251,8 +251,10 @@ class TestArchitectureRegression(unittest.TestCase):
 
 class TestTokenEstimates(unittest.TestCase):
     def test_stage_blocks_are_bounded(self) -> None:
+        limits = {"strategy_slogan_stage": 1040}
         for stage, block in STAGE_METHODOLOGY_BLOCKS.items():
-            self.assertLess(word_count(block), 520, msg=stage)
+            limit = limits.get(stage, 520)
+            self.assertLess(word_count(block), limit, msg=stage)
 
     def test_perception_first_has_reason_layer(self) -> None:
         self.assertTrue(has_reason_layer(BUILDER1_PERCEPTION_FIRST))

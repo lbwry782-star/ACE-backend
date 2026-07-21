@@ -23,6 +23,9 @@ STRICT_SCHEMA_STAGES = frozenset(
         "strategy_stage",
         "strategy_scan",
         "strategy_candidate_repair",
+        "strategy_slogan_stage",
+        "strategy_slogan_repair",
+        "slogan_only_repair",
         "slogan_stage",
         "slogan_scan",
         "slogan_quality_review",
@@ -662,8 +665,31 @@ CONCEPTUAL_STAGE_JSON_SCHEMA: Dict[str, Any] = {
     },
 }
 
+STRATEGY_SLOGAN_STAGE_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["strategy", "slogan"],
+    "properties": {
+        "strategy": STRATEGY_STAGE_JSON_SCHEMA,
+        "slogan": SLOGAN_STAGE_JSON_SCHEMA,
+    },
+}
+
+STRATEGY_SLOGAN_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["strategy", "slogan"],
+    "properties": {
+        "strategy": STRATEGY_STAGE_JSON_SCHEMA,
+        "slogan": SLOGAN_STAGE_JSON_SCHEMA,
+    },
+}
+
 STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "strategy_stage": STRATEGY_STAGE_JSON_SCHEMA,
+    "strategy_slogan_stage": STRATEGY_SLOGAN_STAGE_JSON_SCHEMA,
+    "strategy_slogan_repair": STRATEGY_SLOGAN_REPAIR_JSON_SCHEMA,
+    "slogan_only_repair": SLOGAN_STAGE_JSON_SCHEMA,
     "strategy_scan": STRATEGY_SCAN_JSON_SCHEMA,
     "strategy_candidate_repair": STRATEGY_CANDIDATE_REPAIR_JSON_SCHEMA,
     "slogan_stage": SLOGAN_STAGE_JSON_SCHEMA,
@@ -774,6 +800,12 @@ def call_planning_model(
         logger.info("BUILDER1_STRICT_SCHEMA stage=%s enabled=true", stage)
     elif stage in STRICT_SCHEMA_STAGES:
         logger.info("BUILDER1_STRICT_SCHEMA stage=%s enabled=false", stage)
+
+    logger.info(
+        "BUILDER1_STAGE_MODEL stage=%s model=%s",
+        stage or "",
+        model,
+    )
 
     try:
         response = client.responses.create(**kwargs)

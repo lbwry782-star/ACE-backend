@@ -30,6 +30,7 @@ from engine.builder1_planning_contract import (
     STAGE_SERIES_ADS_SYSTEM,
     STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM,
     STAGE_SLOGAN_STAGE_SYSTEM,
+    STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM,
     STAGE_STRATEGY_STAGE_SYSTEM,
     STAGE_CONCEPTUAL_SCAN_SYSTEM,
     STAGE_CONCEPTUAL_SELECT_SYSTEM,
@@ -494,10 +495,24 @@ def _strategy_selection_payload(
     }
 
 
+def _strategy_slogan_stage_payload(
+    *,
+    selected_strategy_id: str = "S01",
+    selected_slogan_id: str = "L01",
+    candidate_ids: List[str] | None = None,
+) -> Dict[str, Any]:
+    return {
+        "strategy": _strategy_stage_payload(selected_id=selected_strategy_id, candidate_ids=candidate_ids),
+        "slogan": _slogan_stage_payload(selected_id=selected_slogan_id),
+    }
+
+
 def _early_stage_responses(ad_count: int = 2) -> Dict[str, Any]:
     eligible_ids = [f"S{i:02d}" for i in range(1, 13)]
+    combined = _strategy_slogan_stage_payload(candidate_ids=eligible_ids)
     return {
         STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM: {"productNameResolved": "TestBrand"},
+        STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM: combined,
         STAGE_STRATEGY_STAGE_SYSTEM: _strategy_stage_payload(candidate_ids=eligible_ids),
         STAGE_SLOGAN_STAGE_SYSTEM: _slogan_stage_payload(),
         STAGE_SLOGAN_CANDIDATE_REPAIR_SYSTEM: {"replacements": []},

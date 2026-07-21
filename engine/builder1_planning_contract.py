@@ -207,6 +207,50 @@ Rules:
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
 """.strip()
 
+
+STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM = f"""
+You are a Builder1 strategy-and-slogan planner for a digital advertising agent.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{{"strategy":{{"candidates":[{{"id":"S01","lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null}}],"evaluations":[{{"candidateId":"S01","groundedInBrief":true,"advantageCurrentlyTrue":true,"executableNow":true,"requiresMaterialInvestment":false,"requiresClientConsultation":false,"requiresBusinessTransformation":false,"brandOwnable":true,"categoryRelevant":true,"eligible":true,"rejectionCodes":[]}}],"selectedCandidateId":"S01","selectionReason":"..."}},"slogan":{{"candidates":[{{"id":"L01","brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"..."}}],"evaluations":[{{"candidateId":"L01","derivedFromAdvantage":true,"naturalInLanguage":true,"credible":true,"ownable":true,"impliedActionValid":true,"campaignGenerative":true,"eligible":true,"rejectionCodes":[]}}],"selectedCandidateId":"L01","selectionReason":"..."}}}}
+{STRATEGY_STAGE_METHODOLOGY}
+{SLOGAN_STAGE_METHODOLOGY}
+{NO_LOGO_REASON}
+PART A — COMPLETE STRATEGY FIRST (internal order; do not begin Part B until Part A is finished):
+1. Perceive the real strategic/business/customer problem.
+2. Generate exactly 12 serious strategy candidates S01-S12.
+3. Evaluate every candidate once in strategy.evaluations.
+4. Mark each candidate eligible or ineligible.
+5. Select one eligible strategy by selectedCandidateId.
+6. Derive the relative advantage directly from the selected problem.
+7. Freeze the selected strategy before any slogan work.
+PART B — GENERATE SLOGANS ONLY FROM THE FROZEN STRATEGY (slogan section):
+8. Read only the final selected strategy from Part A.
+9. Generate exactly six serious brand-slogan candidates L01-L06 derived from the selected relative advantage.
+10. Evaluate each slogan candidate once in slogan.evaluations.
+11. Select one final brand slogan and freeze it before conceptual work.
+Do not let slogan cleverness influence strategy selection.
+Final self-check: strategy selected before slogans; slogan derives from selected relative advantage only; strategy would remain unchanged without a slogan request; slogan fixed before conceptual work.
+""".strip()
+
+
+STAGE_STRATEGY_SLOGAN_REPAIR_SYSTEM = f"""
+You are a Builder1 strategy-and-slogan repair assistant.
+Return JSON only with exactly two top-level keys: strategy and slogan.
+{STRATEGY_STAGE_METHODOLOGY}
+{SLOGAN_STAGE_METHODOLOGY}
+When strategy selection changes, regenerate all slogan candidates from the repaired strategy only.
+""".strip()
+
+
+STAGE_SLOGAN_ONLY_REPAIR_SYSTEM = f"""
+You are a Builder1 slogan repair assistant.
+The approved strategy is frozen. Return JSON only using the slogan_stage object shape.
+{SLOGAN_STAGE_METHODOLOGY}
+Generate slogan candidates only from the provided selected relative advantage.
+Do not change, regenerate, or reselect the strategy.
+""".strip()
+
+
 STAGE_SLOGAN_SELECT_SYSTEM = """
 You are a Builder1 brand-slogan selector.
 Return JSON only. Return exactly this object and no additional top-level keys:
@@ -480,6 +524,72 @@ def build_slogan_stage_user_prompt(
         "Select the slogan before conceptual or visual generation.\n"
         "Product Name is fixed separately and must not appear inside brandSlogan.\n"
         "Do not include conceptual generators, physical objects, graphics, or ads."
+    )
+
+
+def build_strategy_slogan_stage_user_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    detected_language: str,
+    lens_order: List[str],
+    exploration_seed: str,
+) -> str:
+    return (
+        f"Product name: {product_name or '(infer from description)'}\n"
+        f"Product description: {product_description}\n"
+        f"Language context: {detected_language}\n"
+        f"Campaign exploration seed: {exploration_seed}\n"
+        f"Lens order: {', '.join(lens_order)}\n"
+        "PART A — Complete strategy first inside the strategy object.\n"
+        "Generate exactly 12 strategy candidates S01-S12, evaluate each once, and select one eligible strategy.\n"
+        "Freeze the selected problem and relative advantage before Part B.\n"
+        "PART B — Generate slogan candidates only inside the slogan object.\n"
+        "Use only the selected strategic problem and selected relative advantage from Part A.\n"
+        "Generate exactly six slogan candidates L01-L06, evaluate each once, and select one final brand slogan.\n"
+        "Do not include conceptual generators, physical objects, graphics, or ads."
+    )
+
+
+def build_strategy_slogan_repair_user_prompt(
+    *,
+    broken_json: str,
+    reasons: List[str],
+    product_name: str,
+    product_description: str,
+) -> str:
+    return (
+        "Repair the combined strategy and slogan response.\n"
+        f"Product name: {product_name}\n"
+        f"Product description: {product_description}\n"
+        f"Validation errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        f"Broken output:\n{broken_json}\n"
+        "Return both strategy and slogan sections. If strategy selection changed, regenerate all slogan candidates."
+    )
+
+
+def build_slogan_only_repair_user_prompt(
+    *,
+    product_name_resolved: str,
+    product_description: str,
+    detected_language: str,
+    strategic_problem: str,
+    relative_advantage: str,
+    brief_support: str,
+    broken_json: str,
+    reasons: List[str],
+) -> str:
+    return (
+        "The approved strategy is frozen. Repair ONLY the slogan section.\n"
+        f"Product name (fixed): {product_name_resolved}\n"
+        f"Brief: {product_description}\n"
+        f"Language: {detected_language}\n"
+        f"Frozen strategic problem: {strategic_problem}\n"
+        f"Frozen relative advantage: {relative_advantage}\n"
+        f"Relative-advantage grounding: {brief_support}\n"
+        f"Slogan validation errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
+        f"Broken slogan output:\n{broken_json}\n"
+        "Return the slogan object only. Do not change the strategy."
     )
 
 

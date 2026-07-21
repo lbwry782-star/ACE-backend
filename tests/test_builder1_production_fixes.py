@@ -61,7 +61,7 @@ class TestBalancedRoutingAndConfig(unittest.TestCase):
         self._env.stop()
 
     def test_core_stages_keep_quality_model(self) -> None:
-        for stage in ("strategy_stage", "slogan_stage", "conceptual_stage", "brand_physical"):
+        for stage in ("strategy_slogan_stage", "conceptual_stage", "brand_physical"):
             self.assertEqual(resolve_stage_model(stage), "o3-pro")
 
     def test_missing_execution_model_logs_inactive_optimization(self) -> None:

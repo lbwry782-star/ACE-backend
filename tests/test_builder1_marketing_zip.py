@@ -28,7 +28,7 @@ from engine.builder1_planning_contract import (
     STAGE_CONCEPTUAL_STAGE_SYSTEM,
     STAGE_GRAPHIC_SYSTEM_SYSTEM,
     STAGE_SERIES_ADS_SYSTEM,
-    STAGE_STRATEGY_STAGE_SYSTEM,
+    STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM,
 )
 from engine.builder1_zip import build_builder1_single_ad_zip_bytes, build_builder1_zip_bytes
 from tests.builder1_test_helpers import (
@@ -177,7 +177,7 @@ class TestPlannerMarketingIntegration(unittest.TestCase):
         counters = {"strategy": 0, "conceptual": 0, "repair": 0}
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if system == STAGE_STRATEGY_STAGE_SYSTEM:
+            if system == STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM:
                 counters["strategy"] += 1
             if system == STAGE_CONCEPTUAL_STAGE_SYSTEM:
                 counters["conceptual"] += 1

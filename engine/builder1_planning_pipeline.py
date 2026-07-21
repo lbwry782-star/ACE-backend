@@ -11,8 +11,7 @@ from engine.builder1_campaign_integrity import (
 )
 from engine.builder1_consolidated_stages import (
     run_conceptual_stage,
-    run_slogan_stage,
-    run_strategy_stage,
+    run_strategy_slogan_stage,
 )
 from engine.builder1_final_stages import (
     SeriesAdsOutput,
@@ -142,26 +141,27 @@ def run_builder1_campaign_pipeline(
     )
 
     try:
-        strategy_selection, selected_strategy, _strategy_candidates, _strategy_reviews = run_strategy_stage(
+        (
+            strategy_selection,
+            selected_strategy,
+            _strategy_candidates,
+            _strategy_reviews,
+            _slogan_selection,
+            selected_slogan,
+            slogan_candidates,
+        ) = run_strategy_slogan_stage(
             _run_stage,
             model_caller,
             product_name=product_name_resolved,
+            product_name_resolved=product_name_resolved,
             product_description=normalized.product_description,
             detected_language=detected_language,
             lens_order=lens_order,
             exploration_seed=exploration_seed,
         )
     except StrategySelectionExhausted as exc:
-        raise Builder1PlannerError("strategy_stage_failed") from exc
+        raise Builder1PlannerError("strategy_slogan_stage_failed") from exc
 
-    _slogan_selection, selected_slogan, slogan_candidates = run_slogan_stage(
-        _run_stage,
-        model_caller,
-        selected_strategy=selected_strategy,
-        product_name_resolved=product_name_resolved,
-        product_description=normalized.product_description,
-        detected_language=detected_language,
-    )
     slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
 
     _conceptual_selection, selected_conceptual, conceptual_candidates = run_conceptual_stage(

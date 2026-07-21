@@ -43,12 +43,11 @@ from tests.test_builder1_series import _base_campaign, _parse
 
 
 class TestPlanningOrder(unittest.TestCase):
-    def test_planner_source_order_has_slogan_before_conceptual(self) -> None:
+    def test_planner_source_order_has_strategy_slogan_before_conceptual(self) -> None:
         from engine import builder1_planning_pipeline as module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("run_slogan_stage"), source.index("run_conceptual_stage"))
-        self.assertLess(source.index("run_strategy_stage"), source.index("run_slogan_stage"))
+        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
 
     def test_conceptual_stage_prompt_receives_selected_slogan(self) -> None:
         prompt = build_conceptual_stage_user_prompt(
@@ -170,7 +169,7 @@ class TestRepairRouting(unittest.TestCase):
 
 
 class TestPlannerIntegration(unittest.TestCase):
-    def test_plan_builder1_uses_fixed_slogan_from_slogan_stage(self) -> None:
+    def test_plan_builder1_uses_fixed_slogan_from_strategy_slogan_stage(self) -> None:
         stage_order: List[str] = []
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
@@ -186,8 +185,9 @@ class TestPlannerIntegration(unittest.TestCase):
             model_caller=model_caller,
             ad_count=2,
         )
-        self.assertIn("slogan_stage", stage_order)
-        self.assertLess(stage_order.index("slogan_stage"), stage_order.index("conceptual_stage"))
+        self.assertIn("strategy_slogan_stage", stage_order)
+        self.assertLess(stage_order.index("strategy_slogan_stage"), stage_order.index("conceptual_stage"))
+        self.assertNotIn("slogan_stage", stage_order)
         self.assertEqual(plan.brand_slogan, "Built To Last")
         prompt = build_visual_prompt(plan, plan.ads[0])
         self.assertIn("Fixed brand slogan (typography only): Built To Last.", prompt)

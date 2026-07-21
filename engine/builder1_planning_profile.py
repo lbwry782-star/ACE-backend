@@ -14,6 +14,7 @@ from typing import Dict, Optional
 logger = logging.getLogger(__name__)
 
 PLANNING_STAGES = (
+    "strategy_slogan_stage",
     "strategy_stage",
     "slogan_stage",
     "conceptual_stage",
@@ -24,6 +25,7 @@ PLANNING_STAGES = (
 )
 
 STAGE_MODEL_ENV_KEYS: Dict[str, str] = {
+    "strategy_slogan_stage": "BUILDER1_STRATEGY_SLOGAN_STAGE_MODEL",
     "strategy_stage": "BUILDER1_STRATEGY_STAGE_MODEL",
     "slogan_stage": "BUILDER1_SLOGAN_STAGE_MODEL",
     "conceptual_stage": "BUILDER1_CONCEPTUAL_STAGE_MODEL",
@@ -34,6 +36,7 @@ STAGE_MODEL_ENV_KEYS: Dict[str, str] = {
 }
 
 STAGE_REASONING_ENV_KEYS: Dict[str, str] = {
+    "strategy_slogan_stage": "BUILDER1_STRATEGY_SLOGAN_STAGE_REASONING_EFFORT",
     "strategy_stage": "BUILDER1_STRATEGY_STAGE_REASONING_EFFORT",
     "slogan_stage": "BUILDER1_SLOGAN_STAGE_REASONING_EFFORT",
     "conceptual_stage": "BUILDER1_CONCEPTUAL_STAGE_REASONING_EFFORT",
@@ -44,6 +47,7 @@ STAGE_REASONING_ENV_KEYS: Dict[str, str] = {
 
 CORE_QUALITY_STAGES = frozenset(
     {
+        "strategy_slogan_stage",
         "strategy_stage",
         "slogan_stage",
         "conceptual_stage",
@@ -158,6 +162,8 @@ def _profile_default_model(stage: str, profile: PlanningProfile) -> str:
     exec_configured = configured_execution_model()
     exec_model = execution_model_resolved()
     if profile == PlanningProfile.QUALITY:
+        return q_model
+    if stage == "strategy_slogan_stage":
         return q_model
     if profile == PlanningProfile.BALANCED:
         if stage in BALANCED_EXECUTION_STAGES and exec_configured:

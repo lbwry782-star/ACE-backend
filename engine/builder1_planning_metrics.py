@@ -15,8 +15,8 @@ _metrics_ctx: ContextVar[Optional["Builder1PlanningMetrics"]] = ContextVar(
     default=None,
 )
 
-NORMAL_PLANNING_CALLS_WITH_NAME = 6
-NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME = 7
+NORMAL_PLANNING_CALLS_WITH_NAME = 5
+NORMAL_PLANNING_CALLS_WITH_GENERATED_NAME = 6
 PLANNING_LATENCY_PREFERRED_MS = 150_000
 PLANNING_LATENCY_WARN_MS = 180_000
 PLANNING_LATENCY_ALERT_MS = 240_000
@@ -30,6 +30,10 @@ class Builder1PlanningMetrics:
     product_name_stage_calls: int = 0
     strategy_stage_calls: int = 0
     slogan_stage_calls: int = 0
+    strategy_slogan_stage_calls: int = 0
+    strategy_slogan_repair_calls: int = 0
+    slogan_only_repair_calls: int = 0
+    strategy_candidate_repair_calls: int = 0
     conceptual_stage_calls: int = 0
     physical_stage_calls: int = 0
     graphic_stage_calls: int = 0
@@ -73,6 +77,14 @@ class Builder1PlanningMetrics:
             self.strategy_stage_calls += 1
         elif stage == "slogan_stage":
             self.slogan_stage_calls += 1
+        elif stage == "strategy_slogan_stage":
+            self.strategy_slogan_stage_calls += 1
+        elif stage == "strategy_slogan_repair":
+            self.strategy_slogan_repair_calls += 1
+        elif stage == "slogan_only_repair":
+            self.slogan_only_repair_calls += 1
+        elif stage == "strategy_candidate_repair":
+            self.strategy_candidate_repair_calls += 1
         elif stage == "conceptual_stage":
             self.conceptual_stage_calls += 1
         elif stage == "brand_physical":
@@ -82,7 +94,6 @@ class Builder1PlanningMetrics:
         elif stage == "series_ads":
             self.series_stage_calls += 1
         elif stage in {
-            "strategy_candidate_repair",
             "slogan_candidate_repair",
             "conceptual_candidate_repair",
             "marketing_text_repair",
@@ -91,6 +102,8 @@ class Builder1PlanningMetrics:
 
     def record_stage_repair(self, stage: str) -> None:
         self.stage_repair_calls += 1
+        if stage == "strategy_slogan_stage":
+            self.strategy_slogan_repair_calls += 1
 
     def record_stage_retry(self, stage: str) -> None:
         self.stage_retry_calls += 1
@@ -161,10 +174,11 @@ class Builder1PlanningMetrics:
         logger.info(
             "BUILDER1_PLANNING_CALL_SUMMARY campaignId=%s jobId=%s "
             "productNameCallUsed=%s productNameStageCalls=%s strategyStageCalls=%s sloganStageCalls=%s "
-            "conceptualStageCalls=%s physicalStageCalls=%s graphicStageCalls=%s "
-            "seriesStageCalls=%s marketingTextRepairCalls=%s stageRepairCalls=%s stageRetryCalls=%s "
-            "stageModelFallbackCalls=%s normalExpectedCalls=%s actualPlanningCalls=%s "
-            "totalPlanningModelCalls=%s "
+            "strategySloganStageCalls=%s strategySloganRepairCalls=%s sloganOnlyRepairCalls=%s "
+            "strategyCandidateRepairCalls=%s conceptualStageCalls=%s physicalStageCalls=%s "
+            "graphicStageCalls=%s seriesStageCalls=%s marketingTextRepairCalls=%s "
+            "stageRepairCalls=%s stageRetryCalls=%s stageModelFallbackCalls=%s "
+            "normalExpectedCalls=%s actualPlanningCalls=%s totalPlanningModelCalls=%s "
             "promptTokens=%s outputTokens=%s totalTokens=%s totalPlanningDurationMs=%s",
             self.campaign_id or "",
             self.job_id or "",
@@ -172,6 +186,10 @@ class Builder1PlanningMetrics:
             self.product_name_stage_calls,
             self.strategy_stage_calls,
             self.slogan_stage_calls,
+            self.strategy_slogan_stage_calls,
+            self.strategy_slogan_repair_calls,
+            self.slogan_only_repair_calls,
+            self.strategy_candidate_repair_calls,
             self.conceptual_stage_calls,
             self.physical_stage_calls,
             self.graphic_stage_calls,

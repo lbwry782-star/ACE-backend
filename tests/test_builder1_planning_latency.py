@@ -37,9 +37,13 @@ from engine.builder1_strategy_selection import (
     validate_selected_strategy_gate,
 )
 from engine.builder1_strategy_judge import StrategyJudgeResult
-from engine.builder1_planning_contract import STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM
+from engine.builder1_planning_contract import (
+    STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM,
+    STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM,
+)
 from tests.test_builder1_staged_planning import (
     STAGE_STRATEGY_SCAN_SYSTEM,
+    STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM,
     STAGE_STRATEGY_STAGE_SYSTEM,
     _brand_physical,
     _early_stage_responses,
@@ -48,6 +52,7 @@ from tests.test_builder1_staged_planning import (
     _series_ads,
     _strategy_scan_payload,
     _strategy_selection_payload,
+    _strategy_slogan_stage_payload,
     _strategy_stage_payload,
 )
 
@@ -135,12 +140,12 @@ class TestStrategySelectionReview(unittest.TestCase):
             )
 
     def test_selected_strategy_gate_runs_before_slogan_in_pipeline_source(self) -> None:
-        from engine.builder1_planning_pipeline import run_builder1_campaign_pipeline
+        from engine.builder1_consolidated_stages import process_strategy_slogan_stage_response
         import inspect
 
-        source = inspect.getsource(run_builder1_campaign_pipeline)
-        strategy_idx = source.index("run_strategy_stage")
-        slogan_idx = source.index("run_slogan_stage")
+        source = inspect.getsource(process_strategy_slogan_stage_response)
+        strategy_idx = source.index("_process_frozen_strategy_section")
+        slogan_idx = source.index("_process_frozen_slogan_section")
         self.assertLess(strategy_idx, slogan_idx)
 
 
@@ -197,8 +202,9 @@ class TestProductionShapedLatencyRegression(unittest.TestCase):
                     ]
                 }
             responses = _full_final_responses(2)
-            responses[STAGE_STRATEGY_STAGE_SYSTEM] = _strategy_stage_payload()
-            responses[STAGE_STRATEGY_STAGE_SYSTEM]["candidates"] = broken_scan["candidates"]
+            combined = _strategy_slogan_stage_payload()
+            combined["strategy"]["candidates"] = broken_scan["candidates"]
+            responses[STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM] = combined
             return copy.deepcopy(responses.get(system, {}))
 
         plan = plan_builder1(

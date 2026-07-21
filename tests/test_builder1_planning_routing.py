@@ -82,8 +82,7 @@ class TestStageOrderAndCallCounts(unittest.TestCase):
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
         ordered_tokens = [
-            "run_strategy_stage",
-            "run_slogan_stage",
+            "run_strategy_slogan_stage",
             "run_conceptual_stage",
             "_run_brand_physical_with_identity_guard",
             "_run_graphic_system_stage",
@@ -114,8 +113,7 @@ class TestStageOrderAndCallCounts(unittest.TestCase):
                     for s in stages
                     if s
                     in {
-                        "strategy_stage",
-                        "slogan_stage",
+                        "strategy_slogan_stage",
                         "conceptual_stage",
                         "brand_physical",
                         "graphic_system",
@@ -149,8 +147,7 @@ class TestStageOrderAndCallCounts(unittest.TestCase):
                     if s
                     in {
                         "product_name_resolution",
-                        "strategy_stage",
-                        "slogan_stage",
+                        "strategy_slogan_stage",
                         "conceptual_stage",
                         "brand_physical",
                         "graphic_system",
@@ -191,15 +188,14 @@ class TestProductionShapedRegression(unittest.TestCase):
             )
             self.assertEqual(plan.product_visibility_policy, "FORBIDDEN")
             self.assertTrue(plan.transferred_object)
-            self.assertEqual(stages[:6], [
-                "strategy_stage",
-                "slogan_stage",
+            self.assertEqual(stages[:5], [
+                "strategy_slogan_stage",
                 "conceptual_stage",
                 "brand_physical",
                 "graphic_system",
                 "series_ads",
             ])
-            self.assertEqual(models["strategy_stage"], "o3-pro")
+            self.assertEqual(models["strategy_slogan_stage"], "o3-pro")
             self.assertEqual(models["series_ads"], "gpt-4.1")
             prompt = __import__(
                 "engine.builder1_visual_prompt", fromlist=["build_visual_prompt"]

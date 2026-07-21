@@ -252,6 +252,7 @@ Instead: plain Product Name typography, campaign graphic devices as composition 
 # Stage bundles for token estimation and tests
 STAGE_METHODOLOGY_BLOCKS: dict[str, str] = {
     "strategy_stage": STRATEGY_STAGE_METHODOLOGY,
+    "strategy_slogan_stage": STRATEGY_STAGE_METHODOLOGY + "\n\n" + SLOGAN_STAGE_METHODOLOGY,
     "slogan_stage": SLOGAN_STAGE_METHODOLOGY,
     "conceptual_stage": CONCEPTUAL_STAGE_METHODOLOGY,
     "brand_physical": BRAND_PHYSICAL_STAGE_METHODOLOGY,
