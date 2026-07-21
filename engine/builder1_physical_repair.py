@@ -11,7 +11,6 @@ from engine.builder1_failure_classification import validate_forbidden_plan_visib
 from engine.builder1_final_stages import (
     SeriesAdsOutput,
     assemble_builder1_campaign,
-    parse_brand_physical_output,
     parse_graphic_system_output,
     parse_series_ads_output,
 )
@@ -28,6 +27,10 @@ from engine.builder1_planning_contract import (
     build_graphic_system_user_prompt,
     build_series_ads_repair_prompt,
     build_series_ads_user_prompt,
+)
+from engine.builder1_physical_evaluations import (
+    is_repairable_physical_evaluation_parse_error,
+    parse_brand_physical_with_evaluation_recovery,
 )
 from engine.builder1_planner import (
     Builder1PlannerError,
@@ -129,16 +132,26 @@ def _run_brand_physical_with_identity_guard(
     user_prompt: str,
     parse_kwargs: Dict[str, Any],
     visibility_policy: ProductVisibilityPolicy,
+    repair_context: Optional[Dict[str, Any]] = None,
 ) -> Any:
     identity_retry_used = False
     current_prompt = user_prompt
+    repair_context = dict(repair_context or {})
 
     def _parse(raw: object):
-        return parse_brand_physical_output(
+        return parse_brand_physical_with_evaluation_recovery(
             raw,
+            model_caller=model_caller,
+            run_stage=_run_stage,
             visibility_policy=visibility_policy,
+            repair_context=repair_context,
             **parse_kwargs,
         )
+
+    def _repair_builder(broken_json: str, reasons: List[str]) -> Optional[str]:
+        if is_repairable_physical_evaluation_parse_error(reasons):
+            return None
+        return build_brand_physical_repair_prompt(broken_json=broken_json, reasons=reasons)
 
     while True:
         try:
@@ -148,9 +161,7 @@ def _run_brand_physical_with_identity_guard(
                 STAGE_BRAND_PHYSICAL_SYSTEM,
                 current_prompt,
                 _parse,
-                repair_builder=lambda broken, reasons: build_brand_physical_repair_prompt(
-                    broken_json=broken, reasons=reasons
-                ),
+                repair_builder=_repair_builder,
             )
         except Builder1PlannerError as exc:
             message = str(exc)
@@ -213,6 +224,13 @@ def repair_builder1_campaign_from_physical(
             "product_name_resolved": plan.product_name_resolved,
         },
         visibility_policy=visibility_policy,
+        repair_context={
+            "strategic_problem": plan.strategic_problem,
+            "relative_advantage": plan.relative_advantage,
+            "brand_slogan": plan.brand_slogan,
+            "implied_action": plan.slogan_action,
+            "conceptual": conceptual_fixed,
+        },
     )
     brand_physical = enforce_authoritative_product_name(
         brand_physical,

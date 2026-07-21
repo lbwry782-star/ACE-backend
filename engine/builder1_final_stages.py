@@ -29,7 +29,11 @@ from engine.builder1_staged_parsers import (
     StrategySelection,
     coerce_json_dict,
 )
-from engine.builder1_product_shot_methodology import PHYSICAL_PRODUCT_SHOT_REJECTION_CODES
+from engine.builder1_physical_evaluations import (
+    normalize_physical_evaluation_item,
+    normalize_physical_evaluations_in_payload,
+    validate_normalized_physical_evaluation_item,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -280,22 +284,20 @@ def _validate_brand_physical_candidates(
         if cid not in candidate_ids:
             reasons.append(f"physical_evaluation_unknown_id:{cid}")
             continue
-        rejection_codes = [
-            str(code)
-            for code in (item.get("rejectionCodes") or [])
-            if str(code).strip() in PHYSICAL_PRODUCT_SHOT_REJECTION_CODES
-        ]
-        eligible = bool(item.get("eligible"))
-        if eligible and rejection_codes:
-            reasons.append(f"physical_evaluation_contradictory:{cid}")
-        if not eligible and not rejection_codes:
-            reasons.append(f"physical_evaluation_ineligible_without_codes:{cid}")
+        normalized_item, _actions = normalize_physical_evaluation_item(item)
+        eligible = bool(normalized_item.get("eligible"))
+        reasons.extend(
+            validate_normalized_physical_evaluation_item(
+                normalized_item,
+                candidate_id=cid,
+            )
+        )
         if eligible:
-            if not bool(item.get("clearerThanConventionalProductShot")):
+            if not bool(normalized_item.get("clearerThanConventionalProductShot")):
                 reasons.append("physical_conventional_product_shot")
-            if not bool(item.get("supportsTransferredObject")):
+            if not bool(normalized_item.get("supportsTransferredObject")):
                 reasons.append("physical_no_external_object")
-            if not bool(item.get("distinctiveToBrand")):
+            if not bool(normalized_item.get("distinctiveToBrand")):
                 reasons.append("physical_decorative_presentation_only")
             eligible_ids.add(cid)
 
@@ -335,6 +337,8 @@ def parse_brand_physical_output(
         obj = coerce_json_dict(raw_payload)
     except Exception as exc:
         raise StageParseError("brand_physical", ["brand_physical_not_object"]) from exc
+
+    obj, _evaluation_action_log = normalize_physical_evaluations_in_payload(obj)
 
     _reject_forbidden_keys(obj, BRAND_PHYSICAL_FORBIDDEN, reasons, "brand_physical")
     _reject_legacy_fields(obj, reasons)

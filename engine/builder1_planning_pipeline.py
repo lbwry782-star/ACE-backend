@@ -224,6 +224,13 @@ def run_builder1_campaign_pipeline(
             "product_name_resolved": product_name_resolved,
         },
         visibility_policy=visibility_decision.policy,
+        repair_context={
+            "strategic_problem": selected_strategy.strategic_problem,
+            "relative_advantage": selected_strategy.relative_advantage,
+            "brand_slogan": selected_slogan.brand_slogan,
+            "implied_action": selected_slogan.implied_action,
+            "conceptual": conceptual_fixed,
+        },
     )
     brand_physical = enforce_authoritative_product_name(
         brand_physical,

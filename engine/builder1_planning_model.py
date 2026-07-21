@@ -9,6 +9,7 @@ import os
 from typing import Any, Callable, Dict, Optional
 
 from engine.builder1_conceptual_evaluations import CONCEPTUAL_REJECTION_CODE_LIST
+from engine.builder1_physical_evaluations import PHYSICAL_REJECTION_CODE_LIST
 from engine.builder1_strict_schema import (
     StrictSchemaConfigurationError,
     find_strict_schema_errors,
@@ -34,6 +35,7 @@ STRICT_SCHEMA_STAGES = frozenset(
         "conceptual_stage",
         "conceptual_evaluation_repair",
         "brand_physical",
+        "physical_evaluation_repair",
         "graphic_system",
         "series_ads",
     }
@@ -246,7 +248,22 @@ BRAND_PHYSICAL_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
         "supportsTransferredObject": {"type": "boolean"},
         "distinctiveToBrand": {"type": "boolean"},
         "eligible": {"type": "boolean"},
-        "rejectionCodes": {"type": "array", "items": {"type": "string"}},
+        "rejectionCodes": {
+            "type": "array",
+            "items": {"type": "string", "enum": list(PHYSICAL_REJECTION_CODE_LIST)},
+        },
+    },
+}
+
+PHYSICAL_EVALUATION_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["physicalEvaluations"],
+    "properties": {
+        "physicalEvaluations": {
+            "type": "array",
+            "items": BRAND_PHYSICAL_EVALUATION_ITEM_SCHEMA,
+        },
     },
 }
 
@@ -713,6 +730,7 @@ STAGE_JSON_SCHEMAS: Dict[str, Dict[str, Any]] = {
     "conceptual_stage": CONCEPTUAL_STAGE_JSON_SCHEMA,
     "conceptual_evaluation_repair": CONCEPTUAL_EVALUATION_REPAIR_JSON_SCHEMA,
     "brand_physical": BRAND_PHYSICAL_JSON_SCHEMA,
+    "physical_evaluation_repair": PHYSICAL_EVALUATION_REPAIR_JSON_SCHEMA,
     "graphic_system": GRAPHIC_SYSTEM_JSON_SCHEMA,
     "series_ads": SERIES_ADS_JSON_SCHEMA,
 }

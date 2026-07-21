@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_PLANNING_RULE, brand_guidelines_for_prompt
 from engine.builder1_conceptual_evaluations import CONCEPTUAL_REJECTION_CODE_LIST
+from engine.builder1_physical_evaluations import PHYSICAL_REJECTION_CODE_LIST
 from engine.builder1_graphic_contract import (
     descriptive_field_prompt_lines,
     repair_instructions_for_reasons,
@@ -400,6 +401,26 @@ Rules:
 - mediumParticipates must be JSON boolean true or false, never a string.
 - When mediumParticipates is false, mediumRole must be "".
 - {BUILDER1_NO_LOGO_PLANNING_RULE}
+- For every physicalEvaluations entry:
+  - If eligible=true: rejectionCodes must be [].
+  - If eligible=false: rejectionCodes must contain at least one allowed physical rejection code. Never mark a candidate ineligible without a machine-readable code. Do not place the reason only in explanatory prose.
+- Allowed physical rejectionCodes only:
+  {", ".join(PHYSICAL_REJECTION_CODE_LIST)}
+""".strip()
+
+
+STAGE_PHYSICAL_EVALUATION_REPAIR_SYSTEM = f"""
+You are a Builder1 physical evaluation repair assistant.
+Return JSON only. Return exactly this object and no additional top-level keys:
+{{"physicalEvaluations":[{{"candidateId":"P01","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"supportsTransferredObject":true,"distinctiveToBrand":true,"eligible":false,"rejectionCodes":["physical_conventional_product_shot"]}}]}}
+Rules:
+- Repair ONLY the requested candidate ids in physicalEvaluations.
+- Do not alter valid evaluations that were not requested.
+- If eligible=true: rejectionCodes must be [].
+- If eligible=false: rejectionCodes must contain at least one allowed code.
+- Allowed rejectionCodes only:
+  {", ".join(PHYSICAL_REJECTION_CODE_LIST)}
+- Do not rewrite physicalCandidates[] or change selectedPhysicalCandidateId.
 """.strip()
 
 STAGE_GRAPHIC_SYSTEM_SYSTEM = f"""
@@ -946,6 +967,44 @@ def build_brand_physical_identity_retry_prompt(*, base_user_prompt: str) -> str:
         f"{BUILDER1_BRAND_PHYSICAL_IDENTITY_CORRECTION}\n"
         "The transferred object must not be the advertised product, its packaging, or the same category unit.\n"
         "=== END PHYSICAL GENERATOR CORRECTION ==="
+    )
+
+
+def build_physical_evaluation_repair_user_prompt(
+    *,
+    invalid_candidate_ids: List[str],
+    invalid_reasons: Dict[str, List[str]],
+    evaluation_items: Dict[str, Dict[str, Any]],
+    strategic_problem: str,
+    relative_advantage: str,
+    brand_slogan: str,
+    implied_action: str,
+    conceptual: Dict[str, Any],
+) -> str:
+    requested = [
+        {
+            "candidateId": cid,
+            "currentEvaluation": evaluation_items.get(cid, {}),
+            "errors": invalid_reasons.get(cid, []),
+        }
+        for cid in invalid_candidate_ids
+    ]
+    return (
+        "Repair ONLY the listed physicalEvaluations objects.\n"
+        "Return exactly:\n"
+        '{"physicalEvaluations":[{"candidateId":"P01","clearerThanConventionalProductShot":true,'
+        '"survivesProductRemoval":true,"supportsTransferredObject":true,"distinctiveToBrand":true,'
+        '"eligible":false,"rejectionCodes":["physical_conventional_product_shot"]}]}\n'
+        f"Fixed strategic problem: {strategic_problem}\n"
+        f"Fixed relative advantage: {relative_advantage}\n"
+        f"Fixed brand slogan: {brand_slogan}\n"
+        f"Fixed implied slogan action: {implied_action}\n"
+        f"Fixed conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
+        f"Allowed rejectionCodes only:\n{', '.join(PHYSICAL_REJECTION_CODE_LIST)}\n"
+        f"Invalid candidate ids: {', '.join(invalid_candidate_ids)}\n"
+        f"Requested repairs:\n{json.dumps(requested, ensure_ascii=False, indent=2)}\n"
+        "Do not change eligible status unless required to satisfy the eligible/code invariant.\n"
+        "Do not rewrite physicalCandidates outside the requested ids."
     )
 
 

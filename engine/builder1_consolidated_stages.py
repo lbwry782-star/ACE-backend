@@ -259,10 +259,10 @@ def process_strategy_stage_response(
         raise StageParseError("strategy_stage", ["strategy_stage_not_object"]) from exc
 
     def _repair_caller(system: str, user: str, **kwargs: Any) -> object:
+        from engine.builder1_planner import _invoke_model_caller
+
         stage = kwargs.get("stage") or "strategy_candidate_repair"
-        if "stage" in kwargs:
-            return model_caller(system, user, stage=stage)
-        return model_caller(system, user)
+        return _invoke_model_caller(model_caller, system, user, stage=stage)
 
     candidates = ensure_strategy_scan_from_raw(
         obj,

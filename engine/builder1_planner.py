@@ -197,7 +197,7 @@ def _run_stage(
     user_prompt: str,
     parse_fn: Callable[[object], Any],
     *,
-    repair_builder: Optional[Callable[[str, List[str]], str]] = None,
+    repair_builder: Optional[Callable[[str, List[str]], Optional[str]]] = None,
 ) -> Any:
     last_reasons: List[str] = []
     last_raw = ""
@@ -230,21 +230,23 @@ def _run_stage(
                 last_reasons = exc.reasons
                 logger.error("BUILDER1_STAGE_FAILED stage=%s reasons=%s", stage, last_reasons)
                 if repair_builder and attempt == 1:
-                    logger.info("BUILDER1_STAGE_REPAIR stage=%s", stage)
-                    if metrics is not None:
-                        metrics.record_stage_repair(stage)
-                    current_prompt = repair_builder(last_raw, last_reasons)
-                    try:
-                        raw = _invoke_model_caller(
-                            model_caller, system_prompt, current_prompt, stage=stage
-                        )
-                        last_raw = _raw_to_text(raw)
-                        result = parse_fn(raw)
-                        logger.info("BUILDER1_STAGE_PARSE_OK stage=%s after_repair", stage)
-                        return result
-                    except StageParseError as exc2:
-                        last_reasons = exc2.reasons
-                        logger.error("BUILDER1_STAGE_FAILED stage=%s repair reasons=%s", stage, last_reasons)
+                    repair_prompt = repair_builder(last_raw, last_reasons)
+                    if repair_prompt:
+                        logger.info("BUILDER1_STAGE_REPAIR stage=%s", stage)
+                        if metrics is not None:
+                            metrics.record_stage_repair(stage)
+                        current_prompt = repair_prompt
+                        try:
+                            raw = _invoke_model_caller(
+                                model_caller, system_prompt, current_prompt, stage=stage
+                            )
+                            last_raw = _raw_to_text(raw)
+                            result = parse_fn(raw)
+                            logger.info("BUILDER1_STAGE_PARSE_OK stage=%s after_repair", stage)
+                            return result
+                        except StageParseError as exc2:
+                            last_reasons = exc2.reasons
+                            logger.error("BUILDER1_STAGE_FAILED stage=%s repair reasons=%s", stage, last_reasons)
                 logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
                 current_prompt = user_prompt
             except Exception as exc:
