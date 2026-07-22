@@ -98,6 +98,48 @@ _PORTRAIT_REQUEST_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+_INANIMATE_NAMED_PERSON_TERMS = (
+    "badge",
+    "identification badge",
+    "id card",
+    "identification card",
+    "name tag",
+    "access tag",
+    "tag and reader",
+    "card reader",
+    "reader",
+    "key fob",
+    "keycard",
+    "lanyard",
+    "business card",
+    "document",
+    "sign",
+    "poster text",
+    "poster",
+    "label",
+    "product name text",
+    "name text",
+    "device",
+    "screen",
+    "logo-like",
+    "logo",
+    "symbol",
+    "icon",
+    "empty chair",
+    "clothing without",
+    "jacket alone",
+    "shirt alone",
+)
+
+_HUMAN_REPRESENTATION_PATTERNS = re.compile(
+    r"\b(human person|human being|human face|human head|human body|human silhouette|"
+    r"human figure|human depiction|visible human|real person|actual person|"
+    r"person('|s)? face|recognizable portrait|recognizable likeness|headshot|portrait|"
+    r"photograph of (?:a )?(?:person|human|man|woman)|"
+    r"illustration of (?:a )?(?:person|human|man|woman))\b",
+    re.IGNORECASE,
+)
+
 
 class AdvertisedProductType(str, Enum):
     TANGIBLE_PRODUCT = "tangible_product"
@@ -228,6 +270,49 @@ def _ad_for_index(series_plan: Builder1SeriesPlan, ad_index: int):
         if int(ad.index) == int(ad_index):
             return ad
     return series_plan.ads[0] if series_plan.ads else None
+
+
+def reference_image_actually_supplied(series_plan: Optional[Builder1SeriesPlan]) -> bool:
+    if series_plan is None:
+        return False
+    internals = series_plan.planning_internals or {}
+    return bool(internals.get("referenceImageSupplied") or internals.get("suppliedReferenceImage"))
+
+
+def is_inanimate_named_person_match(matched_visual_element: str) -> bool:
+    element = _norm_text(matched_visual_element).lower()
+    if not element:
+        return False
+    return any(term in element for term in _INANIMATE_NAMED_PERSON_TERMS)
+
+
+def is_human_visual_representation(
+    *,
+    matched_visual_element: str,
+    product_match_explanation: str = "",
+    evidence_description: str = "",
+    advertised_product_name: str = "",
+) -> bool:
+    matched = _norm_text(matched_visual_element)
+    if not matched:
+        return False
+    if is_inanimate_named_person_match(matched):
+        return False
+
+    combined = " ".join(
+        [
+            matched,
+            _norm_text(product_match_explanation),
+            _norm_text(evidence_description),
+        ]
+    ).strip()
+    if _HUMAN_REPRESENTATION_PATTERNS.search(combined):
+        return True
+
+    name = _norm_text(advertised_product_name)
+    if name and _PORTRAIT_REQUEST_PATTERNS.search(combined) and name.lower() in combined.lower():
+        return True
+    return False
 
 
 def named_person_depiction_requested(
@@ -409,17 +494,48 @@ def evaluate_product_visible_hard_support(
     confidence: str,
     relationship_to_brand_text: str = "",
     legacy_unstructured: bool = False,
+    evidence_description: str = "",
 ) -> Tuple[bool, str]:
     if policy != ProductVisibilityPolicy.FORBIDDEN:
         return False, "policy_allows_visibility"
 
-    if advertised_type == AdvertisedProductType.NAMED_PERSON and series_plan is not None:
-        if not named_person_depiction_requested(series_plan):
+    advertised_name = ""
+    if series_plan is not None:
+        advertised_name = series_plan.product_name_resolved or series_plan.product_name
+
+    if advertised_type == AdvertisedProductType.NAMED_PERSON:
+        if product_match.product_match_basis == "supplied_reference_image":
+            if not reference_image_actually_supplied(series_plan):
+                return False, "invalid_reference_image_basis"
+
+        human_visible = is_human_visual_representation(
+            matched_visual_element=product_match.matched_visual_element,
+            product_match_explanation=product_match.product_match_explanation,
+            evidence_description=evidence_description,
+            advertised_product_name=advertised_name,
+        )
+
+        if product_match.product_match_basis in {
+            "explicit_prompt_identification",
+            "supplied_reference_image",
+            "exact_product_text",
+        } and product_match.advertised_product_present and not human_visible:
+            return False, "named_person_non_human_match"
+
+        if product_match.relationship_to_advertised_product == "actual_product" and not human_visible:
+            return False, "named_person_non_human_match"
+
+        if product_match.relationship_to_advertised_product == "explicit_representation" and not human_visible:
+            return False, "named_person_non_human_match"
+
+        if series_plan is not None and not named_person_depiction_requested(series_plan):
             if product_match.advertised_product_present and product_match.product_match_basis not in NAMED_PERSON_ALLOWED_BASIS:
                 return False, "named_person_ungrounded"
             if product_match.relationship_to_advertised_product in {"actual_product", "explicit_representation"}:
                 if product_match.product_match_basis not in NAMED_PERSON_ALLOWED_BASIS:
                     return False, "named_person_ungrounded"
+                if not human_visible:
+                    return False, "named_person_non_human_match"
 
     if matches_creative_plan_object(product_match.matched_visual_element, series_plan=series_plan):
         return False, "creative_generator_not_product"
@@ -453,20 +569,22 @@ def log_false_positive_suppressed(
     product_match: ComplianceProductMatch,
     advertised_type: AdvertisedProductType,
     reason: str,
+    reference_image_actually_supplied: bool = False,
 ) -> None:
     logger.info(
         "BUILDER1_IMAGE_COMPLIANCE_FALSE_POSITIVE_SUPPRESSED code=%s reason=%s "
-        "campaignId=%s adIndex=%s advertisedProductType=%s advertisedProductPresent=%s "
-        "productMatchBasis=%s relationshipToAdvertisedProduct=%s matchedVisualElement=%s",
+        "campaignId=%s adIndex=%s advertisedProductType=%s matchedVisualElement=%s "
+        "productMatchBasis=%s relationshipToAdvertisedProduct=%s "
+        "referenceImageActuallySupplied=%s",
         PRODUCT_VISIBLE_CODE,
         reason,
         campaign_id or "",
         ad_index,
         advertised_type.value,
-        str(product_match.advertised_product_present).lower(),
+        product_match.matched_visual_element,
         product_match.product_match_basis,
         product_match.relationship_to_advertised_product,
-        product_match.matched_visual_element,
+        str(reference_image_actually_supplied).lower(),
     )
 
 

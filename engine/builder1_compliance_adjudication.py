@@ -15,6 +15,7 @@ from engine.builder1_compliance_product_grounding import (
     infer_product_match_from_plan,
     log_false_positive_suppressed,
     log_product_match_decision,
+    reference_image_actually_supplied,
 )
 from engine.builder1_failure_classification import validate_forbidden_plan_visibility
 from engine.builder1_plan_spec import Builder1SeriesPlan
@@ -355,6 +356,11 @@ def adjudicate_compliance_review(
                 confidence=confidence,
                 relationship_to_brand_text=(item.relationship_to_brand_text if item else ""),
                 legacy_unstructured=legacy_unstructured,
+                evidence_description=str(
+                    (item.symbol_description if item else "")
+                    or (item.location if item else "")
+                    or ""
+                ).strip(),
             )
             log_product_match_decision(
                 campaign_id=campaign_id,
@@ -376,6 +382,7 @@ def adjudicate_compliance_review(
                         product_match=resolved_match,
                         advertised_type=advertised_type,
                         reason=suppress_reason,
+                        reference_image_actually_supplied=reference_image_actually_supplied(plan),
                     )
                 if _confidence_rank(confidence) >= 2:
                     advisories.append("possible_product_resemblance")

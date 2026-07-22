@@ -15,6 +15,9 @@ from engine.builder1_compliance_product_grounding import (
     ComplianceProductMatch,
     classify_advertised_product_type,
     evaluate_product_visible_hard_support,
+    is_human_visual_representation,
+    is_inanimate_named_person_match,
+    reference_image_actually_supplied,
 )
 from engine.builder1_image_compliance import (
     ImageComplianceError,
@@ -79,6 +82,284 @@ class TestAdvertisedProductClassification(unittest.TestCase):
             ),
             AdvertisedProductType.PACKAGED_PRODUCT,
         )
+
+
+def _named_person_orit_plan(ad_count: int = 2):
+    plan = _parse(_base_campaign(ad_count), ad_count)
+    plan.product_name = "אורי לב"
+    plan.product_name_resolved = "אורי לב"
+    plan.product_description = ""
+    plan.product_visibility_policy = "FORBIDDEN"
+    plan.physical_generator = "Access control motif"
+    plan.transferred_object = "Access control motif"
+    plan.planning_internals = dict(plan.planning_internals or {})
+    plan.planning_internals["productVisibilityPolicy"] = "FORBIDDEN"
+    plan.planning_internals["advertisedProductType"] = "named_person"
+    return plan
+
+
+class TestNamedPersonHumanPresenceGate(unittest.TestCase):
+    def test_badge_not_product_visibility(self) -> None:
+        plan = _named_person_orit_plan()
+        result = adjudicate_compliance_review(
+            raw_violations=["product_visible_without_explicit_request"],
+            evidence_items=[
+                ComplianceEvidenceItem(
+                    code="product_visible_without_explicit_request",
+                    confidence="high",
+                    symbol_description="Identification badge on lanyard",
+                )
+            ],
+            overall_confidence="high",
+            series_plan=plan,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="identification badge",
+                relationship_to_advertised_product="actual_product",
+                product_match_explanation="Badge identifies the named person.",
+            ),
+        )
+        self.assertNotIn("product_visible_without_explicit_request", result.hard_violations)
+        self.assertIn("possible_product_resemblance", result.advisories)
+
+    def test_identification_card_not_product_visibility(self) -> None:
+        plan = _named_person_orit_plan()
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="identification card",
+                relationship_to_advertised_product="actual_product",
+                product_match_explanation="ID card treated as person.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+        )
+        self.assertFalse(supported)
+        self.assertEqual(reason, "named_person_non_human_match")
+
+    def test_tag_and_reader_not_product_visibility(self) -> None:
+        self.assertTrue(is_inanimate_named_person_match("tag and reader"))
+        plan = _named_person_orit_plan()
+        result = adjudicate_compliance_review(
+            raw_violations=["product_visible_without_explicit_request"],
+            evidence_items=[
+                ComplianceEvidenceItem(
+                    code="product_visible_without_explicit_request",
+                    confidence="high",
+                    symbol_description="Access tag and reader at entry",
+                )
+            ],
+            overall_confidence="high",
+            series_plan=plan,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="tag and reader",
+                relationship_to_advertised_product="actual_product",
+                product_match_explanation="Reader implies the named person.",
+            ),
+        )
+        self.assertNotIn("product_visible_without_explicit_request", result.hard_violations)
+
+    def test_sign_with_name_not_product_visibility(self) -> None:
+        plan = _named_person_orit_plan()
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="exact_product_text",
+                matched_visual_element="sign containing אורי לב",
+                relationship_to_advertised_product="actual_product",
+                product_match_explanation="Name appears on sign.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+            evidence_description="Poster text with the advertised name",
+        )
+        self.assertFalse(supported)
+        self.assertEqual(reason, "named_person_non_human_match")
+
+    def test_business_card_not_product_visibility(self) -> None:
+        plan = _named_person_orit_plan()
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="business card",
+                relationship_to_advertised_product="actual_product",
+                product_match_explanation="Card belongs to the person.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+        )
+        self.assertFalse(supported)
+        self.assertEqual(reason, "named_person_non_human_match")
+
+    def test_associated_device_not_product_visibility(self) -> None:
+        plan = _named_person_orit_plan()
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="access control device",
+                relationship_to_advertised_product="actual_product",
+                product_match_explanation="Device associated with the person.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+        )
+        self.assertFalse(supported)
+        self.assertEqual(reason, "named_person_non_human_match")
+
+    def test_actual_product_rejected_for_inanimate_match(self) -> None:
+        plan = _named_person_orit_plan()
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="reader",
+                relationship_to_advertised_product="actual_product",
+                product_match_explanation="Reader labeled actual product.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+        )
+        self.assertFalse(supported)
+        self.assertEqual(reason, "named_person_non_human_match")
+
+    def test_explicit_prompt_basis_rejected_without_human(self) -> None:
+        plan = _named_person_orit_plan()
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="identification badge",
+                relationship_to_advertised_product="explicit_representation",
+                product_match_explanation="Prompt mentioned the person.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+        )
+        self.assertFalse(supported)
+        self.assertEqual(reason, "named_person_non_human_match")
+
+    def test_supplied_reference_basis_rejected_without_actual_reference(self) -> None:
+        plan = _named_person_orit_plan()
+        self.assertFalse(reference_image_actually_supplied(plan))
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="supplied_reference_image",
+                matched_visual_element="human portrait",
+                relationship_to_advertised_product="explicit_representation",
+                product_match_explanation="Model claimed supplied reference image.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+        )
+        self.assertFalse(supported)
+        self.assertEqual(reason, "invalid_reference_image_basis")
+
+    def test_human_portrait_can_still_be_true_match(self) -> None:
+        plan = _named_person_orit_plan()
+        plan.ads[0].physical_execution = "Portrait photograph of אורי לב centered in frame"
+        self.assertTrue(
+            is_human_visual_representation(
+                matched_visual_element="portrait of אורי לב",
+                product_match_explanation="Visible human portrait of advertised person.",
+                advertised_product_name="אורי לב",
+            )
+        )
+        result = adjudicate_compliance_review(
+            raw_violations=["product_visible_without_explicit_request"],
+            evidence_items=[
+                ComplianceEvidenceItem(
+                    code="product_visible_without_explicit_request",
+                    confidence="high",
+                    symbol_description="Human portrait centered in frame",
+                )
+            ],
+            overall_confidence="high",
+            series_plan=plan,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="explicit_prompt_identification",
+                matched_visual_element="portrait of אורי לב",
+                relationship_to_advertised_product="explicit_representation",
+                product_match_explanation="Portrait explicitly requested in plan.",
+            ),
+        )
+        self.assertIn("product_visible_without_explicit_request", result.hard_violations)
+
+    def test_supplied_reference_with_actual_reference_and_human_match(self) -> None:
+        plan = _named_person_orit_plan()
+        plan.planning_internals["referenceImageSupplied"] = True
+        self.assertTrue(reference_image_actually_supplied(plan))
+        supported, reason = evaluate_product_visible_hard_support(
+            policy=ProductVisibilityPolicy.FORBIDDEN,
+            product_match=ComplianceProductMatch(
+                advertised_product_present=True,
+                product_match_basis="supplied_reference_image",
+                matched_visual_element="human portrait based on supplied reference",
+                relationship_to_advertised_product="explicit_representation",
+                product_match_explanation="Portrait matches supplied reference image.",
+            ),
+            advertised_type=AdvertisedProductType.NAMED_PERSON,
+            series_plan=plan,
+            confidence="high",
+            evidence_description="Recognizable portrait of a human person",
+        )
+        self.assertTrue(supported)
+        self.assertEqual(reason, "")
+
+    def test_false_positive_suppression_prevents_regeneration(self) -> None:
+        plan = _named_person_orit_plan()
+        calls = {"gen": 0}
+
+        def caller(_prompt: str, _fmt: str) -> bytes:
+            calls["gen"] += 1
+            return b"img"
+
+        def reviewer(**_kwargs: Any) -> ImageComplianceResult:
+            return finalize_compliance_result(
+                reviewer_pass=False,
+                candidate_violations=["product_visible_without_explicit_request"],
+                evidence_items=[
+                    ComplianceEvidenceItem(
+                        code="product_visible_without_explicit_request",
+                        confidence="high",
+                        symbol_description="Identification badge",
+                    )
+                ],
+                overall_confidence="high",
+                series_plan=plan,
+                product_match=ComplianceProductMatch(
+                    advertised_product_present=True,
+                    product_match_basis="explicit_prompt_identification",
+                    matched_visual_element="identification badge",
+                    relationship_to_advertised_product="actual_product",
+                    product_match_explanation="Badge treated as person.",
+                ),
+            )
+
+        result = generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
+        self.assertEqual(calls["gen"], 1)
+        self.assertEqual(result.image_bytes, b"img")
 
 
 class TestDominoFalsePositiveSuppression(unittest.TestCase):

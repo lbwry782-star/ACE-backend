@@ -1,5 +1,5 @@
 """
-Builder1 cross-campaign idea memory tests.
+Builder1 global creative-idea memory tests.
 
 Run: python -m unittest tests.test_builder1_idea_memory -v
 """
@@ -13,7 +13,14 @@ from unittest.mock import patch
 
 from engine.builder1_idea_memory import (
     BUILDER1_IDEA_MEMORY_MAX_ADS,
-    IdeaMemoryScope,
+    GLOBAL_IDEA_MEMORY_SCOPE,
+    MEMORY_SCOPE_GLOBAL_IDEA,
+    IdeaMemoryRecord,
+    _campaign_idea_payload,
+    _migrate_legacy_tenant_scoped_memory,
+    _memory_fallback,
+    _memory_lock,
+    _records_key,
     build_records_from_plan,
     build_stage_memory_block,
     clear_idea_memory_for_tests,
@@ -72,7 +79,13 @@ def _graphic() -> Builder1GraphicGenerator:
     )
 
 
-def _plan(*, ad_count: int = 2, campaign_suffix: str = "a") -> Builder1SeriesPlan:
+def _plan(
+    *,
+    ad_count: int = 2,
+    campaign_suffix: str = "a",
+    product_name: str = "CarryShell",
+    product_description: str = "Reinforced shell product",
+) -> Builder1SeriesPlan:
     ads: List[Builder1AdPlan] = []
     ad_internals: Dict[int, Dict[str, str]] = {}
     for idx in range(1, ad_count + 1):
@@ -99,11 +112,11 @@ def _plan(*, ad_count: int = 2, campaign_suffix: str = "a") -> Builder1SeriesPla
             "executionPunchline": f"punch-{idx}-{campaign_suffix}",
         }
     return Builder1SeriesPlan(
-        product_name="CarryShell",
-        product_description="Reinforced shell product",
+        product_name=product_name,
+        product_description=product_description,
         format="portrait",
         ad_count=ad_count,
-        product_name_resolved="CarryShell",
+        product_name_resolved=product_name,
         detected_language="en",
         strategic_problem=f"Problem {campaign_suffix}",
         strategic_problem_evidence="evidence",
@@ -148,175 +161,68 @@ class IdeaMemoryTestCase(unittest.TestCase):
         self._force_env.stop()
 
 
-class TestIdeaMemoryScope(IdeaMemoryTestCase):
-    def test_product_name_normalization(self) -> None:
-        a = resolve_idea_memory_scope(user_product_name="  Carry Shell! ", user_product_description="brief")
-        b = resolve_idea_memory_scope(user_product_name="carry shell", user_product_description="brief")
-        self.assertEqual(a.product_scope_hash, b.product_scope_hash)
-
-    def test_different_products_have_separate_histories(self) -> None:
-        scope_a = resolve_idea_memory_scope(user_product_name="Alpha", user_product_description="a")
-        scope_b = resolve_idea_memory_scope(user_product_name="Beta", user_product_description="b")
-        self.assertNotEqual(scope_a.product_scope_hash, scope_b.product_scope_hash)
-
-    @patch.dict(os.environ, {"BUILDER1_MEMORY_TENANT_SCOPE": "tenant-a"}, clear=False)
-    def test_different_tenants_have_separate_histories(self) -> None:
-        scope_a = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        with patch.dict(os.environ, {"BUILDER1_MEMORY_TENANT_SCOPE": "tenant-b"}, clear=False):
-            scope_b = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        self.assertNotEqual(scope_a.tenant_scope_hash, scope_b.tenant_scope_hash)
-
-
-class TestIdeaMemoryPersistence(IdeaMemoryTestCase):
-    def test_empty_memory_permits_first_campaign(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        snapshot = load_builder1_idea_memory(scope=scope)
-        self.assertEqual(snapshot.records, [])
-
-    def test_two_ad_plan_writes_two_records(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        plan = _plan(ad_count=2, campaign_suffix="one")
-        records = build_records_from_plan(plan, scope=scope, campaign_id="camp-1")
-        self.assertEqual(len(records), 2)
-        result = persist_idea_memory_records(records, scope=scope)
-        self.assertEqual(result.added_count, 2)
-        self.assertEqual(result.count_after, 2)
-
-    def test_four_ad_plan_writes_four_records(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        plan = _plan(ad_count=4, campaign_suffix="four")
-        records = build_records_from_plan(plan, scope=scope, campaign_id="camp-4")
-        self.assertEqual(len(records), 4)
-        result = persist_idea_memory_records(records, scope=scope)
-        self.assertEqual(result.added_count, 4)
-
-    def test_later_campaign_receives_prior_memory(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
+class TestGlobalScope(IdeaMemoryTestCase):
+    def test_two_users_share_global_history(self) -> None:
+        scope_a = resolve_idea_memory_scope(
+            user_product_name="CarryShell",
+            brand_guidelines={"tenantId": "user-a"},
+        )
+        scope_b = resolve_idea_memory_scope(
+            user_product_name="OtherBrand",
+            brand_guidelines={"tenantId": "user-b"},
+        )
         persist_idea_memory_records(
-            build_records_from_plan(_plan(campaign_suffix="prior"), scope=scope, campaign_id="prior"),
-            scope=scope,
+            build_records_from_plan(_plan(campaign_suffix="shared"), campaign_id="camp-a"),
+            scope=scope_a,
         )
-        snapshot = load_builder1_idea_memory(scope=scope, exclude_campaign_id="new")
-        self.assertEqual(len(snapshot.historical_records(exclude_campaign_id="new")), 2)
+        snapshot_b = load_builder1_idea_memory(scope=scope_b, exclude_campaign_id="camp-b")
+        self.assertEqual(len(snapshot_b.records), 2)
 
-    def test_different_campaign_id_does_not_bypass_memory(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
+    def test_two_products_share_global_history(self) -> None:
+        scope_a = resolve_idea_memory_scope(user_product_name="Alpha")
+        scope_b = resolve_idea_memory_scope(user_product_name="Beta")
         persist_idea_memory_records(
-            build_records_from_plan(_plan(campaign_suffix="old"), scope=scope, campaign_id="old-id"),
-            scope=scope,
+            build_records_from_plan(_plan(product_name="Alpha"), campaign_id="alpha-camp"),
+            scope=scope_a,
         )
-        snapshot = load_builder1_idea_memory(scope=scope, exclude_campaign_id="brand-new-id")
-        finding = find_historical_duplicate(
-            stage="strategy_slogan_stage",
-            snapshot=snapshot,
-            exclude_campaign_id="brand-new-id",
-            strategic_problem="Problem old",
-            relative_advantage="Advantage old",
+        snapshot_b = load_builder1_idea_memory(scope=scope_b)
+        self.assertEqual(len(snapshot_b.records), 2)
+
+    def test_tenant_and_user_ids_do_not_affect_redis_key(self) -> None:
+        scope_a = resolve_idea_memory_scope(
+            user_product_name="CarryShell",
+            brand_guidelines={"tenantId": "tenant-a", "userId": "user-1"},
         )
-        self.assertIsNotNone(finding)
-
-    def test_idempotent_retry_does_not_consume_fifo_slot(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        records = build_records_from_plan(_plan(campaign_suffix="retry"), scope=scope, campaign_id="retry-camp")
-        first = persist_idea_memory_records(records, scope=scope)
-        second = persist_idea_memory_records(records, scope=scope)
-        self.assertEqual(first.added_count, 2)
-        self.assertEqual(second.skipped_idempotent_count, 2)
-        self.assertEqual(second.added_count, 0)
-        snapshot = load_builder1_idea_memory(scope=scope)
-        self.assertEqual(len(snapshot.records), 2)
-
-    def test_fifo_evicts_oldest_on_201st_record(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        oldest = build_records_from_plan(_plan(campaign_suffix="oldest"), scope=scope, campaign_id="camp-0")[0]
-        persist_idea_memory_records([oldest], scope=scope)
-        for idx in range(1, BUILDER1_IDEA_MEMORY_MAX_ADS):
-            record = copy.deepcopy(oldest)
-            record.record_id = f"camp-{idx}:1"
-            record.campaign_id = f"camp-{idx}"
-            record.ad_index = 1
-            record.strategic_problem = f"Problem {idx}"
-            record.relative_advantage = f"Advantage {idx}"
-            persist_idea_memory_records([record], scope=scope)
-        overflow = copy.deepcopy(oldest)
-        overflow.record_id = "camp-overflow:1"
-        overflow.campaign_id = "camp-overflow"
-        overflow.strategic_problem = "Problem overflow"
-        overflow.relative_advantage = "Advantage overflow"
-        result = persist_idea_memory_records([overflow], scope=scope)
-        self.assertEqual(result.evicted_count, 1)
-        self.assertEqual(result.count_after, BUILDER1_IDEA_MEMORY_MAX_ADS)
-        snapshot = load_builder1_idea_memory(scope=scope)
-        record_ids = {r.record_id for r in snapshot.records}
-        self.assertNotIn("camp-0:1", record_ids)
-        self.assertIn("camp-overflow:1", record_ids)
-
-    def test_evicted_record_becomes_eligible_for_reuse(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        oldest = build_records_from_plan(_plan(campaign_suffix="reuse"), scope=scope, campaign_id="reuse-camp")[0]
-        persist_idea_memory_records([oldest], scope=scope)
-        for idx in range(1, BUILDER1_IDEA_MEMORY_MAX_ADS):
-            record = copy.deepcopy(oldest)
-            record.record_id = f"fill-{idx}:1"
-            record.campaign_id = f"fill-{idx}"
-            record.strategic_problem = f"Unique problem {idx}"
-            record.relative_advantage = f"Unique advantage {idx}"
-            persist_idea_memory_records([record], scope=scope)
-        overflow = copy.deepcopy(oldest)
-        overflow.record_id = "overflow:1"
-        overflow.campaign_id = "overflow"
-        overflow.strategic_problem = "Overflow problem"
-        overflow.relative_advantage = "Overflow advantage"
-        persist_idea_memory_records([overflow], scope=scope)
-        snapshot = load_builder1_idea_memory(scope=scope, exclude_campaign_id="new")
-        finding = find_historical_duplicate(
-            stage="strategy_slogan_stage",
-            snapshot=snapshot,
-            exclude_campaign_id="new",
-            strategic_problem=oldest.strategic_problem,
-            relative_advantage=oldest.relative_advantage,
+        scope_b = resolve_idea_memory_scope(
+            user_product_name="TotallyDifferent",
+            brand_guidelines={"tenantId": "tenant-b", "accountId": "acct-z"},
         )
-        self.assertIsNone(finding)
+        self.assertEqual(_records_key(scope_a), _records_key(scope_b))
+        self.assertEqual(_records_key(scope_a), "builder1:idea-memory:v3:global:records")
+        self.assertEqual(scope_a, scope_b)
+        self.assertEqual(scope_a.memory_scope, MEMORY_SCOPE_GLOBAL_IDEA)
 
-    def test_no_image_bytes_stored(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
-        records = build_records_from_plan(_plan(), scope=scope, campaign_id="no-image")
-        payload = records[0].to_dict()
-        self.assertFalse(any("base64" in str(value).lower() for value in payload.values()))
+    def test_only_one_effective_global_fifo(self) -> None:
+        persist_idea_memory_records(
+            build_records_from_plan(_plan(campaign_suffix="one"), campaign_id="c1"),
+        )
+        persist_idea_memory_records(
+            build_records_from_plan(_plan(campaign_suffix="two", product_name="Other"), campaign_id="c2"),
+        )
+        snapshot = load_builder1_idea_memory()
+        self.assertEqual(len(snapshot.records), 4)
+        self.assertEqual(snapshot.scope, GLOBAL_IDEA_MEMORY_SCOPE)
 
 
-class TestHistoricalDuplicateDetection(IdeaMemoryTestCase):
+class TestGlobalDuplicateDetection(IdeaMemoryTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
         persist_idea_memory_records(
-            build_records_from_plan(_plan(campaign_suffix="hist"), scope=self.scope, campaign_id="hist"),
-            scope=self.scope,
+            build_records_from_plan(_plan(campaign_suffix="hist"), campaign_id="hist"),
         )
-        self.snapshot = load_builder1_idea_memory(scope=self.scope, exclude_campaign_id="current")
+        self.snapshot = load_builder1_idea_memory(exclude_campaign_id="current")
 
-    def test_strategy_duplicate_rejected(self) -> None:
-        finding = find_historical_duplicate(
-            stage="strategy_slogan_stage",
-            snapshot=self.snapshot,
-            exclude_campaign_id="current",
-            strategic_problem="Problem hist",
-            relative_advantage="Advantage hist",
-        )
-        self.assertIsNotNone(finding)
-
-    def test_slogan_change_alone_is_not_new(self) -> None:
-        finding = find_historical_duplicate(
-            stage="strategy_slogan_stage",
-            snapshot=self.snapshot,
-            exclude_campaign_id="current",
-            strategic_problem="Problem hist",
-            relative_advantage="Advantage hist",
-            brand_slogan="Totally new slogan",
-        )
-        self.assertIsNotNone(finding)
-
-    def test_conceptual_duplicate_detected(self) -> None:
+    def test_different_product_name_does_not_permit_reuse(self) -> None:
         finding = find_historical_duplicate(
             stage="conceptual_stage",
             snapshot=self.snapshot,
@@ -325,23 +231,14 @@ class TestHistoricalDuplicateDetection(IdeaMemoryTestCase):
         )
         self.assertIsNotNone(finding)
 
-    def test_reworded_conceptual_generator_still_matches(self) -> None:
+    def test_different_slogan_does_not_permit_reuse(self) -> None:
         finding = find_historical_duplicate(
-            stage="conceptual_stage",
+            stage="strategy_slogan_stage",
             snapshot=self.snapshot,
             exclude_campaign_id="current",
-            conceptual_generator="  conceptual   HIST ",
-        )
-        self.assertIsNotNone(finding)
-
-    def test_physical_duplicate_detected(self) -> None:
-        finding = find_historical_duplicate(
-            stage="brand_physical",
-            snapshot=self.snapshot,
-            exclude_campaign_id="current",
-            physical_generator="Physical hist",
-            transferred_object="Object hist",
-            transferred_object_action="Action hist",
+            strategic_problem="Problem hist",
+            relative_advantage="Advantage hist",
+            brand_slogan="Totally new slogan",
         )
         self.assertIsNotNone(finding)
 
@@ -364,10 +261,22 @@ class TestHistoricalDuplicateDetection(IdeaMemoryTestCase):
             snapshot=self.snapshot,
             exclude_campaign_id="current",
             ad_execution_fingerprint=fp,
+            proposed_execution=ad,
         )
         self.assertIsNotNone(finding)
 
-    def test_genuinely_different_campaign_passes(self) -> None:
+    def test_different_object_same_mechanism_is_duplicate(self) -> None:
+        finding = find_historical_duplicate(
+            stage="brand_physical",
+            snapshot=self.snapshot,
+            exclude_campaign_id="current",
+            physical_generator="Physical hist",
+            transferred_object="Different object",
+            transferred_object_action="Action hist",
+        )
+        self.assertIsNotNone(finding)
+
+    def test_genuinely_different_mechanism_passes(self) -> None:
         finding = find_historical_duplicate(
             stage="strategy_slogan_stage",
             snapshot=self.snapshot,
@@ -377,8 +286,17 @@ class TestHistoricalDuplicateDetection(IdeaMemoryTestCase):
         )
         self.assertIsNone(finding)
 
+    def test_later_campaign_may_not_reuse_prior_generator_for_another_product(self) -> None:
+        finding = find_historical_duplicate(
+            stage="conceptual_stage",
+            snapshot=self.snapshot,
+            exclude_campaign_id="new-product-campaign",
+            conceptual_generator="Conceptual hist",
+        )
+        self.assertIsNotNone(finding)
+
     def test_current_campaign_excluded_from_history(self) -> None:
-        snapshot = load_builder1_idea_memory(scope=self.scope, exclude_campaign_id="hist")
+        snapshot = load_builder1_idea_memory(exclude_campaign_id="hist")
         finding = find_historical_duplicate(
             stage="strategy_slogan_stage",
             snapshot=snapshot,
@@ -389,15 +307,183 @@ class TestHistoricalDuplicateDetection(IdeaMemoryTestCase):
         self.assertIsNone(finding)
 
 
+class TestFingerprints(unittest.TestCase):
+    def test_campaign_fingerprint_excludes_product_name(self) -> None:
+        payload = _campaign_idea_payload(
+            strategic_problem="Problem",
+            relative_advantage="Advantage",
+            slogan="Slogan A",
+            conceptual_generator="Concept",
+            physical_generator="Physical",
+            transferred_object="Object",
+            transferred_object_action="Action",
+        )
+        payload_b = _campaign_idea_payload(
+            strategic_problem="Problem",
+            relative_advantage="Advantage",
+            slogan="Different slogan",
+            conceptual_generator="Concept",
+            physical_generator="Physical",
+            transferred_object="Object",
+            transferred_object_action="Action",
+        )
+        self.assertEqual(
+            compute_campaign_idea_fingerprint(payload),
+            compute_campaign_idea_fingerprint(payload_b),
+        )
+        self.assertNotIn("slogan", payload)
+
+    def test_execution_fingerprint_excludes_product_name(self) -> None:
+        ad = {
+            "conceptualExecution": "concept",
+            "physicalExecution": "physical",
+            "visualExecution": "visual",
+            "executionSubject": "subject",
+            "executionAction": "action",
+            "executionObjectState": "state",
+            "executionScene": "scene",
+            "executionPunchline": "punch",
+            "productName": "CarryShell",
+        }
+        fp = compute_ad_execution_fingerprint(ad)
+        ad_b = dict(ad)
+        ad_b["productName"] = "OtherBrand"
+        self.assertEqual(fp, compute_ad_execution_fingerprint(ad_b))
+
+
+class TestGlobalFifo(IdeaMemoryTestCase):
+    def test_two_ad_campaign_consumes_two_positions(self) -> None:
+        result = persist_idea_memory_records(
+            build_records_from_plan(_plan(ad_count=2), campaign_id="two-ad"),
+        )
+        self.assertEqual(result.added_count, 2)
+        self.assertEqual(result.count_after, 2)
+
+    def test_four_ad_campaign_consumes_four_positions(self) -> None:
+        result = persist_idea_memory_records(
+            build_records_from_plan(_plan(ad_count=4), campaign_id="four-ad"),
+        )
+        self.assertEqual(result.added_count, 4)
+
+    def test_exactly_200_advertisements_retained_globally(self) -> None:
+        for idx in range(BUILDER1_IDEA_MEMORY_MAX_ADS):
+            record = build_records_from_plan(_plan(campaign_suffix=f"r{idx}"), campaign_id=f"c-{idx}")[0]
+            record.record_id = f"c-{idx}:1"
+            persist_idea_memory_records([record])
+        snapshot = load_builder1_idea_memory()
+        self.assertEqual(len(snapshot.records), BUILDER1_IDEA_MEMORY_MAX_ADS)
+
+    def test_201st_ad_evicts_oldest_global_record(self) -> None:
+        oldest = build_records_from_plan(_plan(campaign_suffix="oldest"), campaign_id="camp-0")[0]
+        persist_idea_memory_records([oldest])
+        for idx in range(1, BUILDER1_IDEA_MEMORY_MAX_ADS):
+            record = copy.deepcopy(oldest)
+            record.record_id = f"camp-{idx}:1"
+            record.campaign_id = f"camp-{idx}"
+            record.strategic_problem = f"Problem {idx}"
+            record.relative_advantage = f"Advantage {idx}"
+            persist_idea_memory_records([record])
+        overflow = copy.deepcopy(oldest)
+        overflow.record_id = "camp-overflow:1"
+        overflow.campaign_id = "camp-overflow"
+        overflow.strategic_problem = "Problem overflow"
+        overflow.relative_advantage = "Advantage overflow"
+        result = persist_idea_memory_records([overflow])
+        self.assertEqual(result.evicted_count, 1)
+        self.assertEqual(result.count_after, BUILDER1_IDEA_MEMORY_MAX_ADS)
+        snapshot = load_builder1_idea_memory()
+        record_ids = {r.record_id for r in snapshot.records}
+        self.assertNotIn("camp-0:1", record_ids)
+        self.assertIn("camp-overflow:1", record_ids)
+
+    def test_retries_are_idempotent(self) -> None:
+        records = build_records_from_plan(_plan(campaign_suffix="retry"), campaign_id="retry-camp")
+        first = persist_idea_memory_records(records)
+        second = persist_idea_memory_records(records)
+        self.assertEqual(first.added_count, 2)
+        self.assertEqual(second.skipped_idempotent_count, 2)
+        self.assertEqual(second.added_count, 0)
+        snapshot = load_builder1_idea_memory()
+        self.assertEqual(len(snapshot.records), 2)
+
+    def test_evicted_record_becomes_eligible_for_reuse(self) -> None:
+        oldest = build_records_from_plan(_plan(campaign_suffix="reuse"), campaign_id="reuse-camp")[0]
+        persist_idea_memory_records([oldest])
+        for idx in range(1, BUILDER1_IDEA_MEMORY_MAX_ADS):
+            record = copy.deepcopy(oldest)
+            record.record_id = f"fill-{idx}:1"
+            record.campaign_id = f"fill-{idx}"
+            record.strategic_problem = f"Unique problem {idx}"
+            record.relative_advantage = f"Unique advantage {idx}"
+            persist_idea_memory_records([record])
+        overflow = copy.deepcopy(oldest)
+        overflow.record_id = "overflow:1"
+        overflow.campaign_id = "overflow"
+        overflow.strategic_problem = "Overflow problem"
+        overflow.relative_advantage = "Overflow advantage"
+        persist_idea_memory_records([overflow])
+        snapshot = load_builder1_idea_memory(exclude_campaign_id="new")
+        finding = find_historical_duplicate(
+            stage="strategy_slogan_stage",
+            snapshot=snapshot,
+            exclude_campaign_id="new",
+            strategic_problem=oldest.strategic_problem,
+            relative_advantage=oldest.relative_advantage,
+        )
+        self.assertIsNone(finding)
+
+
+class TestMigration(IdeaMemoryTestCase):
+    def test_legacy_scoped_records_migrate_into_global_fifo(self) -> None:
+        legacy_record = build_records_from_plan(_plan(campaign_suffix="legacy"), campaign_id="legacy-camp")[0]
+        legacy_key = "old-tenant:product-hash"
+        with _memory_lock:
+            _memory_fallback[legacy_key] = {
+                "records": [legacy_record.to_dict()],
+                "record_ids": {legacy_record.record_id: True},
+            }
+        migrated, _ = _migrate_legacy_tenant_scoped_memory()
+        self.assertEqual(migrated, 1)
+        snapshot = load_builder1_idea_memory()
+        self.assertEqual(len(snapshot.records), 1)
+
+    def test_migration_preserves_chronological_order(self) -> None:
+        older = build_records_from_plan(_plan(campaign_suffix="old"), campaign_id="old-camp")[0]
+        older.created_at = "2020-01-01T00:00:00+00:00"
+        newer = build_records_from_plan(_plan(campaign_suffix="new"), campaign_id="new-camp")[0]
+        newer.created_at = "2025-01-01T00:00:00+00:00"
+        with _memory_lock:
+            _memory_fallback["legacy-bucket"] = {
+                "records": [newer.to_dict(), older.to_dict()],
+                "record_ids": {newer.record_id: True, older.record_id: True},
+            }
+        _migrate_legacy_tenant_scoped_memory()
+        snapshot = load_builder1_idea_memory()
+        self.assertEqual(snapshot.records[0].record_id, older.record_id)
+        self.assertEqual(snapshot.records[1].record_id, newer.record_id)
+
+    def test_migration_is_idempotent(self) -> None:
+        legacy_record = build_records_from_plan(_plan(campaign_suffix="legacy"), campaign_id="legacy-camp")[0]
+        with _memory_lock:
+            _memory_fallback["legacy-bucket-2"] = {
+                "records": [legacy_record.to_dict()],
+                "record_ids": {legacy_record.record_id: True},
+            }
+        migrated, _ = _migrate_legacy_tenant_scoped_memory()
+        self.assertEqual(migrated, 1)
+        migrated_again, _ = _migrate_legacy_tenant_scoped_memory()
+        self.assertEqual(migrated_again, 0)
+        second = persist_idea_memory_records([legacy_record])
+        self.assertEqual(second.skipped_idempotent_count, 1)
+
+
 class TestStageMemoryInjection(IdeaMemoryTestCase):
     def setUp(self) -> None:
         super().setUp()
-        self.scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
         persist_idea_memory_records(
-            build_records_from_plan(_plan(campaign_suffix="inj"), scope=self.scope, campaign_id="inj"),
-            scope=self.scope,
+            build_records_from_plan(_plan(campaign_suffix="inj"), campaign_id="inj"),
         )
-        self.snapshot = load_builder1_idea_memory(scope=self.scope, exclude_campaign_id="next")
+        self.snapshot = load_builder1_idea_memory(exclude_campaign_id="next")
 
     def test_stage_specific_blocks_are_compact(self) -> None:
         strategy_block = build_stage_memory_block(
@@ -408,6 +494,7 @@ class TestStageMemoryInjection(IdeaMemoryTestCase):
         self.assertNotIn("executionPunchline", strategy_block)
         self.assertIn("executionPunchline", series_block)
         self.assertNotIn("strategicProblem", series_block)
+        self.assertIn("any product", strategy_block.lower())
 
     def test_stage_memory_block_helper(self) -> None:
         block = stage_memory_block("conceptual_stage", self.snapshot, campaign_id="next")
@@ -416,12 +503,10 @@ class TestStageMemoryInjection(IdeaMemoryTestCase):
 
 class TestStrategyMemoryGuard(IdeaMemoryTestCase):
     def test_duplicate_after_repair_fails(self) -> None:
-        scope = resolve_idea_memory_scope(user_product_name="CarryShell", user_product_description="brief")
         persist_idea_memory_records(
-            build_records_from_plan(_plan(campaign_suffix="dup"), scope=scope, campaign_id="prior"),
-            scope=scope,
+            build_records_from_plan(_plan(campaign_suffix="dup"), campaign_id="prior"),
         )
-        snapshot = load_builder1_idea_memory(scope=scope, exclude_campaign_id="current")
+        snapshot = load_builder1_idea_memory(exclude_campaign_id="current")
 
         class Strategy:
             strategic_problem = "Problem dup"
@@ -448,8 +533,8 @@ class TestStrategyMemoryGuard(IdeaMemoryTestCase):
                     None,
                     campaign_id="current",
                     idea_memory=snapshot,
-                    product_name="CarryShell",
-                    product_name_resolved="CarryShell",
+                    product_name="OtherProduct",
+                    product_name_resolved="OtherProduct",
                     product_description="brief",
                     detected_language="en",
                     lens_order=["problem"],
@@ -502,20 +587,28 @@ class TestPlanningCallBudget(unittest.TestCase):
             self.assertTrue(idea_memory_active())
 
 
-class TestCampaignFingerprint(unittest.TestCase):
-    def test_campaign_fingerprint_ignores_campaign_id(self) -> None:
-        from engine.builder1_idea_memory import _campaign_idea_payload
-
-        payload = _campaign_idea_payload(
-            strategic_problem="Problem",
-            relative_advantage="Advantage",
-            slogan="Slogan",
-            conceptual_generator="Concept",
-            physical_generator="Physical",
-            transferred_object="Object",
-            transferred_object_action="Action",
+class TestRecordMetadata(IdeaMemoryTestCase):
+    def test_product_name_stored_as_optional_metadata_only(self) -> None:
+        records = build_records_from_plan(
+            _plan(product_name="CarryShell"),
+            campaign_id="meta-camp",
         )
-        self.assertTrue(compute_campaign_idea_fingerprint(payload))
+        payload = records[0].to_dict()
+        self.assertEqual(payload.get("productName"), normalize_product_scope_text("CarryShell"))
+        self.assertNotIn("productScopeHash", payload)
+        self.assertNotIn("tenantScopeHash", payload)
+
+    def test_no_image_bytes_stored(self) -> None:
+        records = build_records_from_plan(_plan(), campaign_id="no-image")
+        payload = records[0].to_dict()
+        self.assertFalse(any("base64" in str(value).lower() for value in payload.values()))
+
+    def test_persist_plan_uses_global_memory(self) -> None:
+        snapshot = load_builder1_idea_memory(exclude_campaign_id="persist-camp")
+        plan = _plan(campaign_suffix="persist")
+        persist_plan_idea_memory(plan, campaign_id="persist-camp", idea_memory=snapshot)
+        loaded = load_builder1_idea_memory()
+        self.assertEqual(len(loaded.records), 2)
 
 
 if __name__ == "__main__":

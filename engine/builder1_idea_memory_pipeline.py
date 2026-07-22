@@ -384,6 +384,7 @@ def run_series_ads_with_memory_guard(
                 snapshot=idea_memory,
                 exclude_campaign_id=campaign_id,
                 ad_execution_fingerprint=fp,
+                proposed_execution=ad,
             )
             if not finding:
                 continue

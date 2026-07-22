@@ -459,7 +459,7 @@ def plan_builder1(
     job_id: Optional[str] = None,
 ) -> Builder1SeriesPlan:
     """Plan one Builder1 campaign via consolidated staged pipeline."""
-    from engine.builder1_idea_memory import idea_memory_active, load_builder1_idea_memory, resolve_idea_memory_scope
+    from engine.builder1_idea_memory import idea_memory_active, load_builder1_idea_memory
     from engine.builder1_planning_pipeline import run_builder1_campaign_pipeline
 
     normalized = normalize_builder1_input(
@@ -520,17 +520,9 @@ def plan_builder1(
         )
 
         metrics.begin_pipeline_pass("initial")
-        memory_scope = resolve_idea_memory_scope(
-            user_product_name=normalized.product_name,
-            user_product_description=normalized.product_description,
-            brand_guidelines=brand_guidelines,
-        )
         idea_memory = None
         if idea_memory_active():
-            idea_memory = load_builder1_idea_memory(
-                scope=memory_scope,
-                exclude_campaign_id=campaign_id or "",
-            )
+            idea_memory = load_builder1_idea_memory(exclude_campaign_id=campaign_id or "")
         try:
             ctx = run_builder1_campaign_pipeline(
                 normalized=normalized,
