@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import random
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -30,6 +31,7 @@ from engine.builder2_tournament_contracts import (
 )
 from engine.builder2_tournament_llm import call_builder2_role_json
 from engine.builder2_tournament_prompts import build_strategy_prompt
+from engine.builder2_tournament_metrics import MetricsTimer, ensure_metrics, finalize_tournament_metrics, record_model_call
 from engine.builder2_tournament_store import (
     load_tournament_state,
     mutate_tournament_state,
@@ -142,12 +144,59 @@ def _ensure_round(state: Dict[str, Any], round_index: int, deck: List[str]) -> N
     )
 
 
+def _count_completed_rounds(state: Dict[str, Any]) -> int:
+    return len([rnd for rnd in state.get("rounds", []) if rnd.get("roundComplete")])
+
+
+def _should_eliminate_after_round(*, max_rounds: int, completed_rounds: int, state: Dict[str, Any]) -> bool:
+    if len(state.get("activePrototypeIds") or []) <= 1:
+        return False
+    if max_rounds > 0 and completed_rounds >= max_rounds:
+        return False
+    if max_rounds == 0:
+        return len(state.get("activePrototypeIds") or []) > 1
+    return completed_rounds < max_rounds and len(state.get("activePrototypeIds") or []) > 1
+
+
+def _prototypes_for_round(state: Dict[str, Any], round_index: int) -> List[str]:
+    initial = list(state.get("initialActivePrototypeIds") or state.get("activePrototypeIds") or [])
+    if round_index == 1:
+        source = initial
+    else:
+        source = list(state.get("activePrototypeIds") or [])
+    return _current_round_deck(state, round_index, source)
+
+
+def _next_step_name(state: Dict[str, Any]) -> str:
+    if not state.get("strategyFoundation"):
+        return "strategy"
+    completed = _count_completed_rounds(state)
+    max_rounds = resolve_builder2_tournament_max_rounds()
+    round_index = state.get("currentRound") or 1
+    if max_rounds > 0 and completed >= max_rounds:
+        if not state.get("winnerCandidateId"):
+            return "select_winner"
+        if not state.get("winnerDevelopmentPlan"):
+            return "winner_development"
+        return "normalize_plan"
+    if _round_is_complete(state, round_index) and _should_eliminate_after_round(
+        max_rounds=max_rounds,
+        completed_rounds=completed,
+        state=state,
+    ):
+        return f"round_{round_index + 1}"
+    if not _round_is_complete(state, round_index):
+        return f"round_{round_index}"
+    return "select_winner"
+
+
 def _generate_strategy(
     *,
     product_name: str,
     product_description: str,
     language: str,
     llm_client: Optional[Any],
+    state: Dict[str, Any],
 ) -> Dict[str, Any]:
     logger.info("BUILDER2_STRATEGY_GENERATION_START")
     prompt = build_strategy_prompt(
@@ -155,12 +204,14 @@ def _generate_strategy(
         product_description=product_description,
         language=language,
     )
+    timer = MetricsTimer()
     raw = call_builder2_role_json(
         role="builder2_strategy",
         model=resolve_builder2_creator_model(),
         prompt=prompt,
         llm_client=llm_client,
     )
+    record_model_call(state, role="builder2_strategy", elapsed_ms=timer.elapsed_ms())
     foundation = validate_strategy_foundation(raw)
     logger.info("BUILDER2_STRATEGY_GENERATION_OK")
     return foundation
@@ -211,6 +262,7 @@ def _run_creator_and_judge_for_assignment(
             attempt_number,
         )
         try:
+            timer = MetricsTimer()
             candidate_id, candidate = generate_creator_candidate(
                 product_name=product_name,
                 product_description=product_description,
@@ -222,6 +274,7 @@ def _run_creator_and_judge_for_assignment(
                 runway_mode=runway_mode,
                 llm_client=llm_client,
             )
+            record_model_call(state, role="builder2_creator", elapsed_ms=timer.elapsed_ms())
         except Builder2TournamentError as exc:
             logger.info(
                 "BUILDER2_CREATOR_REJECTED prototypeId=%s reason=%s",
@@ -251,6 +304,7 @@ def _run_creator_and_judge_for_assignment(
         return
 
     try:
+        timer = MetricsTimer()
         judgment_id, judgment, total, scores = judge_candidate(
             product_name=product_name,
             product_description=product_description,
@@ -261,6 +315,7 @@ def _run_creator_and_judge_for_assignment(
             candidate=candidate,
             llm_client=llm_client,
         )
+        record_model_call(state, role="builder2_judge", elapsed_ms=timer.elapsed_ms())
     except Builder2TournamentError as exc:
         logger.info(
             "BUILDER2_JUDGE_REJECTED candidateId=%s reason=%s",
@@ -355,10 +410,19 @@ def run_builder2_tournament(
     active_ids = resolve_builder2_active_prototype_ids()
     attempts_per = resolve_builder2_tournament_attempts_per_prototype_per_round()
     max_rounds = resolve_builder2_tournament_max_rounds()
+    t_tournament0 = time.monotonic()
 
     state = load_tournament_state(job_id)
     if state:
-        logger.info("BUILDER2_TOURNAMENT_RESUMED jobId=%s tournamentId=%s", job_id, state.get("tournamentId"))
+        next_step = _next_step_name(state)
+        logger.info(
+            "BUILDER2_TOURNAMENT_RESUMED jobId=%s tournamentId=%s lastCompletedStep=%s nextStep=%s roundIndex=%s",
+            job_id,
+            state.get("tournamentId"),
+            state.get("lastCompletedStep"),
+            next_step,
+            state.get("currentRound") or 1,
+        )
     else:
         seed = rng_seed or f"{job_id}-{uuid.uuid4().hex}"
         state = new_tournament_state(
@@ -369,11 +433,14 @@ def run_builder2_tournament(
         )
         save_tournament_state(job_id, state)
         logger.info(
-            "BUILDER2_TOURNAMENT_START jobId=%s tournamentId=%s prototypes=%s",
+            "BUILDER2_TOURNAMENT_START jobId=%s tournamentId=%s prototypes=%s maxRounds=%s",
             job_id,
             state["tournamentId"],
             len(active_ids),
+            max_rounds,
         )
+
+    ensure_metrics(state)
 
     if not state.get("strategyFoundation"):
         state["status"] = "strategy_generating"
@@ -384,34 +451,40 @@ def run_builder2_tournament(
             product_description=product_description,
             language=language,
             llm_client=llm_client,
+            state=state,
         )
         state["status"] = "strategy_complete"
         state["lastCompletedStep"] = "strategy_complete"
         save_tournament_state(job_id, state)
 
-    round_index = max((state.get("currentRound") or 0), 1)
-    if round_index == 1 and not state["rounds"]:
-        state["currentRound"] = 1
+    round_index = max(int(state.get("currentRound") or 0), 1)
+    state["currentRound"] = round_index
 
-    while len(state["activePrototypeIds"]) > 1:
-        if max_rounds > 0 and (round_index - 1) >= max_rounds:
+    while True:
+        completed_rounds = _count_completed_rounds(state)
+        if max_rounds > 0 and completed_rounds >= max_rounds:
             break
+        if max_rounds == 0 and len(state.get("activePrototypeIds") or []) <= 1 and completed_rounds > 0:
+            break
+
         if _round_is_complete(state, round_index):
             round_index += 1
             state["currentRound"] = round_index
             save_tournament_state(job_id, state)
+            if max_rounds > 0 and _count_completed_rounds(state) >= max_rounds:
+                break
+            if max_rounds == 0 and len(state.get("activePrototypeIds") or []) <= 1:
+                break
             continue
 
-        deck = _current_round_deck(state, round_index)
+        deck = _prototypes_for_round(state, round_index)
         _ensure_round(state, round_index, deck)
         state["status"] = "round_generating"
         state["lastCompletedStep"] = f"round_{round_index}_generating"
-        logger.info("BUILDER2_ROUND_START roundIndex=%s active=%s", round_index, state["activePrototypeIds"])
+        logger.info("BUILDER2_ROUND_START roundIndex=%s prototypes=%s", round_index, deck)
         save_tournament_state(job_id, state)
 
         for prototype_id in deck:
-            if prototype_id not in state["activePrototypeIds"]:
-                continue
             for attempt in range(1, attempts_per + 1):
                 _run_creator_and_judge_for_assignment(
                     state=state,
@@ -426,8 +499,6 @@ def run_builder2_tournament(
                 )
                 save_tournament_state(job_id, state)
 
-        state["status"] = "round_complete"
-        state["lastCompletedStep"] = f"round_{round_index}_complete"
         rnd = _round_record(state, round_index)
         rnd["attemptsCompleted"] = attempts_per * len(deck)
         rnd["judgmentsCompleted"] = len(
@@ -437,15 +508,36 @@ def run_builder2_tournament(
                 if c.get("roundIndex") == round_index and c.get("judgmentId")
             ]
         )
+        rnd["roundComplete"] = True
+        state["status"] = "round_complete"
+        state["lastCompletedStep"] = f"round_{round_index}_complete"
         save_tournament_state(job_id, state)
 
-        if len(state["activePrototypeIds"]) > 1:
+        completed_rounds = _count_completed_rounds(state)
+        if _should_eliminate_after_round(
+            max_rounds=max_rounds,
+            completed_rounds=completed_rounds,
+            state=state,
+        ):
             _eliminate_lowest_prototypes(state, round_index)
             state["status"] = "eliminating"
             state["lastCompletedStep"] = f"round_{round_index}_eliminated"
-        round_index += 1
-        state["currentRound"] = round_index
-        save_tournament_state(job_id, state)
+            save_tournament_state(job_id, state)
+            round_index += 1
+            state["currentRound"] = round_index
+            save_tournament_state(job_id, state)
+            continue
+
+        if max_rounds > 0 and completed_rounds >= max_rounds:
+            state["completionReason"] = "max_rounds_reached"
+            logger.info(
+                "BUILDER2_ONE_ROUND_COMPLETE jobId=%s tournamentId=%s roundIndex=%s prototypes=%s",
+                job_id,
+                state.get("tournamentId"),
+                round_index,
+                len(state.get("initialActivePrototypeIds") or []),
+            )
+        break
 
     state["status"] = "tournament_complete"
     state["lastCompletedStep"] = "tournament_complete"
@@ -466,6 +558,7 @@ def run_builder2_tournament(
         save_tournament_state(job_id, state)
         winner_rec = state["candidates"][winner_id]
         try:
+            timer = MetricsTimer()
             winner_plan = develop_builder2_winning_candidate(
                 product_name=product_name,
                 product_description=product_description,
@@ -476,6 +569,7 @@ def run_builder2_tournament(
                 runway_mode=runway_mode,
                 llm_client=llm_client,
             )
+            record_model_call(state, role="builder2_winner", elapsed_ms=timer.elapsed_ms())
         except Builder2TournamentError:
             logger.error("BUILDER2_WINNER_DEVELOPMENT_FAILED candidateId=%s", winner_id)
             state["status"] = "failed"
@@ -487,6 +581,9 @@ def run_builder2_tournament(
         save_tournament_state(job_id, state)
         logger.info("BUILDER2_WINNER_DEVELOPMENT_OK candidateId=%s", winner_id)
 
+    finalize_tournament_metrics(state, elapsed_ms=(time.monotonic() - t_tournament0) * 1000.0)
+    save_tournament_state(job_id, state)
+
     normalized = normalize_winner_plan_for_runway(
         state["winnerDevelopmentPlan"],
         product_name=product_name,
@@ -495,6 +592,7 @@ def run_builder2_tournament(
     )
     normalized["tournamentId"] = state.get("tournamentId")
     normalized["winnerCandidateId"] = winner_id
+    normalized["completionReason"] = state.get("completionReason")
     return normalized
 
 
@@ -503,13 +601,12 @@ def _round_is_complete(state: Dict[str, Any], round_index: int) -> bool:
         rnd = _round_record(state, round_index)
     except Builder2TournamentError:
         return False
-    return rnd.get("judgmentsCompleted", 0) > 0
+    return bool(rnd.get("roundComplete"))
 
 
-def _current_round_deck(state: Dict[str, Any], round_index: int) -> List[str]:
+def _current_round_deck(state: Dict[str, Any], round_index: int, source_ids: List[str]) -> List[str]:
     for rnd in state["rounds"]:
         if rnd.get("roundIndex") == round_index and rnd.get("shuffledPrototypeOrder"):
             return list(rnd["shuffledPrototypeOrder"])
-    active = [pid for pid in state["activePrototypeIds"]]
     seed = f"{state['randomSeed']}-round-{round_index}"
-    return _shuffle_prototypes(active, seed)
+    return _shuffle_prototypes(source_ids, seed)

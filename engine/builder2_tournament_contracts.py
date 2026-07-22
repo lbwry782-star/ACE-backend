@@ -80,6 +80,9 @@ JUDGE_PURITY_FORBIDDEN_PATTERNS: Tuple[str, ...] = (
     "redesign the candidate",
     "new advertisement",
     "replacement creator report",
+    "creator probably",
+    "creator meant",
+    "missing creator report",
 )
 
 

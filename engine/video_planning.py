@@ -2288,11 +2288,47 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     return out, trunc
 
 
+def _build_continuous_event_runway_prompt(plan: Dict[str, Any]) -> str:
+    scene_prompt = _plan_video_prompt_text(plan)
+    if not scene_prompt:
+        raise ValueError("missing videoPrompt")
+    sequence = plan.get("sequence") or {}
+    n = _builder2_video_duration_seconds()
+    lang_vis = _runway_language_visual_constraints(plan)
+    anchor = (plan.get("visualAnchor") or "").strip()
+    opening = (plan.get("openingFrameDescription") or sequence.get("beginning") or "").strip()
+    body = (
+        "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
+        "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
+        f"{lang_vis} "
+        f"MANDATORY: one continuous {n}-second realistic event in a single location with one primary action. "
+        "Natural pacing from opening physical state through development to a clear visual resolution; "
+        "no montage, no multiple clips, no unrelated cuts, no dead seconds at the end. "
+        f"Opening state: {opening}. "
+    )
+    if anchor:
+        body += f"Visual anchor: {anchor}. "
+    if sequence:
+        body += (
+            f"Development: {sequence.get('development', '')}. "
+            f"Resolution: {sequence.get('resolution', '')}. "
+        )
+    body += f"Continuous event (follow exactly): {scene_prompt}. {_RUNWAY_STYLE_TAIL}"
+    out, _ = _finalize_runway_prompt("", body)
+    if not out.strip():
+        raise ValueError("empty prompt")
+    logger.info("RUNWAY_PROMPT path=continuous_event")
+    return out
+
+
 def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
     """
     ACE plan → Runway promptText. Prefers the detailed creative-direction builder; on any failure,
     uses a compact fallback so callers stay stable.
     """
+    if (plan.get("structureType") or "").strip() == "continuous_event":
+        return _build_continuous_event_runway_prompt(plan)
+
     headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
     headline_text = (plan.get("headlineText") or "").strip()
     headline_present = headline_decision != "no_headline" and bool(headline_text)

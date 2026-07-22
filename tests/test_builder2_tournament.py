@@ -311,7 +311,7 @@ class TestBuilder2TournamentEndToEnd(unittest.TestCase):
         {
             "BUILDER2_TOURNAMENT_ACTIVE_PROTOTYPES": "closest,winning_card,forgot",
             "BUILDER2_TOURNAMENT_ATTEMPTS_PER_PROTOTYPE_PER_ROUND": "1",
-            "BUILDER2_TOURNAMENT_ELIMINATIONS_PER_ROUND": "1",
+            "BUILDER2_TOURNAMENT_MAX_ROUNDS": "1",
         },
         clear=True,
     )
@@ -332,14 +332,14 @@ class TestBuilder2TournamentEndToEnd(unittest.TestCase):
         state = load_tournament_state("job-tournament-e2e")
         assert state is not None
         self.assertEqual(state["winnerCandidateId"], select_global_winner(state))
+        self.assertEqual(state.get("completionReason"), "max_rounds_reached")
         self.assertIn("builder2_winner", llm.calls)
 
     @patch.dict(
         os.environ,
         {
             "BUILDER2_TOURNAMENT_ACTIVE_PROTOTYPES": "closest,winning_card",
-            "BUILDER2_TOURNAMENT_ATTEMPTS_PER_PROTOTYPE_PER_ROUND": "1",
-            "BUILDER2_TOURNAMENT_ELIMINATIONS_PER_ROUND": "1",
+            "BUILDER2_TOURNAMENT_MAX_ROUNDS": "1",
         },
         clear=True,
     )
@@ -369,6 +369,7 @@ class TestBuilder2TournamentEndToEnd(unittest.TestCase):
 class TestBuilder2TournamentWorkerIntegration(unittest.TestCase):
     PLAN = _winner_plan()
 
+    @patch("engine.runway_video.load_tournament_state", return_value=None)
     @patch("engine.runway_video.video_job_set_resolved_product_name")
     @patch("engine.runway_video.video_job_set_phase")
     @patch.dict(
@@ -404,6 +405,7 @@ class TestBuilder2TournamentWorkerIntegration(unittest.TestCase):
         _post,
         _phase,
         _redis_name,
+        _load_state,
     ) -> None:
         normalized = normalize_winner_plan_for_runway(
             self.PLAN,

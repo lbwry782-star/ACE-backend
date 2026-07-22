@@ -49,15 +49,22 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
     first_variation = _plan_first_scene_variation(plan)
     video_prompt = (plan.get("videoPrompt") or plan.get("videoPromptCore") or "").strip()
 
-    scene_focus = opening or first_variation or core_visual or video_prompt[:400]
+    scene_focus = opening
+    if not scene_focus and (plan.get("structureType") or "").strip() == "continuous_event":
+        sequence = plan.get("sequence") or {}
+        scene_focus = (sequence.get("beginning") or "").strip()
+    if not scene_focus:
+        scene_focus = first_variation or core_visual or video_prompt[:400]
     essence = core_visual or scene_focus
 
     from engine.builder2_runway_config import resolve_builder2_video_duration_seconds
 
     n = resolve_builder2_video_duration_seconds()
     product_clause = f"Product context (do not show as readable text): {product}. " if product else ""
+    is_continuous = (plan.get("structureType") or "").strip() == "continuous_event"
+    shot_kind = "continuous event" if is_continuous else "commercial montage"
     brief = (
-        f"Single photorealistic still frame, opening shot for a silent {n}-second commercial montage. "
+        f"Single photorealistic still frame, opening shot for a silent {n}-second {shot_kind}. "
         f"The still must be the opening moment from which action can develop naturally over {n} seconds — "
         "not the final resolution. "
         f"{product_clause}"

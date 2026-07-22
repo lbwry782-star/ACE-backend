@@ -32,6 +32,8 @@ from engine.builder2_runway_config import (
 from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_manager import run_builder2_tournament
+from engine.builder2_tournament_store import load_tournament_state, patch_tournament_state, save_tournament_state
+from engine.builder2_winner_plan import builder2_video_plan_struct_ok_for_runway
 from engine.video_start_image import generate_video_start_image_data_uri
 from engine.ad_promise_memory import record_ad_promise_generation_success
 from engine.video_planning import (
@@ -996,7 +998,11 @@ def _generate_one_video_mvp_body(
     apply_canonical_product_name_to_video_plan(plan, canonical_name)
     plan["marketingLanguage"] = marketing_lang
 
-    struct_ok, struct_reason = video_plan_struct_ok_for_runway(plan)
+    struct_ok, struct_reason = (
+        builder2_video_plan_struct_ok_for_runway(plan)
+        if str(plan.get("planInferenceMode") or "").startswith("builder2_tournament")
+        else video_plan_struct_ok_for_runway(plan)
+    )
     if not struct_ok:
         logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=false reason=%s", struct_reason)
         logger.error("VIDEO_JOB_FAILED_INTEGRITY reason=%s", struct_reason)
@@ -1034,9 +1040,16 @@ def _generate_one_video_mvp_body(
     logger.info("VIDEO_TIMING_STAGE_START stage=start_image jobId=%s", job_id or "(none)")
     t_start_image0 = time.monotonic()
     prompt_image_data_uri: Optional[str] = None
+    tournament_state = load_tournament_state(job_id) if job_id and resolve_builder2_tournament_enabled() else None
+    runway_state = (tournament_state or {}).get("runway") if tournament_state else {}
     if builder2_runway_requires_start_image(runway_model):
         logger.info("BUILDER2_START_IMAGE_GENERATION_START jobId=%s", job_id or "(none)")
-        prompt_image_data_uri = generate_video_start_image_data_uri(plan)
+        stored_uri = (runway_state or {}).get("startImageDataUri") or ""
+        if stored_uri:
+            prompt_image_data_uri = stored_uri
+            logger.info("BUILDER2_START_IMAGE_RESUME jobId=%s reused_stored=true", job_id or "(none)")
+        else:
+            prompt_image_data_uri = generate_video_start_image_data_uri(plan)
         start_image_ms = (time.monotonic() - t_start_image0) * 1000.0
         logger.info("VIDEO_TIMING_START_IMAGE_MS=%.1f", start_image_ms)
         if not prompt_image_data_uri:
@@ -1046,11 +1059,18 @@ def _generate_one_video_mvp_body(
             )
             _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
             raise RunwayVideoMVPError("builder2_start_image_generation_failed")
+        if job_id and tournament_state is not None and not stored_uri:
+            def _mark_start_image(state: Dict[str, Any]) -> None:
+                rw = state.setdefault("runway", {})
+                rw["startImageCompleted"] = True
+                rw["startImageDataUri"] = prompt_image_data_uri
+
+            patch_tournament_state(job_id, _mark_start_image)
         logger.info(
-            "BUILDER2_START_IMAGE_GENERATION_OK jobId=%s elapsed_ms=%.1f promptImage_len=%s",
+            "BUILDER2_START_IMAGE_GENERATION_OK jobId=%s elapsed_ms=%.1f stored=%s",
             job_id or "(none)",
             start_image_ms,
-            len(prompt_image_data_uri),
+            str(bool(stored_uri)).lower(),
         )
     else:
         start_image_ms = 0.0
@@ -1066,41 +1086,60 @@ def _generate_one_video_mvp_body(
     logger.info("VIDEO_TIMING_STAGE_START stage=runway_create jobId=%s", job_id or "(none)")
     logger.info("VIDEO_JOB_STEP step=runway_create_task start")
     t_create0 = time.monotonic()
-    if builder2_runway_requires_start_image(runway_model):
-        logger.info(
-            "BUILDER2_RUNWAY_IMAGE_TO_VIDEO_START jobId=%s model=%s duration=%s ratio=%s",
-            job_id or "(none)",
-            runway_model,
-            duration_seconds,
-            BUILDER2_RUNWAY_VIDEO_RATIO,
-        )
-        task_id = _create_image_to_video_task(
-            session,
-            base,
-            runway_model,
-            prompt,
-            prompt_image_data_uri or "",
-            duration_seconds=duration_seconds,
-            sanitize_text_policy_modified=bool(text_policy_sanitized),
-            physics_suffix_appended=True,
-        )
+    existing_task_id = (runway_state or {}).get("taskId") or ""
+    if existing_task_id:
+        task_id = existing_task_id
+        logger.info("BUILDER2_RUNWAY_RESUME task_id=%s jobId=%s", task_id, job_id or "(none)")
+    elif (runway_state or {}).get("submissionState") == "pending":
+        raise RunwayVideoMVPError("builder2_runway_resume_ambiguous")
     else:
-        logger.info(
-            "BUILDER2_RUNWAY_TEXT_TO_VIDEO_START jobId=%s model=%s duration=%s ratio=%s",
-            job_id or "(none)",
-            runway_model,
-            duration_seconds,
-            BUILDER2_RUNWAY_VIDEO_RATIO,
-        )
-        task_id = _create_text_to_video_task(
-            session,
-            base,
-            runway_model,
-            prompt,
-            duration_seconds=duration_seconds,
-            sanitize_text_policy_modified=bool(text_policy_sanitized),
-            physics_suffix_appended=True,
-        )
+        if job_id and tournament_state is not None:
+            def _mark_pending(state: Dict[str, Any]) -> None:
+                state.setdefault("runway", {})["submissionState"] = "pending"
+
+            patch_tournament_state(job_id, _mark_pending)
+        if builder2_runway_requires_start_image(runway_model):
+            logger.info(
+                "BUILDER2_RUNWAY_IMAGE_TO_VIDEO_START jobId=%s model=%s duration=%s ratio=%s",
+                job_id or "(none)",
+                runway_model,
+                duration_seconds,
+                BUILDER2_RUNWAY_VIDEO_RATIO,
+            )
+            task_id = _create_image_to_video_task(
+                session,
+                base,
+                runway_model,
+                prompt,
+                prompt_image_data_uri or "",
+                duration_seconds=duration_seconds,
+                sanitize_text_policy_modified=bool(text_policy_sanitized),
+                physics_suffix_appended=True,
+            )
+        else:
+            logger.info(
+                "BUILDER2_RUNWAY_TEXT_TO_VIDEO_START jobId=%s model=%s duration=%s ratio=%s",
+                job_id or "(none)",
+                runway_model,
+                duration_seconds,
+                BUILDER2_RUNWAY_VIDEO_RATIO,
+            )
+            task_id = _create_text_to_video_task(
+                session,
+                base,
+                runway_model,
+                prompt,
+                duration_seconds=duration_seconds,
+                sanitize_text_policy_modified=bool(text_policy_sanitized),
+                physics_suffix_appended=True,
+            )
+        if job_id and tournament_state is not None:
+            def _mark_submitted(state: Dict[str, Any]) -> None:
+                rw = state.setdefault("runway", {})
+                rw["taskId"] = task_id
+                rw["submissionState"] = "submitted"
+
+            patch_tournament_state(job_id, _mark_submitted)
     create_ms = (time.monotonic() - t_create0) * 1000.0
     logger.info("VIDEO_TIMING_RUNWAY_CREATE_MS=%.1f", create_ms)
     logger.info(

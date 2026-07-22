@@ -26,6 +26,7 @@ logger = logging.getLogger("worker_video")
 _active_lock = threading.Lock()
 _active_job_id: str | None = None
 _heartbeat_stop = threading.Event()
+_worker_token: str = ""
 
 
 def _get_active_job_id() -> str | None:
@@ -61,6 +62,12 @@ def _install_shutdown_signals() -> None:
         )
         if jid:
             try:
+                from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
+                from engine.builder2_tournament_recovery import (
+                    expire_job_lease,
+                    register_recoverable_job,
+                    release_job_lease,
+                )
                 from engine.video_job_context import video_job_get_phase
                 from engine.video_jobs_redis import video_job_mark_interrupted
 
@@ -68,6 +75,10 @@ def _install_shutdown_signals() -> None:
                 logger.info("VIDEO_JOB_PHASE_AT_INTERRUPT=%s", phase)
                 logger.info("VIDEO_JOB_INFRA_FAILURE=true")
                 video_job_mark_interrupted(jid)
+                if resolve_builder2_tournament_enabled():
+                    register_recoverable_job(jid)
+                    release_job_lease(jid, _worker_token)
+                    expire_job_lease(jid)
                 logger.info(
                     "VIDEO_JOB_INTERRUPT_FINALIZED jobId=%s interrupt_code=interrupted_worker_shutdown error=worker_shutdown_during_job",
                     jid,
@@ -93,6 +104,14 @@ def main() -> None:
         sys.exit(1)
 
     # Import after env check so engine can read other env vars
+    from engine.builder2_tournament_recovery import (
+        acquire_job_lease,
+        clear_job_queued,
+        new_worker_token,
+        remove_recoverable_job,
+        release_job_lease,
+        scan_and_requeue_recoverable_jobs,
+    )
     from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
     from engine.video_headline_postprocess import log_video_headline_delivery_startup
     from engine.video_jobs_redis import (
@@ -111,10 +130,18 @@ def main() -> None:
         logger.warning("VIDEO_HEADLINE_UPLOAD_CONFIG worker startup failed err=%s", e)
 
     get_redis()  # connect once
+    global _worker_token
+    _worker_token = new_worker_token()
     _install_shutdown_signals()
     hb_thread = threading.Thread(target=_heartbeat_loop, name="video_job_heartbeat", daemon=True)
     hb_thread.start()
     logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)
+    try:
+        requeued = scan_and_requeue_recoverable_jobs()
+        if requeued:
+            logger.info("BUILDER2_TOURNAMENT_RECOVERY_REQUEUED count=%s jobIds=%s", len(requeued), requeued)
+    except Exception as e:
+        logger.warning("BUILDER2_TOURNAMENT_RECOVERY_STARTUP_FAIL err=%s", e)
 
     while True:
         logger.info("VIDEO_WORKER_WAITING queue=%s", QUEUE_KEY)
@@ -128,6 +155,10 @@ def main() -> None:
             logger.info("VIDEO_WORKER_EMPTY_QUEUE")
             continue
         logger.info("VIDEO_WORKER_DEQUEUED jobId=%s", job_id)
+        if not acquire_job_lease(job_id, _worker_token):
+            logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=lease_not_acquired", job_id)
+            continue
+        clear_job_queued(job_id)
         logger.info("VIDEO_TIMING_STAGE_START stage=worker_dequeued jobId=%s", job_id)
 
         logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
@@ -210,6 +241,10 @@ def main() -> None:
                 (time.monotonic() - t_worker_job0) * 1000.0,
             )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
+            try:
+                remove_recoverable_job(job_id)
+            except Exception:
+                pass
         except RunwayVideoMVPError as e:
             _reason = e.args[0] if getattr(e, "args", None) else "runway_mvp"
             logger.warning("VIDEO_JOB_FAILED jobId=%s reason=%s", job_id, _reason)
@@ -237,6 +272,10 @@ def main() -> None:
                 )
             logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
         finally:
+            try:
+                release_job_lease(job_id, _worker_token)
+            except Exception:
+                pass
             _set_active_job_id(None)
 
 

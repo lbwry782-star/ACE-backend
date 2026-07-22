@@ -69,6 +69,7 @@ def _read_raw(job_id: str) -> Optional[Dict[str, Any]]:
 
 def _write_raw(job_id: str, state: Dict[str, Any]) -> None:
     state["updatedAt"] = _utc_now_iso()
+    payload = json.dumps(state, ensure_ascii=False)
     if _use_memory_store:
         _memory_states[job_id] = deepcopy(state)
         return
@@ -147,11 +148,29 @@ def new_tournament_state(
         "bestCandidateByPrototype": {},
         "winnerCandidateId": None,
         "winnerDevelopmentPlan": None,
+        "initialActivePrototypeIds": list(active_prototype_ids),
+        "completionReason": None,
+        "metrics": None,
+        "runway": {
+            "taskId": None,
+            "submissionState": "none",
+            "startImageCompleted": False,
+        },
         "createdAt": now,
         "updatedAt": now,
         "lastCompletedStep": "created",
         "error": None,
     }
+
+
+def patch_tournament_state(job_id: str, patcher: Callable[[Dict[str, Any]], None]) -> Dict[str, Any]:
+    def mutator(state: Dict[str, Any]) -> None:
+        patcher(state)
+
+    current = _read_raw(job_id)
+    if current is None:
+        raise Builder2TournamentError("builder2_tournament_state_error")
+    return mutate_tournament_state(job_id, mutator)
 
 
 def register_candidate(state: Dict[str, Any], candidate_record: Dict[str, Any]) -> None:
