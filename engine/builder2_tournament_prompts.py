@@ -12,7 +12,10 @@ from engine.builder2_tournament_contracts import (
     CANDIDATE_SCHEMA_VERSION,
     JUDGMENT_SCHEMA_VERSION,
     STRATEGY_SCHEMA_VERSION,
+    VALID_CONTINUITY_RISK,
     VALID_GROUNDING_TYPES,
+    VALID_STRUCTURE_TYPES,
+    VALID_VISUAL_PARALLEL_TYPES,
     WINNER_PLAN_SCHEMA_VERSION,
 )
 
@@ -86,6 +89,9 @@ def build_creator_prompt(
     runway_mode: str,
 ) -> str:
     duration = resolve_builder2_video_duration_seconds()
+    structure_types = ", ".join(sorted(VALID_STRUCTURE_TYPES))
+    continuity_risks = ", ".join(sorted(VALID_CONTINUITY_RISK))
+    visual_parallel_types = ", ".join(sorted(VALID_VISUAL_PARALLEL_TYPES))
     return (
         "You are the Builder2 Creator role generating ONE isolated candidate idea.\n"
         "You know ONLY this assigned prototype and this attempt ID.\n"
@@ -106,16 +112,77 @@ def build_creator_prompt(
         f"Language: {language}\n"
         "Fixed strategic foundation (unchanged for all candidates):\n"
         f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n\n"
-        f"Return one JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}.\n"
+        f"Return one JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}. No Markdown fences. No prose.\n"
         "Required keys: prototypeId, prototypeMethodApplied, coreCreativeMechanism, conceptSummary, "
         "visualParallelType, visualFamily, structureType, sevenSecondStructure{beginning,development,resolution}, "
         "visualAnchor{description,whyEssential}, silentVerification{understandableWithoutAudio,explanation}, "
         "runwayFeasibility{mainSubject,mainAction,location,openingFrame,continuityRisk,generationRisks,whyRunwayShouldUnderstand}, "
         "editingPlan{purpose,reveal,pacing}, creatorReport{problemPerception,relativeAdvantage,mechanismScanSummary,"
         "goldPrototypeUsed,visualParallelType,whyParallelExpressesAdvantage,whyRunwayShouldUnderstand}.\n"
-        "structureType must be continuous_event or variation_montage.\n"
+        f"prototypeId must be exactly {prototype.prototype_id!r}.\n"
+        f"structureType must be exactly one of: {structure_types}.\n"
+        f"continuityRisk must be exactly one of: {continuity_risks}.\n"
+        f"visualParallelType must be exactly one of: {visual_parallel_types}. "
+        'If using "other", explain the parallel clearly in creatorReport.whyParallelExpressesAdvantage.\n'
+        "silentVerification.understandableWithoutAudio must be JSON boolean true, not a string.\n"
+        "runwayFeasibility.generationRisks must be a JSON array (empty array allowed when risk is low).\n"
+        f"creatorReport.goldPrototypeUsed must be {prototype.prototype_id!r} or {prototype.display_name!r}.\n"
+        "Hebrew free-text fields are allowed. Enum fields must use the exact canonical English tokens above.\n"
         "For think_small identify a real weakness. For essential_pairing avoid appearance-only pairing.\n"
         "For context_collision include a meaningful bridge explanation in creatorReport."
+    )
+
+
+def build_creator_repair_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    strategy_foundation: Dict[str, Any],
+    prototype: Builder2Prototype,
+    candidate_id: str,
+    attempt_number: int,
+    runway_mode: str,
+    invalid_output: Dict[str, Any],
+    validation_failures: List[str],
+) -> str:
+    return (
+        "You are the Builder2 Creator repair role.\n"
+        "Repair ONLY the listed structural/schema defects. Preserve the creative idea.\n"
+        "Do NOT reference other candidates, Judge scores, or tournament standings.\n"
+        f"Candidate ID: {candidate_id}\n"
+        f"Assigned prototype ID: {prototype.prototype_id}\n\n"
+        "Original Creator instructions:\n"
+        f"{build_creator_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate_id=candidate_id, attempt_number=attempt_number, runway_mode=runway_mode)}\n\n"
+        "Invalid structured output to repair:\n"
+        f"{json.dumps(invalid_output, ensure_ascii=False)}\n\n"
+        "Exact validation failures to fix:\n"
+        + "\n".join(f"- {item}" for item in validation_failures)
+        + "\n\n"
+        f"Return one repaired JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}."
+    )
+
+
+def build_creator_retry_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    strategy_foundation: Dict[str, Any],
+    prototype: Builder2Prototype,
+    candidate_id: str,
+    attempt_number: int,
+    runway_mode: str,
+    retry_rule: str,
+) -> str:
+    return (
+        "You are the Builder2 Creator role generating ONE fresh isolated candidate idea.\n"
+        "This is a clean retry for the same assigned prototype slot.\n"
+        "Do NOT reference any previous candidate output, Judge scores, or tournament standings.\n"
+        f"Candidate ID: {candidate_id}\n"
+        f"Assigned prototype ID: {prototype.prototype_id}\n"
+        f"Methodology rule to satisfy: {retry_rule}\n\n"
+        f"{build_creator_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate_id=candidate_id, attempt_number=attempt_number, runway_mode=runway_mode)}"
     )
 
 

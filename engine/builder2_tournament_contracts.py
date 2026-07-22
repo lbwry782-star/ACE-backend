@@ -70,6 +70,21 @@ CREATOR_PURITY_FORBIDDEN_PATTERNS: Tuple[str, ...] = (
     "leading prototype",
 )
 
+CREATOR_PURITY_RULES: Tuple[Tuple[str, str], ...] = (
+    ("previous candidate", "mentions_other_candidate"),
+    ("earlier candidate", "mentions_other_candidate"),
+    ("other prototype", "mentions_other_candidate"),
+    ("judge score", "mentions_judge_score"),
+    ("judge feedback", "mentions_judge_score"),
+    ("tournament standing", "mentions_tournament_ranking"),
+    ("current ranking", "mentions_tournament_ranking"),
+    ("eliminated prototype", "mentions_tournament_ranking"),
+    ("best candidate", "mentions_other_candidate"),
+    ("outperform", "mentions_other_candidate"),
+    ("higher score", "mentions_judge_score"),
+    ("leading prototype", "mentions_tournament_ranking"),
+)
+
 JUDGE_PURITY_FORBIDDEN_PATTERNS: Tuple[str, ...] = (
     "other candidate",
     "other candidates",

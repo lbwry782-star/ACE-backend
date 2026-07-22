@@ -23,7 +23,7 @@ from engine.builder2_tournament_config import (
 )
 from engine.builder2_strategy import generate_strategy_foundation
 from engine.builder2_tournament_contracts import Builder2TournamentError, compare_candidate_rankings
-from engine.builder2_tournament_metrics import MetricsTimer, ensure_metrics, finalize_tournament_metrics, record_model_call
+from engine.builder2_tournament_metrics import MetricsTimer, ensure_metrics, finalize_tournament_metrics, record_creator_eligible, record_model_call
 from engine.builder2_tournament_store import (
     load_tournament_state,
     mutate_tournament_state,
@@ -169,6 +169,37 @@ def _generate_strategy(
     )
 
 
+def _register_rejected_creator(
+    state: Dict[str, Any],
+    *,
+    candidate_id: str,
+    prototype_id: str,
+    round_index: int,
+    attempt_number: int,
+    failure_reason: str,
+    creator_diagnostics: Optional[Dict[str, Any]] = None,
+) -> None:
+    register_candidate(
+        state,
+        {
+            "candidateId": candidate_id,
+            "prototypeId": prototype_id,
+            "roundIndex": round_index,
+            "attemptNumber": attempt_number,
+            "creatorOutput": None,
+            "creatorDiagnostics": dict(creator_diagnostics or {}),
+            "validationStatus": "creator_rejected",
+            "status": "creator_rejected",
+            "judgmentId": None,
+            "eligible": False,
+            "totalScore": None,
+            "tieScores": {},
+            "failureReason": failure_reason,
+            "completedAt": _utc_now_iso(),
+        },
+    )
+
+
 def _run_creator_and_judge_for_assignment(
     *,
     state: Dict[str, Any],
@@ -182,7 +213,7 @@ def _run_creator_and_judge_for_assignment(
     llm_client: Optional[Any],
 ) -> None:
     strategy = state["strategyFoundation"]
-    existing = [
+    existing_judged = [
         c
         for c in state["candidates"].values()
         if c.get("prototypeId") == prototype_id
@@ -191,7 +222,18 @@ def _run_creator_and_judge_for_assignment(
         and c.get("validationStatus") == "accepted"
         and c.get("judgmentId")
     ]
-    if existing:
+    if existing_judged:
+        return
+
+    existing_rejected = [
+        c
+        for c in state["candidates"].values()
+        if c.get("prototypeId") == prototype_id
+        and c.get("roundIndex") == round_index
+        and c.get("attemptNumber") == attempt_number
+        and c.get("validationStatus") == "creator_rejected"
+    ]
+    if existing_rejected:
         return
 
     pending = [
@@ -213,8 +255,8 @@ def _run_creator_and_judge_for_assignment(
             round_index,
             attempt_number,
         )
+        candidate_id = f"cand-{round_index}-{prototype_id}-{attempt_number}-{uuid.uuid4().hex[:8]}"
         try:
-            timer = MetricsTimer()
             candidate_id, candidate = generate_creator_candidate(
                 product_name=product_name,
                 product_description=product_description,
@@ -225,15 +267,28 @@ def _run_creator_and_judge_for_assignment(
                 attempt_number=attempt_number,
                 runway_mode=runway_mode,
                 llm_client=llm_client,
+                state=state,
+                candidate_id=candidate_id,
             )
-            record_model_call(state, role="builder2_creator", elapsed_ms=timer.elapsed_ms())
         except Builder2TournamentError as exc:
+            reason = str(exc.args[0] if exc.args else "builder2_creator_invalid_candidate")
+            diagnostics = (state.get("creatorDiagnosticsByCandidate") or {}).get(candidate_id, {})
             logger.info(
-                "BUILDER2_CREATOR_REJECTED prototypeId=%s reason=%s",
+                "BUILDER2_CREATOR_REJECTED prototypeId=%s candidateId=%s reason=%s",
                 prototype_id,
-                exc.args[0],
+                candidate_id,
+                reason,
             )
-            raise
+            _register_rejected_creator(
+                state,
+                candidate_id=candidate_id,
+                prototype_id=prototype_id,
+                round_index=round_index,
+                attempt_number=attempt_number,
+                failure_reason=reason,
+                creator_diagnostics=diagnostics,
+            )
+            return
         register_candidate(
             state,
             {
@@ -242,11 +297,14 @@ def _run_creator_and_judge_for_assignment(
                 "roundIndex": round_index,
                 "attemptNumber": attempt_number,
                 "creatorOutput": candidate,
+                "creatorDiagnostics": dict((state.get("creatorDiagnosticsByCandidate") or {}).get(candidate_id, {})),
                 "validationStatus": "accepted",
+                "status": "accepted",
                 "judgmentId": None,
                 "eligible": False,
                 "totalScore": None,
                 "tieScores": {},
+                "failureReason": None,
                 "completedAt": _utc_now_iso(),
             },
         )
@@ -296,6 +354,7 @@ def _run_creator_and_judge_for_assignment(
     cand_rec["completedAt"] = _utc_now_iso()
 
     if cand_rec["eligible"]:
+        record_creator_eligible(state)
         updated = update_best_candidate_if_stronger(
             state,
             prototype_id=prototype_id,

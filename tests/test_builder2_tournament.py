@@ -241,9 +241,10 @@ class TestBuilder2TournamentValidation(unittest.TestCase):
 
     def test_creator_validation_and_purity(self) -> None:
         cand = _candidate("closest")
-        validate_creator_candidate(cand, assigned_prototype_id="closest")
-        with self.assertRaises(Builder2TournamentError):
+        validate_creator_candidate(cand, assigned_prototype_id="closest", prototype_display_name="Closest")
+        with self.assertRaises(Builder2TournamentError) as ctx:
             validate_creator_purity({**cand, "conceptSummary": "This outperforms the previous candidate."})
+        self.assertIn("builder2_creator_purity_violation", str(ctx.exception.args[0]))
 
     def test_judge_score_recalculation(self) -> None:
         judgment = _judgment("cand-1")
