@@ -436,13 +436,18 @@ def generate_video_headline_o3(
         timeout=httpx.Timeout(120.0),
         max_retries=0,
     )
-    from engine.openai_reasoning import build_reasoning_payload, resolve_openai_reasoning_model
+    from engine.builder2_reasoning_config import (
+        build_builder2_reasoning_payload,
+        log_builder2_model_selected,
+        resolve_builder2_reasoning_model,
+    )
 
     combined = f"{system.strip()}\n\n{user.strip()}"
+    log_builder2_model_selected(role="video_headline", call_type="normal", attempt=1)
     response = client.responses.create(
-        model=resolve_openai_reasoning_model(),
+        model=resolve_builder2_reasoning_model(),
         input=combined,
-        reasoning=build_reasoning_payload(),
+        reasoning=build_builder2_reasoning_payload(),
     )
     out_text = getattr(response, "output_text", None) or ""
     data = _parse_json_object(out_text)

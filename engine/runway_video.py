@@ -445,22 +445,28 @@ def _fallback_packaging_marketing_copy(
         product: str,
         lang_code: str,
         previous_texts: List[str],
+        call_type: str = "normal",
     ) -> str:
         api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
         if not api_key:
             raise RuntimeError("openai_unconfigured")
         client = OpenAI(api_key=api_key)
-        from engine.openai_reasoning import build_reasoning_payload, resolve_openai_reasoning_model
+        from engine.builder2_reasoning_config import (
+            build_builder2_reasoning_payload,
+            log_builder2_model_selected,
+            resolve_builder2_reasoning_model,
+        )
 
+        log_builder2_model_selected(role="marketing_copy", call_type=call_type, attempt=1)
         out = client.responses.create(
-            model=resolve_openai_reasoning_model(),
+            model=resolve_builder2_reasoning_model(),
             input=_promise_only_prompt(
                 promise_text=promise_text,
                 product=product,
                 lang_code=lang_code,
                 previous_texts=previous_texts,
             ),
-            reasoning=build_reasoning_payload(),
+            reasoning=build_builder2_reasoning_payload(),
         )
         return (getattr(out, "output_text", None) or "").strip()
 
@@ -551,6 +557,7 @@ def _fallback_packaging_marketing_copy(
                 product=pn,
                 lang_code=lang,
                 previous_texts=previous_texts + ([candidate] if candidate else []),
+                call_type="retry",
             )
             candidate_retry = _finalize_paragraph(candidate_retry)
             ok_lang_retry = _language_valid(candidate_retry, lang, pn)

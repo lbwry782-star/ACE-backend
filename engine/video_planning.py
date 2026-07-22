@@ -615,16 +615,10 @@ _LOG_PREVIEW_CHARS = 240
 class VideoPlanningTimeoutError(Exception):
     """Hard wall-clock deadline exceeded waiting for o3 planning (see fetch_video_plan_o3)."""
 
-# Match codebase: legacy aliases map to the configured reasoning model.
 def _text_model() -> str:
-    from engine.openai_reasoning import DEFAULT_OPENAI_REASONING_MODEL, normalize_legacy_text_model
+    from engine.builder2_reasoning_config import resolve_builder2_reasoning_model
 
-    raw = (
-        os.environ.get("VIDEO_PLANNER_MODEL")
-        or os.environ.get("OPENAI_TEXT_MODEL", "")
-        or ""
-    ).strip() or DEFAULT_OPENAI_REASONING_MODEL
-    return normalize_legacy_text_model(raw)
+    return resolve_builder2_reasoning_model()
 
 
 # HTTP read timeout for the planning API call (seconds). Slightly raised default vs older 120s to cut false timeouts.
@@ -681,6 +675,8 @@ def _responses_create_with_plan_retry(
     input_text: str,
     reasoning: dict,
     deadline_monotonic: Optional[float] = None,
+    role: str = "video_planning",
+    base_call_type: str = "normal",
 ):
     """
     Up to two identical planning model calls; one retry on transient timeout only.
@@ -689,7 +685,11 @@ def _responses_create_with_plan_retry(
     backoff_s = _video_plan_model_retry_backoff_s()
     last_exc: Optional[BaseException] = None
 
+    from engine.builder2_reasoning_config import log_builder2_model_selected
+
     for attempt in range(1, _VIDEO_PLAN_MODEL_MAX_ATTEMPTS + 1):
+        call_type = base_call_type if attempt == 1 else "retry"
+        log_builder2_model_selected(role=role, call_type=call_type, attempt=attempt)
         logger.info("VIDEO_PLAN_MODEL_CALL_ATTEMPT attempt=%s", attempt)
         if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
             raise VideoPlanningTimeoutError()
@@ -1708,23 +1708,10 @@ def _log_video_plan_post_ok_diagnostics(plan: Dict[str, Any]) -> None:
     )
 
 
-def _reasoning_effort() -> str:
-    from engine.openai_reasoning import resolve_default_reasoning_effort
-
-    raw = (
-        os.environ.get("VIDEO_PLANNER_REASONING_EFFORT")
-        or os.environ.get("OPENAI_REASONING_EFFORT")
-        or ""
-    ).strip().lower()
-    if raw in ("low", "medium", "high"):
-        return raw
-    return resolve_default_reasoning_effort()
-
-
 def _video_plan_reasoning_payload() -> dict:
-    from engine.openai_reasoning import build_reasoning_payload
+    from engine.builder2_reasoning_config import build_builder2_reasoning_payload
 
-    return build_reasoning_payload(effort=_reasoning_effort())
+    return build_builder2_reasoning_payload()
 
 
 def _return_plan_with_promise_persist(
@@ -1862,6 +1849,8 @@ Language: {lang_name} ({lang}).
             input_text=attempt_input,
             reasoning=_video_plan_reasoning_payload(),
             deadline_monotonic=deadline_monotonic,
+            role="video_planning",
+            base_call_type="normal",
         )
     except VideoPlanningTimeoutError:
         raise
@@ -1927,6 +1916,8 @@ Language: {lang_name} ({lang}).
                     input_text=repair_input,
                     reasoning=_video_plan_reasoning_payload(),
                     deadline_monotonic=deadline_monotonic,
+                    role="video_planning_repair",
+                    base_call_type="repair",
                 )
                 repair_raw = _extract_responses_output_text(repair_response)
                 repair_parsed = _parse_json_from_response(repair_raw or "")
