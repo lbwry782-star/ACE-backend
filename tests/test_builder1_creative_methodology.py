@@ -270,8 +270,8 @@ class TestSeriesAndRegression(unittest.TestCase):
         from engine import builder1_planning_pipeline as module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
-        self.assertLess(source.index("run_conceptual_stage"), source.index("build_brand_physical_user_prompt"))
+        self.assertLess(source.index("run_strategy_slogan_with_memory_guard"), source.index("run_conceptual_with_memory_guard"))
+        self.assertLess(source.index("run_conceptual_with_memory_guard"), source.index("build_brand_physical_user_prompt"))
         self.assertLess(source.index("build_brand_physical_user_prompt"), source.index("_run_graphic_system_stage"))
         self.assertLess(source.index("_run_graphic_system_stage"), source.index("_run_series_stage_with_integrity"))
 

@@ -257,6 +257,7 @@ def run_strategy_slogan_stage(
     detected_language: str,
     lens_order: List[str],
     exploration_seed: str,
+    idea_memory_block: str = "",
 ) -> Tuple[
     StrategySelection,
     StrategyCandidate,
@@ -272,6 +273,7 @@ def run_strategy_slogan_stage(
         detected_language=detected_language,
         lens_order=lens_order,
         exploration_seed=exploration_seed,
+        idea_memory_block=idea_memory_block,
     )
 
     def _parse(raw: object):
@@ -662,6 +664,7 @@ def run_conceptual_stage(
     selected_strategy: StrategyCandidate,
     selected_slogan: SloganCandidate,
     exploration_seed: str,
+    idea_memory_block: str = "",
 ) -> Tuple[ConceptualSelection, ConceptualCandidate, List[ConceptualCandidate]]:
     user_prompt = build_conceptual_stage_user_prompt(
         product_description=product_description,
@@ -672,6 +675,7 @@ def run_conceptual_stage(
         slogan_derivation=selected_slogan.derivation_from_advantage,
         implied_action=selected_slogan.implied_action,
         exploration_seed=exploration_seed,
+        idea_memory_block=idea_memory_block,
     )
 
     def _parse(raw: object):

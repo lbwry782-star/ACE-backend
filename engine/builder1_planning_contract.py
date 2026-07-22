@@ -601,7 +601,9 @@ def build_strategy_slogan_stage_user_prompt(
     detected_language: str,
     lens_order: List[str],
     exploration_seed: str,
+    idea_memory_block: str = "",
 ) -> str:
+    memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
     return (
         f"Product name: {product_name or '(infer from description)'}\n"
         f"Product description: {product_description}\n"
@@ -612,7 +614,9 @@ def build_strategy_slogan_stage_user_prompt(
         "Identify the strongest real strategic or perceptual problem, derive one relative advantage, "
         "and produce one distinctive slogan from that advantage.\n"
         "Return only the selected final path — no alternatives, candidates, or tournament structure.\n"
+        "Do not repeat a previous campaign idea for this product — changing wording alone is not a new idea.\n"
         "Do not include conceptual generators, physical objects, graphics, or ads."
+        f"{memory}"
     )
 
 
@@ -788,6 +792,7 @@ def build_conceptual_stage_user_prompt(
     slogan_derivation: str,
     implied_action: str,
     exploration_seed: str,
+    idea_memory_block: str = "",
 ) -> str:
     base = build_conceptual_scan_user_prompt(
         product_description=product_description,
@@ -799,13 +804,16 @@ def build_conceptual_stage_user_prompt(
         implied_action=implied_action,
         exploration_seed=exploration_seed,
     )
+    memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
     return (
         f"{base}\n"
         "Generate exactly 6 conceptual candidates, evaluate each once with perceptionToCreate, impliedPhysicalLaw, "
         "survivesProductRemoval, avoidsProductShotBias, supportsTransferredObject, and distinctiveToBrand, "
         "and select one eligible concept.\n"
         "Reject candidates that depend on conventional product-shot logic unless productEvidenceRequired is justified.\n"
+        "Do not reuse a previous conceptual generator or central mechanism for this product.\n"
         "Do not choose physical generators, graphic systems, or advertisements."
+        f"{memory}"
     )
 
 
@@ -928,11 +936,13 @@ def build_brand_physical_user_prompt(
     conceptual: Dict[str, str],
     brand_guidelines: Optional[Dict[str, Any]] = None,
     visibility_policy: str = "FORBIDDEN",
+    idea_memory_block: str = "",
 ) -> str:
     guidelines = ""
     safe_guidelines = brand_guidelines_for_prompt(brand_guidelines)
     if safe_guidelines:
         guidelines = "\nBrand guidelines:\n" + json.dumps(safe_guidelines, ensure_ascii=False, indent=2)
+    memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
     return (
         f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
         f"Description: {product_description}\n"
@@ -949,7 +959,8 @@ def build_brand_physical_user_prompt(
         "For each candidate state why it is clearer than showing the product and whether it survives product removal.\n"
         "When policy is FORBIDDEN, do not choose the product or its packaging as the physical generator.\n"
         "Compare transferred-object embodiments only. Return physical-generator system only. Do NOT return or modify the brand slogan."
-        f"{guidelines}"
+        "Do not reuse a previous physical generator and transferred action for this product."
+        f"{guidelines}{memory}"
     )
 
 
@@ -1040,6 +1051,7 @@ def build_graphic_system_user_prompt(
     conceptual: Dict[str, str],
     brand_physical: Dict[str, Any],
     format_value: str,
+    idea_memory_block: str = "",
 ) -> str:
     hebrew_rule = ""
     if detected_language == "he":
@@ -1047,6 +1059,7 @@ def build_graphic_system_user_prompt(
             "Hebrew campaign: default main visual right/center, RTL flow, brand slogan at bottom_left "
             "unless sloganPlacementReason provides a strategic RTL-preserving alternative.\n"
         )
+    memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
     return (
         f"Brief: {product_description}\n"
         f"Language: {detected_language}\n"
@@ -1057,6 +1070,7 @@ def build_graphic_system_user_prompt(
         f"Format: {format_value}\n"
         f"{hebrew_rule}"
         "Return the graphic generator object directly."
+        f"{memory}"
     )
 
 
@@ -1086,9 +1100,11 @@ def build_series_ads_user_prompt(
     brand_physical: Dict[str, Any],
     graphic_generator: Dict[str, Any],
     visibility_policy: str = "FORBIDDEN",
+    idea_memory_block: str = "",
 ) -> str:
     indexes = ", ".join(str(i) for i in range(1, ad_count + 1))
     lang_name = "Hebrew" if detected_language == "he" else "English"
+    memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
     return (
         f"Required ad count: {ad_count}\n"
         f"Required ad indexes: {indexes}\n"
@@ -1133,6 +1149,7 @@ def build_series_ads_user_prompt(
             else ""
         )
         + f"Return seriesGenerator and exactly {ad_count} ads obeying the graphic system and internal methodology fields."
+        + (f"\n{idea_memory_block}\n" if idea_memory_block else "")
     )
 
 

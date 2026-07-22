@@ -9,10 +9,6 @@ from engine.builder1_campaign_integrity import (
     make_upstream_snapshot,
     validate_builder1_campaign_integrity,
 )
-from engine.builder1_consolidated_stages import (
-    run_conceptual_stage,
-    run_strategy_slogan_stage,
-)
 from engine.builder1_final_stages import (
     SeriesAdsOutput,
     assemble_builder1_campaign,
@@ -33,7 +29,14 @@ from engine.builder1_planning_contract import (
     build_series_ads_repair_prompt,
     build_series_ads_user_prompt,
 )
-from engine.builder1_physical_repair import _run_brand_physical_with_identity_guard
+from engine.builder1_idea_memory_pipeline import (
+    persist_plan_idea_memory,
+    run_brand_physical_with_memory_guard,
+    run_conceptual_with_memory_guard,
+    run_series_ads_with_memory_guard,
+    run_strategy_slogan_with_memory_guard,
+    stage_memory_block,
+)
 from engine.builder1_product_name import enforce_authoritative_product_name
 from engine.builder1_product_visibility import (
     derive_product_visibility_policy,
@@ -136,6 +139,8 @@ def run_builder1_campaign_pipeline(
     model_caller: Any,
     brand_guidelines: Optional[Dict[str, Any]],
     visibility_decision: Optional[Any] = None,
+    campaign_id: str = "",
+    idea_memory: Optional[Any] = None,
 ) -> Builder1PipelineContext:
     from engine.builder1_planner import (
         Builder1PlannerError,
@@ -154,24 +159,32 @@ def run_builder1_campaign_pipeline(
             _slogan_selection,
             selected_slogan,
             slogan_candidates,
-        ) = run_strategy_slogan_stage(
+        ) = run_strategy_slogan_with_memory_guard(
             _run_stage,
             model_caller,
+            campaign_id=campaign_id,
+            idea_memory=idea_memory,
             product_name=product_name_resolved,
             product_name_resolved=product_name_resolved,
             product_description=normalized.product_description,
             detected_language=detected_language,
             lens_order=lens_order,
             exploration_seed=exploration_seed,
+            idea_memory_block=stage_memory_block(
+                "strategy_slogan_stage", idea_memory, campaign_id=campaign_id
+            ),
         )
     except StrategySelectionExhausted as exc:
         raise Builder1PlannerError("strategy_slogan_stage_failed") from exc
 
     slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
 
-    _conceptual_selection, selected_conceptual, conceptual_candidates = run_conceptual_stage(
+    _conceptual_selection, selected_conceptual, conceptual_candidates = run_conceptual_with_memory_guard(
         _run_stage,
         model_caller,
+        campaign_id=campaign_id,
+        idea_memory=idea_memory,
+        idea_memory_block=stage_memory_block("conceptual_stage", idea_memory, campaign_id=campaign_id),
         product_description=normalized.product_description,
         product_name_resolved=product_name_resolved,
         selected_strategy=selected_strategy,
@@ -220,9 +233,13 @@ def run_builder1_campaign_pipeline(
         conceptual=conceptual_fixed,
         brand_guidelines=brand_guidelines,
         visibility_policy=visibility_decision.policy.value,
+        idea_memory_block=stage_memory_block("brand_physical", idea_memory, campaign_id=campaign_id),
     )
-    brand_physical = _run_brand_physical_with_identity_guard(
+    brand_physical = run_brand_physical_with_memory_guard(
         model_caller=model_caller,
+        run_stage=_run_stage,
+        campaign_id=campaign_id,
+        idea_memory=idea_memory,
         user_prompt=brand_physical_user_prompt,
         parse_kwargs={
             "product_description": normalized.product_description,
@@ -253,6 +270,7 @@ def run_builder1_campaign_pipeline(
             conceptual=conceptual_fixed,
             brand_physical=brand_physical_dict,
             format_value=normalized.format,
+            idea_memory_block=stage_memory_block("graphic_system", idea_memory, campaign_id=campaign_id),
         ),
         run_stage=_run_stage,
     )
@@ -280,6 +298,8 @@ def run_builder1_campaign_pipeline(
         run_stage=_run_stage,
         series_retry_used=False,
         visibility_policy=visibility_decision.policy,
+        campaign_id=campaign_id,
+        idea_memory=idea_memory,
     )
 
     plan = _assemble_campaign_with_duplicate_recovery(
@@ -343,6 +363,12 @@ def run_builder1_campaign_pipeline(
 
     logger.info("BUILDER1_INTEGRITY_OK")
 
+    persist_plan_idea_memory(
+        plan,
+        campaign_id=campaign_id,
+        idea_memory=idea_memory,
+    )
+
     return Builder1PipelineContext(
         exploration_seed=exploration_seed,
         lens_order=lens_order,
@@ -377,6 +403,8 @@ def _run_series_stage_with_integrity(
     run_stage: Any,
     series_retry_used: bool,
     visibility_policy: Any,
+    campaign_id: str = "",
+    idea_memory: Optional[Any] = None,
 ) -> SeriesAdsOutput:
     from engine.builder1_planner import Builder1PlannerError
 
@@ -396,6 +424,7 @@ def _run_series_stage_with_integrity(
             brand_physical=brand_physical_dict,
             graphic_generator=graphic_dict,
             visibility_policy=getattr(visibility_policy, "value", str(visibility_policy)),
+            idea_memory_block=stage_memory_block("series_ads", idea_memory, campaign_id=campaign_id),
         ),
         lambda raw: parse_series_ads_output(
             raw,
@@ -420,6 +449,19 @@ def _run_series_stage_with_integrity(
     except StageParseError as exc:
         raise Builder1PlannerError("marketing_text_failed") from exc
 
+    series_ads = run_series_ads_with_memory_guard(
+        series_ads=series_ads,
+        campaign_id=campaign_id,
+        idea_memory=idea_memory,
+        brand_slogan=selected_slogan.brand_slogan,
+        conceptual=conceptual_fixed,
+        brand_physical=brand_physical_dict,
+        graphic_generator=graphic_dict,
+        detected_language=detected_language,
+        model_caller=model_caller,
+        run_stage=run_stage,
+    )
+
     if _series_ads_needs_retry(series_ads, expected_ad_count=normalized.ad_count) and not series_retry_used:
         logger.info("BUILDER1_SERIES_STAGE_RETRY reason=structural_failure")
         return _run_series_stage_with_integrity(
@@ -435,6 +477,8 @@ def _run_series_stage_with_integrity(
             run_stage=run_stage,
             series_retry_used=True,
             visibility_policy=visibility_policy,
+            campaign_id=campaign_id,
+            idea_memory=idea_memory,
         )
     return series_ads
 

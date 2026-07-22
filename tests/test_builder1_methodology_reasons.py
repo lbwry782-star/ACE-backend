@@ -203,8 +203,8 @@ class TestArchitectureRegression(unittest.TestCase):
         from engine import builder1_planning_pipeline as module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
-        self.assertLess(source.index("run_conceptual_stage"), source.index("build_brand_physical_user_prompt"))
+        self.assertLess(source.index("run_strategy_slogan_with_memory_guard"), source.index("run_conceptual_with_memory_guard"))
+        self.assertLess(source.index("run_conceptual_with_memory_guard"), source.index("build_brand_physical_user_prompt"))
 
     def test_candidate_counts_unchanged(self) -> None:
         self.assertIn("Exactly 12 candidates", STAGE_STRATEGY_STAGE_SYSTEM)

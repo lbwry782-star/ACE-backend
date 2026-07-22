@@ -194,9 +194,9 @@ class TestStageOrderAndCallCounts(unittest.TestCase):
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
         ordered_tokens = [
-            "run_strategy_slogan_stage",
-            "run_conceptual_stage",
-            "_run_brand_physical_with_identity_guard",
+            "run_strategy_slogan_with_memory_guard",
+            "run_conceptual_with_memory_guard",
+            "run_brand_physical_with_memory_guard",
             "_run_graphic_system_stage",
             "_run_series_stage_with_integrity",
         ]

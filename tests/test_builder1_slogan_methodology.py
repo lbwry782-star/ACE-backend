@@ -47,7 +47,7 @@ class TestPlanningOrder(unittest.TestCase):
         from engine import builder1_planning_pipeline as module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
+        self.assertLess(source.index("run_strategy_slogan_with_memory_guard"), source.index("run_conceptual_with_memory_guard"))
 
     def test_conceptual_stage_prompt_receives_selected_slogan(self) -> None:
         prompt = build_conceptual_stage_user_prompt(

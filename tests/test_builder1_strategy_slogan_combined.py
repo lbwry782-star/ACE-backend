@@ -194,7 +194,7 @@ class TestCombinedRegression(unittest.TestCase):
         from engine import builder1_planning_pipeline as module
 
         source = inspect.getsource(module.run_builder1_campaign_pipeline)
-        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
+        self.assertLess(source.index("run_strategy_slogan_with_memory_guard"), source.index("run_conceptual_with_memory_guard"))
 
     def test_compare_contract_script_uses_final_payload(self) -> None:
         import scripts.compare_strategy_slogan_contract as compare_module
