@@ -56,7 +56,6 @@ STRATEGY_SLOGAN_FAMILY_STAGES = frozenset(
     {
         "strategy_slogan_stage",
         "strategy_slogan_repair",
-        "strategy_candidate_repair",
         "slogan_only_repair",
         "strategy_stage",
         "slogan_stage",
@@ -323,25 +322,16 @@ def log_builder1_planning_profile_config() -> None:
     q_model = quality_model()
     exec_model = configured_execution_model() or "(unset)"
     models = {stage: resolve_stage_model(stage) for stage in PLANNING_STAGES}
-    strategy_slogan_model = models["strategy_slogan_stage"]
-    strategy_slogan_effort = resolve_stage_reasoning_effort("strategy_slogan_stage", strategy_slogan_model) or "none"
-    strategy_slogan_model_override = _env_stage_model("strategy_slogan_stage") or "(unset)"
-    strategy_slogan_effort_override = (
-        (os.environ.get(STAGE_REASONING_ENV_KEYS["strategy_slogan_stage"]) or "").strip().lower() or "(unset)"
-    )
+    shared_effort = resolve_default_reasoning_effort()
     logger.info(
         "BUILDER1_PLANNING_PROFILE_CONFIG profile=%s qualityModel=%s executionModel=%s "
-        "strategySloganStageModel=%s strategySloganStageModelOverride=%s "
-        "strategySloganStageReasoningEffort=%s strategySloganStageReasoningEffortOverride=%s "
-        "productNameModel=%s strategyModel=%s sloganModel=%s conceptualModel=%s "
-        "physicalModel=%s graphicModel=%s seriesModel=%s executionOptimizationActive=%s",
+        "reasoningEffort=%s productNameModel=%s strategyModel=%s sloganModel=%s "
+        "conceptualModel=%s physicalModel=%s graphicModel=%s seriesModel=%s "
+        "executionOptimizationActive=%s",
         profile.value,
         q_model,
         exec_model,
-        strategy_slogan_model,
-        strategy_slogan_model_override,
-        strategy_slogan_effort,
-        strategy_slogan_effort_override,
+        shared_effort,
         models["product_name_resolution"],
         models["strategy_stage"],
         models["slogan_stage"],

@@ -20,41 +20,32 @@ from engine.builder1_conceptual_evaluations import (
 from engine.builder1_planning_contract import (
     STAGE_CONCEPTUAL_EVALUATION_REPAIR_SYSTEM,
     STAGE_CONCEPTUAL_STAGE_SYSTEM,
-    STAGE_SLOGAN_ONLY_REPAIR_SYSTEM,
-    STAGE_SLOGAN_STAGE_SYSTEM,
     STAGE_STRATEGY_SLOGAN_REPAIR_SYSTEM,
     STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM,
     STAGE_STRATEGY_STAGE_SYSTEM,
     build_conceptual_evaluation_repair_user_prompt,
     build_conceptual_scan_repair_prompt,
     build_conceptual_stage_user_prompt,
-    build_slogan_only_repair_user_prompt,
-    build_slogan_stage_user_prompt,
     build_strategy_slogan_repair_user_prompt,
     build_strategy_slogan_stage_user_prompt,
     build_strategy_stage_user_prompt,
 )
-from engine.builder1_slogan_stage import (
-    SloganCandidate,
-    SloganSelection,
-    validate_selected_slogan,
-)
-from engine.builder1_slogan_stage_parser import parse_consolidated_slogan_stage_response
 from engine.builder1_staged_parsers import (
     CONCEPTUAL_IDS,
-    STRATEGY_IDS,
-    ConceptualCandidate,
     StageParseError,
+    ConceptualCandidate,
+    ConceptualSelection,
     StrategyCandidate,
     StrategyCandidateReview,
     StrategySelection,
     coerce_json_dict,
     parse_conceptual_scan,
 )
-from engine.builder1_strategy_scan import ensure_strategy_scan_from_raw
-from engine.builder1_strategy_selection import (
-    StrategySelectionExhausted,
-    validate_selected_strategy_gate,
+from engine.builder1_strategy_slogan_final import (
+    FINAL_SLOGAN_ID,
+    FINAL_STRATEGY_ID,
+    parse_slogan_final_section,
+    parse_strategy_final_section,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,17 +65,6 @@ DEFAULT_STRATEGY_SCORES: Dict[str, int] = {
     "persuasiveStrength": 8,
     "seriesPotential": 8,
     "conceptualActionPotential": 8,
-}
-
-DEFAULT_SLOGAN_SCORES: Dict[str, int] = {
-    "directAdvantageExpression": 8,
-    "naturalness": 8,
-    "memorability": 8,
-    "credibility": 8,
-    "brandOwnership": 8,
-    "competitorTransferResistance": 8,
-    "actionClarity": 8,
-    "campaignGenerativePower": 8,
 }
 
 
@@ -149,103 +129,6 @@ def _norm_id(value: object) -> str:
     return str(value or "").strip().upper()
 
 
-def _parse_strategy_evaluations(
-    raw_payload: object,
-    *,
-    expected_ids: List[str],
-) -> Dict[str, StrategyCandidateReview]:
-    reasons: List[str] = []
-    try:
-        obj = coerce_json_dict(raw_payload)
-    except Exception as exc:
-        raise StageParseError("strategy_stage", ["strategy_stage_not_object"]) from exc
-
-    evaluations_raw = obj.get("evaluations")
-    if not isinstance(evaluations_raw, list):
-        raise StageParseError("strategy_stage", ["strategy_stage_missing_evaluations"])
-
-    expected = {_norm_id(cid) for cid in expected_ids}
-    parsed: Dict[str, StrategyCandidateReview] = {}
-    seen: set[str] = set()
-    for item in evaluations_raw:
-        if not isinstance(item, dict):
-            reasons.append("strategy_stage_evaluation_not_object")
-            continue
-        cid = _norm_id(item.get("candidateId"))
-        if cid not in expected:
-            reasons.append(f"strategy_stage_evaluation_unknown_id:{cid}")
-            continue
-        if cid in seen:
-            reasons.append(f"strategy_stage_evaluation_duplicate_id:{cid}")
-            continue
-        seen.add(cid)
-        rejection_codes = [
-            str(code)
-            for code in (item.get("rejectionCodes") or [])
-            if str(code).strip()
-        ]
-        eligible_flag = bool(item.get("eligible"))
-        review = StrategyCandidateReview(
-            candidate_id=cid,
-            grounded_in_brief=bool(item.get("groundedInBrief")),
-            advantage_currently_true=bool(item.get("advantageCurrentlyTrue")),
-            executable_now=bool(item.get("executableNow")),
-            requires_material_investment=bool(item.get("requiresMaterialInvestment")),
-            requires_client_consultation=bool(item.get("requiresClientConsultation")),
-            requires_business_transformation=bool(item.get("requiresBusinessTransformation")),
-            brand_ownable=bool(item.get("brandOwnable")),
-            category_relevant=bool(item.get("categoryRelevant")),
-            eligible=eligible_flag,
-            rejection_codes=rejection_codes,
-        )
-        if eligible_flag and rejection_codes:
-            reasons.append(f"strategy_stage_evaluation_contradictory:{cid}")
-        if not eligible_flag and not rejection_codes:
-            reasons.append(f"strategy_stage_evaluation_ineligible_without_codes:{cid}")
-        parsed[cid] = review
-
-    if seen != expected:
-        for missing in sorted(expected - seen):
-            reasons.append(f"strategy_stage_evaluation_missing_id:{missing}")
-
-    if reasons:
-        raise StageParseError("strategy_stage", reasons)
-    return parsed
-
-
-def _pick_strongest_eligible_strategy(
-    *,
-    candidates: List[StrategyCandidate],
-    reviews: Dict[str, StrategyCandidateReview],
-    preferred_id: Optional[str] = None,
-) -> StrategyCandidate:
-    by_id = {c.id: c for c in candidates}
-    ordered = [_norm_id(cid) for cid in STRATEGY_IDS if _norm_id(cid) in by_id]
-    if preferred_id:
-        preferred = _norm_id(preferred_id)
-        review = reviews.get(preferred)
-        candidate = by_id.get(preferred)
-        if (
-            candidate
-            and review
-            and review.eligible
-            and strategy_candidate_is_eligible(candidate)
-            and not validate_selected_strategy_gate(candidate, review)
-        ):
-            return candidate
-    for cid in ordered:
-        candidate = by_id[cid]
-        review = reviews.get(cid)
-        if not review or not review.eligible:
-            continue
-        if not strategy_candidate_is_eligible(candidate):
-            continue
-        if validate_selected_strategy_gate(candidate, review):
-            continue
-        return candidate
-    raise StrategySelectionExhausted()
-
-
 def process_strategy_stage_response(
     raw_payload: object,
     *,
@@ -253,44 +136,12 @@ def process_strategy_stage_response(
     product_description: str,
     model_caller: PlanningModelCaller,
 ) -> Tuple[StrategySelection, StrategyCandidate, List[StrategyCandidate], Dict[str, StrategyCandidateReview]]:
-    try:
-        obj = coerce_json_dict(raw_payload)
-    except Exception as exc:
-        raise StageParseError("strategy_stage", ["strategy_stage_not_object"]) from exc
-
-    def _repair_caller(system: str, user: str, **kwargs: Any) -> object:
-        from engine.builder1_planner import _invoke_model_caller
-
-        stage = kwargs.get("stage") or "strategy_candidate_repair"
-        return _invoke_model_caller(model_caller, system, user, stage=stage)
-
-    candidates = ensure_strategy_scan_from_raw(
-        obj,
-        product_name=product_name,
+    del product_name, model_caller
+    strategy_selection, selected_strategy = parse_strategy_final_section(
+        raw_payload,
         product_description=product_description,
-        model_caller=_repair_caller,
     )
-    reviews = _parse_strategy_evaluations(obj, expected_ids=STRATEGY_IDS)
-    selected_id = _norm_id(obj.get("selectedCandidateId"))
-    selection_reason = str(obj.get("selectionReason") or "").strip() or "Strongest eligible strategy"
-    selected = _pick_strongest_eligible_strategy(
-        candidates=candidates,
-        reviews=reviews,
-        preferred_id=selected_id,
-    )
-    if selected.id != selected_id:
-        logger.info(
-            "BUILDER1_STRATEGY_STAGE_RESELECT modelSelected=%s localSelected=%s",
-            selected_id,
-            selected.id,
-        )
-    selection = StrategySelection(
-        selected_candidate_id=selected.id,
-        selection_reason=selection_reason,
-        strategy_family=selected.lens,
-        scores=dict(DEFAULT_STRATEGY_SCORES),
-    )
-    return selection, selected, candidates, reviews
+    return strategy_selection, selected_strategy, [selected_strategy], {}
 
 
 def run_strategy_stage(
@@ -328,149 +179,6 @@ def run_strategy_stage(
     )
 
 
-def process_slogan_stage_response(
-    raw_payload: object,
-) -> Tuple[SloganSelection, SloganCandidate, List[SloganCandidate]]:
-    candidates, _evaluations, selected_id, selection_reason = parse_consolidated_slogan_stage_response(
-        raw_payload
-    )
-    selected = next(candidate for candidate in candidates if candidate.id == selected_id)
-    return (
-        SloganSelection(
-            selected_candidate_id=selected.id,
-            selection_reason=selection_reason,
-            scores=dict(DEFAULT_SLOGAN_SCORES),
-        ),
-        selected,
-        candidates,
-    )
-
-
-def run_slogan_stage(
-    run_stage: RunStageFn,
-    model_caller: PlanningModelCaller,
-    *,
-    selected_strategy: StrategyCandidate,
-    product_name_resolved: str,
-    product_description: str,
-    detected_language: str,
-) -> Tuple[SloganSelection, SloganCandidate, List[SloganCandidate]]:
-    user_prompt = build_slogan_stage_user_prompt(
-        product_name_resolved=product_name_resolved,
-        product_description=product_description,
-        detected_language=detected_language,
-        strategic_problem=selected_strategy.strategic_problem,
-        relative_advantage=selected_strategy.relative_advantage,
-        brief_support=selected_strategy.brief_support,
-    )
-
-    def _parse(raw: object):
-        return process_slogan_stage_response(raw)
-
-    return run_stage(
-        "slogan_stage",
-        model_caller,
-        STAGE_SLOGAN_STAGE_SYSTEM,
-        user_prompt,
-        _parse,
-    )
-
-
-def _prefix_stage_reasons(stage: str, reasons: List[str]) -> List[str]:
-    return [f"{stage}:{reason}" for reason in reasons]
-
-
-def _process_frozen_strategy_section(
-    strategy_raw: object,
-    *,
-    product_name: str,
-    product_description: str,
-    model_caller: PlanningModelCaller,
-) -> Tuple[StrategySelection, StrategyCandidate, List[StrategyCandidate], Dict[str, StrategyCandidateReview]]:
-    try:
-        return process_strategy_stage_response(
-            strategy_raw,
-            product_name=product_name,
-            product_description=product_description,
-            model_caller=model_caller,
-        )
-    except StageParseError as exc:
-        raise StageParseError(
-            "strategy_slogan_stage",
-            _prefix_stage_reasons("strategy", exc.reasons),
-        ) from exc
-
-
-def _process_frozen_slogan_section(
-    slogan_raw: object,
-    *,
-    selected_strategy: StrategyCandidate,
-    product_name_resolved: str,
-    product_description: str,
-    detected_language: str,
-) -> Tuple[SloganSelection, SloganCandidate, List[SloganCandidate]]:
-    try:
-        selection, selected, candidates = process_slogan_stage_response(slogan_raw)
-    except StageParseError as exc:
-        raise StageParseError(
-            "strategy_slogan_stage",
-            _prefix_stage_reasons("slogan", exc.reasons),
-        ) from exc
-
-    rejections = validate_selected_slogan(
-        selected,
-        relative_advantage=selected_strategy.relative_advantage,
-        product_description=product_description,
-        detected_language=detected_language,
-    )
-    if rejections:
-        raise StageParseError(
-            "strategy_slogan_stage",
-            _prefix_stage_reasons("slogan", rejections),
-        )
-    return selection, selected, candidates
-
-
-def _run_slogan_only_repair(
-    run_stage: RunStageFn,
-    model_caller: PlanningModelCaller,
-    *,
-    selected_strategy: StrategyCandidate,
-    product_name_resolved: str,
-    product_description: str,
-    detected_language: str,
-    broken_json: str,
-    reasons: List[str],
-) -> Tuple[SloganSelection, SloganCandidate, List[SloganCandidate]]:
-    user_prompt = build_slogan_only_repair_user_prompt(
-        product_name_resolved=product_name_resolved,
-        product_description=product_description,
-        detected_language=detected_language,
-        strategic_problem=selected_strategy.strategic_problem,
-        relative_advantage=selected_strategy.relative_advantage,
-        brief_support=selected_strategy.brief_support,
-        broken_json=broken_json,
-        reasons=reasons,
-    )
-
-    def _parse(raw: object):
-        return _process_frozen_slogan_section(
-            raw,
-            selected_strategy=selected_strategy,
-            product_name_resolved=product_name_resolved,
-            product_description=product_description,
-            detected_language=detected_language,
-        )
-
-    return run_stage(
-        "slogan_only_repair",
-        model_caller,
-        STAGE_SLOGAN_ONLY_REPAIR_SYSTEM,
-        user_prompt,
-        _parse,
-    )
-
-
 def process_strategy_slogan_stage_response(
     raw_payload: object,
     *,
@@ -485,10 +193,11 @@ def process_strategy_slogan_stage_response(
     StrategyCandidate,
     List[StrategyCandidate],
     Dict[str, StrategyCandidateReview],
-    SloganSelection,
-    SloganCandidate,
-    List[SloganCandidate],
+    Any,
+    Any,
+    List[Any],
 ]:
+    del product_name, product_name_resolved, model_caller, run_stage
     try:
         obj = coerce_json_dict(raw_payload)
     except Exception as exc:
@@ -499,55 +208,42 @@ def process_strategy_slogan_stage_response(
     if not isinstance(strategy_raw, dict) or not isinstance(slogan_raw, dict):
         raise StageParseError("strategy_slogan_stage", ["strategy_slogan_stage_invalid_structure"])
 
-    (
-        strategy_selection,
-        selected_strategy,
-        strategy_candidates,
-        strategy_reviews,
-    ) = _process_frozen_strategy_section(
-        strategy_raw,
-        product_name=product_name,
-        product_description=product_description,
-        model_caller=model_caller,
-    )
-    logger.info("BUILDER1_STRATEGY_SECTION_OK selectedCandidateId=%s", selected_strategy.id)
+    try:
+        strategy_selection, selected_strategy = parse_strategy_final_section(
+            strategy_raw,
+            product_description=product_description,
+        )
+    except StageParseError as exc:
+        if exc.stage != "strategy_slogan_stage":
+            raise
+        raise StageParseError(
+            "strategy_slogan_stage",
+            [f"strategy:{reason}" if not str(reason).startswith("strategy:") else reason for reason in exc.reasons],
+        ) from exc
+
+    logger.info("BUILDER1_STRATEGY_SECTION_OK finalStrategy=true")
 
     try:
-        slogan_selection, selected_slogan, slogan_candidates = _process_frozen_slogan_section(
+        slogan_selection, selected_slogan = parse_slogan_final_section(
             slogan_raw,
-            selected_strategy=selected_strategy,
-            product_name_resolved=product_name_resolved,
+            relative_advantage=selected_strategy.relative_advantage,
             product_description=product_description,
             detected_language=detected_language,
         )
     except StageParseError as exc:
-        if not exc.reasons or not all(str(reason).startswith("slogan:") for reason in exc.reasons):
+        if exc.stage != "strategy_slogan_stage":
             raise
-        slogan_reasons = [str(reason).split(":", 1)[-1] for reason in exc.reasons]
-        logger.info(
-            "BUILDER1_STRATEGY_SLOGAN_REPAIR reasonCodes=%s strategyChanged=false sloganRegenerated=true",
-            slogan_reasons,
-        )
-        slogan_selection, selected_slogan, slogan_candidates = _run_slogan_only_repair(
-            run_stage,
-            model_caller,
-            selected_strategy=selected_strategy,
-            product_name_resolved=product_name_resolved,
-            product_description=product_description,
-            detected_language=detected_language,
-            broken_json=json.dumps(slogan_raw, ensure_ascii=False),
-            reasons=slogan_reasons,
-        )
+        raise
 
-    logger.info("BUILDER1_SLOGAN_SECTION_OK selectedCandidateId=%s", selected_slogan.id)
+    logger.info("BUILDER1_SLOGAN_SECTION_OK finalSlogan=true")
     return (
         strategy_selection,
         selected_strategy,
-        strategy_candidates,
-        strategy_reviews,
+        [selected_strategy],
+        {},
         slogan_selection,
         selected_slogan,
-        slogan_candidates,
+        [selected_slogan],
     )
 
 

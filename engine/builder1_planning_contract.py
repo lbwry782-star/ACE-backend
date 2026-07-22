@@ -213,34 +213,31 @@ Rules:
 STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM = f"""
 You are a Builder1 strategy-and-slogan planner for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"strategy":{{"candidates":[{{"id":"S01","lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null}}],"evaluations":[{{"candidateId":"S01","groundedInBrief":true,"advantageCurrentlyTrue":true,"executableNow":true,"requiresMaterialInvestment":false,"requiresClientConsultation":false,"requiresBusinessTransformation":false,"brandOwnable":true,"categoryRelevant":true,"eligible":true,"rejectionCodes":[]}}],"selectedCandidateId":"S01","selectionReason":"..."}},"slogan":{{"candidates":[{{"id":"L01","brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"..."}}],"evaluations":[{{"candidateId":"L01","derivedFromAdvantage":true,"naturalInLanguage":true,"credible":true,"ownable":true,"impliedActionValid":true,"campaignGenerative":true,"eligible":true,"rejectionCodes":[]}}],"selectedCandidateId":"L01","selectionReason":"..."}}}}
+{{"strategy":{{"lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null,"selectionReason":"..."}},"slogan":{{"brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"...","selectionReason":"..."}}}}
 {STRATEGY_STAGE_METHODOLOGY}
 {SLOGAN_STAGE_METHODOLOGY}
 {NO_LOGO_REASON}
-PART A — COMPLETE STRATEGY FIRST (internal order; do not begin Part B until Part A is finished):
-1. Perceive the real strategic/business/customer problem.
-2. Generate exactly 12 serious strategy candidates S01-S12.
-3. Evaluate every candidate once in strategy.evaluations.
-4. Mark each candidate eligible or ineligible.
-5. Select one eligible strategy by selectedCandidateId.
-6. Derive the relative advantage directly from the selected problem.
-7. Freeze the selected strategy before any slogan work.
-PART B — GENERATE SLOGANS ONLY FROM THE FROZEN STRATEGY (slogan section):
-8. Read only the final selected strategy from Part A.
-9. Generate exactly six serious brand-slogan candidates L01-L06 derived from the selected relative advantage.
-10. Evaluate each slogan candidate once in slogan.evaluations.
-11. Select one final brand slogan and freeze it before conceptual work.
-Do not let slogan cleverness influence strategy selection.
-Final self-check: strategy selected before slogans; slogan derives from selected relative advantage only; strategy would remain unchanged without a slogan request; slogan fixed before conceptual work.
+Build one final campaign strategy and one final brand slogan in a single response.
+1. Identify the strongest real strategic or perceptual problem grounded in the brief.
+2. Derive one relative advantage directly from that problem.
+3. Produce one short, distinctive brand slogan derived from that advantage.
+4. Explain why the slogan expresses the relative advantage in derivationFromAdvantage.
+Do not return alternatives, candidate lists, rankings, eliminations, or internal deliberation.
+Do not imitate a tournament. Do not use Creator, Judge, or tournament-manager roles.
+Complete the strategy object first, then the slogan object from that frozen strategy only.
+Do not let slogan cleverness change the strategic problem or relative advantage.
+Final self-check: one strategic path, one slogan, slogan derives from relative advantage only, both ready before conceptual work.
 """.strip()
 
 
 STAGE_STRATEGY_SLOGAN_REPAIR_SYSTEM = f"""
 You are a Builder1 strategy-and-slogan repair assistant.
 Return JSON only with exactly two top-level keys: strategy and slogan.
+Each section must contain one final completed strategy and one final completed slogan only.
+Do not return candidate arrays, evaluations, selectedCandidateId, or alternatives.
 {STRATEGY_STAGE_METHODOLOGY}
 {SLOGAN_STAGE_METHODOLOGY}
-When strategy selection changes, regenerate all slogan candidates from the repaired strategy only.
+When strategy fields change, regenerate the slogan from the repaired strategy only.
 """.strip()
 
 
@@ -611,12 +608,10 @@ def build_strategy_slogan_stage_user_prompt(
         f"Language context: {detected_language}\n"
         f"Campaign exploration seed: {exploration_seed}\n"
         f"Lens order: {', '.join(lens_order)}\n"
-        "PART A — Complete strategy first inside the strategy object.\n"
-        "Generate exactly 12 strategy candidates S01-S12, evaluate each once, and select one eligible strategy.\n"
-        "Freeze the selected problem and relative advantage before Part B.\n"
-        "PART B — Generate slogan candidates only inside the slogan object.\n"
-        "Use only the selected strategic problem and selected relative advantage from Part A.\n"
-        "Generate exactly six slogan candidates L01-L06, evaluate each once, and select one final brand slogan.\n"
+        "Build one final campaign strategy and one final brand slogan.\n"
+        "Identify the strongest real strategic or perceptual problem, derive one relative advantage, "
+        "and produce one distinctive slogan from that advantage.\n"
+        "Return only the selected final path — no alternatives, candidates, or tournament structure.\n"
         "Do not include conceptual generators, physical objects, graphics, or ads."
     )
 
@@ -634,7 +629,8 @@ def build_strategy_slogan_repair_user_prompt(
         f"Product description: {product_description}\n"
         f"Validation errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken output:\n{broken_json}\n"
-        "Return both strategy and slogan sections. If strategy selection changed, regenerate all slogan candidates."
+        "Return one final strategy object and one final slogan object only. "
+        "Do not return candidate arrays or selectedCandidateId fields."
     )
 
 

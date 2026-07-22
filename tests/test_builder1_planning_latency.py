@@ -144,8 +144,8 @@ class TestStrategySelectionReview(unittest.TestCase):
         import inspect
 
         source = inspect.getsource(process_strategy_slogan_stage_response)
-        strategy_idx = source.index("_process_frozen_strategy_section")
-        slogan_idx = source.index("_process_frozen_slogan_section")
+        strategy_idx = source.index("parse_strategy_final_section")
+        slogan_idx = source.index("parse_slogan_final_section")
         self.assertLess(strategy_idx, slogan_idx)
 
 
@@ -178,34 +178,17 @@ class TestFinalJudgeRouting(unittest.TestCase):
 
 class TestProductionShapedLatencyRegression(unittest.TestCase):
     def test_production_shaped_flow_reaches_planning_ok(self) -> None:
-        broken_scan = _strategy_scan_payload()
-        broken_scan["candidates"][0]["briefSupport"] = "Surveys show 90% prefer reinforced shells"
-        broken_scan["candidates"][6]["briefSupport"] = "Research shows 87% prefer reinforced shells"
-        repair_calls = 0
+        stage_calls = 0
 
         def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            nonlocal repair_calls
-            if system == STAGE_STRATEGY_CANDIDATE_REPAIR_SYSTEM:
-                repair_calls += 1
-                if repair_calls == 1:
-                    return {"replacements": []}
-                return {
-                    "replacements": [
-                        {
-                            **_strategy_scan_payload()["candidates"][0],
-                            "briefSupport": "Follows from brief reinforced shell mention",
-                        },
-                        {
-                            **_strategy_scan_payload()["candidates"][6],
-                            "briefSupport": "Follows from brief reinforced shell mention",
-                        },
-                    ]
-                }
-            responses = _full_final_responses(2)
-            combined = _strategy_slogan_stage_payload()
-            combined["strategy"]["candidates"] = broken_scan["candidates"]
-            responses[STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM] = combined
-            return copy.deepcopy(responses.get(system, {}))
+            nonlocal stage_calls
+            if stage == "strategy_slogan_stage":
+                stage_calls += 1
+                if stage_calls == 1:
+                    broken = _strategy_slogan_stage_payload()
+                    broken["strategy"]["relativeAdvantage"] = ""
+                    return broken
+            return copy.deepcopy(_full_final_responses(2).get(system, {}))
 
         plan = plan_builder1(
             product_name="CarryShell",
@@ -215,7 +198,7 @@ class TestProductionShapedLatencyRegression(unittest.TestCase):
             ad_count=2,
         )
         self.assertEqual(plan.ad_count, 2)
-        self.assertEqual(repair_calls, 2)
+        self.assertEqual(stage_calls, 2)
 
 
 class TestLoggingAndMetrics(unittest.TestCase):

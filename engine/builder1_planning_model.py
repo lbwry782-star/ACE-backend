@@ -553,7 +553,7 @@ STRATEGY_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
     },
 }
 
-STRATEGY_STAGE_JSON_SCHEMA: Dict[str, Any] = {
+STRATEGY_CANDIDATE_STAGE_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["candidates", "evaluations", "selectedCandidateId", "selectionReason"],
@@ -564,6 +564,47 @@ STRATEGY_STAGE_JSON_SCHEMA: Dict[str, Any] = {
         "selectionReason": {"type": "string"},
     },
 }
+
+STRATEGY_FINAL_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "lens",
+        "strategicProblem",
+        "relativeAdvantage",
+        "briefSupport",
+        "advantageSource",
+        "claimRisk",
+        "campaignExecutableNow",
+        "requiresClientConsultation",
+        "clientActionLevel",
+        "implementationCostLevel",
+        "simpleStrategicAction",
+        "selectionReason",
+    ],
+    "properties": {
+        "lens": {"type": "string"},
+        "strategicProblem": {"type": "string"},
+        "relativeAdvantage": {"type": "string"},
+        "briefSupport": {"type": "string"},
+        "advantageSource": {"type": "string"},
+        "claimRisk": {"type": "string"},
+        "campaignExecutableNow": {"type": "boolean"},
+        "requiresClientConsultation": {"type": "boolean"},
+        "clientActionLevel": {
+            "type": "string",
+            "enum": ["none", "simple_optional", "complex_required"],
+        },
+        "implementationCostLevel": {
+            "type": "string",
+            "enum": ["none", "negligible", "material"],
+        },
+        "simpleStrategicAction": {"type": ["string", "null"]},
+        "selectionReason": {"type": "string"},
+    },
+}
+
+STRATEGY_STAGE_JSON_SCHEMA: Dict[str, Any] = STRATEGY_FINAL_JSON_SCHEMA
 
 SLOGAN_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -592,7 +633,7 @@ SLOGAN_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
     },
 }
 
-SLOGAN_STAGE_JSON_SCHEMA: Dict[str, Any] = {
+SLOGAN_CANDIDATE_STAGE_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["candidates", "evaluations", "selectedCandidateId", "selectionReason"],
@@ -603,6 +644,36 @@ SLOGAN_STAGE_JSON_SCHEMA: Dict[str, Any] = {
         "selectionReason": {"type": "string"},
     },
 }
+
+SLOGAN_FINAL_JSON_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "brandSlogan",
+        "derivationFromAdvantage",
+        "impliedAction",
+        "whyOwnable",
+        "whyNaturalInLanguage",
+        "competitorTransferRisk",
+        "campaignGenerativePower",
+        "selectionReason",
+    ],
+    "properties": {
+        "brandSlogan": {"type": "string"},
+        "derivationFromAdvantage": {"type": "string"},
+        "impliedAction": {"type": "string"},
+        "whyOwnable": {"type": "string"},
+        "whyNaturalInLanguage": {"type": "string"},
+        "competitorTransferRisk": {
+            "type": "string",
+            "enum": ["low", "medium", "high"],
+        },
+        "campaignGenerativePower": {"type": "string"},
+        "selectionReason": {"type": "string"},
+    },
+}
+
+SLOGAN_STAGE_JSON_SCHEMA: Dict[str, Any] = SLOGAN_FINAL_JSON_SCHEMA
 
 CONCEPTUAL_EVALUATION_ITEM_SCHEMA: Dict[str, Any] = {
     "type": "object",
@@ -712,8 +783,8 @@ STRATEGY_SLOGAN_STAGE_JSON_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
     "required": ["strategy", "slogan"],
     "properties": {
-        "strategy": STRATEGY_STAGE_JSON_SCHEMA,
-        "slogan": SLOGAN_STAGE_JSON_SCHEMA,
+        "strategy": STRATEGY_FINAL_JSON_SCHEMA,
+        "slogan": SLOGAN_FINAL_JSON_SCHEMA,
     },
 }
 
@@ -722,8 +793,8 @@ STRATEGY_SLOGAN_REPAIR_JSON_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
     "required": ["strategy", "slogan"],
     "properties": {
-        "strategy": STRATEGY_STAGE_JSON_SCHEMA,
-        "slogan": SLOGAN_STAGE_JSON_SCHEMA,
+        "strategy": STRATEGY_FINAL_JSON_SCHEMA,
+        "slogan": SLOGAN_FINAL_JSON_SCHEMA,
     },
 }
 

@@ -367,55 +367,32 @@ def _slogan_quality_review_payload() -> Dict[str, Any]:
     }
 
 
+def _strategy_final_payload(**overrides: Any) -> Dict[str, Any]:
+    base = copy.deepcopy(_strategy_scan_payload()["candidates"][0])
+    base.pop("id", None)
+    base["selectionReason"] = "Strongest brief-grounded path"
+    base.update(overrides)
+    return base
+
+
+def _slogan_final_payload(**overrides: Any) -> Dict[str, Any]:
+    base = copy.deepcopy(_slogan_scan_payload()["candidates"][0])
+    base.pop("id", None)
+    base["selectionReason"] = "Strongest advantage expression"
+    base.update(overrides)
+    return base
+
+
 def _strategy_stage_payload(
     *,
     selected_id: str = "S01",
     candidate_ids: List[str] | None = None,
 ) -> Dict[str, Any]:
-    ids = candidate_ids or [f"S{i:02d}" for i in range(1, 13)]
-    return {
-        "candidates": _strategy_scan_payload()["candidates"],
-        "evaluations": [
-            {
-                "candidateId": cid,
-                "groundedInBrief": True,
-                "advantageCurrentlyTrue": True,
-                "executableNow": True,
-                "requiresMaterialInvestment": False,
-                "requiresClientConsultation": False,
-                "requiresBusinessTransformation": False,
-                "brandOwnable": True,
-                "categoryRelevant": True,
-                "eligible": True,
-                "rejectionCodes": [],
-            }
-            for cid in ids
-        ],
-        "selectedCandidateId": selected_id,
-        "selectionReason": "Strongest brief fit",
-    }
+    return _strategy_final_payload()
 
 
 def _slogan_stage_payload(*, selected_id: str = "L01") -> Dict[str, Any]:
-    return {
-        "candidates": _slogan_scan_payload()["candidates"],
-        "evaluations": [
-            {
-                "candidateId": f"L{i:02d}",
-                "derivedFromAdvantage": True,
-                "naturalInLanguage": True,
-                "credible": True,
-                "ownable": True,
-                "impliedActionValid": True,
-                "campaignGenerative": True,
-                "eligible": True,
-                "rejectionCodes": [],
-            }
-            for i in range(1, 7)
-        ],
-        "selectedCandidateId": selected_id,
-        "selectionReason": "Strongest advantage expression",
-    }
+    return _slogan_final_payload()
 
 
 def _conceptual_evaluation(
@@ -506,6 +483,52 @@ def _strategy_selection_payload(
     }
 
 
+def _legacy_strategy_slogan_candidate_payload() -> Dict[str, Any]:
+    ids = [f"S{i:02d}" for i in range(1, 13)]
+    return {
+        "strategy": {
+            "candidates": _strategy_scan_payload()["candidates"],
+            "evaluations": [
+                {
+                    "candidateId": cid,
+                    "groundedInBrief": True,
+                    "advantageCurrentlyTrue": True,
+                    "executableNow": True,
+                    "requiresMaterialInvestment": False,
+                    "requiresClientConsultation": False,
+                    "requiresBusinessTransformation": False,
+                    "brandOwnable": True,
+                    "categoryRelevant": True,
+                    "eligible": True,
+                    "rejectionCodes": [],
+                }
+                for cid in ids
+            ],
+            "selectedCandidateId": "S01",
+            "selectionReason": "Legacy selected strategy",
+        },
+        "slogan": {
+            "candidates": _slogan_scan_payload()["candidates"],
+            "evaluations": [
+                {
+                    "candidateId": f"L{i:02d}",
+                    "derivedFromAdvantage": True,
+                    "naturalInLanguage": True,
+                    "credible": True,
+                    "ownable": True,
+                    "impliedActionValid": True,
+                    "campaignGenerative": True,
+                    "eligible": True,
+                    "rejectionCodes": [],
+                }
+                for i in range(1, 7)
+            ],
+            "selectedCandidateId": "L01",
+            "selectionReason": "Legacy selected slogan",
+        },
+    }
+
+
 def _strategy_slogan_stage_payload(
     *,
     selected_strategy_id: str = "S01",
@@ -513,8 +536,8 @@ def _strategy_slogan_stage_payload(
     candidate_ids: List[str] | None = None,
 ) -> Dict[str, Any]:
     return {
-        "strategy": _strategy_stage_payload(selected_id=selected_strategy_id, candidate_ids=candidate_ids),
-        "slogan": _slogan_stage_payload(selected_id=selected_slogan_id),
+        "strategy": _strategy_final_payload(),
+        "slogan": _slogan_final_payload(),
     }
 
 

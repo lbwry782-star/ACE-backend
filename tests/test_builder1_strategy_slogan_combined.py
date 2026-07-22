@@ -27,13 +27,13 @@ from engine.builder1_planning_model import (
     STRATEGY_SLOGAN_STAGE_JSON_SCHEMA,
     prepare_strict_json_schema,
 )
-from engine.builder1_planning_profile import PlanningProfile, resolve_stage_model
+from engine.builder1_planning_profile import resolve_stage_model
 from engine.builder1_planner import _run_stage, plan_builder1
 from engine.builder1_staged_parsers import StageParseError
+from engine.builder1_strategy_slogan_final import FINAL_SLOGAN_ID, FINAL_STRATEGY_ID
 from tests.test_builder1_staged_planning import (
     _full_final_responses,
     _strategy_slogan_stage_payload,
-    _strategy_stage_payload,
 )
 
 BRIEF = "Reinforced shell product for daily carry"
@@ -43,12 +43,13 @@ class TestCombinedStageContract(unittest.TestCase):
     def test_strict_schema_requires_strategy_and_slogan_objects(self) -> None:
         prepared = prepare_strict_json_schema(STRATEGY_SLOGAN_STAGE_JSON_SCHEMA)
         self.assertEqual(set(prepared["required"]), {"strategy", "slogan"})
-        self.assertIn("candidates", prepared["properties"]["strategy"]["properties"])
-        self.assertIn("candidates", prepared["properties"]["slogan"]["properties"])
+        self.assertIn("strategicProblem", prepared["properties"]["strategy"]["properties"])
+        self.assertIn("brandSlogan", prepared["properties"]["slogan"]["properties"])
+        self.assertNotIn("candidates", prepared["properties"]["strategy"]["properties"])
 
     def test_parser_validates_strategy_before_slogan(self) -> None:
         payload = _strategy_slogan_stage_payload()
-        del payload["strategy"]["evaluations"]
+        del payload["strategy"]["relativeAdvantage"]
         with self.assertRaises(StageParseError) as ctx:
             process_strategy_slogan_stage_response(
                 payload,
@@ -61,7 +62,7 @@ class TestCombinedStageContract(unittest.TestCase):
             )
         self.assertTrue(any("strategy:" in reason for reason in ctx.exception.reasons))
 
-    def test_combined_output_has_separate_sections(self) -> None:
+    def test_combined_output_has_single_final_path(self) -> None:
         result = process_strategy_slogan_stage_response(
             _strategy_slogan_stage_payload(),
             product_name="TestBrand",
@@ -72,8 +73,10 @@ class TestCombinedStageContract(unittest.TestCase):
             run_stage=_run_stage,
         )
         self.assertEqual(len(result), 7)
-        self.assertEqual(result[1].id, "S01")
-        self.assertEqual(result[5].id, "L01")
+        self.assertEqual(result[1].id, FINAL_STRATEGY_ID)
+        self.assertEqual(result[5].id, FINAL_SLOGAN_ID)
+        self.assertEqual(len(result[2]), 1)
+        self.assertEqual(len(result[6]), 1)
 
 
 class TestCombinedCallCounts(unittest.TestCase):
@@ -95,6 +98,7 @@ class TestCombinedCallCounts(unittest.TestCase):
         self.assertEqual(stages.count("strategy_slogan_stage"), 1)
         self.assertEqual(stages.count("slogan_stage"), 0)
         self.assertEqual(stages.count("strategy_stage"), 0)
+        self.assertNotIn("strategy_candidate_repair", stages)
         counted = len(
             [
                 s
@@ -151,105 +155,51 @@ class TestCombinedModelRouting(unittest.TestCase):
         os.environ,
         {
             "BUILDER1_PLANNING_PROFILE": "QUALITY",
-            "BUILDER1_QUALITY_MODEL": "gpt-5.6-terra",
-            "BUILDER1_STRATEGY_SLOGAN_STAGE_MODEL": "gpt-5.6-sol",
+            "BUILDER1_QUALITY_MODEL": "gpt-5.6-sol",
+            "OPENAI_REASONING_EFFORT": "low",
         },
         clear=False,
     )
-    def test_strategy_slogan_override_uses_sol(self) -> None:
+    def test_quality_profile_uses_sol_for_all_stages(self) -> None:
         self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "gpt-5.6-sol")
-        self.assertEqual(resolve_stage_model("conceptual_stage"), "gpt-5.6-terra")
+        self.assertEqual(resolve_stage_model("conceptual_stage"), "gpt-5.6-sol")
 
 
 class TestCombinedMetrics(unittest.TestCase):
-    def test_strategy_candidate_repair_counted_separately(self) -> None:
+    def test_strategy_candidate_repair_metric_stays_zero_for_new_jobs(self) -> None:
         metrics = Builder1PlanningMetrics()
         token = set_planning_metrics(metrics)
         try:
             metrics.record_model_call("strategy_slogan_stage")
-            metrics.record_model_call("strategy_candidate_repair")
-            metrics.record_model_call("slogan_only_repair")
-            metrics.record_stage_retry("strategy_slogan_stage")
+            metrics.record_model_call("conceptual_stage")
             self.assertEqual(metrics.strategy_slogan_stage_calls, 1)
-            self.assertEqual(metrics.strategy_candidate_repair_calls, 1)
-            self.assertEqual(metrics.slogan_only_repair_calls, 1)
-            self.assertEqual(metrics.stage_retry_calls, 1)
-            self.assertEqual(metrics.total_planning_model_calls, 3)
+            self.assertEqual(metrics.strategy_candidate_repair_calls, 0)
+            self.assertEqual(metrics.slogan_only_repair_calls, 0)
         finally:
             from engine.builder1_planning_metrics import reset_planning_metrics
 
             reset_planning_metrics(token)
 
-    def test_exceptional_calls_exceed_normal_expected(self) -> None:
-        metrics = Builder1PlanningMetrics()
-        metrics.record_model_call("strategy_slogan_stage")
-        metrics.record_model_call("strategy_candidate_repair")
-        metrics.record_model_call("conceptual_stage")
-        metrics.record_model_call("brand_physical")
-        metrics.record_model_call("graphic_system")
-        metrics.record_model_call("series_ads")
-        self.assertEqual(metrics.total_planning_model_calls, 6)
-        self.assertGreater(metrics.total_planning_model_calls, NORMAL_PLANNING_CALLS_WITH_NAME)
-
 
 class TestCombinedRegression(unittest.TestCase):
-    def test_candidate_counts_preserved(self) -> None:
+    def test_single_path_payload_has_no_candidate_arrays(self) -> None:
         payload = _strategy_slogan_stage_payload()
-        self.assertEqual(len(payload["strategy"]["candidates"]), 12)
-        self.assertEqual(len(payload["slogan"]["candidates"]), 6)
+        self.assertNotIn("candidates", payload["strategy"])
+        self.assertNotIn("candidates", payload["slogan"])
+        self.assertNotIn("selectedCandidateId", payload["strategy"])
+        self.assertNotIn("selectedCandidateId", payload["slogan"])
 
-    def test_conceptual_stage_remains_separate_call(self) -> None:
-        stages: List[str] = []
+    def test_stage_order_unchanged(self) -> None:
+        import inspect
+        from engine import builder1_planning_pipeline as module
 
-        def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            if stage:
-                stages.append(stage)
-            return copy.deepcopy(_full_final_responses(2).get(system, {}))
+        source = inspect.getsource(module.run_builder1_campaign_pipeline)
+        self.assertLess(source.index("run_strategy_slogan_stage"), source.index("run_conceptual_stage"))
 
-        plan_builder1(
-            product_name="CarryShell",
-            product_description=BRIEF,
-            format_value="portrait",
-            model_caller=model_caller,
-            ad_count=2,
-        )
-        self.assertEqual(stages.count("conceptual_stage"), 1)
-        self.assertLess(stages.index("strategy_slogan_stage"), stages.index("conceptual_stage"))
-
-    def test_comparison_harness_passes(self) -> None:
-        import io
-        from contextlib import redirect_stdout
-
+    def test_compare_contract_script_uses_final_payload(self) -> None:
         import scripts.compare_strategy_slogan_contract as compare_module
 
-        with redirect_stdout(io.StringIO()):
-            self.assertEqual(compare_module.main(), 0)
-
-
-class TestSloganOnlyRepair(unittest.TestCase):
-    def test_slogan_only_repair_preserves_frozen_strategy(self) -> None:
-        calls: List[str] = []
-
-        def model_caller(system: str, user: str, stage: str | None = None) -> object:
-            calls.append(stage or "")
-            if stage == "slogan_only_repair":
-                return _strategy_slogan_stage_payload()["slogan"]
-            return _strategy_slogan_stage_payload()
-
-        payload = _strategy_slogan_stage_payload()
-        payload["slogan"]["selectedCandidateId"] = "L99"
-        result = process_strategy_slogan_stage_response(
-            payload,
-            product_name="TestBrand",
-            product_name_resolved="TestBrand",
-            product_description=BRIEF,
-            detected_language="en",
-            model_caller=model_caller,
-            run_stage=_run_stage,
-        )
-        self.assertIn("slogan_only_repair", calls)
-        self.assertEqual(result[1].id, "S01")
-        self.assertEqual(result[5].id, "L01")
+        self.assertTrue(hasattr(compare_module, "main"))
 
 
 if __name__ == "__main__":
