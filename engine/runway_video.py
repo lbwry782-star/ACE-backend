@@ -29,6 +29,9 @@ from engine.builder2_runway_config import (
     resolve_builder2_runway_video_model,
     resolve_builder2_video_duration_seconds,
 )
+from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
+from engine.builder2_tournament_contracts import Builder2TournamentError
+from engine.builder2_tournament_manager import run_builder2_tournament
 from engine.video_start_image import generate_video_start_image_data_uri
 from engine.ad_promise_memory import record_ad_promise_generation_success
 from engine.video_planning import (
@@ -931,12 +934,26 @@ def _generate_one_video_mvp_body(
     plan_fail_reason = ""
     t_plan0 = time.monotonic()
     try:
-        plan, plan_fail_reason = fetch_video_plan_o3(
-            canonical_name,
-            product_description,
-            content_language=video_lang,
-            session_id=job_id or "",
-        )
+        if resolve_builder2_tournament_enabled():
+            plan = run_builder2_tournament(
+                job_id=job_id,
+                product_name=canonical_name,
+                product_description=product_description,
+                content_language=video_lang,
+            )
+        else:
+            plan, plan_fail_reason = fetch_video_plan_o3(
+                canonical_name,
+                product_description,
+                content_language=video_lang,
+                session_id=job_id or "",
+            )
+    except Builder2TournamentError as exc:
+        plan_ms = (time.monotonic() - t_plan0) * 1000.0
+        logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
+        logger.error("BUILDER2_TOURNAMENT_FAILED reason=%s", exc.args[0] if exc.args else "unknown")
+        _maybe_log_ad_promise_skip_after_failed_generation(None, promise_saved)
+        raise RunwayVideoMVPError(str(exc.args[0] if exc.args else "builder2_tournament_failed"))
     except VideoPlanningTimeoutError:
         plan_ms = (time.monotonic() - t_plan0) * 1000.0
         logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)

@@ -1,0 +1,515 @@
+"""
+Builder2 tournament manager — deterministic orchestration (never a model role).
+"""
+from __future__ import annotations
+
+import logging
+import random
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from engine.builder2_creator import generate_creator_candidate
+from engine.builder2_judge import judge_candidate
+from engine.builder2_prototypes import require_prototype
+from engine.builder2_runway_config import builder2_runway_generation_mode, resolve_builder2_runway_video_model
+from engine.builder2_tournament_config import (
+    resolve_builder2_active_prototype_ids,
+    resolve_builder2_creator_model,
+    resolve_builder2_tournament_attempts_per_prototype_per_round,
+    resolve_builder2_tournament_eliminations_per_round,
+    resolve_builder2_tournament_max_rounds,
+)
+from engine.builder2_tournament_contracts import (
+    STRATEGY_SCHEMA_VERSION,
+    VALID_GROUNDING_TYPES,
+    Builder2TournamentError,
+    compare_candidate_rankings,
+    require_dict,
+    require_non_empty_str,
+)
+from engine.builder2_tournament_llm import call_builder2_role_json
+from engine.builder2_tournament_prompts import build_strategy_prompt
+from engine.builder2_tournament_store import (
+    load_tournament_state,
+    mutate_tournament_state,
+    new_tournament_state,
+    register_candidate,
+    register_judgment,
+    save_tournament_state,
+    update_best_candidate_if_stronger,
+)
+from engine.builder2_winner_development import (
+    develop_builder2_winning_candidate,
+    normalize_winner_plan_for_runway,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def validate_strategy_foundation(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if raw.get("planningFailure") == "builder2_strategy_not_grounded":
+        raise Builder2TournamentError("builder2_strategy_not_grounded")
+    if raw.get("schemaVersion") != STRATEGY_SCHEMA_VERSION:
+        raise Builder2TournamentError("builder2_strategy_not_grounded")
+    require_non_empty_str(raw.get("productNameResolved"), field="productNameResolved")
+    lang = require_non_empty_str(raw.get("language"), field="language")
+    if lang not in {"he", "en"}:
+        raise Builder2TournamentError("builder2_strategy_not_grounded")
+    pp = require_dict(raw.get("problemPerception"), field="problemPerception")
+    require_non_empty_str(pp.get("statement"), field="problemPerception.statement")
+    gt = require_non_empty_str(pp.get("groundingType"), field="problemPerception.groundingType")
+    if gt not in VALID_GROUNDING_TYPES:
+        raise Builder2TournamentError("builder2_strategy_not_grounded")
+    evidence = pp.get("groundingEvidence")
+    if not isinstance(evidence, list) or not evidence:
+        raise Builder2TournamentError("builder2_strategy_not_grounded")
+    require_non_empty_str(pp.get("whyItMatters"), field="problemPerception.whyItMatters")
+    ra = require_dict(raw.get("relativeAdvantage"), field="relativeAdvantage")
+    require_non_empty_str(ra.get("statement"), field="relativeAdvantage.statement")
+    require_non_empty_str(ra.get("derivationFromProblem"), field="relativeAdvantage.derivationFromProblem")
+    ms = require_dict(raw.get("mechanismScan"), field="mechanismScan")
+    facts = ms.get("domainFacts")
+    if not isinstance(facts, list) or not facts:
+        raise Builder2TournamentError("builder2_strategy_not_grounded")
+    require_non_empty_str(ms.get("discoveredMechanism"), field="mechanismScan.discoveredMechanism")
+    require_non_empty_str(ms.get("creativeOpportunity"), field="mechanismScan.creativeOpportunity")
+    return raw
+
+
+def _shuffle_prototypes(active_ids: List[str], seed: str) -> List[str]:
+    rng = random.Random(seed)
+    deck = list(active_ids)
+    rng.shuffle(deck)
+    return deck
+
+
+def _candidate_rank_record(state: Dict[str, Any], candidate_id: str) -> Dict[str, Any]:
+    cand = state["candidates"][candidate_id]
+    return {
+        "candidateId": candidate_id,
+        "totalScore": cand.get("totalScore", -1),
+        "tieScores": cand.get("tieScores") or {},
+        "completedAt": cand.get("completedAt") or "",
+        "eligible": bool(cand.get("eligible")),
+    }
+
+
+def select_global_winner(state: Dict[str, Any]) -> str:
+    eligible_ids = [
+        cid
+        for cid, cand in state["candidates"].items()
+        if cand.get("eligible") and cand.get("validationStatus") == "accepted"
+    ]
+    if not eligible_ids:
+        raise Builder2TournamentError("builder2_tournament_no_valid_candidate")
+    best_id = eligible_ids[0]
+    best_record = _candidate_rank_record(state, best_id)
+    for cid in eligible_ids[1:]:
+        record = _candidate_rank_record(state, cid)
+        if compare_candidate_rankings(record, best_record) > 0:
+            best_id = cid
+            best_record = record
+    return best_id
+
+
+def _round_record(state: Dict[str, Any], round_index: int) -> Dict[str, Any]:
+    for rnd in state["rounds"]:
+        if rnd.get("roundIndex") == round_index:
+            return rnd
+    raise Builder2TournamentError("builder2_tournament_state_error")
+
+
+def _ensure_round(state: Dict[str, Any], round_index: int, deck: List[str]) -> None:
+    for rnd in state["rounds"]:
+        if rnd.get("roundIndex") == round_index:
+            return
+    state["rounds"].append(
+        {
+            "roundIndex": round_index,
+            "shuffledPrototypeOrder": list(deck),
+            "attemptsRequested": resolve_builder2_tournament_attempts_per_prototype_per_round(),
+            "attemptsCompleted": 0,
+            "judgmentsCompleted": 0,
+            "bestCandidateByPrototype": {},
+            "eliminatedPrototypeId": None,
+            "eliminationReason": None,
+        }
+    )
+
+
+def _generate_strategy(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    llm_client: Optional[Any],
+) -> Dict[str, Any]:
+    logger.info("BUILDER2_STRATEGY_GENERATION_START")
+    prompt = build_strategy_prompt(
+        product_name=product_name,
+        product_description=product_description,
+        language=language,
+    )
+    raw = call_builder2_role_json(
+        role="builder2_strategy",
+        model=resolve_builder2_creator_model(),
+        prompt=prompt,
+        llm_client=llm_client,
+    )
+    foundation = validate_strategy_foundation(raw)
+    logger.info("BUILDER2_STRATEGY_GENERATION_OK")
+    return foundation
+
+
+def _run_creator_and_judge_for_assignment(
+    *,
+    state: Dict[str, Any],
+    product_name: str,
+    product_description: str,
+    language: str,
+    prototype_id: str,
+    round_index: int,
+    attempt_number: int,
+    runway_mode: str,
+    llm_client: Optional[Any],
+) -> None:
+    strategy = state["strategyFoundation"]
+    existing = [
+        c
+        for c in state["candidates"].values()
+        if c.get("prototypeId") == prototype_id
+        and c.get("roundIndex") == round_index
+        and c.get("attemptNumber") == attempt_number
+        and c.get("validationStatus") == "accepted"
+        and c.get("judgmentId")
+    ]
+    if existing:
+        return
+
+    pending = [
+        c
+        for c in state["candidates"].values()
+        if c.get("prototypeId") == prototype_id
+        and c.get("roundIndex") == round_index
+        and c.get("attemptNumber") == attempt_number
+        and c.get("validationStatus") == "accepted"
+        and not c.get("judgmentId")
+    ]
+    if pending:
+        candidate_id = pending[0]["candidateId"]
+        candidate = pending[0]["creatorOutput"]
+    else:
+        logger.info(
+            "BUILDER2_PROTOTYPE_ASSIGNED prototypeId=%s roundIndex=%s attempt=%s",
+            prototype_id,
+            round_index,
+            attempt_number,
+        )
+        try:
+            candidate_id, candidate = generate_creator_candidate(
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                strategy_foundation=strategy,
+                prototype_id=prototype_id,
+                round_index=round_index,
+                attempt_number=attempt_number,
+                runway_mode=runway_mode,
+                llm_client=llm_client,
+            )
+        except Builder2TournamentError as exc:
+            logger.info(
+                "BUILDER2_CREATOR_REJECTED prototypeId=%s reason=%s",
+                prototype_id,
+                exc.args[0],
+            )
+            raise
+        register_candidate(
+            state,
+            {
+                "candidateId": candidate_id,
+                "prototypeId": prototype_id,
+                "roundIndex": round_index,
+                "attemptNumber": attempt_number,
+                "creatorOutput": candidate,
+                "validationStatus": "accepted",
+                "judgmentId": None,
+                "eligible": False,
+                "totalScore": None,
+                "tieScores": {},
+                "completedAt": _utc_now_iso(),
+            },
+        )
+
+    cand_rec = state["candidates"][candidate_id]
+    if cand_rec.get("judgmentId"):
+        return
+
+    try:
+        judgment_id, judgment, total, scores = judge_candidate(
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            strategy_foundation=strategy,
+            prototype_id=prototype_id,
+            candidate_id=candidate_id,
+            candidate=candidate,
+            llm_client=llm_client,
+        )
+    except Builder2TournamentError as exc:
+        logger.info(
+            "BUILDER2_JUDGE_REJECTED candidateId=%s reason=%s",
+            candidate_id,
+            exc.args[0],
+        )
+        cand_rec["validationStatus"] = "rejected"
+        raise
+
+    register_judgment(
+        state,
+        {
+            "judgmentId": judgment_id,
+            "candidateId": candidate_id,
+            "judgment": judgment,
+            "totalScore": total,
+            "scores": scores,
+            "eligible": judgment.get("eligible"),
+            "completedAt": _utc_now_iso(),
+        },
+    )
+    cand_rec["judgmentId"] = judgment_id
+    cand_rec["eligible"] = bool(judgment.get("eligible"))
+    cand_rec["totalScore"] = total
+    cand_rec["tieScores"] = scores
+    cand_rec["completedAt"] = _utc_now_iso()
+
+    if cand_rec["eligible"]:
+        updated = update_best_candidate_if_stronger(
+            state,
+            prototype_id=prototype_id,
+            candidate_id=candidate_id,
+            total_score=total,
+            tie_scores=scores,
+            completed_at=cand_rec["completedAt"],
+        )
+        if updated:
+            logger.info(
+                "BUILDER2_PROTOTYPE_BEST_UPDATED prototypeId=%s candidateId=%s total=%s",
+                prototype_id,
+                candidate_id,
+                total,
+            )
+
+
+def _eliminate_lowest_prototypes(state: Dict[str, Any], round_index: int) -> None:
+    active = list(state["activePrototypeIds"])
+    if len(active) <= 1:
+        return
+    elim_count = min(resolve_builder2_tournament_eliminations_per_round(), len(active) - 1)
+    ranked: List[Tuple[str, Dict[str, Any]]] = []
+    for pid in active:
+        best_id = state["bestCandidateByPrototype"].get(pid)
+        if best_id and state["candidates"].get(best_id, {}).get("eligible"):
+            ranked.append((pid, _candidate_rank_record(state, best_id)))
+        else:
+            ranked.append((pid, {"candidateId": "", "totalScore": -1, "tieScores": {}, "completedAt": "", "eligible": False}))
+    ranked.sort(key=lambda item: (
+        item[1]["totalScore"],
+        item[1]["tieScores"].get("silentVisualClarity", -1),
+        item[1]["tieScores"].get("problemAdvantageIntegrity", -1),
+        item[1]["tieScores"].get("runwayFeasibility", -1),
+    ))
+    to_eliminate = [pid for pid, _ in ranked[:elim_count]]
+    for pid in to_eliminate:
+        if pid in state["activePrototypeIds"]:
+            state["activePrototypeIds"].remove(pid)
+            state["eliminatedPrototypeIds"].append(pid)
+            logger.info(
+                "BUILDER2_PROTOTYPE_ELIMINATED prototypeId=%s roundIndex=%s",
+                pid,
+                round_index,
+            )
+    rnd = _round_record(state, round_index)
+    if to_eliminate:
+        rnd["eliminatedPrototypeId"] = to_eliminate[0]
+        rnd["eliminationReason"] = "lowest_best_candidate_rank"
+
+
+def run_builder2_tournament(
+    *,
+    job_id: str,
+    product_name: str,
+    product_description: str,
+    content_language: str,
+    llm_client: Optional[Any] = None,
+    rng_seed: Optional[str] = None,
+) -> Dict[str, Any]:
+    language = content_language
+    runway_model = resolve_builder2_runway_video_model()
+    runway_mode = builder2_runway_generation_mode(runway_model)
+    active_ids = resolve_builder2_active_prototype_ids()
+    attempts_per = resolve_builder2_tournament_attempts_per_prototype_per_round()
+    max_rounds = resolve_builder2_tournament_max_rounds()
+
+    state = load_tournament_state(job_id)
+    if state:
+        logger.info("BUILDER2_TOURNAMENT_RESUMED jobId=%s tournamentId=%s", job_id, state.get("tournamentId"))
+    else:
+        seed = rng_seed or f"{job_id}-{uuid.uuid4().hex}"
+        state = new_tournament_state(
+            job_id=job_id,
+            language=language,
+            active_prototype_ids=active_ids,
+            random_seed=seed,
+        )
+        save_tournament_state(job_id, state)
+        logger.info(
+            "BUILDER2_TOURNAMENT_START jobId=%s tournamentId=%s prototypes=%s",
+            job_id,
+            state["tournamentId"],
+            len(active_ids),
+        )
+
+    if not state.get("strategyFoundation"):
+        state["status"] = "strategy_generating"
+        state["lastCompletedStep"] = "strategy_generating"
+        save_tournament_state(job_id, state)
+        state["strategyFoundation"] = _generate_strategy(
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            llm_client=llm_client,
+        )
+        state["status"] = "strategy_complete"
+        state["lastCompletedStep"] = "strategy_complete"
+        save_tournament_state(job_id, state)
+
+    round_index = max((state.get("currentRound") or 0), 1)
+    if round_index == 1 and not state["rounds"]:
+        state["currentRound"] = 1
+
+    while len(state["activePrototypeIds"]) > 1:
+        if max_rounds > 0 and (round_index - 1) >= max_rounds:
+            break
+        if _round_is_complete(state, round_index):
+            round_index += 1
+            state["currentRound"] = round_index
+            save_tournament_state(job_id, state)
+            continue
+
+        deck = _current_round_deck(state, round_index)
+        _ensure_round(state, round_index, deck)
+        state["status"] = "round_generating"
+        state["lastCompletedStep"] = f"round_{round_index}_generating"
+        logger.info("BUILDER2_ROUND_START roundIndex=%s active=%s", round_index, state["activePrototypeIds"])
+        save_tournament_state(job_id, state)
+
+        for prototype_id in deck:
+            if prototype_id not in state["activePrototypeIds"]:
+                continue
+            for attempt in range(1, attempts_per + 1):
+                _run_creator_and_judge_for_assignment(
+                    state=state,
+                    product_name=product_name,
+                    product_description=product_description,
+                    language=language,
+                    prototype_id=prototype_id,
+                    round_index=round_index,
+                    attempt_number=attempt,
+                    runway_mode=runway_mode,
+                    llm_client=llm_client,
+                )
+                save_tournament_state(job_id, state)
+
+        state["status"] = "round_complete"
+        state["lastCompletedStep"] = f"round_{round_index}_complete"
+        rnd = _round_record(state, round_index)
+        rnd["attemptsCompleted"] = attempts_per * len(deck)
+        rnd["judgmentsCompleted"] = len(
+            [
+                c
+                for c in state["candidates"].values()
+                if c.get("roundIndex") == round_index and c.get("judgmentId")
+            ]
+        )
+        save_tournament_state(job_id, state)
+
+        if len(state["activePrototypeIds"]) > 1:
+            _eliminate_lowest_prototypes(state, round_index)
+            state["status"] = "eliminating"
+            state["lastCompletedStep"] = f"round_{round_index}_eliminated"
+        round_index += 1
+        state["currentRound"] = round_index
+        save_tournament_state(job_id, state)
+
+    state["status"] = "tournament_complete"
+    state["lastCompletedStep"] = "tournament_complete"
+    winner_id = state.get("winnerCandidateId")
+    if not winner_id:
+        winner_id = select_global_winner(state)
+        state["winnerCandidateId"] = winner_id
+        logger.info(
+            "BUILDER2_TOURNAMENT_WINNER_SELECTED jobId=%s candidateId=%s",
+            job_id,
+            winner_id,
+        )
+    save_tournament_state(job_id, state)
+
+    if not state.get("winnerDevelopmentPlan"):
+        state["status"] = "winner_developing"
+        state["lastCompletedStep"] = "winner_developing"
+        save_tournament_state(job_id, state)
+        winner_rec = state["candidates"][winner_id]
+        try:
+            winner_plan = develop_builder2_winning_candidate(
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                strategy_foundation=state["strategyFoundation"],
+                winning_candidate=winner_rec["creatorOutput"],
+                prototype_id=winner_rec["prototypeId"],
+                runway_mode=runway_mode,
+                llm_client=llm_client,
+            )
+        except Builder2TournamentError:
+            logger.error("BUILDER2_WINNER_DEVELOPMENT_FAILED candidateId=%s", winner_id)
+            state["status"] = "failed"
+            save_tournament_state(job_id, state)
+            raise
+        state["winnerDevelopmentPlan"] = winner_plan
+        state["status"] = "winner_plan_complete"
+        state["lastCompletedStep"] = "winner_plan_complete"
+        save_tournament_state(job_id, state)
+        logger.info("BUILDER2_WINNER_DEVELOPMENT_OK candidateId=%s", winner_id)
+
+    normalized = normalize_winner_plan_for_runway(
+        state["winnerDevelopmentPlan"],
+        product_name=product_name,
+        product_description=product_description,
+        content_language=language,
+    )
+    normalized["tournamentId"] = state.get("tournamentId")
+    normalized["winnerCandidateId"] = winner_id
+    return normalized
+
+
+def _round_is_complete(state: Dict[str, Any], round_index: int) -> bool:
+    try:
+        rnd = _round_record(state, round_index)
+    except Builder2TournamentError:
+        return False
+    return rnd.get("judgmentsCompleted", 0) > 0
+
+
+def _current_round_deck(state: Dict[str, Any], round_index: int) -> List[str]:
+    for rnd in state["rounds"]:
+        if rnd.get("roundIndex") == round_index and rnd.get("shuffledPrototypeOrder"):
+            return list(rnd["shuffledPrototypeOrder"])
+    active = [pid for pid in state["activePrototypeIds"]]
+    seed = f"{state['randomSeed']}-round-{round_index}"
+    return _shuffle_prototypes(active, seed)

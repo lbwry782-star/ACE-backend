@@ -181,7 +181,12 @@ class TestBuilder2RunwayGenerationRouting(unittest.TestCase):
     @patch("engine.runway_video.video_job_set_resolved_product_name")
     @patch.dict(
         os.environ,
-        {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test"},
+        {
+            "RUNWAY_API_KEY": "rk-test",
+            "OPENAI_API_KEY": "sk-test",
+            "BUILDER2_RUNWAY_VIDEO_MODEL": "gen4_turbo",
+            "BUILDER2_TOURNAMENT_ENABLED": "false",
+        },
         clear=False,
     )
     @patch("engine.runway_video.generate_video_start_image_data_uri", return_value=None)
@@ -200,9 +205,8 @@ class TestBuilder2RunwayGenerationRouting(unittest.TestCase):
     ) -> None:
         from engine.runway_video import _generate_one_video_mvp_body
 
-        with patch.dict(os.environ, {"BUILDER2_RUNWAY_VIDEO_MODEL": "gen4_turbo"}, clear=False):
-            with self.assertRaises(RunwayVideoMVPError) as ctx:
-                _generate_one_video_mvp_body("Product", "A useful product.", job_id="job-1")
+        with self.assertRaises(RunwayVideoMVPError) as ctx:
+            _generate_one_video_mvp_body("Product", "A useful product.", job_id="job-1")
         self.assertEqual(ctx.exception.args[0], "builder2_start_image_generation_failed")
         _start_image.assert_called_once()
         image_task_mock.assert_not_called()
@@ -212,7 +216,11 @@ class TestBuilder2RunwayGenerationRouting(unittest.TestCase):
     @patch("engine.runway_video.video_job_set_phase")
     @patch.dict(
         os.environ,
-        {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test"},
+        {
+            "RUNWAY_API_KEY": "rk-test",
+            "OPENAI_API_KEY": "sk-test",
+            "BUILDER2_TOURNAMENT_ENABLED": "false",
+        },
         clear=False,
     )
     @patch("engine.runway_video.generate_video_start_image_data_uri", return_value="data:image/png;base64,x")
@@ -237,7 +245,11 @@ class TestBuilder2RunwayGenerationRouting(unittest.TestCase):
         poll_mock.return_value = {"status": "SUCCEEDED", "output": ["https://runway/video.mp4"]}
         from engine.runway_video import _generate_one_video_mvp_body
 
-        with patch.dict(os.environ, {"BUILDER2_RUNWAY_VIDEO_MODEL": "gen4_turbo"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"BUILDER2_RUNWAY_VIDEO_MODEL": "gen4_turbo", "BUILDER2_TOURNAMENT_ENABLED": "false"},
+            clear=False,
+        ):
             with patch("engine.runway_video.postprocess_video_headline", return_value="https://final/video.mp4"):
                 with patch("engine.runway_video._fallback_packaging_marketing_copy", return_value="copy"):
                     with patch("engine.runway_video.record_ad_promise_generation_success"):
