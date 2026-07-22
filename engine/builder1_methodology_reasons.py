@@ -144,9 +144,9 @@ Selection test: "Does the viewer understand why this particular object is doing 
 DO_NOT_SHOW_THING_ITSELF = """
 Do not literally depict the subject of the slogan when another object can communicate the idea more clearly.
 Why: literal depiction repeats the claim; a transferred embodiment demonstrates it.
-Failure prevented: showing the service interface for closeness, the vehicle for speed, or the food product for freshness — category illustration without perception proof.
-Instead: find a known physical situation where closeness, speed, freshness, generosity, simplicity, or protection becomes visibly undeniable.
-Selection test: "Is the visual merely showing the subject, or is it physically proving the intended perception?"
+Failure prevented: showing the service interface for closeness, the vehicle for speed, the road/maze/car for shortening a way, or the food product for freshness — category or slogan-noun illustration without perception proof.
+Instead: find a known physical situation or external object where the intended perception becomes visibly undeniable.
+Selection test: "Is the visual merely showing the subject or slogan noun, or is it physically proving the intended perception through a stronger external object?"
 Do not copy these categories automatically into campaigns.
 """.strip()
 
@@ -184,7 +184,8 @@ SERIES_COHERENCE_REASON = """
 Every ad must use the same conceptual, physical-family, and graphic generators.
 Why: a series develops one idea through variation — not a collection of different metaphors about the same broad benefit.
 Failure prevented: treating "connection" as permission for handshake, bridge, chain, cable, hug, and puzzle pieces in one series — similar message, unstable visual family.
-Instead: choose one recurring visual law and develop distinct examples within it.
+Failure prevented: trapping a shortening concept in literal road/maze/car/route/product-category imagery across multiple ads.
+Instead: choose one recurring visual law and develop distinct external expressive examples within it.
 Selection test: "Do these advertisements feel like different episodes of one mechanism, or different ideas gathered under one topic?"
 """.strip()
 

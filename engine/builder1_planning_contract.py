@@ -32,6 +32,13 @@ from engine.builder1_product_shot_methodology import (
     BUILDER1_SERIES_TRANSFERRED_OBJECT_RULES,
     BUILDER1_VISIBILITY_POLICY_METHODOLOGY,
 )
+from engine.builder1_literal_embodiment import (
+    BUILDER1_CONCEPT_FIRST_RULE,
+    BUILDER1_EXPRESSIVE_OBJECT_DECISION,
+    BUILDER1_SERIES_EXTERNAL_OBJECT_RULE,
+    BUILDER1_SLOGAN_COMPLEMENTARITY_RULE,
+    BUILDER1_SLOGAN_LITERALNESS_SCAN,
+)
 
 EXPLORATION_LENSES = [
     "economic",
@@ -294,6 +301,10 @@ You are a Builder1 conceptual-generator explorer.
 Return JSON only. Return exactly this object and no additional top-level keys:
 {{"candidates":[{{"id":"C01","generator":"...","action":"...","input":"...","transformation":"...","result":"...","perceptionToCreate":"...","impliedPhysicalLaw":"...","whyItExpressesSlogan":"...","whyItExpressesAdvantage":"...","seriesPotential":"...","brandOwnershipPotential":"..."}}]}}
 {CONCEPTUAL_STAGE_METHODOLOGY}
+{BUILDER1_CONCEPT_FIRST_RULE}
+{BUILDER1_EXPRESSIVE_OBJECT_DECISION}
+{BUILDER1_SLOGAN_COMPLEMENTARITY_RULE}
+{BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_PERCEPTION_FIRST}
 {BUILDER1_REMOVAL_TEST}
 {BUILDER1_CLARITY_OVER_CATEGORY}
@@ -301,6 +312,7 @@ Rules:
 - Exactly 6 candidates with ids C01 through C06.
 - Every candidate must be an object with all string fields non-empty.
 - Begin from the exact perception to create and the clearest physical demonstration of that perception — NOT from how to show the advertised product.
+- Do not illustrate slogan nouns literally when a stronger external object can embody the action.
 - perceptionToCreate: the belief or clarity the viewer must acquire.
 - impliedPhysicalLaw: the action or physical law that makes that perception visible.
 - The conceptual generator must answer: what action or transformation makes the selected brand slogan visible?
@@ -316,19 +328,25 @@ You are a Builder1 conceptual-generator explorer and selector.
 Return JSON only. Return exactly this object and no additional top-level keys:
 {{"candidates":[{{"id":"C01","generator":"...","action":"...","input":"...","transformation":"...","result":"...","perceptionToCreate":"...","impliedPhysicalLaw":"...","whyItExpressesSlogan":"...","whyItExpressesAdvantage":"...","seriesPotential":"...","brandOwnershipPotential":"..."}}],"evaluations":[{{"candidateId":"C01","perceptionToCreate":"...","impliedPhysicalLaw":"...","derivedFromSelectedSloganAction":true,"expressesRelativeAdvantage":true,"visuallyClear":true,"seriesGenerative":true,"brandOwnable":true,"categoryRelevant":true,"executableByImageModel":true,"survivesProductRemoval":true,"avoidsProductShotBias":true,"supportsTransferredObject":true,"distinctiveToBrand":true,"productEvidenceRequired":false,"productEvidenceReason":"","eligible":true,"rejectionCodes":[]}}],"selectedCandidateId":"C01","selectionReason":"..."}}
 {CONCEPTUAL_STAGE_METHODOLOGY}
+{BUILDER1_CONCEPT_FIRST_RULE}
+{BUILDER1_EXPRESSIVE_OBJECT_DECISION}
+{BUILDER1_SLOGAN_COMPLEMENTARITY_RULE}
+{BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_PERCEPTION_FIRST}
 {BUILDER1_REMOVAL_TEST}
 {BUILDER1_CLARITY_OVER_CATEGORY}
 {BUILDER1_PRODUCT_EVIDENCE_EXCEPTION}
 Internal order:
 1. Define the exact audience perception to create from the fixed slogan action.
-2. Generate conceptual-generator candidates from that perception — not from the product.
-3. Apply the removal test to every candidate.
-4. Evaluate each candidate once in evaluations for product-shot bias and transferred-object potential.
-5. Select one eligible conceptual generator by id.
+2. Ask whether the literal slogan object or product category is necessary — usually it is not.
+3. Generate conceptual-generator candidates from that perception — not from the product or slogan nouns.
+4. Apply the removal test to every candidate.
+5. Evaluate each candidate once in evaluations for product-shot bias, literal-slogan illustration, and transferred-object potential.
+6. Select one eligible conceptual generator by id.
 Rules:
 - Exactly 6 candidates with ids C01 through C06.
-- Derive every candidate from the fixed brand slogan and its implied action — not from product shape, packaging, or conventional product shots.
+- Derive every candidate from the fixed brand slogan and its implied action — not from product shape, packaging, conventional product shots, or literal slogan nouns.
+- Reject candidates that merely illustrate the slogan wording instead of physically proving the perception.
 - generator must define a repeatable action, not a mood, object, or abstract noun.
 - categoryRelevant means relevant to the fixed relative advantage — not category literalness.
 - Mark eligible=false with rejectionCodes when the idea collapses without the product, starts from product-shot logic, lacks a transferred-object path, or is generically transferable — unless productEvidenceRequired=true with a convincing productEvidenceReason.
@@ -375,6 +393,10 @@ You are a Builder1 physical-system builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
 {{"physicalCandidates":[{{"id":"P01","externalObject":"...","physicalWorld":"...","physicalAction":"...","perceptionDemonstrated":"...","sloganActionConnection":"...","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"seriesPotential":"...","whyClearerThanShowingProduct":"..."}}],"physicalEvaluations":[{{"candidateId":"P01","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"supportsTransferredObject":true,"distinctiveToBrand":true,"eligible":true,"rejectionCodes":[]}}],"selectedPhysicalCandidateId":"P01","productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","physicalGeneratorIsProduct":false,"physicalGeneratorIsPackaging":false,"worksWithoutProductVisible":true,"transferredObject":"...","transferredObjectAction":"...","whyClearerThanShowingProduct":"...","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"productEvidenceRequired":false,"productEvidenceReason":"","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
 {BRAND_PHYSICAL_STAGE_METHODOLOGY}
+{BUILDER1_CONCEPT_FIRST_RULE}
+{BUILDER1_EXPRESSIVE_OBJECT_DECISION}
+{BUILDER1_SLOGAN_COMPLEMENTARITY_RULE}
+{BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_CLARITY_OVER_CATEGORY}
 {BUILDER1_REMOVAL_TEST}
 {BUILDER1_PRODUCT_EVIDENCE_EXCEPTION}
@@ -383,9 +405,10 @@ Rules:
 - Do NOT create, replace, or modify the brand slogan. It is fixed before this stage.
 - productNameResolved must exactly match the fixed productNameResolved value provided in the user prompt. Do not rename it.
 - Generate at least 4 physicalCandidates P01-P04 from different physicalWorld values before selecting.
-- Do not allow all candidates to be minor variations of the advertised product or its category.
-- Search broadly across different physical worlds; restart the object search for this brand only.
-- Apply the removal test to every candidate before selection.
+- Do not allow all candidates to be minor variations of the advertised product, its category, or literal slogan nouns.
+- Search broadly across different physical worlds for the strongest expressive object — restart the object search for this brand only.
+- Apply the removal test and expressive-object decision to every candidate before selection.
+- Prefer an external object that makes the perception clearer than showing the product, category, or literal slogan object.
 - Top-level physical fields must match the selectedPhysicalCandidateId.
 - The selected physical generator must NOT be the advertised product, its packaging, or a category package unless productEvidenceRequired=true with a convincing productEvidenceReason.
 - physicalGeneratorIsProduct, physicalGeneratorIsPackaging must be false and worksWithoutProductVisible must be true when policy is FORBIDDEN.
@@ -446,13 +469,19 @@ Return JSON only. Return exactly this object and no additional top-level keys:
 {{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"...","executionSubject":"...","executionAction":"...","executionObjectState":"...","executionScene":"...","executionPunchline":"..."}}]}}
 {SERIES_STAGE_METHODOLOGY}
 {BUILDER1_SERIES_TRANSFERRED_OBJECT_RULES}
+{BUILDER1_SERIES_EXTERNAL_OBJECT_RULE}
+{BUILDER1_CONCEPT_FIRST_RULE}
+{BUILDER1_EXPRESSIVE_OBJECT_DECISION}
+{BUILDER1_SLOGAN_COMPLEMENTARITY_RULE}
+{BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_VISIBILITY_POLICY_METHODOLOGY}
 {NO_LOGO_REASON}
 Rules:
 - seriesGenerator must be an object with type, principle, progression.
 - ads must contain exactly the requested ad count ({AD_COUNT_MIN}-{AD_COUNT_MAX}).
 - Every ad must preserve the same conceptual generator, transferred physical family, and graphic system.
-- Do not let any ad fall back to a conventional product shot, packaging variation, hero-product angle, or product-shot fallback.
+- Do not let any ad fall back to a conventional product shot, packaging variation, hero-product angle, literal slogan-object illustration, or product-shot fallback.
+- Each ad must search for the strongest external expressive embodiment of the shared concept — not repeated road/maze/car/category literalism.
 - The campaign slogan has already been selected upstream and is immutable.
 - Do not generate, rewrite, paraphrase, translate, punctuate, or spacing-change the slogan.
 - Do not create a different slogan for any advertisement.
@@ -776,8 +805,9 @@ def build_conceptual_scan_user_prompt(
         f"Implied slogan action: {implied_action}\n"
         f"Exploration seed: {exploration_seed}\n"
         "Every conceptual candidate must derive from the slogan action and the perception to create. "
-        "Apply the removal test. Do not begin from product shape, packaging, or conventional product shots.\n"
-        "Answer: what action or transformation makes the slogan visible without defaulting to showing the product?\n"
+        "Apply the removal test and expressive-object decision. "
+        "Run the slogan-literalness scan. Do not begin from product shape, packaging, conventional product shots, or literal slogan nouns.\n"
+        "Answer: what external object physically proves the perception more clearly than showing the product or copying a slogan noun?\n"
         "Return exactly 6 conceptual-generator candidates C01-C06 as objects."
     )
 
@@ -810,7 +840,8 @@ def build_conceptual_stage_user_prompt(
         "Generate exactly 6 conceptual candidates, evaluate each once with perceptionToCreate, impliedPhysicalLaw, "
         "survivesProductRemoval, avoidsProductShotBias, supportsTransferredObject, and distinctiveToBrand, "
         "and select one eligible concept.\n"
-        "Reject candidates that depend on conventional product-shot logic unless productEvidenceRequired is justified.\n"
+        "Reject candidates that depend on conventional product-shot logic, literal slogan-object illustration, "
+        "or category literalness unless productEvidenceRequired is justified.\n"
         "Do not reuse a previous conceptual generator or central mechanism for this product.\n"
         "Do not choose physical generators, graphic systems, or advertisements."
         f"{memory}"
@@ -1132,7 +1163,10 @@ def build_series_ads_user_prompt(
         f"Physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
         f"Graphic system:\n{json.dumps(graphic_generator, ensure_ascii=False, indent=2)}\n"
         f"Server product visibility policy: {visibility_policy}\n"
-        "Every ad must execute the same transferred physical family — no product-shot fallbacks in later ads.\n"
+        "Every ad must execute the same transferred physical family — no product-shot fallbacks or literal slogan/category traps in later ads.\n"
+        "Before returning each ad, run the slogan-literalness scan. "
+        "Ask: is this too close to the product, the literal slogan noun, or merely illustrating the wording? "
+        "If yes, replace it with a stronger external expressive object that stays simple and immediately readable.\n"
         "Do not decide product or packaging visibility in ad output — the server injects visibility fields.\n"
         "All ads must share the same campaign generators and graphic system, but each ad must use a clearly "
         "distinct execution.\n"

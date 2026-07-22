@@ -16,6 +16,7 @@ from engine.builder1_failure_classification import (
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_identity_guard import extract_product_category_identities
 from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_literal_embodiment import validate_visual_prompt_expressive_object
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,7 @@ def classify_image_prompt_plan(
     reasons = list(dict.fromkeys(validate_ad_plan_for_forbidden_image(series_plan, ad_plan)))
     if prompt:
         reasons.extend(validate_forbidden_visual_prompt_text(prompt, series_plan=series_plan).reasons)
+        reasons.extend(validate_visual_prompt_expressive_object(prompt, series_plan=series_plan))
     reasons = list(dict.fromkeys(reasons))
     if reasons:
         return ImagePromptPreflightResult(

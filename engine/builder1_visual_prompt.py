@@ -7,6 +7,7 @@ from engine.builder1_methodology_reasons import NO_LOGO_REASON, POSITIVE_IMAGE_P
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_shot_methodology import BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE
+from engine.builder1_literal_embodiment import BUILDER1_IMAGE_EXPRESSIVE_OBJECT_RULE
 from engine.builder1_product_visibility import ProductVisibilityPolicy
 
 MEDIUM_PROHIBITION = (
@@ -91,7 +92,7 @@ def _forbidden_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Build
             f"ACTION: {action}",
             f"Ad variation: {ad_plan.variation_label}.",
             f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
-            "Center the transferred external object and its physical action as the advertisement's visual proof.",
+            "Center the selected external expressive object and its physical action as the advertisement's visual proof.",
             "Product Name and slogan appear only as plain typography — not on objects, packaging, or signs.",
             "=== END MAIN VISUAL ===",
             "=== ADVERTISED PRODUCT ===",
@@ -155,8 +156,11 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
         POSITIVE_IMAGE_PROMPT_REASON,
         NO_LOGO_REASON,
         BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE,
+        BUILDER1_IMAGE_EXPRESSIVE_OBJECT_RULE,
+        "Preserve the selected external expressive object as MAIN VISUAL. Do not substitute the advertised product, product category, literal slogan noun, road/path/maze/car/train imagery, or other literal illustration unless that object was explicitly selected in planning.",
+        "Do not add discarded slogan nouns back into the scene when planning selected a non-literal expressive object.",
         f"Fixed brand slogan (typography only): {series_plan.brand_slogan}.",
-        f"Slogan-implied action for the transferred object: {series_plan.slogan_action}.",
+        f"Slogan-implied action performed by the selected external object: {series_plan.slogan_action}.",
         "MARKETING TEXT must NOT appear inside the image.",
         headline_rule,
         hebrew_block,

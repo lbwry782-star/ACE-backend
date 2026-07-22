@@ -8,9 +8,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from engine.builder1_no_logo import deterministic_no_logo_checks
 from engine.builder1_slogan_stage import SLOGAN_REJECTION_CODES, is_slogan_rejection
+from engine.builder1_literal_embodiment import (
+    LITERAL_EMBODIMENT_REJECTION_CODES,
+    scan_literal_embodiment_bias,
+)
 
 METHODOLOGY_REJECTION_CODES = frozenset(
     SLOGAN_REJECTION_CODES
+    | LITERAL_EMBODIMENT_REJECTION_CODES
     | {
         "conceptual_generator_not_derived_from_slogan",
         "physical_generator_not_derived_from_concept",
@@ -115,6 +120,11 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
             "physical_generator_is_product",
             "physical_generator_is_packaging",
             "unauthorized_product_visibility",
+            "literal_slogan_illustration",
+            "literal_slogan_object_depiction",
+            "literal_category_depiction",
+            "literal_product_embodiment",
+            "slogan_word_illustration",
         )
     ):
         return "brand_physical"
@@ -125,6 +135,9 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
             "series_lacks_shared_visual_law",
             "same_image_different_headlines",
             "no_mechanism_reuse_inside_campaign",
+            "series_literal_category_trap",
+            "expressive_object_weakened",
+            "literal_slogan_illustration",
         )
     ):
         return "series_ads"
@@ -156,6 +169,11 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
                     "physical_generator_is_product",
                     "physical_generator_is_packaging",
                     "unauthorized_product_visibility",
+                    "literal_slogan_illustration",
+                    "literal_slogan_object_depiction",
+                    "literal_category_depiction",
+                    "literal_product_embodiment",
+                    "slogan_word_illustration",
                 }
             ),
         ),
@@ -176,6 +194,9 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
                     "series_lacks_shared_visual_law",
                     "same_image_different_headlines",
                     "no_mechanism_reuse_inside_campaign",
+                    "series_literal_category_trap",
+                    "expressive_object_weakened",
+                    "literal_slogan_illustration",
                 }
             ),
         ),
@@ -364,6 +385,8 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
         no_reuse = _norm(ad.get("noReuseCheck")).lower()
         if no_reuse in {"duplicate", "same", "reused"}:
             reasons.append("no_mechanism_reuse_inside_campaign")
+
+    reasons.extend(scan_literal_embodiment_bias(plan_dict))
 
     return list(dict.fromkeys(reasons))
 

@@ -149,6 +149,8 @@ CONCEPTUAL_PRODUCT_SHOT_REJECTION_CODES = frozenset(
         "concept_no_transferred_object_path",
         "concept_not_distinctive",
         "concept_starts_from_product_shape",
+        "concept_literal_slogan_illustration",
+        "concept_slogan_noun_depiction",
     }
 )
 
@@ -162,5 +164,7 @@ PHYSICAL_PRODUCT_SHOT_REJECTION_CODES = frozenset(
         "physical_no_external_object",
         "physical_insufficient_candidates",
         "physical_missing_evidence_reason",
+        "physical_literal_slogan_object",
+        "physical_slogan_word_illustration",
     }
 )
