@@ -61,7 +61,8 @@ class TestBalancedRoutingAndConfig(unittest.TestCase):
         self._env.stop()
 
     def test_core_stages_keep_quality_model(self) -> None:
-        for stage in ("strategy_slogan_stage", "conceptual_stage", "brand_physical"):
+        self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "gpt-5.6-sol")
+        for stage in ("conceptual_stage", "brand_physical"):
             self.assertEqual(resolve_stage_model(stage), "gpt-5.6-sol")
 
     def test_missing_execution_model_logs_inactive_optimization(self) -> None:
@@ -79,7 +80,8 @@ class TestBalancedRoutingAndConfig(unittest.TestCase):
 
     def test_fast_profile_remains_opt_in(self) -> None:
         with patch.dict(os.environ, {"BUILDER1_PLANNING_PROFILE": "FAST"}, clear=False):
-            self.assertEqual(resolve_stage_model("slogan_stage"), "gpt-4.1")
+            self.assertEqual(resolve_stage_model("slogan_stage"), "gpt-5.6-sol")
+            self.assertEqual(resolve_stage_model("conceptual_stage"), "gpt-4.1")
 
 
 class TestPlanningCallMetrics(unittest.TestCase):

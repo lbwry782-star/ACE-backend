@@ -18,6 +18,7 @@ from engine.builder1_planning_metrics import (
 )
 from engine.builder1_planning_profile import (
     PlanningProfile,
+    STRATEGY_SLOGAN_FAMILY_STAGES,
     execution_optimization_active,
     model_supports_reasoning_effort,
     resolve_planning_profile,
@@ -61,7 +62,8 @@ class TestPlanningProfiles(unittest.TestCase):
         self.assertEqual(resolve_planning_profile(), PlanningProfile.BALANCED)
         with patch.dict(os.environ, {"BUILDER1_PLANNING_PROFILE": "FAST"}, clear=False):
             self.assertEqual(resolve_planning_profile(), PlanningProfile.FAST)
-            self.assertEqual(resolve_stage_model("slogan_stage"), "gpt-4.1")
+            self.assertEqual(resolve_stage_model("slogan_stage"), "gpt-5.6-sol")
+            self.assertEqual(resolve_stage_model("conceptual_stage"), "gpt-4.1")
 
     def test_unsupported_execution_model_falls_back_when_unset(self) -> None:
         with patch.dict(os.environ, {"BUILDER1_EXECUTION_MODEL": ""}, clear=False):
@@ -98,7 +100,13 @@ class TestPlanningProfiles(unittest.TestCase):
         )
 
     def test_repair_stages_inherit_default_medium(self) -> None:
-        for stage in ("strategy_candidate_repair", "conceptual_evaluation_repair"):
+        self.assertEqual(
+            resolve_stage_reasoning_effort("conceptual_evaluation_repair", "gpt-5.6-sol"),
+            "medium",
+        )
+        for stage in STRATEGY_SLOGAN_FAMILY_STAGES:
+            if stage == "strategy_slogan_stage":
+                continue
             with self.subTest(stage=stage):
                 self.assertEqual(
                     resolve_stage_reasoning_effort(stage, "gpt-5.6-sol"),
@@ -119,6 +127,111 @@ class TestPlanningProfiles(unittest.TestCase):
             resolve_stage_reasoning_effort("brand_physical", "gpt-5.6-sol"),
             "medium",
         )
+
+
+class TestStrategySloganSolSplit(unittest.TestCase):
+    PRODUCTION_ENV = {
+        "BUILDER1_PLANNING_PROFILE": "QUALITY",
+        "BUILDER1_QUALITY_MODEL": "gpt-5.6-terra",
+        "OPENAI_REASONING_EFFORT": "medium",
+        "BUILDER1_STRATEGY_SLOGAN_STAGE_MODEL": "gpt-5.6-sol",
+        "BUILDER1_STRATEGY_SLOGAN_STAGE_REASONING_EFFORT": "low",
+    }
+
+    def setUp(self) -> None:
+        self._env = patch.dict(os.environ, self.PRODUCTION_ENV, clear=False)
+        self._env.start()
+
+    def tearDown(self) -> None:
+        self._env.stop()
+
+    def test_strategy_slogan_stage_uses_sol(self) -> None:
+        self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "gpt-5.6-sol")
+
+    def test_strategy_slogan_stage_uses_low_effort(self) -> None:
+        self.assertEqual(
+            resolve_stage_reasoning_effort("strategy_slogan_stage", "gpt-5.6-sol"),
+            "low",
+        )
+
+    def test_other_normal_stages_remain_terra_medium(self) -> None:
+        for stage in ("conceptual_stage", "brand_physical", "graphic_system", "series_ads"):
+            with self.subTest(stage=stage):
+                self.assertEqual(resolve_stage_model(stage), "gpt-5.6-terra")
+                self.assertEqual(
+                    resolve_stage_reasoning_effort(stage, "gpt-5.6-terra"),
+                    "medium",
+                )
+
+    def test_strategy_slogan_repairs_inherit_sol_low(self) -> None:
+        for stage in (
+            "strategy_slogan_repair",
+            "strategy_candidate_repair",
+            "slogan_only_repair",
+        ):
+            with self.subTest(stage=stage):
+                self.assertEqual(resolve_stage_model(stage), "gpt-5.6-sol")
+                self.assertEqual(
+                    resolve_stage_reasoning_effort(stage, "gpt-5.6-sol"),
+                    "low",
+                )
+
+    def test_conceptual_repair_does_not_inherit_sol(self) -> None:
+        self.assertEqual(resolve_stage_model("conceptual_evaluation_repair"), "gpt-5.6-terra")
+        self.assertEqual(
+            resolve_stage_reasoning_effort("conceptual_evaluation_repair", "gpt-5.6-terra"),
+            "medium",
+        )
+
+    def test_physical_and_series_repairs_do_not_inherit_sol(self) -> None:
+        for stage in ("physical_evaluation_repair", "series_execution_repair"):
+            with self.subTest(stage=stage):
+                self.assertEqual(resolve_stage_model(stage), "gpt-5.6-terra")
+                self.assertEqual(
+                    resolve_stage_reasoning_effort(stage, "gpt-5.6-terra"),
+                    "medium",
+                )
+
+    def test_shared_quality_model_remains_terra(self) -> None:
+        from engine.builder1_planning_profile import quality_model
+
+        self.assertEqual(quality_model(), "gpt-5.6-terra")
+
+    def test_removing_stage_override_restores_quality_model(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "BUILDER1_STRATEGY_SLOGAN_STAGE_MODEL": "",
+                "BUILDER1_STRATEGY_SLOGAN_STAGE_REASONING_EFFORT": "",
+            },
+            clear=False,
+        ):
+            self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "gpt-5.6-terra")
+            self.assertEqual(
+                resolve_stage_reasoning_effort("strategy_slogan_stage", "gpt-5.6-terra"),
+                "medium",
+            )
+
+    def test_stage_override_precedence_over_quality_model(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"BUILDER1_STRATEGY_SLOGAN_STAGE_MODEL": "gpt-5.6-sol-custom"},
+            clear=False,
+        ):
+            self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "gpt-5.6-sol-custom")
+
+    def test_startup_logging_reports_strategy_slogan_override(self) -> None:
+        import engine.builder1_planning_profile as profile_module
+
+        profile_module._config_logged = False
+        with self.assertLogs("engine.builder1_planning_profile", level="INFO") as logs:
+            profile_module.log_builder1_planning_profile_config()
+        joined = "\n".join(logs.output)
+        self.assertIn("strategySloganStageModel=gpt-5.6-sol", joined)
+        self.assertIn("strategySloganStageModelOverride=gpt-5.6-sol", joined)
+        self.assertIn("strategySloganStageReasoningEffort=low", joined)
+        self.assertIn("qualityModel=gpt-5.6-terra", joined)
+        self.assertIn("conceptualModel=gpt-5.6-terra", joined)
 
 
 class TestStageOrderAndCallCounts(unittest.TestCase):

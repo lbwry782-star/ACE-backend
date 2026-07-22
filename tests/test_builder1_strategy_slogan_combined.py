@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import unittest
 from typing import Any, Dict, List
 from unittest.mock import patch
@@ -146,9 +147,18 @@ class TestCombinedCallCounts(unittest.TestCase):
 
 
 class TestCombinedModelRouting(unittest.TestCase):
-    @patch.dict("os.environ", {"BUILDER1_PLANNING_PROFILE": "QUALITY"}, clear=False)
-    def test_quality_profile_uses_quality_model(self) -> None:
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER1_PLANNING_PROFILE": "QUALITY",
+            "BUILDER1_QUALITY_MODEL": "gpt-5.6-terra",
+            "BUILDER1_STRATEGY_SLOGAN_STAGE_MODEL": "gpt-5.6-sol",
+        },
+        clear=False,
+    )
+    def test_strategy_slogan_override_uses_sol(self) -> None:
         self.assertEqual(resolve_stage_model("strategy_slogan_stage"), "gpt-5.6-sol")
+        self.assertEqual(resolve_stage_model("conceptual_stage"), "gpt-5.6-terra")
 
 
 class TestCombinedMetrics(unittest.TestCase):

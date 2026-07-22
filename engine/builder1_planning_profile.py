@@ -52,6 +52,17 @@ STAGE_REASONING_ENV_KEYS: Dict[str, str] = {
     "series_ads": "BUILDER1_SERIES_STAGE_REASONING_EFFORT",
 }
 
+STRATEGY_SLOGAN_FAMILY_STAGES = frozenset(
+    {
+        "strategy_slogan_stage",
+        "strategy_slogan_repair",
+        "strategy_candidate_repair",
+        "slogan_only_repair",
+        "strategy_stage",
+        "slogan_stage",
+    }
+)
+
 CORE_QUALITY_STAGES = frozenset(
     {
         "strategy_slogan_stage",
@@ -155,6 +166,14 @@ def model_supports_reasoning_effort(model: str) -> bool:
     return normalized.startswith(("o1", "o3", "gpt-5"))
 
 
+def _routing_stage_key(stage: Optional[str]) -> Optional[str]:
+    if not stage:
+        return stage
+    if stage in STRATEGY_SLOGAN_FAMILY_STAGES:
+        return "strategy_slogan_stage"
+    return stage
+
+
 def _env_stage_model(stage: str) -> str:
     env_key = STAGE_MODEL_ENV_KEYS.get(stage, "")
     if env_key:
@@ -214,13 +233,14 @@ def resolve_stage_model(stage: Optional[str]) -> str:
     if not stage:
         return quality_model()
 
+    routing_stage = _routing_stage_key(stage) or stage
     exec_configured = configured_execution_model()
-    profile_model = _profile_default_model(stage, profile)
-    explicit = _env_stage_model(stage)
+    profile_model = _profile_default_model(routing_stage, profile)
+    explicit = _env_stage_model(routing_stage)
 
     if (
         profile in {PlanningProfile.BALANCED, PlanningProfile.FAST}
-        and stage in (BALANCED_EXECUTION_STAGES if profile == PlanningProfile.BALANCED else FAST_EXECUTION_STAGES)
+        and routing_stage in (BALANCED_EXECUTION_STAGES if profile == PlanningProfile.BALANCED else FAST_EXECUTION_STAGES)
         and exec_configured
     ):
         if explicit and explicit == quality_model() and profile_model != quality_model():
@@ -237,15 +257,16 @@ def resolve_stage_model(stage: Optional[str]) -> str:
             return profile_model
 
     if explicit:
-        return explicit
+        return normalize_legacy_text_model(explicit)
     return profile_model
 
 
 def resolve_stage_reasoning_effort(stage: Optional[str], model: str) -> Optional[str]:
-    if not stage:
+    routing_stage = _routing_stage_key(stage) if stage else stage
+    if not routing_stage:
         effort = resolve_default_reasoning_effort()
     else:
-        env_key = STAGE_REASONING_ENV_KEYS.get(stage, "")
+        env_key = STAGE_REASONING_ENV_KEYS.get(routing_stage, "")
         configured = (os.environ.get(env_key) or "").strip().lower() if env_key else ""
         if configured:
             if configured not in VALID_REASONING_EFFORTS:
@@ -254,10 +275,10 @@ def resolve_stage_reasoning_effort(stage: Optional[str], model: str) -> Optional
                     stage,
                     configured,
                 )
-                configured = _profile_default_reasoning(stage, resolve_planning_profile())
+                configured = _profile_default_reasoning(routing_stage, resolve_planning_profile())
             effort = configured
         else:
-            effort = _profile_default_reasoning(stage, resolve_planning_profile())
+            effort = _profile_default_reasoning(routing_stage, resolve_planning_profile())
 
     if not model_supports_reasoning_effort(model):
         if effort:
@@ -302,13 +323,25 @@ def log_builder1_planning_profile_config() -> None:
     q_model = quality_model()
     exec_model = configured_execution_model() or "(unset)"
     models = {stage: resolve_stage_model(stage) for stage in PLANNING_STAGES}
+    strategy_slogan_model = models["strategy_slogan_stage"]
+    strategy_slogan_effort = resolve_stage_reasoning_effort("strategy_slogan_stage", strategy_slogan_model) or "none"
+    strategy_slogan_model_override = _env_stage_model("strategy_slogan_stage") or "(unset)"
+    strategy_slogan_effort_override = (
+        (os.environ.get(STAGE_REASONING_ENV_KEYS["strategy_slogan_stage"]) or "").strip().lower() or "(unset)"
+    )
     logger.info(
         "BUILDER1_PLANNING_PROFILE_CONFIG profile=%s qualityModel=%s executionModel=%s "
+        "strategySloganStageModel=%s strategySloganStageModelOverride=%s "
+        "strategySloganStageReasoningEffort=%s strategySloganStageReasoningEffortOverride=%s "
         "productNameModel=%s strategyModel=%s sloganModel=%s conceptualModel=%s "
         "physicalModel=%s graphicModel=%s seriesModel=%s executionOptimizationActive=%s",
         profile.value,
         q_model,
         exec_model,
+        strategy_slogan_model,
+        strategy_slogan_model_override,
+        strategy_slogan_effort,
+        strategy_slogan_effort_override,
         models["product_name_resolution"],
         models["strategy_stage"],
         models["slogan_stage"],
