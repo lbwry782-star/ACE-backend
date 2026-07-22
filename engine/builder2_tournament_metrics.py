@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_METRICS: Dict[str, Any] = {
     "strategyCalls": 0,
+    "strategyRepairCalls": 0,
     "creatorCalls": 0,
     "creatorRepairCalls": 0,
     "judgeCalls": 0,
@@ -43,6 +44,7 @@ def ensure_metrics(state: Dict[str, Any]) -> Dict[str, Any]:
 def _recalc_total_calls(metrics: Dict[str, Any]) -> None:
     metrics["totalReasoningCalls"] = (
         int(metrics.get("strategyCalls") or 0)
+        + int(metrics.get("strategyRepairCalls") or 0)
         + int(metrics.get("creatorCalls") or 0)
         + int(metrics.get("creatorRepairCalls") or 0)
         + int(metrics.get("judgeCalls") or 0)
@@ -61,7 +63,8 @@ def record_model_call(
 ) -> None:
     metrics = ensure_metrics(state)
     if role == "builder2_strategy":
-        metrics["strategyCalls"] = int(metrics.get("strategyCalls") or 0) + 1
+        key = "strategyRepairCalls" if repair else "strategyCalls"
+        metrics[key] = int(metrics.get(key) or 0) + 1
         metrics["strategyElapsedMs"] = float(metrics.get("strategyElapsedMs") or 0) + elapsed_ms
         bucket = "strategy"
     elif role == "builder2_creator":
@@ -105,13 +108,14 @@ def finalize_tournament_metrics(state: Dict[str, Any], *, elapsed_ms: float) -> 
     )
     logger.info(
         "BUILDER2_TOURNAMENT_METRICS jobId=%s activePrototypes=%s candidates=%s eligibleCandidates=%s "
-        "strategyCalls=%s creatorCalls=%s judgeCalls=%s creatorRepairCalls=%s judgeRepairCalls=%s "
+        "strategyCalls=%s strategyRepairCalls=%s creatorCalls=%s judgeCalls=%s creatorRepairCalls=%s judgeRepairCalls=%s "
         "winnerDevelopmentCalls=%s totalReasoningCalls=%s tournamentElapsedMs=%.1f",
         state.get("jobId"),
         len(state.get("initialActivePrototypeIds") or state.get("activePrototypeIds") or []),
         len(state.get("candidates") or {}),
         eligible,
         metrics.get("strategyCalls"),
+        metrics.get("strategyRepairCalls"),
         metrics.get("creatorCalls"),
         metrics.get("judgeCalls"),
         metrics.get("creatorRepairCalls"),

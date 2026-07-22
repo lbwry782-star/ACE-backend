@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from openai import OpenAI
@@ -20,7 +20,51 @@ logger = logging.getLogger(__name__)
 _JSON_BLOCK_RE = re.compile(r"\{[\s\S]*\}")
 
 
-def _extract_json_object(text: str) -> Dict[str, Any]:
+def extract_responses_output_text(response: Any) -> str:
+    """
+    Extract assistant text from an OpenAI Responses API result.
+    Compatible with reasoning models that expose output_text parts.
+    """
+    direct = getattr(response, "output_text", None)
+    if isinstance(direct, str) and direct.strip():
+        return direct.strip()
+
+    chunks: list[str] = []
+    for block in getattr(response, "output", None) or []:
+        contents = getattr(block, "content", None)
+        if contents is None and isinstance(block, dict):
+            contents = block.get("content")
+        if not contents:
+            continue
+        for content in contents:
+            content_type = getattr(content, "type", None) if not isinstance(content, dict) else content.get("type")
+            if content_type != "output_text":
+                continue
+            text = getattr(content, "text", None) if not isinstance(content, dict) else content.get("text")
+            if text:
+                chunks.append(str(text))
+                continue
+            parsed = getattr(content, "parsed", None) if not isinstance(content, dict) else content.get("parsed")
+            if parsed is None:
+                continue
+            if isinstance(parsed, str):
+                chunks.append(parsed)
+            else:
+                chunks.append(json.dumps(parsed, ensure_ascii=False, separators=(",", ":")))
+
+    combined = "".join(chunks).strip()
+    if combined:
+        return combined
+
+    output_parsed = getattr(response, "output_parsed", None)
+    if output_parsed is not None:
+        if isinstance(output_parsed, str):
+            return output_parsed.strip()
+        return json.dumps(output_parsed, ensure_ascii=False, separators=(",", ":"))
+    return ""
+
+
+def parse_json_object(text: str) -> Dict[str, Any]:
     raw = (text or "").strip()
     if not raw:
         raise ValueError("empty_response")
@@ -37,6 +81,10 @@ def _extract_json_object(text: str) -> Dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ValueError("json_not_object")
     return parsed
+
+
+def _extract_json_object(text: str) -> Dict[str, Any]:
+    return parse_json_object(text)
 
 
 def call_builder2_role_json(
@@ -64,10 +112,5 @@ def call_builder2_role_json(
         lambda: client.responses.create(model=model, input=prompt, reasoning=reasoning),
         endpoint="responses",
     )
-    chunks: list[str] = []
-    for item in getattr(response, "output", []) or []:
-        for content in getattr(item, "content", []) or []:
-            text = getattr(content, "text", None)
-            if text:
-                chunks.append(text)
-    return _extract_json_object("\n".join(chunks))
+    text = extract_responses_output_text(response)
+    return _extract_json_object(text)

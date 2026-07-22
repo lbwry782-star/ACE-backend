@@ -21,16 +21,8 @@ from engine.builder2_tournament_config import (
     resolve_builder2_tournament_eliminations_per_round,
     resolve_builder2_tournament_max_rounds,
 )
-from engine.builder2_tournament_contracts import (
-    STRATEGY_SCHEMA_VERSION,
-    VALID_GROUNDING_TYPES,
-    Builder2TournamentError,
-    compare_candidate_rankings,
-    require_dict,
-    require_non_empty_str,
-)
-from engine.builder2_tournament_llm import call_builder2_role_json
-from engine.builder2_tournament_prompts import build_strategy_prompt
+from engine.builder2_strategy import generate_strategy_foundation
+from engine.builder2_tournament_contracts import Builder2TournamentError, compare_candidate_rankings
 from engine.builder2_tournament_metrics import MetricsTimer, ensure_metrics, finalize_tournament_metrics, record_model_call
 from engine.builder2_tournament_store import (
     load_tournament_state,
@@ -51,36 +43,6 @@ logger = logging.getLogger(__name__)
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def validate_strategy_foundation(raw: Dict[str, Any]) -> Dict[str, Any]:
-    if raw.get("planningFailure") == "builder2_strategy_not_grounded":
-        raise Builder2TournamentError("builder2_strategy_not_grounded")
-    if raw.get("schemaVersion") != STRATEGY_SCHEMA_VERSION:
-        raise Builder2TournamentError("builder2_strategy_not_grounded")
-    require_non_empty_str(raw.get("productNameResolved"), field="productNameResolved")
-    lang = require_non_empty_str(raw.get("language"), field="language")
-    if lang not in {"he", "en"}:
-        raise Builder2TournamentError("builder2_strategy_not_grounded")
-    pp = require_dict(raw.get("problemPerception"), field="problemPerception")
-    require_non_empty_str(pp.get("statement"), field="problemPerception.statement")
-    gt = require_non_empty_str(pp.get("groundingType"), field="problemPerception.groundingType")
-    if gt not in VALID_GROUNDING_TYPES:
-        raise Builder2TournamentError("builder2_strategy_not_grounded")
-    evidence = pp.get("groundingEvidence")
-    if not isinstance(evidence, list) or not evidence:
-        raise Builder2TournamentError("builder2_strategy_not_grounded")
-    require_non_empty_str(pp.get("whyItMatters"), field="problemPerception.whyItMatters")
-    ra = require_dict(raw.get("relativeAdvantage"), field="relativeAdvantage")
-    require_non_empty_str(ra.get("statement"), field="relativeAdvantage.statement")
-    require_non_empty_str(ra.get("derivationFromProblem"), field="relativeAdvantage.derivationFromProblem")
-    ms = require_dict(raw.get("mechanismScan"), field="mechanismScan")
-    facts = ms.get("domainFacts")
-    if not isinstance(facts, list) or not facts:
-        raise Builder2TournamentError("builder2_strategy_not_grounded")
-    require_non_empty_str(ms.get("discoveredMechanism"), field="mechanismScan.discoveredMechanism")
-    require_non_empty_str(ms.get("creativeOpportunity"), field="mechanismScan.creativeOpportunity")
-    return raw
 
 
 def _shuffle_prototypes(active_ids: List[str], seed: str) -> List[str]:
@@ -198,23 +160,13 @@ def _generate_strategy(
     llm_client: Optional[Any],
     state: Dict[str, Any],
 ) -> Dict[str, Any]:
-    logger.info("BUILDER2_STRATEGY_GENERATION_START")
-    prompt = build_strategy_prompt(
+    return generate_strategy_foundation(
         product_name=product_name,
         product_description=product_description,
         language=language,
-    )
-    timer = MetricsTimer()
-    raw = call_builder2_role_json(
-        role="builder2_strategy",
-        model=resolve_builder2_creator_model(),
-        prompt=prompt,
         llm_client=llm_client,
+        state=state,
     )
-    record_model_call(state, role="builder2_strategy", elapsed_ms=timer.elapsed_ms())
-    foundation = validate_strategy_foundation(raw)
-    logger.info("BUILDER2_STRATEGY_GENERATION_OK")
-    return foundation
 
 
 def _run_creator_and_judge_for_assignment(
@@ -446,13 +398,19 @@ def run_builder2_tournament(
         state["status"] = "strategy_generating"
         state["lastCompletedStep"] = "strategy_generating"
         save_tournament_state(job_id, state)
-        state["strategyFoundation"] = _generate_strategy(
-            product_name=product_name,
-            product_description=product_description,
-            language=language,
-            llm_client=llm_client,
-            state=state,
-        )
+        try:
+            state["strategyFoundation"] = _generate_strategy(
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                llm_client=llm_client,
+                state=state,
+            )
+        except Builder2TournamentError as exc:
+            state["status"] = "failed"
+            state["error"] = str(exc.args[0] if exc.args else "builder2_strategy_validation_failed")
+            save_tournament_state(job_id, state)
+            raise
         state["status"] = "strategy_complete"
         state["lastCompletedStep"] = "strategy_complete"
         save_tournament_state(job_id, state)

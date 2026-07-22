@@ -34,10 +34,10 @@ from engine.builder2_creator import (
     validate_creator_candidate,
     validate_creator_purity,
 )
+from engine.builder2_strategy import generate_strategy_foundation, validate_strategy_foundation
 from engine.builder2_tournament_manager import (
     run_builder2_tournament,
     select_global_winner,
-    validate_strategy_foundation,
 )
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store, load_tournament_state
 from engine.builder2_winner_development import normalize_winner_plan_for_runway, validate_winner_plan

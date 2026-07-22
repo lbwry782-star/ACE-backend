@@ -4,7 +4,7 @@ Builder2 tournament prompt builders — isolated from legacy video_planning prom
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from engine.builder2_prototypes import Builder2Prototype
 from engine.builder2_runway_config import resolve_builder2_video_duration_seconds
@@ -12,6 +12,7 @@ from engine.builder2_tournament_contracts import (
     CANDIDATE_SCHEMA_VERSION,
     JUDGMENT_SCHEMA_VERSION,
     STRATEGY_SCHEMA_VERSION,
+    VALID_GROUNDING_TYPES,
     WINNER_PLAN_SCHEMA_VERSION,
 )
 
@@ -22,11 +23,13 @@ def build_strategy_prompt(
     product_description: str,
     language: str,
 ) -> str:
+    grounding_types = ", ".join(sorted(VALID_GROUNDING_TYPES))
     return (
-        "You are the Builder2 Creator role generating ONE fixed strategic foundation.\n"
+        "You are the Builder2 Strategy role generating ONE fixed strategic foundation.\n"
         "Do NOT choose a prototype. Do NOT create a visual concept, headline, or Runway prompt.\n"
         "Do NOT invent statistics, studies, or customer research.\n"
         "Ground the problem in real observable practice, physical reality, market behavior, or professional knowledge.\n"
+        "Perceptual buyer problems are valid when grounded in observable practice or market behavior.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
         f"Language: {language}\n\n"
@@ -34,7 +37,40 @@ def build_strategy_prompt(
         "productNameResolved, language, problemPerception{statement,groundingType,groundingEvidence,whyItMatters}, "
         "relativeAdvantage{statement,derivationFromProblem}, "
         "mechanismScan{domainFacts,discoveredMechanism,creativeOpportunity}.\n"
-        "If you cannot ground a valid problem, return {\"planningFailure\":\"builder2_strategy_not_grounded\"} only."
+        f'language must be exactly "he" or "en".\n'
+        f"groundingType must be exactly one of: {grounding_types}.\n"
+        "groundingEvidence must be a non-empty JSON array of concise qualitative evidence strings; "
+        "one strong item is sufficient. Do not invent statistics.\n"
+        "domainFacts must be a non-empty JSON array of concise qualitative domain facts; "
+        "professional knowledge and common market behavior are acceptable without citations.\n"
+        'If you cannot ground a valid problem, return {"planningFailure":"builder2_strategy_not_grounded"} only.'
+    )
+
+
+def build_strategy_repair_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    invalid_output: Dict[str, Any],
+    validation_failures: List[str],
+) -> str:
+    return (
+        "You are the Builder2 Strategy repair role.\n"
+        "Repair ONLY the listed validation defects in the strategic foundation JSON.\n"
+        "Do NOT choose a prototype. Do NOT create a visual concept, headline, or Runway prompt.\n"
+        "Do NOT invent statistics, studies, or customer research.\n"
+        f"Product name: {product_name or '(empty)'}\n"
+        f"Product description: {product_description}\n"
+        f"Language: {language}\n\n"
+        "Original strategy instructions:\n"
+        f"{build_strategy_prompt(product_name=product_name, product_description=product_description, language=language)}\n\n"
+        "Invalid structured output to repair:\n"
+        f"{json.dumps(invalid_output, ensure_ascii=False)}\n\n"
+        "Exact validation failures to fix:\n"
+        + "\n".join(f"- {item}" for item in validation_failures)
+        + "\n\n"
+        f"Return one repaired JSON object only with schemaVersion={STRATEGY_SCHEMA_VERSION!r}."
     )
 
 

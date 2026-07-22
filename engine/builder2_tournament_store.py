@@ -151,6 +151,7 @@ def new_tournament_state(
         "initialActivePrototypeIds": list(active_prototype_ids),
         "completionReason": None,
         "metrics": None,
+        "strategyDiagnostics": None,
         "runway": {
             "taskId": None,
             "submissionState": "none",
