@@ -1,7 +1,7 @@
 """
 ACE Runway video — first MVP path (isolated from the image engine).
 
-Currently: one video output only, pure text-to-video using Runway gen4.5.
+Currently: one video output via Runway (gen4_turbo image-to-video default, or gen4.5 text-to-video).
 Future ACE video engine may produce two outputs and richer concept prompting; keep this module minimal until then.
 """
 
@@ -19,6 +19,17 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 from openai import OpenAI
 
+from engine.builder2_runway_config import (
+    BUILDER2_RUNWAY_VIDEO_RATIO,
+    Builder2RunwayConfigError,
+    builder2_runway_generation_mode,
+    builder2_runway_requires_start_image,
+    log_builder2_runway_model_selected,
+    log_builder2_video_duration_selected,
+    resolve_builder2_runway_video_model,
+    resolve_builder2_video_duration_seconds,
+)
+from engine.video_start_image import generate_video_start_image_data_uri
 from engine.ad_promise_memory import record_ad_promise_generation_success
 from engine.video_planning import (
     RUNWAY_PHYSICS_REALISM_CONSTRAINT,
@@ -68,7 +79,6 @@ def _maybe_log_ad_promise_skip_after_failed_generation(
 # Official Runway API (see https://docs.dev.runwayml.com/guides/using-the-api)
 RUNWAY_API_VERSION_HEADER = "2024-11-06"
 DEFAULT_RUNWAY_BASE_URL = "https://api.dev.runwayml.com"
-DEFAULT_VIDEO_MODEL = "gen4.5"
 
 # Polling: docs recommend ≥5s between polls for a given task
 _POLL_INTERVAL_SECONDS = 5.0
@@ -235,10 +245,25 @@ def _env_api_key() -> str:
     return (os.environ.get("RUNWAY_API_KEY", "") or "").strip()
 
 
-def _env_model() -> str:
-    # Locked pipeline: gen4.5 text-only
-    model = DEFAULT_VIDEO_MODEL
-    logger.info("RUNWAY_VIDEO_MODEL_SELECTED model=%s source=forced", model)
+def _resolve_runway_video_model(*, job_id: str = "", duration_seconds: int) -> str:
+    try:
+        model = resolve_builder2_runway_video_model()
+    except Builder2RunwayConfigError:
+        raise RunwayVideoMVPError("unsupported_builder2_runway_model") from None
+    mode = builder2_runway_generation_mode(model)
+    log_builder2_runway_model_selected(
+        job_id=job_id,
+        model=model,
+        mode=mode,
+        duration=duration_seconds,
+        ratio=BUILDER2_RUNWAY_VIDEO_RATIO,
+    )
+    log_builder2_video_duration_selected(
+        job_id=job_id,
+        duration_seconds=duration_seconds,
+        model=model,
+        mode=mode,
+    )
     return model
 
 
@@ -593,44 +618,18 @@ def _fallback_packaging_marketing_copy(
     return out if out.strip() else f"{pn} — temporary packaging copy for video delivery."
 
 
-def _create_text_to_video_task(
+def _runway_task_create_http(
     session: requests.Session,
-    base_url: str,
-    model: str,
-    prompt_text: str,
-    prompt_image_data_uri: Optional[str] = None,
+    url: str,
+    body: Dict[str, Any],
     *,
-    sanitize_text_policy_modified: bool = False,
-    physics_suffix_appended: bool = False,
+    mode: str,
+    model: str,
+    prompt_len: int,
+    payload_summary: str,
+    sanitize_text_policy_modified: bool,
+    physics_suffix_appended: bool,
 ) -> str:
-    if (prompt_image_data_uri or "").strip():
-        raise RunwayVideoMVPError("promptImage is not supported in gen4.5 pipeline")
-    if model != "gen4.5":
-        logger.error("RUNWAY_MODEL_UNSUPPORTED model=%s expected=gen4.5", model)
-        raise RunwayVideoMVPError("unsupported_runway_model")
-    url = f"{base_url}/v1/text_to_video"
-    body: Dict[str, Any] = {
-        "model": model,
-        "promptText": prompt_text,
-        "ratio": "1280:720",
-        "duration": 5,
-    }
-    pt = prompt_text or ""
-    prompt_len = len(pt)
-    mode = "text_to_video"
-    payload_summary = json.dumps(
-        {
-            "endpoint": "POST /v1/text_to_video",
-            "model": body["model"],
-            "ratio": body["ratio"],
-            "duration": body["duration"],
-            "promptText_len": prompt_len,
-            "promptText_head": pt[:160],
-        },
-        ensure_ascii=False,
-    )
-    logger.info("RUNWAY_MODE=gen4.5_text_only")
-    logger.info("PROMPT_IMAGE_DISABLED=true")
     logger.info("RUNWAY_MVP task_create_model=%s", model)
     logger.info("RUNWAY_MVP task_create_mode=%s", mode)
     logger.info("RUNWAY_MVP task_create_prompt_len=%s", prompt_len)
@@ -685,6 +684,110 @@ def _create_text_to_video_task(
         raise RunwayVideoMVPError("create_failed")
     logger.info("RUNWAY_MVP task_created task_id=%s", task_id)
     return task_id
+
+
+def _create_text_to_video_task(
+    session: requests.Session,
+    base_url: str,
+    model: str,
+    prompt_text: str,
+    *,
+    duration_seconds: int,
+    sanitize_text_policy_modified: bool = False,
+    physics_suffix_appended: bool = False,
+) -> str:
+    if model != "gen4.5":
+        logger.error("RUNWAY_MODEL_UNSUPPORTED model=%s expected=gen4.5", model)
+        raise RunwayVideoMVPError("unsupported_runway_model")
+    url = f"{base_url}/v1/text_to_video"
+    pt = prompt_text or ""
+    prompt_len = len(pt)
+    body: Dict[str, Any] = {
+        "model": model,
+        "promptText": pt,
+        "ratio": BUILDER2_RUNWAY_VIDEO_RATIO,
+        "duration": duration_seconds,
+    }
+    payload_summary = json.dumps(
+        {
+            "endpoint": "POST /v1/text_to_video",
+            "model": body["model"],
+            "ratio": body["ratio"],
+            "duration": body["duration"],
+            "promptText_len": prompt_len,
+            "promptText_head": pt[:160],
+            "promptImage_present": False,
+        },
+        ensure_ascii=False,
+    )
+    logger.info("RUNWAY_MODE=gen4.5_text_only")
+    logger.info("PROMPT_IMAGE_DISABLED=true")
+    return _runway_task_create_http(
+        session,
+        url,
+        body,
+        mode="text_to_video",
+        model=model,
+        prompt_len=prompt_len,
+        payload_summary=payload_summary,
+        sanitize_text_policy_modified=sanitize_text_policy_modified,
+        physics_suffix_appended=physics_suffix_appended,
+    )
+
+
+def _create_image_to_video_task(
+    session: requests.Session,
+    base_url: str,
+    model: str,
+    prompt_text: str,
+    prompt_image_data_uri: str,
+    *,
+    duration_seconds: int,
+    sanitize_text_policy_modified: bool = False,
+    physics_suffix_appended: bool = False,
+) -> str:
+    if model != "gen4_turbo":
+        logger.error("RUNWAY_MODEL_UNSUPPORTED model=%s expected=gen4_turbo", model)
+        raise RunwayVideoMVPError("unsupported_runway_model")
+    image_uri = (prompt_image_data_uri or "").strip()
+    if not image_uri:
+        raise RunwayVideoMVPError("builder2_start_image_generation_failed")
+    url = f"{base_url}/v1/image_to_video"
+    pt = prompt_text or ""
+    prompt_len = len(pt)
+    body: Dict[str, Any] = {
+        "model": model,
+        "promptImage": image_uri,
+        "promptText": pt,
+        "ratio": BUILDER2_RUNWAY_VIDEO_RATIO,
+        "duration": duration_seconds,
+    }
+    payload_summary = json.dumps(
+        {
+            "endpoint": "POST /v1/image_to_video",
+            "model": body["model"],
+            "ratio": body["ratio"],
+            "duration": body["duration"],
+            "promptText_len": prompt_len,
+            "promptText_head": pt[:160],
+            "promptImage_present": True,
+            "promptImage_len": len(image_uri),
+        },
+        ensure_ascii=False,
+    )
+    logger.info("RUNWAY_MODE=gen4_turbo_image_to_video")
+    logger.info("PROMPT_IMAGE_ENABLED=true promptImage_len=%s", len(image_uri))
+    return _runway_task_create_http(
+        session,
+        url,
+        body,
+        mode="image_to_video",
+        model=model,
+        prompt_len=prompt_len,
+        payload_summary=payload_summary,
+        sanitize_text_policy_modified=sanitize_text_policy_modified,
+        physics_suffix_appended=physics_suffix_appended,
+    )
 
 
 def _poll_get_task_once(
@@ -785,7 +888,11 @@ def _generate_one_video_mvp_body(
         raise RunwayVideoMVPError("not_configured")
 
     base = _env_base_url()
-    model = _env_model()
+    try:
+        duration_seconds = resolve_builder2_video_duration_seconds()
+    except Builder2RunwayConfigError:
+        raise RunwayVideoMVPError("builder2_invalid_video_duration") from None
+    runway_model = _resolve_runway_video_model(job_id=job_id, duration_seconds=duration_seconds)
     marketing_lang = detect_text_language(product_description)
     video_lang, _, _ = log_video_language_decision(product_description)
     try:
@@ -908,23 +1015,75 @@ def _generate_one_video_mvp_body(
     logger.info("RUNWAY_MVP task_create_prompt_len_final=%s", len(prompt))
 
     logger.info("VIDEO_TIMING_STAGE_START stage=start_image jobId=%s", job_id or "(none)")
-    logger.info("VIDEO_TIMING_START_IMAGE_MS=0.0 skipped=true reason=text_only_gen4.5")
-    logger.info("VIDEO_TIMING_STAGE_END stage=start_image jobId=%s elapsed_ms=0.0", job_id or "(none)")
+    t_start_image0 = time.monotonic()
+    prompt_image_data_uri: Optional[str] = None
+    if builder2_runway_requires_start_image(runway_model):
+        logger.info("BUILDER2_START_IMAGE_GENERATION_START jobId=%s", job_id or "(none)")
+        prompt_image_data_uri = generate_video_start_image_data_uri(plan)
+        start_image_ms = (time.monotonic() - t_start_image0) * 1000.0
+        logger.info("VIDEO_TIMING_START_IMAGE_MS=%.1f", start_image_ms)
+        if not prompt_image_data_uri:
+            logger.error(
+                "BUILDER2_START_IMAGE_GENERATION_FAILED jobId=%s",
+                job_id or "(none)",
+            )
+            _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
+            raise RunwayVideoMVPError("builder2_start_image_generation_failed")
+        logger.info(
+            "BUILDER2_START_IMAGE_GENERATION_OK jobId=%s elapsed_ms=%.1f promptImage_len=%s",
+            job_id or "(none)",
+            start_image_ms,
+            len(prompt_image_data_uri),
+        )
+    else:
+        start_image_ms = 0.0
+        logger.info("VIDEO_TIMING_START_IMAGE_MS=0.0 skipped=true reason=text_only_gen4.5")
+    logger.info(
+        "VIDEO_TIMING_STAGE_END stage=start_image jobId=%s elapsed_ms=%.1f",
+        job_id or "(none)",
+        start_image_ms,
+    )
 
     session = requests.Session()
     t_runway0 = time.monotonic()
     logger.info("VIDEO_TIMING_STAGE_START stage=runway_create jobId=%s", job_id or "(none)")
     logger.info("VIDEO_JOB_STEP step=runway_create_task start")
     t_create0 = time.monotonic()
-    task_id = _create_text_to_video_task(
-        session,
-        base,
-        model,
-        prompt,
-        prompt_image_data_uri=None,
-        sanitize_text_policy_modified=bool(text_policy_sanitized),
-        physics_suffix_appended=True,
-    )
+    if builder2_runway_requires_start_image(runway_model):
+        logger.info(
+            "BUILDER2_RUNWAY_IMAGE_TO_VIDEO_START jobId=%s model=%s duration=%s ratio=%s",
+            job_id or "(none)",
+            runway_model,
+            duration_seconds,
+            BUILDER2_RUNWAY_VIDEO_RATIO,
+        )
+        task_id = _create_image_to_video_task(
+            session,
+            base,
+            runway_model,
+            prompt,
+            prompt_image_data_uri or "",
+            duration_seconds=duration_seconds,
+            sanitize_text_policy_modified=bool(text_policy_sanitized),
+            physics_suffix_appended=True,
+        )
+    else:
+        logger.info(
+            "BUILDER2_RUNWAY_TEXT_TO_VIDEO_START jobId=%s model=%s duration=%s ratio=%s",
+            job_id or "(none)",
+            runway_model,
+            duration_seconds,
+            BUILDER2_RUNWAY_VIDEO_RATIO,
+        )
+        task_id = _create_text_to_video_task(
+            session,
+            base,
+            runway_model,
+            prompt,
+            duration_seconds=duration_seconds,
+            sanitize_text_policy_modified=bool(text_policy_sanitized),
+            physics_suffix_appended=True,
+        )
     create_ms = (time.monotonic() - t_create0) * 1000.0
     logger.info("VIDEO_TIMING_RUNWAY_CREATE_MS=%.1f", create_ms)
     logger.info(

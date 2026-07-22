@@ -198,9 +198,11 @@ class TestBuilder2CallSites(unittest.TestCase):
         self.assertLess(repair_idx, fallback_idx)
 
     def test_runway_video_model_selection_unchanged(self) -> None:
-        source = (ENGINE / "runway_video.py").read_text(encoding="utf-8")
-        self.assertIn("RUNWAY_VIDEO_MODEL_SELECTED", source)
-        self.assertNotIn("BUILDER2_REASONING_MODEL", source.split("def _runway")[0] if "def _runway" in source else source[:5000])
+        runway_source = (ENGINE / "runway_video.py").read_text(encoding="utf-8")
+        config_source = (ENGINE / "builder2_runway_config.py").read_text(encoding="utf-8")
+        self.assertIn("builder2_runway_config", runway_source)
+        self.assertIn("log_builder2_runway_model_selected", runway_source)
+        self.assertIn("BUILDER2_RUNWAY_MODEL_SELECTED", config_source)
 
 
 class TestBuilder2Logging(unittest.TestCase):

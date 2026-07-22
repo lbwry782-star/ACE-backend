@@ -634,6 +634,55 @@ _VIDEO_PLAN_MODEL_RETRY_BACKOFF_S = float(
 _VIDEO_PLAN_MODEL_MAX_ATTEMPTS = 2
 
 
+def _builder2_video_duration_seconds() -> int:
+    from engine.builder2_runway_config import resolve_builder2_video_duration_seconds
+
+    return resolve_builder2_video_duration_seconds()
+
+
+def _planner_duration_instruction_block() -> str:
+    n = _builder2_video_duration_seconds()
+    return (
+        f"VIDEO DURATION (mandatory — server-configured {n} seconds total):\n"
+        f"- Design a complete silent video that fits naturally within {n} seconds.\n"
+        f"- The complete montage, including all sceneVariations and the final visual resolution, "
+        f"must be understandable within {n} seconds.\n"
+        f"- {n} seconds is the TOTAL video length — not {n} seconds per variation.\n"
+        "- Keep transitions short and clear; do not add scenes just to fill time.\n"
+        "- Do not artificially stretch a simple action; allow enough time for visual anchor/resolution.\n"
+        f"- Do not front-load all action in the first few seconds and leave the remainder empty. "
+        f"Use the full {n} seconds only when it strengthens clarity and pacing.\n"
+        "- If 3-4 variations cannot fit clearly within the total duration, choose 2 stronger variations "
+        "(still within 2-4 range).\n"
+        "- Silent video: every moment must remain visually verifiable without sound.\n\n"
+    )
+
+
+def _json_keys_block() -> str:
+    n = _builder2_video_duration_seconds()
+    return f"""
+Return one JSON object only (no markdown, no prose).
+
+Keys:
+- productNameResolved, headline, headlineCoreKeyword, coreVisualIdea, sceneVariations, videoPrompt, language (all strings except sceneVariations)
+- sceneVariations: JSON array of 2-4 strings — brief independent variations of the same coreVisualIdea
+
+Flow (mandatory order — internal only; output final JSON only):
+1) Read product name + product description.
+2) headline: direct advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; reject phrase-dependent headlines.
+3) headlineCoreKeyword: exactly ONE standalone semantic word from headline.
+4) coreVisualIdea: the ESSENCE of the keyword — then its strongest extreme visual embodiment (not literal meaning, not bare object).
+5) sceneVariations: 2-4 variations within ONE visual family of that essence — same motif, not dictionary examples.
+6) videoPrompt: English {n}-second montage of those family-consistent variations; short, clear, realistic, visually distinct; no headline burn-in.
+
+Empty product name → invent productNameResolved.
+
+Before the JSON: revision pass (headline → keyword → essence → extreme embodiment → visual family → variations → montage videoPrompt).
+
+Failure only: {{"planningFailure":"planning_failed_invalid_plan"}}
+"""
+
+
 def _video_plan_model_retry_backoff_s() -> float:
     return max(2.0, min(_VIDEO_PLAN_MODEL_RETRY_BACKOFF_S, 5.0))
 
@@ -745,29 +794,6 @@ def _video_plan_planner_description_limit() -> int:
     return max(400, min(n, 48000))
 
 
-_JSON_KEYS = """
-Return one JSON object only (no markdown, no prose).
-
-Keys:
-- productNameResolved, headline, headlineCoreKeyword, coreVisualIdea, sceneVariations, videoPrompt, language (all strings except sceneVariations)
-- sceneVariations: JSON array of 2-4 strings — brief independent variations of the same coreVisualIdea
-
-Flow (mandatory order — internal only; output final JSON only):
-1) Read product name + product description.
-2) headline: direct advertising advantage; remainder ONLY; no productNameResolved inside headline; up to 7 words; reject phrase-dependent headlines.
-3) headlineCoreKeyword: exactly ONE standalone semantic word from headline.
-4) coreVisualIdea: the ESSENCE of the keyword — then its strongest extreme visual embodiment (not literal meaning, not bare object).
-5) sceneVariations: 2-4 variations within ONE visual family of that essence — same motif, not dictionary examples.
-6) videoPrompt: English 5-second montage of those family-consistent variations; short, clear, realistic, visually distinct; no headline burn-in.
-
-Empty product name → invent productNameResolved.
-
-Before the JSON: revision pass (headline → keyword → essence → extreme embodiment → visual family → variations → montage videoPrompt).
-
-Failure only: {"planningFailure":"planning_failed_invalid_plan"}
-"""
-
-
 def _planner_essence_extreme_block() -> str:
     return (
         "ESSENCE EXTREME RULE (mandatory — variation_montage_v4):\n"
@@ -845,10 +871,11 @@ def _planner_visual_family_consistency_block() -> str:
 
 
 def _planner_variation_montage_block() -> str:
+    n = _builder2_video_duration_seconds()
     return (
         "VARIATION MONTAGE MODE (mandatory — Builder2 variation_montage_v4):\n"
         "- Do NOT generate a single scene. Generate 2-4 very short variations of the same extreme visual ESSENCE.\n"
-        "- Total video duration remains 5 seconds — montage of quick related moments.\n"
+        f"- Total video duration remains {n} seconds — montage of quick related moments.\n"
         "- Flow: headline → keyword → essence → coreVisualIdea → visual family → sceneVariations → videoPrompt.\n\n"
         "CORE VISUAL IDEA + VISUAL FAMILY:\n"
         "- coreVisualIdea = strongest extreme visual embodiment of the keyword's essence.\n"
@@ -868,7 +895,7 @@ def _planner_variation_montage_block() -> str:
         "1) clear opening visible beyond dense leaves  2) bright sky through cave opening  "
         "3) sunlight visible through gap in clouds  4) light flooding through a dark passage\n\n"
         "VIDEO PROMPT:\n"
-        "- Describe a 5-second montage of 2-4 variations within one visual family.\n"
+        f"- Describe a {n}-second montage of 2-4 variations within one visual family.\n"
         "- Goal: one recurring visual motif — viewer remembers the motif, not scattered dictionary scenes.\n"
         "- Headline overlay at end (downstream) — do NOT burn headline into videoPrompt.\n\n"
     )
@@ -962,6 +989,7 @@ def _planner_gender_consistency_block() -> str:
 
 
 def _planner_final_checklist_block() -> str:
+    n = _builder2_video_duration_seconds()
     return (
         "FINAL CHECKLIST (before returning JSON):\n"
         "1) headlineCoreKeyword is exactly one standalone word.\n"
@@ -970,7 +998,7 @@ def _planner_final_checklist_block() -> str:
         "4) side-by-side frame test: all variations feel like the same visual family.\n"
         "5) variations are essence-expressions — not object repetitions; same object ≤ once.\n"
         "6) variations are independent — no story arc or plot progression.\n"
-        "7) videoPrompt is a 5-second montage of one visual-family motif; no headline phrase leakage.\n"
+        f"7) videoPrompt is a {n}-second montage of one visual-family motif; no headline phrase leakage.\n"
         "8) main subject gender does not contradict product/headline when gendered subjects appear.\n"
         "9) silent-video verifiable; realistic; same essence and family across variations.\n"
         "10) ESSENCE EXTREME + VISUAL FAMILY self-checks passed.\n\n"
@@ -1006,13 +1034,14 @@ def _planner_interest_first_block() -> str:
 
 
 def _planner_scene_association_block() -> str:
+    n = _builder2_video_duration_seconds()
     return (
         "SCENE ASSOCIATION RULE (mandatory for coreVisualIdea + sceneVariations + videoPrompt):\n"
         "- Convert headlineCoreKeyword to ESSENCE, extreme embodiment, then ONE visual family (see ESSENCE EXTREME + VISUAL FAMILY rules).\n"
         "- coreVisualIdea comes ONLY from keyword territory — never from a multi-word phrase in the headline.\n"
         "- Do NOT default to literal dictionary meaning or the physical object.\n"
         "- sceneVariations = 2-4 variations within ONE visual family of that essence — not mixed families.\n"
-        "- Instantly recognizable and emotionally understandable within 5 seconds.\n\n"
+        f"- Instantly recognizable and emotionally understandable within {n} seconds.\n\n"
         "BAD vs GOOD (keyword → essence → extreme embodiment → variations):\n"
         '- "קרוב" — BAD: standing near. GOOD: maximum connection → hug variations.\n'
         '- "דלת" — BAD: wooden door ×4. GOOD: opening → leaves parting to light, cave mouth to sky, cloud gap to sun.\n'
@@ -1026,9 +1055,10 @@ def _planner_scene_association_block() -> str:
 
 
 def _planner_video_prompt_simplicity_block() -> str:
+    n = _builder2_video_duration_seconds()
     return (
         "VIDEO PROMPT SIMPLICITY RULE (mandatory for videoPrompt only):\n"
-        "- Execute sceneConcept as the SIMPLEST possible 5-second stock-video moment — interesting but not complex.\n"
+        f"- Execute sceneConcept as the SIMPLEST possible {n}-second stock-video moment — interesting but not complex.\n"
         "- Feel like clean stock footage — NOT a short film, NOT a plot, NOT an ad storyboard.\n"
         "- One main human subject whenever possible. One clear action. One location. Single continuous moment.\n"
         "- Interest comes from style, context, or human detail — NOT from extra story beats or choreography.\n"
@@ -1072,6 +1102,7 @@ def _planner_silent_video_verifiability_block() -> str:
 
 
 def _planner_keyword_scene_flow_block() -> str:
+    n = _builder2_video_duration_seconds()
     return (
         "BUILDER2 VARIATION MONTAGE FLOW (mandatory; do not narrate in JSON):\n"
         "STEP 1 — Read product_name and product_description.\n"
@@ -1079,7 +1110,8 @@ def _planner_keyword_scene_flow_block() -> str:
         "STEP 3 — headlineCoreKeyword (see STANDALONE KEYWORD RULE).\n"
         "STEP 4 — Find essence of headlineCoreKeyword; set coreVisualIdea to its strongest extreme visual embodiment.\n"
         "STEP 5 — Choose ONE visual family for coreVisualIdea; sceneVariations: 2-4 variations inside that family (object ≤ once).\n"
-        "STEP 6 — videoPrompt: 5-second montage of that visual-family motif.\n\n"
+        f"STEP 6 — videoPrompt: {n}-second montage of that visual-family motif.\n\n"
+        + _planner_duration_instruction_block()
         + _planner_variation_montage_block()
         + _planner_essence_extreme_block()
         + _planner_essence_before_object_block()
@@ -1104,11 +1136,12 @@ def _planner_keyword_scene_flow_block() -> str:
 def _build_video_planner_instructions(content_language: str = "he") -> str:
     lang = normalize_video_content_language(content_language)
     lang_name = video_language_display_name(lang)
+    n = _builder2_video_duration_seconds()
     return (
         f"ACE Builder2 video planning — variation montage ({_VIDEO_PLAN_SCHEMA_VERSION}). "
         f"Language {lang_name} ({lang}). "
         "product → headline → headlineCoreKeyword → essence → coreVisualIdea (extreme embodiment) → sceneVariations → videoPrompt. "
-        "5-second montage of 2-4 variations within one visual family; essence + family consistency; object ≤ once; all existing rules apply. "
+        f"{n}-second montage of 2-4 variations within one visual family; essence + family consistency; object ≤ once; all existing rules apply. "
         'Planner refusal: {"planningFailure":"planning_failed_invalid_plan"}'
     )
 
@@ -1239,7 +1272,7 @@ def _build_scene_plan_repair_input(
         "coreVisualIdea and all variations must come from headlineCoreKeyword ONLY — ignore all other headline words.\n"
         "Use gender-neutral subject (a person) unless product/headline clearly requires gender; no gender contradiction.\n"
         "For sceneVariations + videoPrompt: visually provable without sound; muted viewer must understand each moment.\n"
-        "For videoPrompt: 5-second montage of the variations — short, clear, realistic, visually distinct moments.\n"
+        f"For videoPrompt: {_builder2_video_duration_seconds()}-second montage of the variations — short, clear, realistic, visually distinct moments.\n"
         "Return the same required JSON shape only.\n"
         f"Product name: {product_name or '(empty)'}\n"
         f"Product description: {product_description}\n"
@@ -1273,7 +1306,7 @@ def _build_keyword_scene_fallback_plan(
         ]
     )
     video_prompt = (
-        "A 5-second realistic montage of three short hug moments: elderly friends hugging; "
+        f"A {_builder2_video_duration_seconds()}-second realistic montage of three short hug moments: elderly friends hugging; "
         "a young couple hugging; a parent and child hugging. Quick cuts, same embrace idea, "
         "natural movement. Simple cinematic shots. No text."
     )
@@ -1319,14 +1352,17 @@ _RUNWAY_SCENE_TAIL_MARKERS: Tuple[str, ...] = (
 
 
 def _runway_variation_montage_camera_focus() -> Tuple[str, str]:
-    """5-second montage of related visual variations (Builder2 experiment)."""
+    """Configurable-duration montage of related visual variations (Builder2)."""
+    n = _builder2_video_duration_seconds()
     return (
-        "MANDATORY: one 5-second realistic montage of 2-4 very short moments within the SAME visual family and extreme essence. "
+        f"MANDATORY: one {n}-second realistic montage of 2-4 very short moments within the SAME visual family and extreme essence. "
+        "Natural pacing from action start through brief development to a clear visual anchor or resolution; no dead seconds at the end. "
         "Each moment is a variation of one recurring visual motif — not scattered dictionary scenes. "
         "Quick cuts between family-consistent variations. Each moment clear and readable. "
         "NO story arc, NO cause-and-effect, NO plot progression — independent expressions of the same idea. "
+        "No dialogue or audio required; no on-screen text. "
         "No surreal motion, no fantasy, no impossible physics.",
-        "variation_montage_5s",
+        f"variation_montage_{n}s",
     )
 
 
@@ -1794,7 +1830,7 @@ Product description:
 Language: {lang_name} ({lang}).
 
 {_planner_keyword_scene_flow_block()}
-{_JSON_KEYS}
+{_json_keys_block()}
 """
     instructions = _build_video_planner_instructions(lang)
     ph = compute_product_hash(product_name, product_description)
@@ -2228,7 +2264,7 @@ def _format_variation_montage_prompt(plan: Dict[str, Any], scene_prompt: str) ->
 
 def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Runway prompt from variation-montage plan: 5-second montage of related moments.
+    Runway prompt from variation-montage plan: configurable-duration montage of related moments.
     No headline burn-in.
     """
     scene_prompt = _plan_video_prompt_text(plan)
@@ -2292,9 +2328,10 @@ def _build_runway_interaction_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str
     motion_focus, _ = _runway_variation_montage_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
     montage_body = _format_variation_montage_prompt(plan, scene_prompt)
+    n = _builder2_video_duration_seconds()
     scene = (
         f"{lang_vis} "
-        "The first frame is supplied as the start image; continue the same 5-second variation montage. "
+        f"The first frame is supplied as the start image; continue the same {n}-second variation montage. "
         f"{motion_focus} "
         f"Montage continuation (follow exactly): {montage_body}"
     )
