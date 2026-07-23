@@ -23,7 +23,14 @@ from engine.builder2_tournament_config import (
 )
 from engine.builder2_strategy import generate_strategy_foundation
 from engine.builder2_tournament_contracts import Builder2TournamentError, compare_candidate_rankings
-from engine.builder2_tournament_metrics import MetricsTimer, ensure_metrics, finalize_tournament_metrics, record_creator_eligible, record_model_call
+from engine.builder2_tournament_metrics import (
+    MetricsTimer,
+    ensure_metrics,
+    finalize_tournament_metrics,
+    record_creator_eligible,
+    record_judge_valid,
+    record_model_call,
+)
 from engine.builder2_tournament_store import (
     load_tournament_state,
     mutate_tournament_state,
@@ -236,6 +243,17 @@ def _run_creator_and_judge_for_assignment(
     if existing_rejected:
         return
 
+    existing_judge_unavailable = [
+        c
+        for c in state["candidates"].values()
+        if c.get("prototypeId") == prototype_id
+        and c.get("roundIndex") == round_index
+        and c.get("attemptNumber") == attempt_number
+        and c.get("validationStatus") == "judge_unavailable"
+    ]
+    if existing_judge_unavailable:
+        return
+
     pending = [
         c
         for c in state["candidates"].values()
@@ -313,8 +331,8 @@ def _run_creator_and_judge_for_assignment(
     if cand_rec.get("judgmentId"):
         return
 
+    judgment_id = f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
     try:
-        timer = MetricsTimer()
         judgment_id, judgment, total, scores = judge_candidate(
             product_name=product_name,
             product_description=product_description,
@@ -324,16 +342,28 @@ def _run_creator_and_judge_for_assignment(
             candidate_id=candidate_id,
             candidate=candidate,
             llm_client=llm_client,
+            state=state,
+            judgment_id=judgment_id,
         )
-        record_model_call(state, role="builder2_judge", elapsed_ms=timer.elapsed_ms())
     except Builder2TournamentError as exc:
+        reason = str(exc.args[0] if exc.args else "builder2_judge_invalid_response")
+        diagnostics = (state.get("judgeDiagnosticsByCandidate") or {}).get(candidate_id, {})
         logger.info(
-            "BUILDER2_JUDGE_REJECTED candidateId=%s reason=%s",
+            "BUILDER2_JUDGE_REJECTED candidateId=%s judgmentId=%s reason=%s",
             candidate_id,
-            exc.args[0],
+            judgment_id,
+            reason,
         )
-        cand_rec["validationStatus"] = "rejected"
-        raise
+        cand_rec["validationStatus"] = "judge_unavailable"
+        cand_rec["status"] = "judge_unavailable"
+        cand_rec["creatorCandidateValid"] = True
+        cand_rec["failureReason"] = reason
+        cand_rec["judgeDiagnostics"] = dict(diagnostics)
+        cand_rec["eligible"] = False
+        cand_rec["totalScore"] = None
+        cand_rec["tieScores"] = {}
+        cand_rec["completedAt"] = _utc_now_iso()
+        return
 
     register_judgment(
         state,
@@ -351,7 +381,9 @@ def _run_creator_and_judge_for_assignment(
     cand_rec["eligible"] = bool(judgment.get("eligible"))
     cand_rec["totalScore"] = total
     cand_rec["tieScores"] = scores
+    cand_rec["judgeDiagnostics"] = dict((state.get("judgeDiagnosticsByCandidate") or {}).get(candidate_id, {}))
     cand_rec["completedAt"] = _utc_now_iso()
+    record_judge_valid(state, eligible=bool(judgment.get("eligible")))
 
     if cand_rec["eligible"]:
         record_creator_eligible(state)

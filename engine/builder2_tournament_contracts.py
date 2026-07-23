@@ -100,6 +100,21 @@ JUDGE_PURITY_FORBIDDEN_PATTERNS: Tuple[str, ...] = (
     "missing creator report",
 )
 
+JUDGE_PURITY_RULES: Tuple[Tuple[str, str], ...] = (
+    ("other candidate", "compares_unseen_candidates"),
+    ("other candidates", "compares_unseen_candidates"),
+    ("tournament standing", "mentions_tournament_ranking"),
+    ("compared to candidate", "compares_unseen_candidates"),
+    ("ranked against", "mentions_tournament_ranking"),
+    ("replace the idea", "redesigns_candidate"),
+    ("redesign the candidate", "redesigns_candidate"),
+    ("new advertisement", "redesigns_candidate"),
+    ("replacement creator report", "invents_creator_intent"),
+    ("creator probably", "invents_creator_intent"),
+    ("creator meant", "invents_creator_intent"),
+    ("missing creator report", "invents_creator_intent"),
+)
+
 
 class Builder2TournamentError(Exception):
     """Tournament failure mapped to RunwayVideoMVPError by caller."""

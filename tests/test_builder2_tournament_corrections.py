@@ -219,8 +219,9 @@ class TestPurityOneRound(unittest.TestCase):
     def test_judge_purity_rejects_unseen_comparison(self) -> None:
         bad = _judgment("c1")
         bad["verdict"] = "Compared to other candidates this is weaker."
-        with self.assertRaises(Builder2TournamentError):
+        with self.assertRaises(Builder2TournamentError) as ctx:
             validate_judge_response(bad, candidate_id="c1")
+        self.assertEqual(ctx.exception.args[0], "builder2_judge_purity_violation:compares_unseen_candidates")
 
     def test_judge_purity_rejects_redesign(self) -> None:
         bad = _judgment("c1")

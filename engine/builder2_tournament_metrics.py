@@ -19,6 +19,12 @@ DEFAULT_METRICS: Dict[str, Any] = {
     "creatorEligibleCandidates": 0,
     "judgeCalls": 0,
     "judgeRepairCalls": 0,
+    "judgeRetryCalls": 0,
+    "judgeRejectedResponses": 0,
+    "judgeValidJudgments": 0,
+    "judgeEligibleCandidates": 0,
+    "judgeIneligibleCandidates": 0,
+    "judgeUnavailableCandidates": 0,
     "winnerDevelopmentCalls": 0,
     "totalReasoningCalls": 0,
     "strategyElapsedMs": 0,
@@ -58,6 +64,7 @@ def _recalc_total_calls(metrics: Dict[str, Any]) -> None:
         + int(metrics.get("creatorRetryCalls") or 0)
         + int(metrics.get("judgeCalls") or 0)
         + int(metrics.get("judgeRepairCalls") or 0)
+        + int(metrics.get("judgeRetryCalls") or 0)
         + int(metrics.get("winnerDevelopmentCalls") or 0)
     )
 
@@ -88,7 +95,12 @@ def record_model_call(
         metrics["creatorElapsedMs"] = float(metrics.get("creatorElapsedMs") or 0) + elapsed_ms
         bucket = "creator"
     elif role == "builder2_judge":
-        key = "judgeRepairCalls" if repair else "judgeCalls"
+        if repair:
+            key = "judgeRepairCalls"
+        elif retry:
+            key = "judgeRetryCalls"
+        else:
+            key = "judgeCalls"
         metrics[key] = int(metrics.get(key) or 0) + 1
         metrics["judgeElapsedMs"] = float(metrics.get("judgeElapsedMs") or 0) + elapsed_ms
         bucket = "judge"
@@ -114,6 +126,21 @@ def record_creator_eligible(state: Dict[str, Any]) -> None:
     metrics["creatorEligibleCandidates"] = int(metrics.get("creatorEligibleCandidates") or 0) + 1
 
 
+def record_judge_unavailable(state: Dict[str, Any]) -> None:
+    metrics = ensure_metrics(state)
+    metrics["judgeUnavailableCandidates"] = int(metrics.get("judgeUnavailableCandidates") or 0) + 1
+    metrics["judgeRejectedResponses"] = int(metrics.get("judgeRejectedResponses") or 0) + 1
+
+
+def record_judge_valid(state: Dict[str, Any], *, eligible: bool) -> None:
+    metrics = ensure_metrics(state)
+    metrics["judgeValidJudgments"] = int(metrics.get("judgeValidJudgments") or 0) + 1
+    if eligible:
+        metrics["judgeEligibleCandidates"] = int(metrics.get("judgeEligibleCandidates") or 0) + 1
+    else:
+        metrics["judgeIneligibleCandidates"] = int(metrics.get("judgeIneligibleCandidates") or 0) + 1
+
+
 def _merge_token_usage(existing: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
     merged = dict(existing)
     for key, value in new.items():
@@ -131,25 +158,43 @@ def finalize_tournament_metrics(state: Dict[str, Any], *, elapsed_ms: float) -> 
         for cand in state.get("candidates", {}).values()
         if cand.get("eligible") and cand.get("validationStatus") == "accepted"
     )
-    rejected = sum(
+    rejected_creator = sum(
         1
         for cand in state.get("candidates", {}).values()
         if cand.get("validationStatus") == "creator_rejected"
     )
-    metrics["creatorRejectedAttempts"] = max(int(metrics.get("creatorRejectedAttempts") or 0), rejected)
+    unavailable = sum(
+        1
+        for cand in state.get("candidates", {}).values()
+        if cand.get("validationStatus") == "judge_unavailable"
+    )
+    ineligible_judged = sum(
+        1
+        for cand in state.get("candidates", {}).values()
+        if cand.get("judgmentId") and not cand.get("eligible")
+    )
+    metrics["creatorRejectedAttempts"] = max(int(metrics.get("creatorRejectedAttempts") or 0), rejected_creator)
     metrics["creatorEligibleCandidates"] = eligible
+    metrics["judgeUnavailableCandidates"] = max(int(metrics.get("judgeUnavailableCandidates") or 0), unavailable)
+    metrics["judgeValidJudgments"] = max(int(metrics.get("judgeValidJudgments") or 0), judged)
+    metrics["judgeEligibleCandidates"] = eligible
+    metrics["judgeIneligibleCandidates"] = max(int(metrics.get("judgeIneligibleCandidates") or 0), ineligible_judged)
     _recalc_total_calls(metrics)
     logger.info(
         "BUILDER2_TOURNAMENT_METRICS jobId=%s activePrototypes=%s candidates=%s judgedCandidates=%s "
-        "eligibleCandidates=%s rejectedCreatorAttempts=%s "
+        "eligibleCandidates=%s rejectedCreatorAttempts=%s judgeUnavailable=%s judgeValid=%s judgeIneligible=%s "
         "strategyCalls=%s strategyRepairCalls=%s creatorCalls=%s creatorRepairCalls=%s creatorRetryCalls=%s "
-        "judgeCalls=%s judgeRepairCalls=%s winnerDevelopmentCalls=%s totalReasoningCalls=%s tournamentElapsedMs=%.1f",
+        "judgeCalls=%s judgeRepairCalls=%s judgeRetryCalls=%s winnerDevelopmentCalls=%s totalReasoningCalls=%s "
+        "tournamentElapsedMs=%.1f",
         state.get("jobId"),
         len(state.get("initialActivePrototypeIds") or state.get("activePrototypeIds") or []),
         len(state.get("candidates") or {}),
         judged,
         eligible,
         metrics.get("creatorRejectedAttempts"),
+        metrics.get("judgeUnavailableCandidates"),
+        metrics.get("judgeValidJudgments"),
+        metrics.get("judgeIneligibleCandidates"),
         metrics.get("strategyCalls"),
         metrics.get("strategyRepairCalls"),
         metrics.get("creatorCalls"),
@@ -157,6 +202,7 @@ def finalize_tournament_metrics(state: Dict[str, Any], *, elapsed_ms: float) -> 
         metrics.get("creatorRetryCalls"),
         metrics.get("judgeCalls"),
         metrics.get("judgeRepairCalls"),
+        metrics.get("judgeRetryCalls"),
         metrics.get("winnerDevelopmentCalls"),
         metrics.get("totalReasoningCalls"),
         elapsed_ms,

@@ -255,8 +255,9 @@ class TestBuilder2TournamentValidation(unittest.TestCase):
     def test_model_total_not_authoritative(self) -> None:
         bad = _judgment("cand-1")
         bad["totalScore"] = 999
-        with self.assertRaises(Builder2TournamentError):
+        with self.assertRaises(Builder2TournamentError) as ctx:
             validate_judge_response(bad, candidate_id="cand-1")
+        self.assertEqual(ctx.exception.args[0], "builder2_judge_schema_invalid:scores.total")
 
 
 class TestBuilder2TournamentLogic(unittest.TestCase):

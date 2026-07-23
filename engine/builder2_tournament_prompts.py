@@ -11,6 +11,7 @@ from engine.builder2_runway_config import resolve_builder2_video_duration_second
 from engine.builder2_tournament_contracts import (
     CANDIDATE_SCHEMA_VERSION,
     JUDGMENT_SCHEMA_VERSION,
+    JUDGE_SCORE_RANGES,
     STRATEGY_SCHEMA_VERSION,
     VALID_CONTINUITY_RISK,
     VALID_GROUNDING_TYPES,
@@ -196,6 +197,10 @@ def build_judge_prompt(
     candidate: Dict[str, Any],
     candidate_id: str,
 ) -> str:
+    score_lines = "\n".join(
+        f"- {name}: {low}–{high}"
+        for name, (low, high) in sorted(JUDGE_SCORE_RANGES.items())
+    )
     return (
         "You are the Builder2 Judge role evaluating ONE candidate independently.\n"
         "Do NOT redesign the idea, generate a replacement advertisement, or compare to unseen candidates.\n"
@@ -210,11 +215,69 @@ def build_judge_prompt(
         f"{json.dumps({'prototypeId': prototype.prototype_id, 'displayName': prototype.display_name, 'originalProblem': prototype.original_problem, 'reusableMethod': prototype.reusable_method, 'mustNotCopy': prototype.must_not_copy, 'judgeQualityGuidance': prototype.judge_quality_guidance}, ensure_ascii=False)}\n"
         "Candidate to judge:\n"
         f"{json.dumps(candidate, ensure_ascii=False)}\n\n"
-        f"Return one JSON object only with schemaVersion={JUDGMENT_SCHEMA_VERSION!r}.\n"
-        "Required keys: candidateId, eligible, disqualifiers, scores{problemAdvantageIntegrity,mechanismQuality,"
-        "prototypeMethodApplication,silentVisualClarity,originalityFreshness,eleganceSimplicity,runwayFeasibility,"
-        "editingContribution}, verdict, strengths, weaknesses, prototypeQualityComparison, confidence.\n"
-        "Do NOT provide an authoritative total score field."
+        f"Return one JSON object only with schemaVersion={JUDGMENT_SCHEMA_VERSION!r}. No Markdown fences. No prose.\n"
+        f"candidateId must be exactly {candidate_id!r}.\n"
+        "eligible must be JSON boolean true or false, not a string.\n"
+        "disqualifiers must be a JSON array.\n"
+        "strengths must be a JSON array.\n"
+        "weaknesses must be a JSON array.\n"
+        "confidence must be a JSON number from 0.0 to 1.0.\n"
+        "Every score must be an integer within its category maximum.\n"
+        "Do NOT output totalScore, total, or any authoritative total score field.\n"
+        "Hebrew free-text fields are allowed in verdict, strengths, weaknesses and prototypeQualityComparison.\n"
+        "Required keys: candidateId, eligible, disqualifiers, scores, verdict, strengths, weaknesses, "
+        "prototypeQualityComparison, confidence.\n"
+        "Required score fields:\n"
+        f"{score_lines}\n"
+        "If eligible=false, include at least one disqualifier explaining why."
+    )
+
+
+def build_judge_repair_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    strategy_foundation: Dict[str, Any],
+    prototype: Builder2Prototype,
+    candidate: Dict[str, Any],
+    candidate_id: str,
+    invalid_output: Dict[str, Any],
+    validation_failures: List[str],
+) -> str:
+    return (
+        "You are the Builder2 Judge repair role.\n"
+        "Repair ONLY the listed structural defects. Preserve the substantive judgment.\n"
+        "Do NOT redesign the candidate or change eligibility merely to satisfy schema.\n"
+        f"Candidate ID: {candidate_id}\n\n"
+        "Original Judge instructions:\n"
+        f"{build_judge_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate=candidate, candidate_id=candidate_id)}\n\n"
+        "Invalid structured output to repair:\n"
+        f"{json.dumps(invalid_output, ensure_ascii=False)}\n\n"
+        "Exact validation failures to fix:\n"
+        + "\n".join(f"- {item}" for item in validation_failures)
+        + "\n\n"
+        f"Return one repaired JSON object only with schemaVersion={JUDGMENT_SCHEMA_VERSION!r}."
+    )
+
+
+def build_judge_retry_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    strategy_foundation: Dict[str, Any],
+    prototype: Builder2Prototype,
+    candidate: Dict[str, Any],
+    candidate_id: str,
+    retry_rule: str,
+) -> str:
+    return (
+        "You are the Builder2 Judge role performing ONE clean retry for the same candidate.\n"
+        "Do NOT reference any previous Judge response, score, ranking, or unseen candidate.\n"
+        f"Candidate ID: {candidate_id}\n"
+        f"Violated Judge rule to respect: {retry_rule}\n\n"
+        f"{build_judge_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate=candidate, candidate_id=candidate_id)}"
     )
 
 
