@@ -203,17 +203,45 @@ def _default_postprocess_video(
     )
 
 
-def _default_compose_marketing_copy(*, product_name: str, product_description: str, plan: Dict[str, Any]) -> str:
-    from engine.runway_video import _fallback_packaging_marketing_copy
-    from engine.video_language import detect_text_language
+def _default_compose_marketing_copy(
+    *,
+    product_name: str,
+    product_description: str,
+    plan: Dict[str, Any],
+    state: Optional[Dict[str, Any]] = None,
+    job_data: Optional[Dict[str, Any]] = None,
+    headline_decision: str = "omit",
+) -> str:
+    from engine.builder2_media_marketing_text import resolve_media_resume_marketing_text
 
-    marketing_lang = detect_text_language(product_description)
-    return _fallback_packaging_marketing_copy(
-        product_name,
-        product_description,
-        (plan.get("advertisingPromise") or "").strip(),
-        output_language=marketing_lang,
-        headline_text=(plan.get("headlineText") or "").strip(),
+    resolved, _source = resolve_media_resume_marketing_text(
+        state=state or {},
+        plan=plan,
+        job_data=job_data,
+        product_name=product_name,
+        headline_decision=headline_decision,
+    )
+    return resolved
+
+
+def _resolve_pipeline_marketing_text(
+    *,
+    pipeline_deps: MediaPipelineDeps,
+    state: Dict[str, Any],
+    plan: Dict[str, Any],
+    product_name: str,
+    product_description: str,
+    headline_decision: str,
+    job_data: Optional[Dict[str, Any]] = None,
+) -> Tuple[str, str]:
+    from engine.builder2_media_marketing_text import resolve_media_resume_marketing_text
+
+    return resolve_media_resume_marketing_text(
+        state=state,
+        plan=plan,
+        job_data=job_data,
+        product_name=product_name,
+        headline_decision=headline_decision,
     )
 
 
@@ -305,8 +333,16 @@ def execute_builder2_media_pipeline(
             raise Builder2TournamentError(str(exc)) from exc
 
     if dry_run:
+        from engine.builder2_media_marketing_text import build_media_marketing_dry_run_report
         from engine.builder2_runway_submission import audit_media_resume_start_image, build_builder2_runway_dry_run_report
 
+        MediaResumeIsolationGuard.assert_delivery_is_model_free(compose_marketing_copy_uses_model=False)
+        marketing_dry = build_media_marketing_dry_run_report(
+            state=state,
+            plan=plan,
+            product_name=str(plan.get("productNameResolved") or ""),
+            headline_decision=str(headline_decision),
+        )
         media["runwayDryRun"] = {
             **audit_media_resume_start_image(state),
             **build_builder2_runway_dry_run_report(
@@ -316,6 +352,9 @@ def execute_builder2_media_pipeline(
                 duration_seconds=duration_seconds,
                 ratio=ratio,
             ),
+            **marketing_dry,
+            "allReasoningRolesBlocked": MediaResumeIsolationGuard.all_reasoning_roles_blocked(),
+            "totalReasoningCalls": MediaResumeIsolationGuard.reasoning_report()["totalReasoningCalls"],
         }
         media["mediaResumeStatus"] = "dry_run_validated"
         counters.sync_legacy_start_image_calls()
@@ -504,11 +543,6 @@ def execute_builder2_media_pipeline(
         counters.media_reused = True
     else:
         pipeline_deps = deps or default_media_pipeline_deps()
-        marketing_text = pipeline_deps.compose_marketing_copy(
-            product_name=str(plan.get("productNameResolved") or ""),
-            product_description=product_description,
-            plan=plan,
-        )
         if headline_decision_requires_headline(headline_decision):
             _update_media_progress(state, "postprocessing_video")
             MediaResumeIsolationGuard.assert_safe_before_ffmpeg()
@@ -527,7 +561,16 @@ def execute_builder2_media_pipeline(
             media["ffmpegStatus"] = "skipped_omit"
         media["finalVideoPath"] = final_url
         media["finalPublicUrl"] = final_url
+        marketing_text, marketing_source = _resolve_pipeline_marketing_text(
+            pipeline_deps=pipeline_deps,
+            state=state,
+            plan=plan,
+            product_name=str(plan.get("productNameResolved") or ""),
+            product_description=product_description,
+            headline_decision=str(headline_decision),
+        )
         media["marketingText"] = marketing_text
+        media["marketingCopySource"] = marketing_source
         media["deliveryArtifactPaths"] = [final_url]
 
     _update_media_progress(

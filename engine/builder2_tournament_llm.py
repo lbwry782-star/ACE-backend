@@ -96,6 +96,9 @@ def call_builder2_role_json(
     llm_client: Optional[Any] = None,
     on_paid_request_submitted: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
+    from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+
+    MediaResumeIsolationGuard.assert_reasoning_call_allowed(role)
     log_builder2_model_selected(role=role, call_type=call_type)
     if llm_client is not None:
         if on_paid_request_submitted is not None:
@@ -111,6 +114,9 @@ def call_builder2_role_json(
     timeout = float((os.environ.get("BUILDER2_TOURNAMENT_TIMEOUT_SECONDS") or "150").strip() or "150")
     client = OpenAI(api_key=api_key, timeout=httpx.Timeout(timeout), max_retries=0)
     reasoning = build_builder2_reasoning_payload()
+    from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+
+    MediaResumeIsolationGuard.record_reasoning_call_submitted(role)
     response = openai_retry.openai_call_with_retry(
         lambda: client.responses.create(model=model, input=prompt, reasoning=reasoning),
         endpoint="responses",
@@ -130,6 +136,9 @@ def call_builder2_role_json_with_text(
     llm_client: Optional[Any] = None,
     on_paid_request_submitted: Optional[Callable[[], None]] = None,
 ) -> tuple[Dict[str, Any], str]:
+    from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+
+    MediaResumeIsolationGuard.assert_reasoning_call_allowed(role)
     log_builder2_model_selected(role=role, call_type=call_type)
     if llm_client is not None:
         if on_paid_request_submitted is not None:
@@ -146,6 +155,9 @@ def call_builder2_role_json_with_text(
     timeout = float((os.environ.get("BUILDER2_TOURNAMENT_TIMEOUT_SECONDS") or "150").strip() or "150")
     client = OpenAI(api_key=api_key, timeout=httpx.Timeout(timeout), max_retries=0)
     reasoning = build_builder2_reasoning_payload()
+    from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+
+    MediaResumeIsolationGuard.record_reasoning_call_submitted(role)
     response = openai_retry.openai_call_with_retry(
         lambda: client.responses.create(model=model, input=prompt, reasoning=reasoning),
         endpoint="responses",

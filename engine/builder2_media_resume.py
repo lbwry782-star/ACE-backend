@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from engine.builder2_headline_decision_contract import get_normalized_headline_decision, headline_decision_requires_headline
 from engine.builder2_media_pipeline import MediaPipelineDeps, execute_builder2_media_pipeline
 from engine.builder2_media_resume_config import build_media_resume_configuration
+from engine.builder2_media_reasoning_guard import MEDIA_RESUME_MODEL_DEPENDENT_DELIVERY, MEDIA_RESUME_REASONING_BLOCKED
 from engine.builder2_media_resume_guard import MEDIA_RESUME_ISOLATION_ERROR, MediaResumeIsolationGuard
 from engine.builder2_methodology_contract import METHODOLOGY_VERSION
 from engine.builder2_runway_config import (
@@ -56,6 +57,11 @@ def _initial_report(*, job_id: str, dry_run: bool = False) -> Dict[str, Any]:
         "creatorCalls": 0,
         "judgeCalls": 0,
         "winnerCalls": 0,
+        "marketingCopyCalls": 0,
+        "headlineCalls": 0,
+        "keywordCalls": 0,
+        "otherReasoningCalls": 0,
+        "totalReasoningCalls": 0,
         "startImageCalls": 0,
         "startImageNormalCalls": 0,
         "startImageRepairCalls": 0,
@@ -141,43 +147,40 @@ def run_one_media_resume(
     dry = _truthy("BUILDER2_MEDIA_RESUME_DRY_RUN") if dry_run is None else dry_run
     report = _initial_report(job_id=job_id, dry_run=dry)
     MediaResumeIsolationGuard.begin()
-    state = tournament_state if tournament_state is not None else load_tournament_state(job_id)
-    if state is None:
-        report["failureReason"] = "builder2_media_resume_job_not_found"
-        MediaResumeIsolationGuard.end()
-        return report
+    try:
+        state = tournament_state if tournament_state is not None else load_tournament_state(job_id)
+        if state is None:
+            report["failureReason"] = "builder2_media_resume_job_not_found"
+            return report
 
-    media = state.get("mediaResume")
-    if isinstance(media, dict) and media.get("mediaResumeStatus") == "completed" and media.get("finalPublicUrl"):
+        media = state.get("mediaResume")
+        if isinstance(media, dict) and media.get("mediaResumeStatus") == "completed" and media.get("finalPublicUrl"):
+            candidate_id = str(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId") or "").strip()
+            prototype_id = str(state.get("winnerDevelopmentPrototypeId") or "").strip()
+            report["winnerCandidateId"] = candidate_id or None
+            report["winnerPrototypeId"] = prototype_id or None
+            report["winnerLoaded"] = is_valid_persisted_winner_development(state)
+            report["headlineDecision"] = get_normalized_headline_decision(state.get("winnerDevelopmentPlan") or {})
+            report["downstreamValidationAccepted"] = True
+            report["mediaReused"] = True
+            report["finalVideoAvailable"] = True
+            report["jobCompleted"] = True
+            report["readyForMediaResume"] = True
+            report["ok"] = True
+            return report
+
+        missing = collect_media_resume_missing_paths(state)
+        if missing:
+            report["failureReason"] = f"builder2_media_resume_missing:{','.join(missing)}"
+            report["missingPaths"] = missing
+            return report
+
         candidate_id = str(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId") or "").strip()
         prototype_id = str(state.get("winnerDevelopmentPrototypeId") or "").strip()
-        report["winnerCandidateId"] = candidate_id or None
-        report["winnerPrototypeId"] = prototype_id or None
-        report["winnerLoaded"] = is_valid_persisted_winner_development(state)
-        report["headlineDecision"] = get_normalized_headline_decision(state.get("winnerDevelopmentPlan") or {})
-        report["downstreamValidationAccepted"] = True
-        report["mediaReused"] = True
-        report["finalVideoAvailable"] = True
-        report["jobCompleted"] = True
-        report["readyForMediaResume"] = True
-        report["ok"] = True
-        MediaResumeIsolationGuard.end()
-        return report
+        report["winnerCandidateId"] = candidate_id
+        report["winnerPrototypeId"] = prototype_id
+        report["winnerLoaded"] = True
 
-    missing = collect_media_resume_missing_paths(state)
-    if missing:
-        report["failureReason"] = f"builder2_media_resume_missing:{','.join(missing)}"
-        report["missingPaths"] = missing
-        MediaResumeIsolationGuard.end()
-        return report
-
-    candidate_id = str(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId") or "").strip()
-    prototype_id = str(state.get("winnerDevelopmentPrototypeId") or "").strip()
-    report["winnerCandidateId"] = candidate_id
-    report["winnerPrototypeId"] = prototype_id
-    report["winnerLoaded"] = True
-
-    try:
         MediaResumeIsolationGuard.assert_reasoning_isolated()
         plan = _load_and_normalize_winner(job_id=job_id, state=state)
         report["downstreamValidationAccepted"] = True
@@ -229,13 +232,17 @@ def run_one_media_resume(
                         "runwayPromptUtf16Length",
                         "runwayPromptMaximumUtf16Length",
                         "runwayPromptAccepted",
+                        "marketingCopyRequired",
+                        "marketingCopySource",
+                        "marketingCopyModelAllowed",
+                        "allReasoningRolesBlocked",
+                        "totalReasoningCalls",
                     )
                     if key in runway_dry
                 }
             )
             report["readyForMediaResume"] = bool(runway_dry.get("readyForMediaResume"))
             report["ok"] = report["readyForMediaResume"]
-            MediaResumeIsolationGuard.end()
             return report
 
         state["status"] = "media_continuing"
@@ -293,6 +300,11 @@ def run_one_media_resume(
         report["failureReason"] = reason
         if reason.startswith(MEDIA_RESUME_ISOLATION_ERROR):
             report["failureStage"] = "isolation"
+        elif reason.startswith(MEDIA_RESUME_REASONING_BLOCKED):
+            report["failureStage"] = "reasoning_isolation"
+            report["blockedRole"] = MediaResumeIsolationGuard.blocked_role_from_error(reason)
+        elif reason == MEDIA_RESUME_MODEL_DEPENDENT_DELIVERY:
+            report["failureStage"] = "reasoning_isolation"
         elif reason.startswith("builder2_media_resume_not_configured"):
             report["failureStage"] = "configuration"
         elif reason.startswith("builder2_start_image_unsupported_generation_size"):
@@ -354,6 +366,7 @@ def run_one_media_resume(
         if tournament_state is None:
             save_tournament_state(job_id, state)
     finally:
+        report.update(MediaResumeIsolationGuard.reasoning_report())
         MediaResumeIsolationGuard.end()
 
     return report
@@ -400,6 +413,11 @@ def print_media_resume_report(report: Dict[str, Any]) -> None:
         "creatorCalls",
         "judgeCalls",
         "winnerCalls",
+        "marketingCopyCalls",
+        "headlineCalls",
+        "keywordCalls",
+        "otherReasoningCalls",
+        "totalReasoningCalls",
         "startImageCalls",
         "startImageNormalCalls",
         "startImageRepairCalls",
@@ -429,6 +447,11 @@ def print_media_resume_report(report: Dict[str, Any]) -> None:
         "failureStage",
         "failureReason",
         "publicBaseUrlSource",
+        "marketingCopyRequired",
+        "marketingCopySource",
+        "marketingCopyModelAllowed",
+        "allReasoningRolesBlocked",
+        "blockedRole",
         "missingPaths",
         "ok",
     )

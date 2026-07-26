@@ -343,6 +343,8 @@ class TestMediaResumeExecution(unittest.TestCase):
         self.assertEqual(report["creatorCalls"], 0)
         self.assertEqual(report["judgeCalls"], 0)
         self.assertEqual(report["winnerCalls"], 0)
+        self.assertEqual(report["marketingCopyCalls"], 0)
+        self.assertEqual(report["totalReasoningCalls"], 0)
 
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)

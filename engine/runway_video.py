@@ -413,8 +413,10 @@ def _fallback_packaging_marketing_copy(
             log_builder2_model_selected,
             resolve_builder2_reasoning_model,
         )
+        from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
 
         log_builder2_model_selected(role="marketing_copy", call_type=call_type, attempt=1)
+        MediaResumeIsolationGuard.record_reasoning_call_submitted("marketing_copy")
         out = client.responses.create(
             model=resolve_builder2_reasoning_model(),
             input=_promise_only_prompt(

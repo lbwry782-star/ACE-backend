@@ -72,6 +72,9 @@ def log_builder2_model_selected(
     call_type: str = "normal",
     attempt: Optional[int] = None,
 ) -> None:
+    from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+
+    MediaResumeIsolationGuard.assert_reasoning_call_allowed(role)
     model = resolve_builder2_reasoning_model()
     mode = resolve_builder2_reasoning_mode()
     effort = resolve_builder2_reasoning_effort()

@@ -3,6 +3,13 @@ Isolation guard for Builder2 media-only resume.
 """
 from __future__ import annotations
 
+from engine.builder2_media_reasoning_guard import (
+    MEDIA_RESUME_MODEL_DEPENDENT_DELIVERY,
+    MEDIA_RESUME_REASONING_BLOCKED,
+    MediaResumeReasoningCounters,
+    assert_media_resume_reasoning_call_allowed,
+    normalize_reasoning_role,
+)
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
 MEDIA_RESUME_ISOLATION_ERROR = "builder2_media_resume_isolation_failed"
@@ -21,6 +28,7 @@ class MediaResumeIsolationGuard:
     ffmpeg_enabled: bool = False
     zip_generation_enabled: bool = False
     active: bool = False
+    reasoning_counters: MediaResumeReasoningCounters = MediaResumeReasoningCounters()
 
     @classmethod
     def begin(cls) -> None:
@@ -35,6 +43,7 @@ class MediaResumeIsolationGuard:
         cls.runway_enabled = False
         cls.ffmpeg_enabled = False
         cls.zip_generation_enabled = False
+        cls.reasoning_counters = MediaResumeReasoningCounters()
         cls.active = True
 
     @classmethod
@@ -52,6 +61,31 @@ class MediaResumeIsolationGuard:
     @classmethod
     def enable_ffmpeg(cls) -> None:
         cls.ffmpeg_enabled = True
+
+    @classmethod
+    def all_reasoning_roles_blocked(cls) -> bool:
+        if not cls.active:
+            return False
+        reasoning_checks = {
+            "strategyGenerationEnabled": cls.strategy_generation_enabled,
+            "creatorGenerationEnabled": cls.creator_generation_enabled,
+            "judgeGenerationEnabled": cls.judge_generation_enabled,
+            "winnerDevelopmentEnabled": cls.winner_development_enabled,
+            "tournamentLoopEnabled": cls.tournament_loop_enabled,
+            "ordinaryQueueEnabled": cls.ordinary_queue_enabled,
+            "recoveryScanEnabled": cls.recovery_scan_enabled,
+        }
+        return not any(reasoning_checks.values())
+
+    @classmethod
+    def assert_reasoning_call_allowed(cls, role: str) -> None:
+        assert_media_resume_reasoning_call_allowed(role=role, active=cls.active)
+
+    @classmethod
+    def record_reasoning_call_submitted(cls, role: str) -> None:
+        if not cls.active:
+            return
+        cls.reasoning_counters.increment(role)
 
     @classmethod
     def assert_reasoning_isolated(cls) -> None:
@@ -87,3 +121,21 @@ class MediaResumeIsolationGuard:
         cls.assert_reasoning_isolated()
         if not cls.ffmpeg_enabled:
             raise Builder2TournamentError(f"{MEDIA_RESUME_ISOLATION_ERROR}:ffmpegDisabled")
+
+    @classmethod
+    def assert_delivery_is_model_free(cls, *, compose_marketing_copy_uses_model: bool) -> None:
+        if not cls.active:
+            return
+        if compose_marketing_copy_uses_model:
+            raise Builder2TournamentError(MEDIA_RESUME_MODEL_DEPENDENT_DELIVERY)
+
+    @classmethod
+    def reasoning_report(cls) -> dict[str, int]:
+        return cls.reasoning_counters.to_report_dict()
+
+    @classmethod
+    def blocked_role_from_error(cls, reason: str) -> str:
+        prefix = f"{MEDIA_RESUME_REASONING_BLOCKED}:"
+        if reason.startswith(prefix):
+            return reason[len(prefix) :]
+        return normalize_reasoning_role("")
