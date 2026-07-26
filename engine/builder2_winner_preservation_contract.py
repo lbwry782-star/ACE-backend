@@ -319,6 +319,7 @@ def process_winner_development_response(
     source_reference: Dict[str, Any],
     winning_candidate: Dict[str, Any],
     preservation_snapshot: Optional[Dict[str, Any]] = None,
+    winning_judgment: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
     job_id: str = "",
     tournament_id: str = "",
@@ -345,6 +346,7 @@ def process_winner_development_response(
             merged,
             winning_candidate=winning_candidate,
             preservation_snapshot=snapshot,
+            winning_judgment=winning_judgment,
             compatibility_mode=compatibility_mode,
         )
     except Builder2TournamentError as exc:

@@ -7,6 +7,13 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from engine.builder2_headline_decision_contract import (
+    CANONICAL_HEADLINE_DECISIONS,
+    get_normalized_headline_decision,
+    headline_decision_is_omit,
+    headline_decision_requires_headline,
+    normalize_headline_decision_object,
+)
 from engine.builder2_methodology_contract import METHODOLOGY_VERSION
 from engine.builder2_methodology_validation import validate_winner_methodology
 from engine.builder2_tournament_contracts import (
@@ -42,14 +49,11 @@ _MONTAGE_LANGUAGE = re.compile(
 
 
 def _headline_decision_value(raw: Dict[str, Any]) -> str:
-    decision_obj = raw.get("headlineDecision")
-    if isinstance(decision_obj, dict):
-        return str(decision_obj.get("decision") or "").strip()
-    return str(decision_obj or "").strip()
+    return get_normalized_headline_decision(raw)
 
 
 def _headline_omitted(raw: Dict[str, Any]) -> bool:
-    return _headline_decision_value(raw) == "omit"
+    return headline_decision_is_omit(_headline_decision_value(raw))
 
 
 def _validate_visual_anchor(raw: Dict[str, Any]) -> Any:
@@ -105,6 +109,7 @@ def validate_builder2_winner_plan(
     *,
     winning_candidate: Optional[Dict[str, Any]] = None,
     preservation_snapshot: Optional[Dict[str, Any]] = None,
+    winning_judgment: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
 ) -> Dict[str, Any]:
     if raw.get("planningFailure"):
@@ -121,7 +126,15 @@ def validate_builder2_winner_plan(
     require_non_empty_str(raw.get("visualFamily"), field="visualFamily")
     structure = require_non_empty_str(raw.get("structureType"), field="structureType")
     headline_decision = _headline_decision_value(raw)
-    if headline_decision != "omit":
+    if winning_candidate is not None:
+        normalized_headline = normalize_headline_decision_object(
+            raw.get("headlineDecision"),
+            winning_judgment=winning_judgment,
+        )
+        if normalized_headline.get("decision") not in CANONICAL_HEADLINE_DECISIONS:
+            raise Builder2TournamentError("builder2_winner_validation_failed:headlineDecision.decision")
+        headline_decision = str(normalized_headline.get("decision") or "")
+    if headline_decision_requires_headline(headline_decision):
         require_non_empty_str(raw.get("headline"), field="headline")
         require_non_empty_str(raw.get("headlineCoreKeyword"), field="headlineCoreKeyword")
     require_non_empty_str(raw.get("coreVisualIdea"), field="coreVisualIdea")
@@ -156,6 +169,7 @@ def validate_builder2_winner_plan(
             out,
             winning_candidate=winning_candidate,
             preservation_snapshot=preservation_snapshot,
+            winning_judgment=winning_judgment,
             compatibility_mode=compatibility_mode,
         )
     return out

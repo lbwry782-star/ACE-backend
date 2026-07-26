@@ -240,11 +240,13 @@ def methodology_winner_extras(
         "coreCreativeMechanism": candidate.get("coreCreativeMechanism"),
     }
     headline_form = "none" if headline_decision == "omit" else "direct"
+    canonical_decision = "omit" if headline_decision == "omit" else "use"
     return {
         "methodologyVersion": METHODOLOGY_VERSION,
         "headlineDecision": {
-            "decision": headline_decision,
-            "reason": "The visual mechanism is strong enough to decide headline inclusion explicitly.",
+            "decision": canonical_decision,
+            "reason": None,
+            "reasonSource": "not_required",
         },
         "headlineForm": headline_form,
         "preservationReference": preservation,

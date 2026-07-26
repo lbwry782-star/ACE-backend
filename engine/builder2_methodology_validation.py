@@ -757,6 +757,7 @@ def validate_winner_methodology(
     *,
     winning_candidate: Dict[str, Any],
     preservation_snapshot: Optional[Dict[str, Any]] = None,
+    winning_judgment: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
 ) -> None:
     if compatibility_mode and not uses_full_methodology(winner_plan):
@@ -768,29 +769,13 @@ def validate_winner_methodology(
         field="headlineDecision",
         code="builder2_winner_validation_failed",
     )
-    decision = _require_text(decision_obj.get("decision"), field="headlineDecision.decision", code="builder2_winner_validation_failed")
-    if decision not in VALID_HEADLINE_DECISIONS:
-        _raise("builder2_winner_validation_failed", field="headlineDecision.decision")
-    _require_text(decision_obj.get("reason"), field="headlineDecision.reason", code="builder2_winner_validation_failed")
-    logger.info("BUILDER2_HEADLINE_DECISION_VALIDATED decision=%s", decision)
+    from engine.builder2_headline_decision_contract import validate_headline_decision_methodology
 
-    headline_form = winner_plan.get("headlineForm")
-    if headline_form is not None:
-        form = str(headline_form).strip()
-        if form not in VALID_HEADLINE_FORMS:
-            _raise("builder2_winner_validation_failed", field="headlineForm")
-        if form == "none" and decision != "omit":
-            _raise("builder2_winner_validation_failed", field="headlineForm.none_requires_omit")
-        if decision == "omit" and form not in {"none", "other"}:
-            _raise("builder2_winner_validation_failed", field="headlineForm.omit_requires_none")
-
-    if decision == "omit":
-        headline = str(winner_plan.get("headline") or "").strip()
-        headline_text = str(winner_plan.get("headlineText") or "").strip()
-        if headline or headline_text:
-            _raise("builder2_winner_validation_failed", field="headlineDecision.omit_with_headline")
-    elif decision == "include":
-        _require_text(winner_plan.get("headline"), field="headline", code="builder2_winner_validation_failed")
+    validate_headline_decision_methodology(
+        winner_plan,
+        winning_judgment=winning_judgment if isinstance(winning_judgment, dict) else None,
+    )
+    decision = str((winner_plan.get("headlineDecision") or {}).get("decision") or "")
 
     _validate_winner_preservation_deterministic(
         winner_plan,

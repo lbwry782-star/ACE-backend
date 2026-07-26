@@ -31,7 +31,9 @@ REFERENCE_ONLY_METHOD_IDS: FrozenSet[str] = REFERENCE_ONLY_PROTOTYPE_IDS | froze
 )
 
 # Authoritative Builder2 enum source — import these from this module elsewhere.
-VALID_HEADLINE_DECISIONS: FrozenSet[str] = frozenset({"include", "omit"})
+CANONICAL_HEADLINE_DECISIONS: FrozenSet[str] = frozenset({"use", "omit"})
+HEADLINE_DECISION_ALIASES: Dict[str, str] = {"include": "use"}
+VALID_HEADLINE_DECISIONS: FrozenSet[str] = CANONICAL_HEADLINE_DECISIONS | frozenset(HEADLINE_DECISION_ALIASES.keys())
 
 VALID_HEADLINE_FORMS: FrozenSet[str] = frozenset(
     {"expression_replacement", "direct", "planned_contradiction", "other", "none"}

@@ -39,6 +39,7 @@ def validate_winner_plan(
     *,
     winning_candidate: Optional[Dict[str, Any]] = None,
     preservation_snapshot: Optional[Dict[str, Any]] = None,
+    winning_judgment: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
     source_reference: Optional[Dict[str, Any]] = None,
     job_id: str = "",
@@ -50,6 +51,7 @@ def validate_winner_plan(
             source_reference=source_reference,
             winning_candidate=winning_candidate,
             preservation_snapshot=preservation_snapshot,
+            winning_judgment=winning_judgment,
             compatibility_mode=compatibility_mode,
             job_id=job_id,
             tournament_id=tournament_id,
@@ -58,6 +60,7 @@ def validate_winner_plan(
         raw,
         winning_candidate=winning_candidate,
         preservation_snapshot=preservation_snapshot,
+        winning_judgment=winning_judgment,
         compatibility_mode=compatibility_mode,
     )
 
@@ -200,26 +203,28 @@ def develop_builder2_winning_candidate(
         top_level_keys=top_level_keys,
     )
 
+    if state is not None:
+        persist_parsed_winner_response(
+            state,
+            parsed=raw,
+            candidate_id=resolved_candidate_id,
+            prototype_id=prototype_id,
+            top_level_keys=top_level_keys,
+            response_char_count=len(response_text),
+        )
+
     try:
         winner_plan = process_winner_development_response(
             raw,
             source_reference=source_reference,
             winning_candidate=winning_candidate,
             preservation_snapshot=preservation_snapshot,
+            winning_judgment=winning_judgment,
             compatibility_mode=compatibility_mode,
             job_id=job_id,
             tournament_id=tournament_id,
         )
     except Builder2TournamentError as exc:
-        if state is not None:
-            persist_parsed_winner_response(
-                state,
-                parsed=raw,
-                candidate_id=resolved_candidate_id,
-                prototype_id=prototype_id,
-                top_level_keys=top_level_keys,
-                response_char_count=len(response_text),
-            )
         reason = str(exc.args[0] if exc.args else "")
         stage = STAGE_METHODOLOGY_VALIDATION if reason.startswith(
             ("builder2_winner_validation_failed", "builder2_winner_source_identity_mismatch", "builder2_winner_preservation_contract_missing")
@@ -232,15 +237,6 @@ def develop_builder2_winning_candidate(
             top_level_keys=top_level_keys,
         )
     except Exception as exc:
-        if state is not None:
-            persist_parsed_winner_response(
-                state,
-                parsed=raw,
-                candidate_id=resolved_candidate_id,
-                prototype_id=prototype_id,
-                top_level_keys=top_level_keys,
-                response_char_count=len(response_text),
-            )
         raise_public_winner_failure(
             exc,
             state=state,

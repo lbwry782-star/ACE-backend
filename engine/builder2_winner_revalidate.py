@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from engine.builder2_accepted_creator_store import backfill_accepted_creator_index
 from engine.builder2_accepted_judgment_store import backfill_accepted_judgment_index
+from engine.builder2_headline_decision_contract import capture_headline_decision_diagnostic
 from engine.builder2_tournament_store import load_tournament_state, save_tournament_state
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development, persist_winner_development_atomically
 from engine.builder2_winner_preservation_contract import (
@@ -29,6 +30,16 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
+def _resolve_winning_judgment(state: Dict[str, Any], candidate_id: str) -> Dict[str, Any]:
+    winner_rec = (state.get("candidates") or {}).get(candidate_id) or {}
+    judgment_id = winner_rec.get("judgmentId")
+    if not judgment_id:
+        return {}
+    judgment_rec = (state.get("judgments") or {}).get(str(judgment_id)) or {}
+    judgment = judgment_rec.get("judgment")
+    return judgment if isinstance(judgment, dict) else {}
+
+
 def run_one_winner_revalidate(
     *,
     job_id: str,
@@ -36,11 +47,18 @@ def run_one_winner_revalidate(
 ) -> Dict[str, Any]:
     report: Dict[str, Any] = {
         "jobId": job_id,
+        "winnerCandidateId": None,
+        "winnerPrototypeId": None,
         "parsedResponseAvailable": False,
         "topLevelKeyCount": 0,
         "winnerDevelopmentAccepted": False,
+        "winnerRevalidated": False,
         "winnerReused": False,
+        "headlineDecision": None,
+        "headlineReasonPresent": False,
         "winnerNormalCalls": 0,
+        "winnerRepairCalls": 0,
+        "winnerRetryCalls": 0,
         "strategyCalls": 0,
         "creatorCalls": 0,
         "judgeCalls": 0,
@@ -58,8 +76,16 @@ def run_one_winner_revalidate(
         return report
 
     if is_valid_persisted_winner_development(state):
+        candidate_id = str(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId") or "").strip()
+        prototype_id = str(state.get("winnerDevelopmentPrototypeId") or "").strip()
+        plan = state.get("winnerDevelopmentPlan") or {}
+        diagnostic = capture_headline_decision_diagnostic(plan.get("headlineDecision"))
+        report["winnerCandidateId"] = candidate_id or None
+        report["winnerPrototypeId"] = prototype_id or None
         report["winnerDevelopmentAccepted"] = True
         report["winnerReused"] = True
+        report["headlineDecision"] = diagnostic.get("normalizedDecision")
+        report["headlineReasonPresent"] = bool(diagnostic.get("reasonPresent"))
         report["mediaContinuationRequired"] = True
         report["ok"] = True
         return report
@@ -77,8 +103,11 @@ def run_one_winner_revalidate(
     candidate_id = str(payload.get("candidateId") or state.get("winnerCandidateId") or "").strip()
     winner_rec = (state.get("candidates") or {}).get(candidate_id) or {}
     winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+    winning_judgment = _resolve_winning_judgment(state, candidate_id)
     strategy = state.get("strategyFoundation") or {}
     prototype_id = str(payload.get("prototypeId") or winner_rec.get("prototypeId") or "").strip()
+    report["winnerCandidateId"] = candidate_id or None
+    report["winnerPrototypeId"] = prototype_id or None
 
     source_reference = build_server_owned_winner_source_reference(
         strategy_foundation=strategy,
@@ -101,6 +130,7 @@ def run_one_winner_revalidate(
             source_reference=source_reference,
             winning_candidate=winning_candidate,
             preservation_snapshot=preservation_snapshot,
+            winning_judgment=winning_judgment,
             compatibility_mode=bool(state.get("methodologyCompatibilityMode")),
             job_id=job_id,
             tournament_id=str(state.get("tournamentId") or ""),
@@ -116,7 +146,11 @@ def run_one_winner_revalidate(
         )
         state["mediaContinuationRequired"] = True
         save_tournament_state(job_id, state)
+        diagnostic = capture_headline_decision_diagnostic(parsed.get("headlineDecision"))
         report["winnerDevelopmentAccepted"] = True
+        report["winnerRevalidated"] = True
+        report["headlineDecision"] = diagnostic.get("normalizedDecision")
+        report["headlineReasonPresent"] = bool(diagnostic.get("reasonPresent"))
         report["mediaContinuationRequired"] = True
         report["ok"] = True
     except Exception as exc:
@@ -130,11 +164,18 @@ def print_revalidate_report(report: Dict[str, Any]) -> None:
         key: report.get(key)
         for key in (
             "jobId",
+            "winnerCandidateId",
+            "winnerPrototypeId",
             "parsedResponseAvailable",
             "topLevelKeyCount",
             "winnerDevelopmentAccepted",
+            "winnerRevalidated",
             "winnerReused",
+            "headlineDecision",
+            "headlineReasonPresent",
             "winnerNormalCalls",
+            "winnerRepairCalls",
+            "winnerRetryCalls",
             "strategyCalls",
             "creatorCalls",
             "judgeCalls",
@@ -159,10 +200,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     report = run_one_winner_revalidate(job_id=job_id)
     print_revalidate_report(report)
     logger.info(
-        "BUILDER2_WINNER_REVALIDATE_DONE jobId=%s ok=%s parsedResponseAvailable=%s",
+        "BUILDER2_WINNER_REVALIDATE_DONE jobId=%s ok=%s parsedResponseAvailable=%s headlineDecision=%s",
         job_id,
         report.get("ok"),
         report.get("parsedResponseAvailable"),
+        report.get("headlineDecision"),
     )
     return 0 if report.get("ok") else 1
 

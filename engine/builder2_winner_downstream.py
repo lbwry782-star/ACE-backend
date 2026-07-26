@@ -8,6 +8,10 @@ import re
 import unicodedata
 from typing import Any, Dict, List, Optional, Tuple
 
+from engine.builder2_headline_decision_contract import (
+    get_normalized_headline_decision,
+    headline_decision_requires_headline,
+)
 from engine.builder2_methodology_contract import METHODOLOGY_VERSION
 from engine.builder2_tournament_contracts import WINNER_PLAN_SCHEMA_VERSION
 from engine.video_planning import (
@@ -61,14 +65,7 @@ def _optional_text(value: Any) -> str:
 
 
 def get_headline_decision(plan: Dict[str, Any]) -> str:
-    decision_obj = plan.get("headlineDecision")
-    if isinstance(decision_obj, dict):
-        return _require_non_empty_text(decision_obj.get("decision"), "headlineDecision.decision")
-    if isinstance(decision_obj, str):
-        text = decision_obj.strip()
-        if text:
-            return text
-    return "omit"
+    return get_normalized_headline_decision(plan)
 
 
 def get_visual_anchor_description(plan: Dict[str, Any]) -> str:
@@ -269,7 +266,7 @@ def compose_builder2_headline_text(
 
 def apply_builder2_headline_composition(plan: Dict[str, Any]) -> None:
     decision = get_headline_decision(plan)
-    if decision == "omit":
+    if not headline_decision_requires_headline(decision):
         plan["headline"] = ""
         plan["headlineText"] = ""
         plan["headlineTextRemainder"] = ""
@@ -284,7 +281,7 @@ def apply_builder2_headline_composition(plan: Dict[str, Any]) -> None:
     plan["headlineText"] = headline_text
     plan["headlineTextRemainder"] = cleaned_rem
     plan["advertisingPromise"] = cleaned_rem
-    logger.info("BUILDER2_HEADLINE_COMPOSITION_OK decision=include")
+    logger.info("BUILDER2_HEADLINE_COMPOSITION_OK decision=use")
 
 
 def ensure_builder2_schema_metadata(plan: Dict[str, Any], *, compatibility_mode: bool = False) -> None:
@@ -384,7 +381,7 @@ def validate_builder2_pre_runway(plan: Dict[str, Any]) -> None:
         get_recurring_motif(plan)
 
     decision = get_headline_decision(plan)
-    if decision == "include":
+    if headline_decision_requires_headline(decision):
         _require_non_empty_text(plan.get("headlineText"), "headlineText")
         _require_non_empty_text(plan.get("headlineTextRemainder"), "headlineTextRemainder")
         pn = _require_non_empty_text(plan.get("productNameResolved"), "productNameResolved")
