@@ -64,6 +64,8 @@ def _negative_verbal_judgment(candidate_id: str = "cand-neg", *, eligible: bool 
 
 
 def _persisted_preflight_state(*, candidate_id: str = DEFAULT_PREFLIGHT_CANDIDATE_ID) -> Dict[str, Any]:
+    from engine.builder2_accepted_creator_store import persist_accepted_creator_candidate
+
     strategy = _strategy(language="he")
     candidate = _candidate("summer_fan")
     candidate["verbalPotential"] = {
@@ -80,13 +82,25 @@ def _persisted_preflight_state(*, candidate_id: str = DEFAULT_PREFLIGHT_CANDIDAT
     state["productDescription"] = "Preflight description"
     state["contentLanguage"] = "he"
     state["strategyFoundation"] = strategy
+    persist_accepted_creator_candidate(
+        state,
+        candidate_id=candidate_id,
+        prototype_id="summer_fan",
+        round_index=1,
+        attempt_number=1,
+        creator_output=candidate,
+        strategy_foundation=strategy,
+    )
     state["candidates"][candidate_id] = {
         "candidateId": candidate_id,
         "prototypeId": "summer_fan",
         "roundIndex": 1,
         "attemptNumber": 1,
         "creatorOutput": candidate,
+        "creatorSnapshot": candidate,
+        "creatorAcceptanceStatus": "accepted",
         "validationStatus": "accepted",
+        "judgeStatus": "pending",
         "status": "accepted",
         "judgmentId": None,
         "eligible": False,
@@ -233,6 +247,8 @@ class TestJudgeCoherenceAndTournamentOutcomes(unittest.TestCase):
                 f"c{i}": {
                     "candidateId": f"c{i}",
                     "eligible": False,
+                    "creatorAcceptanceStatus": "accepted",
+                    "judgeStatus": "accepted",
                     "validationStatus": "accepted",
                     "judgmentId": f"j{i}",
                     "totalScore": 10 + i,
@@ -252,6 +268,8 @@ class TestJudgeCoherenceAndTournamentOutcomes(unittest.TestCase):
                 "c1": {
                     "candidateId": "c1",
                     "eligible": False,
+                    "creatorAcceptanceStatus": "accepted",
+                    "judgeStatus": "accepted",
                     "validationStatus": "accepted",
                     "judgmentId": "j1",
                     "totalScore": 10,
@@ -261,13 +279,19 @@ class TestJudgeCoherenceAndTournamentOutcomes(unittest.TestCase):
                 "c2": {
                     "candidateId": "c2",
                     "eligible": False,
+                    "creatorAcceptanceStatus": "accepted",
+                    "judgeStatus": "pending",
                     "validationStatus": "accepted",
                     "judgmentId": None,
                     "totalScore": None,
                     "tieScores": {},
                     "completedAt": "2026-01-02T00:00:00+00:00",
                 },
-            }
+            },
+            "acceptedCreatorCandidates": {
+                "c1": {"candidateId": "c1", "validationStatus": "accepted", "creatorOutput": {"prototypeId": "closest"}},
+                "c2": {"candidateId": "c2", "validationStatus": "accepted", "creatorOutput": {"prototypeId": "closest"}},
+            },
         }
         with self.assertRaises(Builder2TournamentError) as ctx:
             select_global_winner(state)
@@ -421,6 +445,8 @@ class TestJudgePreflight(unittest.TestCase):
             llm_client=lambda **kwargs: _valid_judgment(DEFAULT_PREFLIGHT_CANDIDATE_ID, eligible=True),
         )
         self.assertTrue(report["judgeAccepted"])
+        self.assertEqual(report["requestedCandidateId"], DEFAULT_PREFLIGHT_CANDIDATE_ID)
+        self.assertEqual(report["resolvedCandidateId"], DEFAULT_PREFLIGHT_CANDIDATE_ID)
         self.assertEqual(report["candidateSource"], "requested_persisted_candidate")
         self.assertEqual(report["judgeNormalCalls"], 1)
         self.assertEqual(report["judgeRepairCalls"], 0)

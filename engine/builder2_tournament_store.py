@@ -80,7 +80,12 @@ def _write_raw(job_id: str, state: Dict[str, Any]) -> None:
 
 
 def load_tournament_state(job_id: str) -> Optional[Dict[str, Any]]:
-    return _read_raw(job_id)
+    state = _read_raw(job_id)
+    if state is not None:
+        from engine.builder2_accepted_creator_store import backfill_accepted_creator_index
+
+        backfill_accepted_creator_index(state)
+    return state
 
 
 def save_tournament_state(job_id: str, state: Dict[str, Any]) -> None:
@@ -145,6 +150,7 @@ def new_tournament_state(
         "currentRound": 0,
         "rounds": [],
         "candidates": {},
+        "acceptedCreatorCandidates": {},
         "judgments": {},
         "bestCandidateByPrototype": {},
         "winnerCandidateId": None,

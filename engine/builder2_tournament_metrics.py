@@ -156,7 +156,7 @@ def finalize_tournament_metrics(state: Dict[str, Any], *, elapsed_ms: float) -> 
     eligible = sum(
         1
         for cand in state.get("candidates", {}).values()
-        if cand.get("eligible") and cand.get("validationStatus") == "accepted"
+        if cand.get("eligible") and cand.get("judgeStatus") == "accepted"
     )
     rejected_creator = sum(
         1
@@ -166,7 +166,7 @@ def finalize_tournament_metrics(state: Dict[str, Any], *, elapsed_ms: float) -> 
     unavailable = sum(
         1
         for cand in state.get("candidates", {}).values()
-        if cand.get("validationStatus") == "judge_unavailable"
+        if cand.get("judgeStatus") == "unavailable"
     )
     ineligible_judged = sum(
         1

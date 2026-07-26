@@ -239,13 +239,18 @@ class TestValidNegativeJudgment(unittest.TestCase):
                 "c1": {
                     "candidateId": "c1",
                     "eligible": False,
+                    "creatorAcceptanceStatus": "accepted",
+                    "judgeStatus": "accepted",
                     "validationStatus": "accepted",
                     "judgmentId": "j1",
                     "totalScore": 95,
                     "tieScores": {},
                     "completedAt": "2026-01-01T00:00:00+00:00",
                 }
-            }
+            },
+            "acceptedCreatorCandidates": {
+                "c1": {"candidateId": "c1", "validationStatus": "accepted", "creatorOutput": {"prototypeId": "closest"}},
+            },
         }
         with self.assertRaises(Builder2TournamentError) as ctx:
             select_global_winner(state)

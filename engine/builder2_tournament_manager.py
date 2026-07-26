@@ -11,6 +11,10 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from engine.builder2_accepted_creator_store import (
+    persist_accepted_creator_candidate,
+    update_candidate_judge_state,
+)
 from engine.builder2_creator import generate_creator_candidate
 from engine.builder2_creator_circuit_breaker import (
     SYSTEMIC_FAILURE_CODE,
@@ -87,11 +91,39 @@ def _candidate_rank_record(state: Dict[str, Any], candidate_id: str) -> Dict[str
     }
 
 
+def _creator_was_accepted(cand: Dict[str, Any], *, state: Optional[Dict[str, Any]] = None) -> bool:
+    if cand.get("creatorAcceptanceStatus") == "accepted":
+        return True
+    candidate_id = str(cand.get("candidateId") or "")
+    if state is not None and candidate_id:
+        index = state.get("acceptedCreatorCandidates") or {}
+        if candidate_id in index:
+            return True
+    if cand.get("validationStatus") == "accepted":
+        if isinstance(cand.get("creatorOutput"), dict):
+            return True
+        if cand.get("eligible") or cand.get("totalScore") is not None or cand.get("judgmentId"):
+            return True
+    return False
+
+
+def _has_valid_judgment(cand: Dict[str, Any]) -> bool:
+    if cand.get("judgmentId"):
+        return True
+    if cand.get("judgeStatus") == "accepted":
+        return True
+    if cand.get("judgeStatus") in (None, "pending") and cand.get("validationStatus") == "accepted":
+        return cand.get("eligible") is True or cand.get("totalScore") is not None
+    return False
+
+
 def select_global_winner(state: Dict[str, Any]) -> str:
     eligible_ids = [
         cid
         for cid, cand in state["candidates"].items()
-        if cand.get("eligible") and cand.get("validationStatus") == "accepted"
+        if cand.get("eligible")
+        and _creator_was_accepted(cand, state=state)
+        and _has_valid_judgment(cand)
     ]
     if eligible_ids:
         best_id = eligible_ids[0]
@@ -103,13 +135,13 @@ def select_global_winner(state: Dict[str, Any]) -> str:
                 best_record = record
         return best_id
 
-    accepted = [
+    creator_accepted = [
         cand
         for cand in state["candidates"].values()
-        if cand.get("validationStatus") == "accepted"
+        if _creator_was_accepted(cand, state=state)
     ]
-    judged = [cand for cand in accepted if cand.get("judgmentId")]
-    if judged and len(judged) == len(accepted):
+    judged = [cand for cand in creator_accepted if _has_valid_judgment(cand)]
+    if judged and len(judged) == len(creator_accepted):
         raise Builder2TournamentError("builder2_tournament_no_eligible_candidate")
     raise Builder2TournamentError("builder2_tournament_no_valid_candidate")
 
@@ -276,7 +308,7 @@ def _run_creator_and_judge_for_assignment(
         if c.get("prototypeId") == prototype_id
         and c.get("roundIndex") == round_index
         and c.get("attemptNumber") == attempt_number
-        and c.get("validationStatus") == "judge_unavailable"
+        and c.get("judgeStatus") == "unavailable"
     ]
     if existing_judge_unavailable:
         return
@@ -287,12 +319,24 @@ def _run_creator_and_judge_for_assignment(
         if c.get("prototypeId") == prototype_id
         and c.get("roundIndex") == round_index
         and c.get("attemptNumber") == attempt_number
-        and c.get("validationStatus") == "accepted"
+        and _creator_was_accepted(c, state=state)
+        and c.get("judgeStatus") in (None, "pending")
         and not c.get("judgmentId")
     ]
     if pending:
         candidate_id = pending[0]["candidateId"]
-        candidate = pending[0]["creatorOutput"]
+        candidate = pending[0].get("creatorSnapshot") or pending[0]["creatorOutput"]
+        if candidate_id not in (state.get("acceptedCreatorCandidates") or {}):
+            persist_accepted_creator_candidate(
+                state,
+                candidate_id=candidate_id,
+                prototype_id=prototype_id,
+                round_index=round_index,
+                attempt_number=attempt_number,
+                creator_output=candidate,
+                strategy_foundation=strategy,
+            )
+            save_tournament_state(str(state.get("jobId") or ""), state)
     else:
         logger.info(
             "BUILDER2_PROTOTYPE_ASSIGNED prototypeId=%s roundIndex=%s attempt=%s",
@@ -351,7 +395,11 @@ def _run_creator_and_judge_for_assignment(
                 "creatorOutput": candidate,
                 "creatorDiagnostics": dict((state.get("creatorDiagnosticsByCandidate") or {}).get(candidate_id, {})),
                 "validationStatus": "accepted",
+                "creatorAcceptanceStatus": "accepted",
                 "status": "accepted",
+                "judgeStatus": "pending",
+                "judgmentSnapshot": None,
+                "judgeFailure": None,
                 "judgmentId": None,
                 "eligible": False,
                 "totalScore": None,
@@ -360,8 +408,19 @@ def _run_creator_and_judge_for_assignment(
                 "completedAt": _utc_now_iso(),
             },
         )
+        persist_accepted_creator_candidate(
+            state,
+            candidate_id=candidate_id,
+            prototype_id=prototype_id,
+            round_index=round_index,
+            attempt_number=attempt_number,
+            creator_output=candidate,
+            strategy_foundation=strategy,
+        )
+        save_tournament_state(str(state.get("jobId") or ""), state)
 
     cand_rec = state["candidates"][candidate_id]
+    candidate = cand_rec.get("creatorSnapshot") or cand_rec.get("creatorOutput") or candidate
     if cand_rec.get("judgmentId"):
         return
 
@@ -402,10 +461,13 @@ def _run_creator_and_judge_for_assignment(
             judgment_id,
             reason,
         )
-        cand_rec["validationStatus"] = "judge_unavailable"
-        cand_rec["status"] = "judge_unavailable"
-        cand_rec["creatorCandidateValid"] = True
-        cand_rec["failureReason"] = reason
+        update_candidate_judge_state(
+            state,
+            candidate_id=candidate_id,
+            judge_status="unavailable",
+            failure_reason=reason,
+        )
+        cand_rec = state["candidates"][candidate_id]
         cand_rec["judgeDiagnostics"] = dict(diagnostics)
         cand_rec["eligible"] = False
         cand_rec["totalScore"] = None
@@ -431,6 +493,13 @@ def _run_creator_and_judge_for_assignment(
     cand_rec["tieScores"] = scores
     cand_rec["judgeDiagnostics"] = dict((state.get("judgeDiagnosticsByCandidate") or {}).get(candidate_id, {}))
     cand_rec["completedAt"] = _utc_now_iso()
+    update_candidate_judge_state(
+        state,
+        candidate_id=candidate_id,
+        judge_status="accepted",
+        judgment_id=judgment_id,
+        judgment_snapshot=judgment,
+    )
     record_judge_valid(state, eligible=bool(judgment.get("eligible")))
 
     if cand_rec["eligible"]:
