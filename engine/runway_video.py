@@ -36,6 +36,7 @@ from engine.builder2_tournament_store import load_tournament_state, patch_tourna
 from engine.builder2_winner_plan import builder2_video_plan_struct_ok_for_runway
 from engine.video_start_image import generate_video_start_image_data_uri
 from engine.ad_promise_memory import record_ad_promise_generation_success
+from engine.runway_prompt_budget import RunwayPromptBudgetError, count_utf16_code_units
 from engine.video_planning import (
     RUNWAY_PHYSICS_REALISM_CONSTRAINT,
     VideoPlanningTimeoutError,
@@ -122,114 +123,37 @@ def _enforce_runway_prompt_text_api_max(
     prompt: str, *, physics_full: str
 ) -> Tuple[str, bool, int, int]:
     """
-    Hard cap promptText for Runway (<= _RUNWAY_PROMPT_TEXT_API_MAX) after all assembly.
-
-    Priority when trimming: (1) physical interaction clause, (2) visual / no-text policy,
-    (3) camera motion (kept by preserving text near the interaction marker), (4) secondary style — dropped first.
-
-    Returns (final_prompt, trim_applied, len_before, len_after).
+    Hard cap promptText for Runway (<= _RUNWAY_PROMPT_TEXT_API_MAX UTF-16 code units) after all assembly.
     """
+    from engine.runway_prompt_budget import normalize_runway_prompt_to_budget, count_utf16_code_units
+
     original = (prompt or "").strip()
-    before_len = len(original)
+    before_len = count_utf16_code_units(original)
     if before_len <= _RUNWAY_PROMPT_TEXT_API_MAX:
         return original, False, before_len, before_len
-
-    pf = (physics_full or "").strip()
-    ps = _RUNWAY_PHYSICS_REALISM_SHORT.strip()
-    rs = original.rstrip()
-    main = rs
-    physics = ""
-    if pf and rs.endswith(pf):
-        main = rs[: len(rs) - len(pf)].rstrip()
-        physics = pf
-
-    trim_applied = True
-
-    def _total() -> int:
-        m = (main or "").strip()
-        p = (physics or "").strip()
-        if not m and not p:
-            return 0
-        if not m:
-            return len(p)
-        if not p:
-            return len(m)
-        return len(m) + 1 + len(p)
-
-    def _join() -> str:
-        m = (main or "").strip()
-        p = (physics or "").strip()
-        if not m:
-            return p
-        if not p:
-            return m
-        return f"{m} {p}".strip()
-
-    guard = 0
-    while _total() > _RUNWAY_PROMPT_TEXT_API_MAX and guard < 48:
-        guard += 1
-        progressed = False
-        # 1) Compress physics suffix (full -> short).
-        if physics == pf and len(pf) > len(ps):
-            physics = ps
-            progressed = True
-        # 2) Drop secondary style tail (lowest priority).
-        if not progressed:
-            m2 = _SECONDARY_RUNWAY_STYLE_TAIL.sub("", main).strip()
-            m2 = re.sub(r"\s+", " ", m2)
-            if m2 != main:
-                main = m2
-                progressed = True
-        # 3) Compact long VISUAL POLICY opener.
-        if not progressed and _VISUAL_POLICY_LONG_PREFIX in main:
-            main = main.replace(_VISUAL_POLICY_LONG_PREFIX, _VISUAL_POLICY_COMPACT, 1)
-            main = re.sub(r"\s+", " ", main).strip()
-            progressed = True
-        # 4) Shrink prefix before the physical interaction clause (preserves tail: camera + interaction).
-        if not progressed:
-            markers = ("Physical interaction (follow exactly):", "Physical interaction:")
-            idx = -1
-            for mk in markers:
-                j = main.find(mk)
-                if j >= 0:
-                    idx = j
-                    break
-            if idx > 0:
-                pref, tail = main[:idx], main[idx:]
-                budget = _RUNWAY_PROMPT_TEXT_API_MAX - (1 + len(physics) if physics else 0)
-                if len(tail) >= budget:
-                    main = tail[:budget].rstrip()
-                else:
-                    room = budget - len(tail)
-                    pref2 = pref[-room:] if room > 0 else ""
-                    main = (pref2 + tail).strip()
-                progressed = True
-        # 5) No marker (compact prompt): truncate from the left, keeping the end.
-        if not progressed:
-            budget = _RUNWAY_PROMPT_TEXT_API_MAX - (1 + len(physics) if physics else 0)
-            if budget <= 0:
-                physics = ""
-                main = original[:_RUNWAY_PROMPT_TEXT_API_MAX].strip()
-                break
-            main = main[-budget:].strip()
-            progressed = True
-
-        if _total() <= _RUNWAY_PROMPT_TEXT_API_MAX:
-            break
-        if not progressed:
-            tmp = _join()
-            main = tmp[:_RUNWAY_PROMPT_TEXT_API_MAX].rstrip()
-            physics = ""
-            break
-
-    out = _join()
-    if len(out) > _RUNWAY_PROMPT_TEXT_API_MAX:
-        out = out[:_RUNWAY_PROMPT_TEXT_API_MAX].rstrip()
-    if not out:
-        out = "Two objects in physical contact; smooth half-orbit camera; no on-screen text."
-        out = out[:_RUNWAY_PROMPT_TEXT_API_MAX]
-    after_len = len(out)
-    return out, trim_applied or (after_len != before_len), before_len, after_len
+    main = original
+    physics = (physics_full or "").strip()
+    if physics and original.endswith(physics):
+        main = original[: len(original) - len(physics)].rstrip()
+    try:
+        result = normalize_runway_prompt_to_budget(
+            core_prompt=main,
+            physics_suffix=physics or RUNWAY_PHYSICS_REALISM_CONSTRAINT,
+            maximum_utf16_units=_RUNWAY_PROMPT_TEXT_API_MAX,
+        )
+    except RunwayPromptBudgetError:
+        tmp = original
+        while tmp and count_utf16_code_units(tmp) > _RUNWAY_PROMPT_TEXT_API_MAX:
+            tmp = tmp[:-1]
+        tmp = tmp.rstrip()
+        after = count_utf16_code_units(tmp)
+        return tmp, True, before_len, after
+    return (
+        result.promptText,
+        result.trimApplied,
+        result.utf16LengthBefore,
+        result.utf16Length,
+    )
 # Per poll GET — must never block indefinitely (network stalls)
 _POLL_HTTP_TIMEOUT_SECONDS = float((os.environ.get("RUNWAY_POLL_HTTP_TIMEOUT_SECONDS") or "25").strip() or "25")
 
@@ -273,8 +197,11 @@ def _resolve_runway_video_model(*, job_id: str = "", duration_seconds: int) -> s
 
 
 def _env_base_url() -> str:
-    raw = (os.environ.get("RUNWAY_API_BASE_URL", "") or "").strip()
-    return raw.rstrip("/") if raw else DEFAULT_RUNWAY_BASE_URL
+    from engine.runway_api_urls import normalize_runway_origin, resolve_configured_runway_base
+
+    _, configured = resolve_configured_runway_base()
+    origin, _ = normalize_runway_origin(configured)
+    return origin
 
 
 def log_config_warning_if_missing_key() -> None:
@@ -647,7 +574,7 @@ def _runway_task_create_http(
         "RUNWAY_MVP task_create_physics_suffix_appended=%s",
         str(physics_suffix_appended).lower(),
     )
-    logger.info("RUNWAY_MVP task_create_prompt_len_final=%s", prompt_len)
+    logger.info("RUNWAY_MVP task_create_prompt_len_final=%s", count_utf16_code_units(body.get("promptText") or ""))
     resp = session.post(url, json=body, headers=_headers(), timeout=_HTTP_TIMEOUT_SECONDS)
     if resp.status_code >= 400:
         max_c = max(200, _RUNWAY_TASK_CREATE_ERROR_BODY_LOG_CHARS)
@@ -704,9 +631,11 @@ def _create_text_to_video_task(
     if model != "gen4.5":
         logger.error("RUNWAY_MODEL_UNSUPPORTED model=%s expected=gen4.5", model)
         raise RunwayVideoMVPError("unsupported_runway_model")
-    url = f"{base_url}/v1/text_to_video"
+    from engine.runway_api_urls import build_runway_text_to_video_url
+
+    url = build_runway_text_to_video_url(configured_base=base_url).absoluteUrl
     pt = prompt_text or ""
-    prompt_len = len(pt)
+    prompt_len = count_utf16_code_units(pt)
     body: Dict[str, Any] = {
         "model": model,
         "promptText": pt,
@@ -757,9 +686,11 @@ def _create_image_to_video_task(
     image_uri = (prompt_image_data_uri or "").strip()
     if not image_uri:
         raise RunwayVideoMVPError("builder2_start_image_generation_failed")
-    url = f"{base_url}/v1/image_to_video"
+    from engine.runway_api_urls import build_runway_image_to_video_url
+
+    url = build_runway_image_to_video_url(configured_base=base_url).absoluteUrl
     pt = prompt_text or ""
-    prompt_len = len(pt)
+    prompt_len = count_utf16_code_units(pt)
     body: Dict[str, Any] = {
         "model": model,
         "promptImage": image_uri,
@@ -805,7 +736,9 @@ def _poll_get_task_once(
     Single poll GET with hard timeout. Returns None on timeout/transport/HTTP/JSON parse errors
     so the outer loop can retry until monotonic deadline (never hang forever on one socket).
     """
-    url = f"{base_url}/v1/tasks/{task_id}"
+    from engine.runway_api_urls import build_runway_task_poll_url
+
+    url = build_runway_task_poll_url(task_id, configured_base=base_url).absoluteUrl
     try:
         resp = session.get(url, headers=_headers(), timeout=timeout)
     except requests.exceptions.Timeout:
@@ -1050,7 +983,7 @@ def _generate_one_video_mvp_body(
     )
     logger.info("RUNWAY_MVP task_create_prompt_trim_from=%s", runway_trim_from)
     logger.info("RUNWAY_MVP task_create_prompt_trim_to=%s", runway_trim_to)
-    logger.info("RUNWAY_MVP task_create_prompt_len_final=%s", len(prompt))
+    logger.info("RUNWAY_MVP task_create_prompt_len_final=%s", count_utf16_code_units(prompt))
 
     logger.info("VIDEO_TIMING_STAGE_START stage=start_image jobId=%s", job_id or "(none)")
     t_start_image0 = time.monotonic()

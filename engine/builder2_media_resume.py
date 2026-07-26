@@ -61,8 +61,11 @@ def _initial_report(*, job_id: str, dry_run: bool = False) -> Dict[str, Any]:
         "startImageRepairCalls": 0,
         "startImageRetryCalls": 0,
         "startImageGeneratedCount": 0,
+        "startImageReused": False,
         "startImageGeometry": None,
         "runwaySubmissionCalls": 0,
+        "runwayTaskCreatedCount": 0,
+        "runwayPollingCalls": 0,
         "runwayPollingResumed": False,
         "ffmpegCalls": 0,
         "dryRun": dry_run,
@@ -210,8 +213,28 @@ def run_one_media_resume(
                 dry_run=True,
                 media_config=media_config,
             )
-            report["readyForMediaResume"] = True
-            report["ok"] = True
+            runway_dry = (state.get("mediaResume") or {}).get("runwayDryRun") or {}
+            report.update(
+                {
+                    key: runway_dry.get(key)
+                    for key in (
+                        "startImageAvailable",
+                        "startImageReusable",
+                        "startImageOutputSize",
+                        "runwayOriginConfigured",
+                        "runwayCreateEndpointPath",
+                        "runwayTaskEndpointTemplate",
+                        "runwayVersionPrefixCount",
+                        "runwayEndpointAccepted",
+                        "runwayPromptUtf16Length",
+                        "runwayPromptMaximumUtf16Length",
+                        "runwayPromptAccepted",
+                    )
+                    if key in runway_dry
+                }
+            )
+            report["readyForMediaResume"] = bool(runway_dry.get("readyForMediaResume"))
+            report["ok"] = report["readyForMediaResume"]
             MediaResumeIsolationGuard.end()
             return report
 
@@ -241,7 +264,10 @@ def run_one_media_resume(
         report["startImageRepairCalls"] = counters.start_image_repair_calls
         report["startImageRetryCalls"] = counters.start_image_retry_calls
         report["startImageGeneratedCount"] = counters.start_image_generated_count
+        report["startImageReused"] = counters.start_image_reused or bool((state.get("mediaResume") or {}).get("startImageReused"))
         report["runwaySubmissionCalls"] = counters.runway_submission_calls
+        report["runwayTaskCreatedCount"] = counters.runway_task_created_count
+        report["runwayPollingCalls"] = counters.runway_polling_calls
         report["runwayPollingResumed"] = counters.runway_polling_resumed
         report["ffmpegCalls"] = counters.ffmpeg_calls
         report["mediaReused"] = counters.media_reused
@@ -281,12 +307,33 @@ def run_one_media_resume(
             report["failureStage"] = "start_image_postprocess"
         elif reason.startswith("builder2_start_image_runway") or reason.startswith("builder2_start_image_invalid_artifact"):
             report["failureStage"] = "pre_runway_image_validation"
+        elif reason.startswith("builder2_runway_invalid_endpoint_url") or reason == "builder2_runway_prompt_too_long":
+            report["failureStage"] = "runway_configuration"
+        elif reason == "builder2_runway_submission_http_error":
+            report["failureStage"] = "runway_submission"
+        elif reason.startswith("builder2_runway_"):
+            report["failureStage"] = "runway_configuration"
         failure = (state.get("mediaResume") or {}).get("startImageFailure") or {}
         if failure:
             report["failureStage"] = failure.get("failureStage") or report.get("failureStage")
             report["startImageNormalCalls"] = 1 if failure.get("callSubmitted") else 0
             report["startImageGeneratedCount"] = 0
             report["startImageCalls"] = report.get("startImageNormalCalls", 0)
+        runway_failure = (state.get("mediaResume") or {}).get("runwaySubmissionFailure") or {}
+        if runway_failure:
+            report["failureStage"] = runway_failure.get("failureStage") or report.get("failureStage")
+            report["runwaySubmissionCalls"] = 1 if runway_failure.get("requestSubmitted") else report.get("runwaySubmissionCalls", 0)
+            report["runwayTaskCreatedCount"] = 0
+        persisted_counters = (state.get("mediaResume") or {}).get("callCounters") or {}
+        for key, report_key in (
+            ("startImageNormalCalls", "startImageNormalCalls"),
+            ("startImageGeneratedCount", "startImageGeneratedCount"),
+            ("startImageCalls", "startImageCalls"),
+            ("runwaySubmissionCalls", "runwaySubmissionCalls"),
+            ("runwayTaskCreatedCount", "runwayTaskCreatedCount"),
+        ):
+            if persisted_counters.get(key) is not None and report.get(report_key) in (None, 0):
+                report[report_key] = persisted_counters.get(key)
         _persist_media_failure(state, stage=report.get("failureStage") or "media", reason=reason)
         if tournament_state is None:
             save_tournament_state(job_id, state)
@@ -358,9 +405,21 @@ def print_media_resume_report(report: Dict[str, Any]) -> None:
         "startImageRepairCalls",
         "startImageRetryCalls",
         "startImageGeneratedCount",
+        "startImageReused",
         "startImageGeometry",
         "runwaySubmissionCalls",
+        "runwayTaskCreatedCount",
+        "runwayPollingCalls",
         "runwayPollingResumed",
+        "runwayCreateEndpointPath",
+        "runwayTaskEndpointTemplate",
+        "runwayVersionPrefixCount",
+        "runwayEndpointAccepted",
+        "runwayPromptUtf16Length",
+        "runwayPromptMaximumUtf16Length",
+        "runwayPromptAccepted",
+        "startImageAvailable",
+        "startImageReusable",
         "ffmpegCalls",
         "dryRun",
         "readyForMediaResume",

@@ -13,51 +13,94 @@ from engine.public_base_url import normalize_public_base_url, require_public_bas
 
 
 class TestPublicBaseUrlResolver(unittest.TestCase):
+    def _isolated_env(self, env: dict[str, str] | None = None):
+        return patch.dict(os.environ, env or {}, clear=True)
+
+    def test_no_sources_configured(self) -> None:
+        with self._isolated_env():
+            resolution = resolve_public_base_url()
+        self.assertFalse(resolution.configured)
+        self.assertEqual(resolution.source, "")
+        self.assertEqual(resolution.value, "")
+
     def test_ace_public_base_url_resolves(self) -> None:
-        with patch.dict(os.environ, {"ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com/"}, clear=True):
+        with self._isolated_env({"ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com/"}):
             resolution = resolve_public_base_url()
         self.assertTrue(resolution.configured)
         self.assertEqual(resolution.source, "ACE_PUBLIC_BASE_URL")
         self.assertEqual(resolution.value, "https://ace-backend-k1p6.onrender.com")
 
-    def test_public_base_url_env_resolves(self) -> None:
-        with patch.dict(os.environ, {"PUBLIC_BASE_URL": "https://example.com"}, clear=True):
+    def test_public_base_url_env_resolves_when_ace_absent(self) -> None:
+        with self._isolated_env({"PUBLIC_BASE_URL": "https://example.com"}):
             resolution = resolve_public_base_url()
         self.assertTrue(resolution.configured)
         self.assertEqual(resolution.source, "PUBLIC_BASE_URL")
 
     def test_ace_wins_when_both_env_vars_exist(self) -> None:
-        with patch.dict(
-            os.environ,
+        with self._isolated_env(
             {
                 "ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com",
                 "PUBLIC_BASE_URL": "https://example.com",
-            },
-            clear=True,
+            }
         ):
             resolution = resolve_public_base_url()
+        self.assertTrue(resolution.configured)
         self.assertEqual(resolution.source, "ACE_PUBLIC_BASE_URL")
 
+    def test_invalid_ace_is_rejected_without_falling_through(self) -> None:
+        with self._isolated_env(
+            {
+                "ACE_PUBLIC_BASE_URL": "not-a-url",
+                "PUBLIC_BASE_URL": "https://example.com",
+            }
+        ):
+            resolution = resolve_public_base_url()
+        self.assertFalse(resolution.configured)
+        self.assertEqual(resolution.source, "ACE_PUBLIC_BASE_URL")
+
+    def test_invalid_public_is_rejected_when_selected(self) -> None:
+        with self._isolated_env({"PUBLIC_BASE_URL": "not-a-url"}):
+            resolution = resolve_public_base_url()
+        self.assertFalse(resolution.configured)
+        self.assertEqual(resolution.source, "PUBLIC_BASE_URL")
+
+    def test_invalid_job_public_base_url_is_rejected_without_falling_through(self) -> None:
+        with self._isolated_env({"ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com"}):
+            resolution = resolve_public_base_url(job_data={"public_base_url": "not-a-url"})
+        self.assertFalse(resolution.configured)
+        self.assertEqual(resolution.source, "job_public_base_url")
+
+    def test_invalid_job_public_base_url_camel_case_is_rejected(self) -> None:
+        with self._isolated_env({"ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com"}):
+            resolution = resolve_public_base_url(job_data={"publicBaseUrl": "not-a-url"})
+        self.assertFalse(resolution.configured)
+        self.assertEqual(resolution.source, "job_publicBaseUrl")
+
+    def test_shell_environment_cannot_contaminate_invalid_job_test(self) -> None:
+        with self._isolated_env({"ACE_PUBLIC_BASE_URL": "https://shell-should-not-win.example.com"}):
+            resolution = resolve_public_base_url(job_data={"public_base_url": "not-a-url"})
+        self.assertFalse(resolution.configured)
+        self.assertEqual(resolution.source, "job_public_base_url")
+
     def test_job_public_base_url_wins_over_env(self) -> None:
-        with patch.dict(os.environ, {"ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com"}, clear=True):
+        with self._isolated_env({"ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com"}):
             resolution = resolve_public_base_url(job_data={"public_base_url": "https://job.example.com/"})
+        self.assertTrue(resolution.configured)
         self.assertEqual(resolution.source, "job_public_base_url")
         self.assertEqual(resolution.value, "https://job.example.com")
 
     def test_job_public_base_url_camel_case_supported(self) -> None:
-        resolution = resolve_public_base_url(job_data={"publicBaseUrl": "https://job-camel.example.com/"})
+        with self._isolated_env():
+            resolution = resolve_public_base_url(job_data={"publicBaseUrl": "https://job-camel.example.com/"})
+        self.assertTrue(resolution.configured)
         self.assertEqual(resolution.source, "job_publicBaseUrl")
         self.assertEqual(resolution.value, "https://job-camel.example.com")
 
     def test_trailing_slash_normalized(self) -> None:
         self.assertEqual(normalize_public_base_url("https://example.com/"), "https://example.com")
 
-    def test_invalid_url_not_configured(self) -> None:
-        resolution = resolve_public_base_url(job_data={"public_base_url": "not-a-url"})
-        self.assertFalse(resolution.configured)
-
     def test_missing_url_raises_on_require(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
+        with self._isolated_env():
             with self.assertRaises(Builder2TournamentError) as ctx:
                 require_public_base_url()
         self.assertIn("publicBaseUrl", str(ctx.exception))

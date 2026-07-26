@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -24,11 +24,6 @@ from engine.builder2_runway_config import (
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_store import patch_tournament_state
 from engine.builder2_winner_downstream import Builder2WinnerDownstreamError, validate_builder2_pre_runway
-from engine.video_planning import (
-    RUNWAY_PHYSICS_REALISM_CONSTRAINT,
-    build_runway_prompt_from_plan,
-    sanitize_runway_prompt_for_video_text_policy,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +50,10 @@ class MediaPipelineCounters:
     start_image_repair_calls: int = 0
     start_image_retry_calls: int = 0
     start_image_generated_count: int = 0
+    start_image_reused: bool = False
     runway_submission_calls: int = 0
+    runway_task_created_count: int = 0
+    runway_polling_calls: int = 0
     runway_polling_resumed: bool = False
     ffmpeg_calls: int = 0
     media_reused: bool = False
@@ -64,6 +62,19 @@ class MediaPipelineCounters:
         self.start_image_calls = (
             self.start_image_normal_calls + self.start_image_repair_calls + self.start_image_retry_calls
         )
+
+    def to_persisted_dict(self) -> Dict[str, int]:
+        self.sync_legacy_start_image_calls()
+        return {
+            "startImageCalls": self.start_image_calls,
+            "startImageNormalCalls": self.start_image_normal_calls,
+            "startImageRepairCalls": self.start_image_repair_calls,
+            "startImageRetryCalls": self.start_image_retry_calls,
+            "startImageGeneratedCount": self.start_image_generated_count,
+            "runwaySubmissionCalls": self.runway_submission_calls,
+            "runwayTaskCreatedCount": self.runway_task_created_count,
+            "runwayPollingCalls": self.runway_polling_calls,
+        }
 
 
 @dataclass
@@ -79,8 +90,32 @@ def _env_runway_api_key() -> str:
     return (os.environ.get("RUNWAY_API_KEY") or "").strip()
 
 
-def _env_runway_base_url() -> str:
-    return (os.environ.get("RUNWAY_API_BASE") or "https://api.dev.runwayml.com/v1").strip()
+def _persist_media_counters(state: Dict[str, Any], counters: MediaPipelineCounters) -> None:
+    media = _media_bucket(state)
+    media["callCounters"] = counters.to_persisted_dict()
+    if counters.start_image_reused:
+        media["startImageReused"] = True
+
+
+def _default_submit_runway_task(
+    *,
+    plan: Dict[str, Any],
+    prompt_image_data_uri: str,
+    runway_model: str,
+    duration_seconds: int,
+) -> str:
+    from engine.builder2_runway_submission import submit_builder2_runway_task
+
+    session = requests.Session()
+    result = submit_builder2_runway_task(
+        session=session,
+        api_key=_env_runway_api_key(),
+        plan=plan,
+        runway_model=runway_model,
+        duration_seconds=duration_seconds,
+        prompt_image_data_uri=prompt_image_data_uri,
+    )
+    return result.task_id or ""
 
 
 def _default_generate_start_image(plan: Dict[str, Any]) -> str:
@@ -96,40 +131,12 @@ def _default_generate_start_image(plan: Dict[str, Any]) -> str:
     return result.data_uri or ""
 
 
-def _default_submit_runway_task(
-    *,
-    plan: Dict[str, Any],
-    prompt_image_data_uri: str,
-    runway_model: str,
-    duration_seconds: int,
-) -> str:
-    from engine.runway_video import _create_image_to_video_task, _create_text_to_video_task
+def _env_runway_base_url() -> str:
+    from engine.runway_api_urls import normalize_runway_origin, resolve_configured_runway_base
 
-    session = requests.Session()
-    base = _env_runway_base_url()
-    prompt = build_runway_prompt_from_plan(plan)
-    prompt, _ = sanitize_runway_prompt_for_video_text_policy(prompt)
-    prompt = f"{prompt.rstrip()} {RUNWAY_PHYSICS_REALISM_CONSTRAINT}".strip()
-    if builder2_runway_requires_start_image(runway_model):
-        return _create_image_to_video_task(
-            session,
-            base,
-            runway_model,
-            prompt,
-            prompt_image_data_uri,
-            duration_seconds=duration_seconds,
-            sanitize_text_policy_modified=False,
-            physics_suffix_appended=True,
-        )
-    return _create_text_to_video_task(
-        session,
-        base,
-        runway_model,
-        prompt,
-        duration_seconds=duration_seconds,
-        sanitize_text_policy_modified=False,
-        physics_suffix_appended=True,
-    )
+    _, configured = resolve_configured_runway_base()
+    origin, _ = normalize_runway_origin(configured)
+    return origin
 
 
 def _default_poll_runway_task(*, task_id: str) -> Tuple[str, str]:
@@ -298,8 +305,21 @@ def execute_builder2_media_pipeline(
             raise Builder2TournamentError(str(exc)) from exc
 
     if dry_run:
+        from engine.builder2_runway_submission import audit_media_resume_start_image, build_builder2_runway_dry_run_report
+
+        media["runwayDryRun"] = {
+            **audit_media_resume_start_image(state),
+            **build_builder2_runway_dry_run_report(
+                plan=plan,
+                state=state,
+                runway_model=runway_model,
+                duration_seconds=duration_seconds,
+                ratio=ratio,
+            ),
+        }
         media["mediaResumeStatus"] = "dry_run_validated"
         counters.sync_legacy_start_image_calls()
+        _persist_media_counters(state, counters)
         return state, counters
 
     prompt_image_data_uri = str(media.get("startImageArtifact") or (state.get("runway") or {}).get("startImageDataUri") or "")
@@ -315,6 +335,7 @@ def execute_builder2_media_pipeline(
         if prompt_image_data_uri:
             validate_builder2_runway_start_image_artifact(prompt_image_data_uri, start_image_geometry)
             media["startImageStatus"] = "reused"
+            counters.start_image_reused = True
         else:
             pipeline_deps = deps or default_media_pipeline_deps()
             if deps is not None:
@@ -375,6 +396,9 @@ def execute_builder2_media_pipeline(
             )
 
         patch_tournament_state(job_id, _persist_start_image)
+        if media.get("startImageStatus") == "completed":
+            counters.start_image_generated_count = max(counters.start_image_generated_count, 1)
+        _persist_media_counters(state, counters)
 
     existing_task_id = str(
         media.get("runwayTaskId")
@@ -395,15 +419,46 @@ def execute_builder2_media_pipeline(
         raise Builder2TournamentError("builder2_media_runway_resume_ambiguous")
     else:
         pipeline_deps = deps or default_media_pipeline_deps()
-        task_id = pipeline_deps.submit_runway_task(
-            plan=plan,
-            prompt_image_data_uri=prompt_image_data_uri,
-            runway_model=runway_model,
-            duration_seconds=duration_seconds,
-        )
         counters.runway_submission_calls += 1
+        _persist_media_counters(state, counters)
+        try:
+            if deps is None:
+                from engine.builder2_runway_submission import submit_builder2_runway_task
+
+                submission = submit_builder2_runway_task(
+                    session=requests.Session(),
+                    api_key=_env_runway_api_key(),
+                    plan=plan,
+                    runway_model=runway_model,
+                    duration_seconds=duration_seconds,
+                    prompt_image_data_uri=prompt_image_data_uri,
+                )
+                task_id = submission.task_id or ""
+                counters.runway_task_created_count = 1 if submission.task_created else 0
+                media["runwaySubmissionMetadata"] = submission.metadata
+            else:
+                task_id = pipeline_deps.submit_runway_task(
+                    plan=plan,
+                    prompt_image_data_uri=prompt_image_data_uri,
+                    runway_model=runway_model,
+                    duration_seconds=duration_seconds,
+                )
+                counters.runway_task_created_count = 1 if task_id else 0
+        except Builder2TournamentError as exc:
+            submission = getattr(exc, "runway_submission_result", None)
+            media["runwaySubmissionFailure"] = {
+                "failureStage": getattr(exc, "failure_stage", None) or "runway_submission",
+                "failureReason": str(exc.args[0] if exc.args else ""),
+                "requestSubmitted": True,
+                "taskCreated": False,
+            }
+            if submission is not None:
+                media["runwaySubmissionFailure"].update(submission.metadata)
+            _persist_media_counters(state, counters)
+            raise
         media["runwaySubmissionStatus"] = "submitted"
         media["runwaySubmittedAt"] = _utc_now_iso()
+        _persist_media_counters(state, counters)
 
         def _persist_task(st: Dict[str, Any]) -> None:
             _update_media_progress(
@@ -412,6 +467,7 @@ def execute_builder2_media_pipeline(
                 runwayTaskId=task_id,
                 runwaySubmissionStatus="submitted",
                 runwaySubmittedAt=media["runwaySubmittedAt"],
+                callCounters=counters.to_persisted_dict(),
             )
 
         patch_tournament_state(job_id, _persist_task)
@@ -423,6 +479,7 @@ def execute_builder2_media_pipeline(
     else:
         _update_media_progress(state, "waiting_for_runway", runwayTaskId=task_id)
         pipeline_deps = deps or default_media_pipeline_deps()
+        counters.runway_polling_calls += 1
         status, runway_url = pipeline_deps.poll_runway_task(task_id=task_id)
         media["runwayStatus"] = status
         media["runwayVideoUrl"] = runway_url
@@ -485,4 +542,5 @@ def execute_builder2_media_pipeline(
     state["status"] = "completed"
     state["lastCompletedStep"] = "done"
     counters.sync_legacy_start_image_calls()
+    _persist_media_counters(state, counters)
     return state, counters

@@ -69,6 +69,7 @@ def resolve_public_base_url(
             logger.info("PUBLIC_BASE_URL_RESOLVED source=%s configured=true", source)
             return PublicBaseUrlResolution(configured=True, source=source, value=normalized)
         logger.info("PUBLIC_BASE_URL_INVALID source=%s configured=false", source)
+        return PublicBaseUrlResolution(configured=False, source=source, value="")
 
     logger.info("PUBLIC_BASE_URL_RESOLVED source=none configured=false")
     return PublicBaseUrlResolution(configured=False, source="", value="")
