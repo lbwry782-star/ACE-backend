@@ -51,10 +51,19 @@ def _utc_now_iso() -> str:
 @dataclass
 class MediaPipelineCounters:
     start_image_calls: int = 0
+    start_image_normal_calls: int = 0
+    start_image_repair_calls: int = 0
+    start_image_retry_calls: int = 0
+    start_image_generated_count: int = 0
     runway_submission_calls: int = 0
     runway_polling_resumed: bool = False
     ffmpeg_calls: int = 0
     media_reused: bool = False
+
+    def sync_legacy_start_image_calls(self) -> None:
+        self.start_image_calls = (
+            self.start_image_normal_calls + self.start_image_repair_calls + self.start_image_retry_calls
+        )
 
 
 @dataclass
@@ -75,9 +84,16 @@ def _env_runway_base_url() -> str:
 
 
 def _default_generate_start_image(plan: Dict[str, Any]) -> str:
-    from engine.video_start_image import generate_video_start_image_data_uri
+    from engine.builder2_start_image_pipeline import (
+        Builder2StartImagePipelineError,
+        generate_builder2_start_image,
+    )
 
-    return generate_video_start_image_data_uri(plan) or ""
+    try:
+        result = generate_builder2_start_image(plan)
+    except Builder2StartImagePipelineError as exc:
+        raise Builder2TournamentError(str(exc.args[0] if exc.args else "builder2_media_start_image_failed")) from exc
+    return result.data_uri or ""
 
 
 def _default_submit_runway_task(
@@ -266,26 +282,97 @@ def execute_builder2_media_pipeline(
     validate_builder2_pre_runway(plan)
     _update_media_progress(state, "preparing_start_image")
 
+    start_image_geometry = None
+    if builder2_runway_requires_start_image(runway_model):
+        from engine.builder2_start_image_geometry import (
+            Builder2StartImageGeometryError,
+            resolve_builder2_start_image_geometry,
+            validate_builder2_start_image_geometry,
+        )
+
+        try:
+            start_image_geometry = resolve_builder2_start_image_geometry()
+            validate_builder2_start_image_geometry(start_image_geometry)
+            media["startImageGeometry"] = start_image_geometry.to_safe_metadata()
+        except Builder2StartImageGeometryError as exc:
+            raise Builder2TournamentError(str(exc)) from exc
+
     if dry_run:
         media["mediaResumeStatus"] = "dry_run_validated"
+        counters.sync_legacy_start_image_calls()
         return state, counters
 
     prompt_image_data_uri = str(media.get("startImageArtifact") or (state.get("runway") or {}).get("startImageDataUri") or "")
     if builder2_runway_requires_start_image(runway_model):
+        from engine.builder2_start_image_pipeline import (
+            Builder2StartImagePipelineError,
+            generate_builder2_start_image,
+            validate_builder2_runway_start_image_artifact,
+        )
+
         _update_media_progress(state, "generating_start_image")
         MediaResumeIsolationGuard.assert_safe_before_start_image()
         if prompt_image_data_uri:
+            validate_builder2_runway_start_image_artifact(prompt_image_data_uri, start_image_geometry)
             media["startImageStatus"] = "reused"
         else:
-            prompt_image_data_uri = (deps or default_media_pipeline_deps()).generate_start_image(plan)
-            counters.start_image_calls += 1
-            if not prompt_image_data_uri:
-                raise Builder2TournamentError("builder2_media_start_image_failed")
-            media["startImageStatus"] = "completed"
+            pipeline_deps = deps or default_media_pipeline_deps()
+            if deps is not None:
+                prompt_image_data_uri = pipeline_deps.generate_start_image(plan)
+                counters.start_image_normal_calls += 1
+                counters.sync_legacy_start_image_calls()
+                if not prompt_image_data_uri:
+                    raise Builder2TournamentError("builder2_media_start_image_failed")
+                counters.start_image_generated_count += 1
+                validate_builder2_runway_start_image_artifact(prompt_image_data_uri, start_image_geometry)
+                media["startImageStatus"] = "completed"
+            else:
+                try:
+                    start_result = generate_builder2_start_image(plan)
+                except Builder2StartImagePipelineError as exc:
+                    if exc.result is not None:
+                        counters.start_image_normal_calls = exc.result.counters.startImageNormalCalls
+                        counters.start_image_repair_calls = exc.result.counters.startImageRepairCalls
+                        counters.start_image_retry_calls = exc.result.counters.startImageRetryCalls
+                        counters.start_image_generated_count = exc.result.counters.startImageGeneratedCount
+                        counters.sync_legacy_start_image_calls()
+                        media["startImageFailure"] = {
+                            "failureStage": exc.failure_stage,
+                            "failureReason": str(exc.args[0] if exc.args else ""),
+                            "callSubmitted": exc.result.api_submitted,
+                            "httpStatus": exc.result.api_status,
+                            "errorCategory": exc.result.api_error_category,
+                            "submittedSize": exc.result.submitted_size,
+                            "modelName": exc.result.model_name,
+                        }
+                    raise Builder2TournamentError(str(exc.args[0] if exc.args else "builder2_media_start_image_failed")) from exc
+                counters.start_image_normal_calls = start_result.counters.startImageNormalCalls
+                counters.start_image_repair_calls = start_result.counters.startImageRepairCalls
+                counters.start_image_retry_calls = start_result.counters.startImageRetryCalls
+                counters.start_image_generated_count = start_result.counters.startImageGeneratedCount
+                counters.sync_legacy_start_image_calls()
+                prompt_image_data_uri = start_result.data_uri or ""
+                if not prompt_image_data_uri:
+                    raise Builder2TournamentError("builder2_media_start_image_failed")
+                validate_builder2_runway_start_image_artifact(prompt_image_data_uri, start_image_geometry)
+                media.update(start_result.metadata)
+                media["startImageStatus"] = "completed"
         media["startImageArtifact"] = prompt_image_data_uri
 
         def _persist_start_image(st: Dict[str, Any]) -> None:
-            _update_media_progress(st, "generating_start_image", startImageArtifact=prompt_image_data_uri, startImageStatus=media["startImageStatus"])
+            _update_media_progress(
+                st,
+                "generating_start_image",
+                startImageArtifact=prompt_image_data_uri,
+                startImageStatus=media["startImageStatus"],
+                startImageGenerationSize=media.get("startImageGenerationSize"),
+                startImageSourceWidth=media.get("startImageSourceWidth"),
+                startImageSourceHeight=media.get("startImageSourceHeight"),
+                startImageCropBox=media.get("startImageCropBox"),
+                startImageOutputWidth=media.get("startImageOutputWidth"),
+                startImageOutputHeight=media.get("startImageOutputHeight"),
+                startImageMimeType=media.get("startImageMimeType"),
+            )
 
         patch_tournament_state(job_id, _persist_start_image)
 
@@ -296,6 +383,10 @@ def execute_builder2_media_pipeline(
     ).strip()
     _update_media_progress(state, "submitting_runway")
     MediaResumeIsolationGuard.assert_safe_before_runway()
+    if builder2_runway_requires_start_image(runway_model) and prompt_image_data_uri:
+        from engine.builder2_start_image_pipeline import validate_builder2_runway_start_image_artifact
+
+        validate_builder2_runway_start_image_artifact(prompt_image_data_uri, start_image_geometry)
     if existing_task_id:
         task_id = existing_task_id
         media["runwaySubmissionStatus"] = "reused"
@@ -393,4 +484,5 @@ def execute_builder2_media_pipeline(
     state["mediaContinuationRequired"] = False
     state["status"] = "completed"
     state["lastCompletedStep"] = "done"
+    counters.sync_legacy_start_image_calls()
     return state, counters

@@ -92,16 +92,21 @@ def generate_video_start_image_data_uri(plan: Dict[str, Any]) -> Optional[str]:
     """
     Generate one start image from plan; return data URI for Runway promptImage, or None on any failure.
     """
+    from engine.builder2_winner_downstream import is_builder2_tournament_plan
+
+    if is_builder2_tournament_plan(plan):
+        from engine.builder2_start_image_pipeline import generate_builder2_start_image_data_uri
+
+        return generate_builder2_start_image_data_uri(plan)
+
     api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
     if not api_key:
         logger.warning("VIDEO_START_IMAGE skip: OPENAI_API_KEY missing")
         return None
 
-    from engine.builder2_runway_config import resolve_builder2_start_image_size
-
     prompt = build_ace_start_frame_image_prompt(plan)
     model = (os.environ.get("OPENAI_IMAGE_MODEL") or "gpt-image-1.5").strip()
-    size = resolve_builder2_start_image_size()
+    size = (os.environ.get("VIDEO_START_IMAGE_SIZE") or "1024x1024").strip()
     quality = (os.environ.get("VIDEO_START_IMAGE_QUALITY") or "low").strip()
 
     client = OpenAI(

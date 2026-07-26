@@ -25,6 +25,18 @@ HISTORICAL_JOB_ID = "5a3157a3-532f-44ef-86db-c777cff54d38"
 HISTORICAL_CANDIDATE_ID = "cand-1-summer_fan-1-57f415ca"
 
 
+def _mock_start_image_data_uri() -> str:
+    import base64
+    import io
+
+    from PIL import Image
+
+    image = Image.new("RGB", (1280, 720), color="red")
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
 def _winner_plan_for_media(*, headline_decision: str = "omit") -> Dict[str, Any]:
     strategy = _strategy(language="he")
     candidate = _candidate("summer_fan")
@@ -111,7 +123,7 @@ def _media_ready_state(*, job_id: str = HISTORICAL_JOB_ID) -> Dict[str, Any]:
 
 def _mock_pipeline_deps() -> MediaPipelineDeps:
     return MediaPipelineDeps(
-        generate_start_image=lambda plan: "data:image/png;base64,mock",
+        generate_start_image=lambda plan: _mock_start_image_data_uri(),
         submit_runway_task=lambda **kwargs: "task-mock-1",
         poll_runway_task=lambda **kwargs: ("SUCCEEDED", "https://runway/mock.mp4"),
         postprocess_video=lambda **kwargs: kwargs["runway_url"],
@@ -200,6 +212,14 @@ class TestDryRunValidation(unittest.TestCase):
             report = run_one_media_resume(job_id="job-media-anchor", tournament_state=deepcopy(state), dry_run=True)
         self.assertTrue(report["downstreamValidationAccepted"])
 
+    def test_dry_run_reports_start_image_geometry(self) -> None:
+        state = _media_ready_state(job_id="job-media-geometry")
+        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False):
+            report = run_one_media_resume(job_id="job-media-geometry", tournament_state=deepcopy(state), dry_run=True)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["startImageGeometry"]["imageGenerationSize"], "1536x1024")
+        self.assertEqual(report["startImageGeometry"]["startImageOutputSize"], "1280x720")
+
 
 class TestMediaPipelineIdempotency(unittest.TestCase):
     def setUp(self) -> None:
@@ -214,7 +234,7 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
 
     def test_existing_start_image_is_reused(self) -> None:
         state = _media_ready_state(job_id="job-media-start-reuse")
-        state["mediaResume"] = {"startImageArtifact": "data:image/png;base64,reused", "startImageStatus": "completed"}
+        state["mediaResume"] = {"startImageArtifact": _mock_start_image_data_uri(), "startImageStatus": "completed"}
         counters = MediaPipelineCounters()
         with patch("engine.builder2_media_pipeline.patch_tournament_state", side_effect=lambda job_id, fn: fn(state)):
             _, counters = execute_builder2_media_pipeline(
@@ -231,7 +251,7 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
     def test_existing_runway_task_prevents_resubmission(self) -> None:
         state = _media_ready_state(job_id="job-media-runway-reuse")
         state["mediaResume"] = {
-            "startImageArtifact": "data:image/png;base64,reused",
+            "startImageArtifact": _mock_start_image_data_uri(),
             "runwayTaskId": "task-existing",
             "runwayVideoUrl": "https://runway/existing.mp4",
         }
@@ -253,7 +273,7 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
     def test_completed_runway_output_is_reused(self) -> None:
         state = _media_ready_state(job_id="job-media-output-reuse")
         state["mediaResume"] = {
-            "startImageArtifact": "data:image/png;base64,reused",
+            "startImageArtifact": _mock_start_image_data_uri(),
             "runwayTaskId": "task-existing",
             "runwayVideoUrl": "https://runway/existing.mp4",
             "downloadedVideoPath": "https://runway/existing.mp4",
@@ -400,6 +420,8 @@ class TestPublicBaseUrlDryRunParity(unittest.TestCase):
         )
         self.assertTrue(report["ok"])
         self.assertEqual(report["startImageCalls"], 1)
+        self.assertEqual(report["startImageNormalCalls"], 1)
+        self.assertEqual(report["startImageGeneratedCount"], 1)
 
 
 class TestBuilder1Isolation(unittest.TestCase):

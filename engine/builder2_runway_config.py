@@ -15,7 +15,7 @@ BUILDER2_RUNWAY_VIDEO_RATIO = "1280:720"
 DEFAULT_BUILDER2_VIDEO_DURATION_SECONDS = 7
 BUILDER2_VIDEO_DURATION_MIN_SECONDS = 2
 BUILDER2_VIDEO_DURATION_MAX_SECONDS = 10
-DEFAULT_BUILDER2_START_IMAGE_SIZE = "1280x720"
+DEFAULT_BUILDER2_START_IMAGE_SIZE = "1536x1024"
 
 
 class Builder2RunwayConfigError(ValueError):
@@ -68,12 +68,10 @@ def builder2_runway_generation_mode(model: str) -> str:
 
 
 def resolve_builder2_start_image_size() -> str:
-    raw = (
-        (os.environ.get("BUILDER2_START_IMAGE_SIZE") or "").strip()
-        or (os.environ.get("VIDEO_START_IMAGE_SIZE") or "").strip()
-        or DEFAULT_BUILDER2_START_IMAGE_SIZE
-    )
-    return raw
+    """OpenAI Images API generation size for Builder2 (never Runway delivery size)."""
+    from engine.builder2_start_image_geometry import resolve_builder2_start_image_geometry
+
+    return resolve_builder2_start_image_geometry().imageGenerationSize
 
 
 def log_builder2_runway_model_selected(

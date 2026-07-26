@@ -57,6 +57,11 @@ def _initial_report(*, job_id: str, dry_run: bool = False) -> Dict[str, Any]:
         "judgeCalls": 0,
         "winnerCalls": 0,
         "startImageCalls": 0,
+        "startImageNormalCalls": 0,
+        "startImageRepairCalls": 0,
+        "startImageRetryCalls": 0,
+        "startImageGeneratedCount": 0,
+        "startImageGeometry": None,
         "runwaySubmissionCalls": 0,
         "runwayPollingResumed": False,
         "ffmpegCalls": 0,
@@ -193,6 +198,7 @@ def run_one_media_resume(
             ffmpeg_required=ffmpeg_required,
         )
         report["publicBaseUrlSource"] = media_config.public_base_url.source
+        report["startImageGeometry"] = media_config.startImageGeometry
 
         if dry:
             execute_builder2_media_pipeline(
@@ -231,6 +237,10 @@ def run_one_media_resume(
         )
         state.update(updated_state)
         report["startImageCalls"] = counters.start_image_calls
+        report["startImageNormalCalls"] = counters.start_image_normal_calls
+        report["startImageRepairCalls"] = counters.start_image_repair_calls
+        report["startImageRetryCalls"] = counters.start_image_retry_calls
+        report["startImageGeneratedCount"] = counters.start_image_generated_count
         report["runwaySubmissionCalls"] = counters.runway_submission_calls
         report["runwayPollingResumed"] = counters.runway_polling_resumed
         report["ffmpegCalls"] = counters.ffmpeg_calls
@@ -259,6 +269,24 @@ def run_one_media_resume(
             report["failureStage"] = "isolation"
         elif reason.startswith("builder2_media_resume_not_configured"):
             report["failureStage"] = "configuration"
+        elif reason.startswith("builder2_start_image_unsupported_generation_size"):
+            report["failureStage"] = "start_image_configuration"
+        elif reason.startswith("builder2_start_image"):
+            report["failureStage"] = "start_image_configuration"
+        elif reason == "builder2_media_start_image_api_rejected":
+            report["failureStage"] = "start_image_generation"
+        elif reason.startswith("builder2_media_start_image"):
+            report["failureStage"] = "start_image_generation"
+        elif reason.startswith("builder2_start_image_postprocess") or reason.startswith("builder2_start_image_source"):
+            report["failureStage"] = "start_image_postprocess"
+        elif reason.startswith("builder2_start_image_runway") or reason.startswith("builder2_start_image_invalid_artifact"):
+            report["failureStage"] = "pre_runway_image_validation"
+        failure = (state.get("mediaResume") or {}).get("startImageFailure") or {}
+        if failure:
+            report["failureStage"] = failure.get("failureStage") or report.get("failureStage")
+            report["startImageNormalCalls"] = 1 if failure.get("callSubmitted") else 0
+            report["startImageGeneratedCount"] = 0
+            report["startImageCalls"] = report.get("startImageNormalCalls", 0)
         _persist_media_failure(state, stage=report.get("failureStage") or "media", reason=reason)
         if tournament_state is None:
             save_tournament_state(job_id, state)
@@ -326,6 +354,11 @@ def print_media_resume_report(report: Dict[str, Any]) -> None:
         "judgeCalls",
         "winnerCalls",
         "startImageCalls",
+        "startImageNormalCalls",
+        "startImageRepairCalls",
+        "startImageRetryCalls",
+        "startImageGeneratedCount",
+        "startImageGeometry",
         "runwaySubmissionCalls",
         "runwayPollingResumed",
         "ffmpegCalls",

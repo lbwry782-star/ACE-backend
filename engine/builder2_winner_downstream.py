@@ -521,6 +521,11 @@ def build_builder2_start_frame_image_prompt(plan: Dict[str, Any], *, duration_se
     is_continuous = (plan.get("structureType") or "").strip() == "continuous_event"
     shot_kind = "continuous event" if is_continuous else "commercial montage"
     anchor_clause = f"Visible anchor at opening when present: {anchor}. " if anchor and anchor.lower() in scene_focus.lower() else ""
+    safe_area = (
+        "Compose the scene for a central 16:9 safe area. "
+        "Keep the subject, action, and visual anchor away from the extreme top and bottom edges. "
+        "Do not place critical objects or text in the crop margins. "
+    )
     brief = (
         f"Single photorealistic still frame, opening shot for a silent {duration_seconds}-second {shot_kind}. "
         f"The still must be the opening moment from which action can develop naturally over {duration_seconds} seconds — "
@@ -529,6 +534,7 @@ def build_builder2_start_frame_image_prompt(plan: Dict[str, Any], *, duration_se
         f"Core visual idea: {core_visual}. "
         f"Opening moment to animate: {scene_focus}. "
         f"{anchor_clause}"
+        f"{safe_area}"
         "Realistic human scene when applicable; clear composition; soft natural lighting; realistic materials. "
         f"{no_text}"
     )

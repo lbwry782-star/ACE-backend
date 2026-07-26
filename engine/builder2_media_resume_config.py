@@ -12,6 +12,11 @@ from engine.builder2_runway_config import (
     resolve_builder2_runway_video_model,
     resolve_builder2_video_duration_seconds,
 )
+from engine.builder2_start_image_geometry import (
+    Builder2StartImageGeometryError,
+    resolve_builder2_start_image_geometry,
+    validate_builder2_start_image_geometry,
+)
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.public_base_url import PublicBaseUrlResolution, require_public_base_url
 
@@ -26,6 +31,7 @@ class MediaResumeConfiguration:
     runwayConfigured: bool
     startImageConfigured: bool
     ffmpegRequired: bool
+    startImageGeometry: Dict[str, Any]
 
     def to_safe_metadata(self) -> Dict[str, Any]:
         return {
@@ -37,6 +43,7 @@ class MediaResumeConfiguration:
             "runwayConfigured": self.runwayConfigured,
             "startImageConfigured": self.startImageConfigured,
             "ffmpegRequired": self.ffmpegRequired,
+            "startImageGeometry": dict(self.startImageGeometry),
         }
 
 
@@ -57,6 +64,14 @@ def build_media_resume_configuration(
         raise Builder2TournamentError("builder2_media_resume_not_configured:runwayApiKey")
     if start_image_required and not openai_key:
         raise Builder2TournamentError("builder2_media_resume_not_configured:openaiApiKey")
+    start_image_geometry: Dict[str, Any] = {}
+    if start_image_required:
+        try:
+            geometry = resolve_builder2_start_image_geometry()
+            validate_builder2_start_image_geometry(geometry)
+            start_image_geometry = geometry.to_safe_metadata()
+        except Builder2StartImageGeometryError as exc:
+            raise Builder2TournamentError(str(exc)) from exc
     return MediaResumeConfiguration(
         public_base_url=public,
         publicBaseUrl=public.value,
@@ -66,4 +81,5 @@ def build_media_resume_configuration(
         runwayConfigured=runway_key,
         startImageConfigured=(not start_image_required) or openai_key,
         ffmpegRequired=ffmpeg_required,
+        startImageGeometry=start_image_geometry,
     )
