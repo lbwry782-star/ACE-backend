@@ -1,5 +1,8 @@
 """
 Builder2 headline decision contract — canonical use-or-omit decision with optional diagnostic reason.
+
+omit suppresses readable text inside the Runway-generated scene only.
+It does not suppress mandatory Advertising Closure after Runway.
 """
 from __future__ import annotations
 

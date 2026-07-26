@@ -21,6 +21,7 @@ _KNOWN_ROLE_BUCKETS: Dict[str, str] = {
     "winner": "winner",
     "winner_development": "winner",
     "marketing_copy": "marketing_copy",
+    "advertising_closure": "advertising_closure",
     "video_headline": "headline",
     "headline": "headline",
     "keyword": "keyword",
@@ -42,6 +43,7 @@ class MediaResumeReasoningCounters:
     judgeCalls: int = 0
     winnerCalls: int = 0
     marketingCopyCalls: int = 0
+    advertisingClosureCalls: int = 0
     headlineCalls: int = 0
     keywordCalls: int = 0
     otherReasoningCalls: int = 0
@@ -58,6 +60,8 @@ class MediaResumeReasoningCounters:
             self.winnerCalls += 1
         elif bucket == "marketing_copy":
             self.marketingCopyCalls += 1
+        elif bucket == "advertising_closure":
+            self.advertisingClosureCalls += 1
         elif bucket == "headline":
             self.headlineCalls += 1
         elif bucket == "keyword":
@@ -73,6 +77,7 @@ class MediaResumeReasoningCounters:
             + self.judgeCalls
             + self.winnerCalls
             + self.marketingCopyCalls
+            + self.advertisingClosureCalls
             + self.headlineCalls
             + self.keywordCalls
             + self.otherReasoningCalls
@@ -85,6 +90,7 @@ class MediaResumeReasoningCounters:
             "judgeCalls": self.judgeCalls,
             "winnerCalls": self.winnerCalls,
             "marketingCopyCalls": self.marketingCopyCalls,
+            "advertisingClosureCalls": self.advertisingClosureCalls,
             "headlineCalls": self.headlineCalls,
             "keywordCalls": self.keywordCalls,
             "otherReasoningCalls": self.otherReasoningCalls,

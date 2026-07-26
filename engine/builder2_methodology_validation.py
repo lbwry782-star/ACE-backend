@@ -690,6 +690,22 @@ def collect_judge_methodology_structural_errors(
         if not str(headline.get("notes") or "").strip():
             errors.append("builder2_judge_validation_failed:headlineNecessityAssessment.notes")
 
+    advertising = judgment.get("advertisingCompletionAssessment")
+    if not isinstance(advertising, dict):
+        errors.append("builder2_judge_validation_failed:advertisingCompletionAssessment")
+    else:
+        for key in (
+            "advertiserIdentifiable",
+            "productNamePresent",
+            "relativeAdvantageClosed",
+            "sloganSpecificToIdea",
+            "functionsAsAdvertisement",
+        ):
+            if not isinstance(advertising.get(key), bool):
+                errors.append(f"builder2_judge_validation_failed:advertisingCompletionAssessment.{key}")
+        if not str(advertising.get("notes") or "").strip():
+            errors.append("builder2_judge_validation_failed:advertisingCompletionAssessment.notes")
+
     return list(dict.fromkeys(errors))
 
 
@@ -716,6 +732,9 @@ def validate_judge_methodology(
         _raise("builder2_judge_validation_failed", field=first)
 
     _validate_judge_methodology_coherence(judgment)
+    from engine.builder2_advertising_closure_contract import validate_judge_advertising_completion_assessment
+
+    validate_judge_advertising_completion_assessment(judgment)
     logger.info("BUILDER2_JUDGE_METHODOLOGY_VALIDATED")
 
 
@@ -775,6 +794,9 @@ def validate_winner_methodology(
         winner_plan,
         winning_judgment=winning_judgment if isinstance(winning_judgment, dict) else None,
     )
+    from engine.builder2_advertising_closure_contract import validate_advertising_closure_methodology
+
+    validate_advertising_closure_methodology(winner_plan, require_present=False)
     decision = str((winner_plan.get("headlineDecision") or {}).get("decision") or "")
 
     _validate_winner_preservation_deterministic(

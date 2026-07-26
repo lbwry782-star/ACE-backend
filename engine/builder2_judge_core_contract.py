@@ -160,6 +160,14 @@ def build_judge_example_json(*, candidate_id: str = "cand-example") -> Dict[str,
             "visualWouldWorkWithoutHeadline": True,
             "notes": "...",
         },
+        "advertisingCompletionAssessment": {
+            "advertiserIdentifiable": True,
+            "productNamePresent": True,
+            "relativeAdvantageClosed": True,
+            "sloganSpecificToIdea": True,
+            "functionsAsAdvertisement": True,
+            "notes": "...",
+        },
     }
 
 
@@ -174,6 +182,8 @@ def build_judge_required_keys_prompt_text(*, creator_verbal_decision: str, candi
         f"{build_judge_verbal_layer_prompt_text(creator_verbal_decision=creator_verbal_decision)}\n"
         "headlineNecessityAssessment must include headlineNeeded (boolean), "
         "visualWouldWorkWithoutHeadline (boolean), and notes.\n"
+        "advertisingCompletionAssessment must include advertiserIdentifiable, productNamePresent, "
+        "relativeAdvantageClosed, sloganSpecificToIdea, functionsAsAdvertisement (booleans), and notes.\n"
         "Required score fields:\n"
         f"{score_lines}\n"
     )

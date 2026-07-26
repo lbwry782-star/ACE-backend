@@ -221,6 +221,14 @@ def methodology_judgment_extras() -> Dict[str, Any]:
             "visualWouldWorkWithoutHeadline": True,
             "notes": "The visual proof is sufficient without a headline.",
         },
+        "advertisingCompletionAssessment": {
+            "advertiserIdentifiable": True,
+            "productNamePresent": True,
+            "relativeAdvantageClosed": True,
+            "sloganSpecificToIdea": True,
+            "functionsAsAdvertisement": True,
+            "notes": "Final delivery still requires Advertising Closure even when the Runway scene stays text-free.",
+        },
     }
 
 
