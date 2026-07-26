@@ -23,6 +23,12 @@ from engine.builder2_tournament_contracts import (
     require_dict,
     require_non_empty_str,
 )
+from engine.builder2_methodology_contract import METHODOLOGY_VERSION
+from engine.builder2_methodology_validation import (
+    normalize_strategy_methodology_defaults,
+    validate_strategy_methodology,
+)
+from engine.builder2_strategy_identity import assign_strategy_foundation_identity
 from engine.builder2_tournament_llm import extract_responses_output_text, parse_json_object
 from engine.builder2_tournament_metrics import MetricsTimer, record_model_call
 from engine.builder2_tournament_prompts import build_strategy_prompt, build_strategy_repair_prompt
@@ -104,7 +110,7 @@ def _normalize_string_list(value: Any) -> List[str]:
     return []
 
 
-def normalize_strategy_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_strategy_raw(raw: Dict[str, Any], *, compatibility_mode: bool = False) -> Dict[str, Any]:
     out = dict(raw)
     out["language"] = _normalize_language(out.get("language"))
     pp = out.get("problemPerception")
@@ -113,12 +119,18 @@ def normalize_strategy_raw(raw: Dict[str, Any]) -> Dict[str, Any]:
         pp["groundingType"] = _normalize_grounding_type(pp.get("groundingType"))
         pp["groundingEvidence"] = _normalize_string_list(pp.get("groundingEvidence"))
         out["problemPerception"] = pp
+    ra = out.get("relativeAdvantage")
+    if isinstance(ra, dict):
+        ra = dict(ra)
+        if ra.get("admitsRelevantGap") is None and not compatibility_mode:
+            ra["admitsRelevantGap"] = False
+        out["relativeAdvantage"] = ra
     ms = out.get("mechanismScan")
     if isinstance(ms, dict):
         ms = dict(ms)
         ms["domainFacts"] = _normalize_string_list(ms.get("domainFacts"))
         out["mechanismScan"] = ms
-    return out
+    return normalize_strategy_methodology_defaults(out, compatibility_mode=compatibility_mode)
 
 
 def _raise_strategy_error(code: str, *, field: str | None = None) -> None:
@@ -127,11 +139,11 @@ def _raise_strategy_error(code: str, *, field: str | None = None) -> None:
     raise Builder2TournamentError(code)
 
 
-def validate_strategy_foundation(raw: Dict[str, Any]) -> Dict[str, Any]:
+def validate_strategy_foundation(raw: Dict[str, Any], *, compatibility_mode: bool = False) -> Dict[str, Any]:
     """
     Validate a parsed strategy object. Raises Builder2TournamentError with a precise code.
     """
-    normalized = normalize_strategy_raw(raw)
+    normalized = normalize_strategy_raw(raw, compatibility_mode=compatibility_mode)
     planning_failure = normalized.get("planningFailure")
     if planning_failure:
         if planning_failure == "builder2_strategy_not_grounded":
@@ -199,6 +211,11 @@ def validate_strategy_foundation(raw: Dict[str, Any]) -> Dict[str, Any]:
     except Builder2TournamentError as exc:
         _raise_strategy_error("builder2_strategy_schema_invalid", field=_field_from_error(exc))
 
+    validate_strategy_methodology(normalized, compatibility_mode=compatibility_mode)
+    logger.info(
+        "BUILDER2_METHODOLOGY_VERSION_SELECTED role=strategy version=%s",
+        normalized.get("methodologyVersion") or "legacy",
+    )
     return normalized
 
 
@@ -398,6 +415,15 @@ def generate_strategy_foundation(
                 response_excerpt=_redact_excerpt(response_text) if response_text else None,
             )
             foundation = validate_strategy_foundation(parsed)
+            tournament_id = state.get("tournamentId") or ""
+            existing_id = (state.get("strategyFoundation") or {}).get("strategyFoundationId")
+            foundation = assign_strategy_foundation_identity(
+                foundation,
+                tournament_id=tournament_id,
+                existing_id=existing_id,
+            )
+            state["methodologyVersion"] = METHODOLOGY_VERSION
+            state["methodologyCompatibilityMode"] = False
             _write_strategy_diagnostics(
                 state,
                 parse_status="ok",

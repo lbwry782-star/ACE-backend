@@ -17,11 +17,16 @@ from engine.builder2_creator import (
 from engine.builder2_tournament_contracts import CANDIDATE_SCHEMA_VERSION, Builder2TournamentError
 from engine.builder2_tournament_manager import run_builder2_tournament, select_global_winner
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store, load_tournament_state
-from tests.test_builder2_tournament import TournamentMockLLM, _candidate, _judgment, _strategy
+from tests.test_builder2_tournament import TournamentMockLLM, _candidate, _judgment, _strategy, _winner_plan_from_prompt
 
 
-def _valid_candidate(prototype_id: str = "closest", *, language_structure: str = "continuous_event") -> Dict[str, Any]:
-    cand = _candidate(prototype_id, structure=language_structure)
+def _valid_candidate(
+    prototype_id: str = "closest",
+    *,
+    language_structure: str = "continuous_event",
+    prompt: str = "",
+) -> Dict[str, Any]:
+    cand = _candidate(prototype_id, structure=language_structure, prompt=prompt)
     cand["creatorReport"]["goldPrototypeUsed"] = prototype_id
     cand["creatorReport"]["visualParallelType"] = cand["visualParallelType"]
     return cand
@@ -54,6 +59,11 @@ class TestCreatorValidation(unittest.TestCase):
 
     def test_variation_montage_passes(self) -> None:
         cand = _valid_candidate("closest", language_structure="variation_montage")
+        cand["sceneVariations"] = [
+            "Two people stand apart.",
+            "One step closes the distance.",
+            "They meet in a clear embrace.",
+        ]
         validate_creator_candidate(
             cand,
             assigned_prototype_id="closest",
@@ -248,10 +258,10 @@ class TestCreatorTournamentContinuation(unittest.TestCase):
                         prototype_id = pid
                         break
                 if prototype_id == "closest":
-                    bad = _valid_candidate("closest")
+                    bad = _valid_candidate("closest", prompt=kwargs.get("prompt", ""))
                     bad["schemaVersion"] = "wrong"
                     return bad
-                return _valid_candidate(prototype_id)
+                return _valid_candidate(prototype_id, prompt=kwargs.get("prompt", ""))
             if kwargs.get("role") == "builder2_judge":
                 candidate_id = "unknown"
                 for token in kwargs.get("prompt", "").split():
@@ -262,9 +272,7 @@ class TestCreatorTournamentContinuation(unittest.TestCase):
             if kwargs.get("role") == "builder2_strategy":
                 return _strategy()
             if kwargs.get("role") == "builder2_winner":
-                from tests.test_builder2_tournament import _winner_plan
-
-                return _winner_plan()
+                return _winner_plan_from_prompt(kwargs.get("prompt", ""))
             raise AssertionError(kwargs.get("role"))
 
         with patch.dict(
@@ -377,10 +385,10 @@ class TestProductionRegression(unittest.TestCase):
                         prototype_id = pid
                         break
                 if prototype_id == "closest":
-                    bad = _valid_candidate("closest")
+                    bad = _valid_candidate("closest", prompt=kwargs.get("prompt", ""))
                     bad["schemaVersion"] = "wrong"
                     return bad
-                return _valid_candidate(prototype_id)
+                return _valid_candidate(prototype_id, prompt=kwargs.get("prompt", ""))
             if kwargs.get("role") == "builder2_judge":
                 candidate_id = "unknown"
                 for token in kwargs.get("prompt", "").split():
@@ -389,9 +397,7 @@ class TestProductionRegression(unittest.TestCase):
                         break
                 return _judgment(candidate_id, total_hint=90)
             if kwargs.get("role") == "builder2_winner":
-                from tests.test_builder2_tournament import _winner_plan
-
-                return _winner_plan()
+                return _winner_plan_from_prompt(kwargs.get("prompt", ""))
             raise AssertionError(kwargs.get("role"))
 
         def _run_tournament(**kwargs: Any):

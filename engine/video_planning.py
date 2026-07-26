@@ -1461,7 +1461,8 @@ def validate_and_normalize_plan(
 
     data = _coerce_plan_keys(data)
 
-    logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
+    if not str(data.get("planInferenceMode") or "").startswith("builder2_tournament"):
+        logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
 
     pn = (data.get("productNameResolved") or "").strip()
     headline_rem = (data.get("headline") or "").strip()
@@ -1622,7 +1623,12 @@ def _scene_plan_digest(scene: str, keyword: str) -> str:
 
 def log_video_job_plan_integrity(plan: Dict[str, Any]) -> None:
     """Structured keyword-scene + headline fields for every validated plan (video job trace)."""
-    logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
+    from engine.builder2_winner_downstream import is_builder2_tournament_plan, log_builder2_winner_schema_metadata
+
+    if is_builder2_tournament_plan(plan):
+        log_builder2_winner_schema_metadata(plan)
+    else:
+        logger.info("VIDEO_PLAN_SCHEMA_VERSION=%s", _VIDEO_PLAN_SCHEMA_VERSION)
     logger.info(
         'VIDEO_PLAN_INTEGRITY headline="%s"',
         (plan.get("headline") or plan.get("headlineTextRemainder") or "")[:260],
@@ -2289,14 +2295,31 @@ def _build_runway_prompt_detailed(plan: Dict[str, Any]) -> Tuple[str, bool]:
 
 
 def _build_continuous_event_runway_prompt(plan: Dict[str, Any]) -> str:
+    from engine.builder2_winner_downstream import (
+        Builder2WinnerDownstreamError,
+        build_continuous_event_runway_prompt,
+        is_builder2_tournament_plan,
+    )
+
+    if is_builder2_tournament_plan(plan):
+        try:
+            return build_continuous_event_runway_prompt(
+                plan,
+                duration_seconds=_builder2_video_duration_seconds(),
+            )
+        except Builder2WinnerDownstreamError as exc:
+            raise ValueError(exc.code) from exc
+
     scene_prompt = _plan_video_prompt_text(plan)
     if not scene_prompt:
         raise ValueError("missing videoPrompt")
     sequence = plan.get("sequence") or {}
     n = _builder2_video_duration_seconds()
     lang_vis = _runway_language_visual_constraints(plan)
-    anchor = (plan.get("visualAnchor") or "").strip()
-    opening = (plan.get("openingFrameDescription") or sequence.get("beginning") or "").strip()
+    anchor_raw = plan.get("visualAnchor")
+    anchor = anchor_raw.strip() if isinstance(anchor_raw, str) else ""
+    opening_raw = plan.get("openingFrameDescription") or sequence.get("beginning") or ""
+    opening = opening_raw.strip() if isinstance(opening_raw, str) else ""
     body = (
         "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
         "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
@@ -2326,8 +2349,20 @@ def build_runway_prompt_from_plan(plan: Dict[str, Any]) -> str:
     ACE plan → Runway promptText. Prefers the detailed creative-direction builder; on any failure,
     uses a compact fallback so callers stay stable.
     """
+    from engine.builder2_winner_downstream import (
+        Builder2WinnerDownstreamError,
+        build_variation_montage_runway_prompt,
+        is_builder2_tournament_plan,
+    )
+
     if (plan.get("structureType") or "").strip() == "continuous_event":
         return _build_continuous_event_runway_prompt(plan)
+
+    if is_builder2_tournament_plan(plan):
+        try:
+            return build_variation_montage_runway_prompt(plan)
+        except Builder2WinnerDownstreamError as exc:
+            raise ValueError(exc.code) from exc
 
     headline_decision = (plan.get("headlineDecision") or "no_headline").strip()
     headline_text = (plan.get("headlineText") or "").strip()

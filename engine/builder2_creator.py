@@ -18,12 +18,17 @@ from engine import openai_retry
 from engine.builder2_prototypes import Builder2Prototype, require_prototype
 from engine.builder2_reasoning_config import build_builder2_reasoning_payload, log_builder2_model_selected
 from engine.builder2_tournament_config import resolve_builder2_creator_model
+from engine.builder2_methodology_validation import (
+    normalize_candidate_methodology_defaults,
+    validate_creator_methodology,
+)
 from engine.builder2_tournament_contracts import (
     CANDIDATE_SCHEMA_VERSION,
     CREATOR_PURITY_RULES,
     VALID_CONTINUITY_RISK,
     VALID_STRUCTURE_TYPES,
     VALID_VISUAL_PARALLEL_TYPES,
+    VISUAL_PARALLEL_CANONICAL_ALIASES,
     Builder2TournamentError,
     require_dict,
     require_non_empty_str,
@@ -124,6 +129,8 @@ def _normalize_enum(value: Any, *, aliases: Dict[str, str], allowed: frozenset[s
     if text in aliases:
         return aliases[text]
     snake = text.replace(" ", "_")
+    if snake in VISUAL_PARALLEL_CANONICAL_ALIASES:
+        return VISUAL_PARALLEL_CANONICAL_ALIASES[snake]
     return snake if snake in allowed else snake
 
 
@@ -148,6 +155,7 @@ def normalize_creator_raw(
     *,
     assigned_prototype_id: str,
     prototype_display_name: str,
+    compatibility_mode: bool = False,
 ) -> Dict[str, Any]:
     out = dict(raw)
     pid = str(out.get("prototypeId") or "").strip()
@@ -201,7 +209,7 @@ def normalize_creator_raw(
             report["visualParallelType"] = out["visualParallelType"]
         out["creatorReport"] = report
 
-    return out
+    return normalize_candidate_methodology_defaults(out, compatibility_mode=compatibility_mode)
 
 
 def _collect_purity_text(candidate: Dict[str, Any]) -> str:
@@ -234,11 +242,14 @@ def validate_creator_candidate(
     *,
     assigned_prototype_id: str,
     prototype_display_name: str,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
 ) -> Dict[str, Any]:
     normalized = normalize_creator_raw(
         candidate,
         assigned_prototype_id=assigned_prototype_id,
         prototype_display_name=prototype_display_name,
+        compatibility_mode=compatibility_mode,
     )
     if normalized.get("planningFailure"):
         _raise_creator_error("builder2_creator_validation_failed", field="planningFailure")
@@ -361,14 +372,9 @@ def validate_creator_candidate(
         if str(normalized.get(key) or "").strip():
             _raise_creator_error("builder2_creator_validation_failed", field=key)
 
-    if assigned_prototype_id == "think_small":
-        blob = _collect_purity_text(normalized).lower()
-        if "weakness" not in blob and "weak" not in blob:
-            _raise_creator_error("builder2_creator_validation_failed", field="think_small.weakness_required")
-
     if assigned_prototype_id == "greenpeace_essential_pairing":
         report_blob = json.dumps(report, ensure_ascii=False).lower()
-        if "appearance" in report_blob and "only" in report_blob:
+        if "appearance only" in report_blob and "not merely" not in report_blob:
             _raise_creator_error("builder2_creator_validation_failed", field="essential_pairing.appearance_only")
 
     if vpt == "context_collision":
@@ -377,13 +383,30 @@ def validate_creator_candidate(
             _raise_creator_error("builder2_creator_validation_failed", field="context_collision.bridge_required")
 
     validate_creator_purity(normalized)
+    validate_creator_methodology(
+        normalized,
+        assigned_prototype_id=assigned_prototype_id,
+        strategy_foundation=strategy_foundation,
+        compatibility_mode=compatibility_mode,
+    )
     return normalized
 
 
 _CREATIVE_RETRY_FIELDS = {
     "think_small.weakness_required",
+    "think_small.denial_of_weakness",
+    "think_small.invented_weakness",
     "essential_pairing.appearance_only",
+    "essential_pairing.shape_only",
     "context_collision.bridge_required",
+    "creativeOrder",
+    "verbalPotential.bornFromVisibleMechanism",
+    "runwayFeasibility.requiresImpossibleMorphing",
+    "runwayFeasibility.requiresSubtleUnseenInference",
+    "winning_card.literal_card_imitation",
+    "closest.generic_hug",
+    "sceneVariations.count",
+    "sceneVariations.familyId",
     "planningFailure",
 }
 
@@ -573,6 +596,7 @@ def generate_creator_candidate(
     llm_client: Optional[Any] = None,
     state: Optional[Dict[str, Any]] = None,
     candidate_id: Optional[str] = None,
+    compatibility_mode: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     prototype = require_prototype(prototype_id)
     candidate_id = candidate_id or f"cand-{round_index}-{prototype_id}-{attempt_number}-{uuid.uuid4().hex[:8]}"
@@ -704,6 +728,8 @@ def generate_creator_candidate(
                 parsed,
                 assigned_prototype_id=prototype_id,
                 prototype_display_name=prototype.display_name,
+                strategy_foundation=strategy_foundation,
+                compatibility_mode=compatibility_mode,
             )
             _write_creator_diagnostics(
                 diagnostics,

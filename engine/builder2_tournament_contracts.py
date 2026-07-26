@@ -5,6 +5,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, FrozenSet, Tuple
 
+from engine.builder2_methodology_contract import (
+    VALID_HEADLINE_DECISIONS,
+    VALID_CONTINUITY_RISK,
+    VALID_STRUCTURE_TYPES,
+    VALID_VISUAL_PARALLEL_TYPES,
+    VISUAL_PARALLEL_CANONICAL_ALIASES,
+)
+
 STRATEGY_SCHEMA_VERSION = "builder2_strategy_v1"
 CANDIDATE_SCHEMA_VERSION = "builder2_candidate_v1"
 JUDGMENT_SCHEMA_VERSION = "builder2_judgment_v1"
@@ -21,25 +29,7 @@ VALID_GROUNDING_TYPES: FrozenSet[str] = frozenset(
     }
 )
 
-VALID_VISUAL_PARALLEL_TYPES: FrozenSet[str] = frozenset(
-    {
-        "replacement",
-        "side_by_side",
-        "motion_similarity",
-        "physical_behavior",
-        "graphic_similarity",
-        "context_collision",
-        "context_replacement",
-        "media_replacement",
-        "medium_as_object",
-        "essential_pairing",
-        "spatial_proximity",
-        "consequence_embodiment",
-        "other",
-    }
-)
-
-VALID_STRUCTURE_TYPES: FrozenSet[str] = frozenset({"continuous_event", "variation_montage"})
+# Re-exported from engine.builder2_methodology_contract (authoritative enum source).
 VALID_CONTINUITY_RISK: FrozenSet[str] = frozenset({"low", "medium", "high"})
 
 JUDGE_SCORE_RANGES: Dict[str, Tuple[int, int]] = {

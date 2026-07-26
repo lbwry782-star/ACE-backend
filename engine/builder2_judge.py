@@ -26,6 +26,7 @@ from engine.builder2_tournament_contracts import (
     require_dict,
     require_non_empty_str,
 )
+from engine.builder2_methodology_validation import validate_judge_methodology
 from engine.builder2_tournament_llm import extract_responses_output_text, parse_json_object
 from engine.builder2_tournament_metrics import MetricsTimer, record_judge_unavailable, record_model_call
 from engine.builder2_tournament_prompts import (
@@ -182,6 +183,7 @@ def validate_judge_response(
     judgment: Dict[str, Any],
     *,
     candidate_id: str,
+    compatibility_mode: bool = False,
 ) -> Tuple[Dict[str, Any], int, Dict[str, int]]:
     normalized = normalize_judge_raw(judgment, candidate_id=candidate_id)
 
@@ -252,6 +254,7 @@ def validate_judge_response(
         out["disqualifiers"] = ["ineligible_without_reason"]
 
     validate_judge_purity(out)
+    validate_judge_methodology(out, compatibility_mode=compatibility_mode)
     return out, total, scores
 
 
@@ -396,6 +399,7 @@ def judge_candidate(
     llm_client: Optional[Any] = None,
     state: Optional[Dict[str, Any]] = None,
     judgment_id: Optional[str] = None,
+    compatibility_mode: bool = False,
 ) -> Tuple[str, Dict[str, Any], int, Dict[str, int]]:
     prototype = require_prototype(prototype_id)
     judgment_id = judgment_id or f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
@@ -513,7 +517,11 @@ def judge_candidate(
         try:
             parsed, top_level_keys, schema_version_received = _parse_judge_payload(response_text)
             last_parsed = parsed
-            judgment, total, scores = validate_judge_response(parsed, candidate_id=candidate_id)
+            judgment, total, scores = validate_judge_response(
+                parsed,
+                candidate_id=candidate_id,
+                compatibility_mode=compatibility_mode,
+            )
             _write_judge_diagnostics(
                 diagnostics,
                 response_received=True,

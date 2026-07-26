@@ -1017,6 +1017,21 @@ def _generate_one_video_mvp_body(
     logger.info("VIDEO_PLAN_REQUIRED_FIELDS_OK=true")
     log_video_job_plan_integrity(plan)
 
+    if str(plan.get("planInferenceMode") or "").startswith("builder2_tournament"):
+        from engine.builder2_winner_downstream import Builder2WinnerDownstreamError, validate_builder2_pre_runway
+
+        try:
+            validate_builder2_pre_runway(plan)
+        except Builder2WinnerDownstreamError as exc:
+            logger.error("BUILDER2_PRE_RUNWAY_VALIDATION_FAILED code=%s", exc.code)
+            logger.info("VIDEO_TIMING_RUNWAY_MS=0.0")
+            logger.info("VIDEO_TIMING_POSTPROCESS_MS=0.0")
+            total_ms = (time.monotonic() - t_job0) * 1000.0
+            logger.info("VIDEO_TIMING_TOTAL_MS=%.1f", total_ms)
+            logger.info("VIDEO_TIMING_DOMINANT_PHASE=plan")
+            _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
+            raise RunwayVideoMVPError(exc.code)
+
     video_job_set_phase("runway")
     prompt = build_runway_prompt_from_plan(plan)
 
@@ -1212,6 +1227,14 @@ def _generate_one_video_mvp_body(
                 logger.info("VIDEO_JOB_STEP step=packaging_result start")
                 headline_for_overlay = (plan.get("headlineText") or "").strip()
                 headline_decision = (plan.get("headlineDecision") or "").strip()
+                headline_detail = plan.get("headlineDecisionDetail")
+                if isinstance(headline_detail, dict):
+                    detail_decision = str(headline_detail.get("decision") or "").strip()
+                    if detail_decision:
+                        headline_decision = detail_decision
+                headline_omitted_by_methodology = headline_decision == "omit"
+                if headline_omitted_by_methodology:
+                    logger.info("BUILDER2_HEADLINE_OMITTED_BY_METHODOLOGY")
                 try:
                     ad_goal = (plan.get("advertisingPromise") or "").strip()
                     logger.info(
@@ -1262,9 +1285,10 @@ def _generate_one_video_mvp_body(
                     )
                 try:
                     _enforce_marketing_copy_language(marketing_lang, marketing_text_for_api)
-                    _enforce_headline_overlay_language(
-                        video_lang, headline_for_overlay, canonical_name
-                    )
+                    if not headline_omitted_by_methodology:
+                        _enforce_headline_overlay_language(
+                            video_lang, headline_for_overlay, canonical_name
+                        )
                     _bidi_prot = (
                         (canonical_name.strip(),)
                         if (canonical_name or "").strip()
@@ -1287,71 +1311,81 @@ def _generate_one_video_mvp_body(
                         logger.info(
                             "MARKETING_TEXT_BIDI_NORMALIZED applied=false lang=en",
                         )
-                    overlay_prep = prepare_ffmpeg_overlay_headline(
-                        headline_for_overlay,
-                        content_language=video_lang,
-                        canonical_name=canonical_name,
-                    )
-                    headline_for_overlay = overlay_prep.text_plain
-                    overlay_bidi_strategy = overlay_prep.strategy
-                    logger.info(
-                        "VIDEO_BIDI_FIX_APPLIED_COPY=%s",
-                        str(bidi_copy).lower(),
-                    )
-                    logger.info(
-                        "VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s",
-                        format_bidi_segments_for_log(segs_copy),
-                    )
-                    logger.info(
-                        "VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s",
-                        overlay_bidi_strategy,
-                    )
-                    logger.info(
-                        "VIDEO_HEADLINE_OVERLAY_RENDER_MODE=%s",
-                        overlay_prep.render_mode,
-                    )
-                    logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
-                    logger.info("VIDEO_JOB_STEP step=packaging_result done")
-                    logger.info(
-                        "VIDEO_TIMING_STAGE_START stage=headline_overlay jobId=%s",
-                        job_id or "(none)",
-                    )
-                    t_overlay0 = time.monotonic()
-                    final_url = postprocess_video_headline(
-                        url,
-                        public_base_url or "",
-                        headline=headline_for_overlay,
-                        job_id=job_id,
-                        overlay_language=video_lang,
-                        overlay_render_mode=overlay_prep.render_mode,
-                        overlay_dual_latin=overlay_prep.dual_latin,
-                        overlay_dual_hebrew=overlay_prep.dual_hebrew,
-                        overlay_canonical_name=canonical_name,
-                    )
-                    overlay_ms = (time.monotonic() - t_overlay0) * 1000.0
-                    logger.info("VIDEO_TIMING_HEADLINE_OVERLAY_MS=%.1f", overlay_ms)
-                    logger.info(
-                        "VIDEO_TIMING_STAGE_END stage=headline_overlay jobId=%s elapsed_ms=%.1f",
-                        job_id or "(none)",
-                        overlay_ms,
-                    )
-                    post_ms = (time.monotonic() - t_post0) * 1000.0
-                    logger.info("VIDEO_TIMING_POSTPROCESS_MS=%.1f", post_ms)
-                    if final_url.rstrip("/") == url.rstrip("/"):
+                    if headline_omitted_by_methodology:
+                        logger.info("VIDEO_JOB_STEP step=packaging_result done")
+                        final_url = url
+                        post_ms = (time.monotonic() - t_post0) * 1000.0
+                        logger.info("VIDEO_TIMING_POSTPROCESS_MS=%.1f", post_ms)
                         logger.info(
-                            "VIDEO_JOB_CHOSEN_URL source=runway_fallback jobId=%s",
-                            job_id,
-                        )
-                    elif "/api/video-headline/" in final_url and "/api/video-headline-artifact" not in final_url:
-                        logger.info(
-                            "VIDEO_JOB_CHOSEN_URL source=processed_uploaded jobId=%s",
+                            "VIDEO_JOB_CHOSEN_URL source=runway_no_headline_overlay jobId=%s",
                             job_id,
                         )
                     else:
-                        logger.info(
-                            "VIDEO_JOB_CHOSEN_URL source=processed jobId=%s",
-                            job_id,
+                        overlay_prep = prepare_ffmpeg_overlay_headline(
+                            headline_for_overlay,
+                            content_language=video_lang,
+                            canonical_name=canonical_name,
                         )
+                        headline_for_overlay = overlay_prep.text_plain
+                        overlay_bidi_strategy = overlay_prep.strategy
+                        logger.info(
+                            "VIDEO_BIDI_FIX_APPLIED_COPY=%s",
+                            str(bidi_copy).lower(),
+                        )
+                        logger.info(
+                            "VIDEO_BIDI_LATIN_SEGMENTS_COPY=%s",
+                            format_bidi_segments_for_log(segs_copy),
+                        )
+                        logger.info(
+                            "VIDEO_HEADLINE_BIDI_OVERLAY_STRATEGY=%s",
+                            overlay_bidi_strategy,
+                        )
+                        logger.info(
+                            "VIDEO_HEADLINE_OVERLAY_RENDER_MODE=%s",
+                            overlay_prep.render_mode,
+                        )
+                        logger.info("VIDEO_HEADLINE_OVERLAY_USED_ISOLATES=false")
+                        logger.info("VIDEO_JOB_STEP step=packaging_result done")
+                        logger.info(
+                            "VIDEO_TIMING_STAGE_START stage=headline_overlay jobId=%s",
+                            job_id or "(none)",
+                        )
+                        t_overlay0 = time.monotonic()
+                        final_url = postprocess_video_headline(
+                            url,
+                            public_base_url or "",
+                            headline=headline_for_overlay,
+                            job_id=job_id,
+                            overlay_language=video_lang,
+                            overlay_render_mode=overlay_prep.render_mode,
+                            overlay_dual_latin=overlay_prep.dual_latin,
+                            overlay_dual_hebrew=overlay_prep.dual_hebrew,
+                            overlay_canonical_name=canonical_name,
+                        )
+                        overlay_ms = (time.monotonic() - t_overlay0) * 1000.0
+                        logger.info("VIDEO_TIMING_HEADLINE_OVERLAY_MS=%.1f", overlay_ms)
+                        logger.info(
+                            "VIDEO_TIMING_STAGE_END stage=headline_overlay jobId=%s elapsed_ms=%.1f",
+                            job_id or "(none)",
+                            overlay_ms,
+                        )
+                        post_ms = (time.monotonic() - t_post0) * 1000.0
+                        logger.info("VIDEO_TIMING_POSTPROCESS_MS=%.1f", post_ms)
+                        if final_url.rstrip("/") == url.rstrip("/"):
+                            logger.info(
+                                "VIDEO_JOB_CHOSEN_URL source=runway_fallback jobId=%s",
+                                job_id,
+                            )
+                        elif "/api/video-headline/" in final_url and "/api/video-headline-artifact" not in final_url:
+                            logger.info(
+                                "VIDEO_JOB_CHOSEN_URL source=processed_uploaded jobId=%s",
+                                job_id,
+                            )
+                        else:
+                            logger.info(
+                                "VIDEO_JOB_CHOSEN_URL source=processed jobId=%s",
+                                job_id,
+                            )
                     logger.info(
                         "VIDEO_PRODUCT_NAME_RESOLVED_PACKAGED value=%s",
                         json.dumps(canonical_name, ensure_ascii=False),

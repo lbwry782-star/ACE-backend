@@ -11,6 +11,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from engine.builder2_methodology_contract import METHODOLOGY_VERSION, PROCESS_FAILURE_TAGS
 from engine.builder2_tournament_contracts import (
     TOURNAMENT_STATE_SCHEMA_VERSION,
     Builder2TournamentError,
@@ -149,6 +150,9 @@ def new_tournament_state(
         "winnerCandidateId": None,
         "winnerDevelopmentPlan": None,
         "initialActivePrototypeIds": list(active_prototype_ids),
+        "methodologyVersion": None,
+        "methodologyCompatibilityMode": False,
+        "processFailureTags": [],
         "completionReason": None,
         "metrics": None,
         "strategyDiagnostics": None,
@@ -187,6 +191,69 @@ def register_judgment(state: Dict[str, Any], judgment_record: Dict[str, Any]) ->
     if jid in state["judgments"]:
         return
     state["judgments"][jid] = judgment_record
+
+
+def _has_persisted_pre_methodology_completed_output(state: Dict[str, Any]) -> bool:
+    if state.get("methodologyVersion") == METHODOLOGY_VERSION:
+        return False
+    strategy = state.get("strategyFoundation")
+    if isinstance(strategy, dict) and strategy and not strategy.get("methodologyVersion"):
+        return True
+    for candidate in (state.get("candidates") or {}).values():
+        if candidate.get("validationStatus") != "accepted":
+            continue
+        output = candidate.get("creatorOutput")
+        if isinstance(output, dict) and output and not output.get("methodologyVersion"):
+            return True
+    for judgment in (state.get("judgments") or {}).values():
+        payload = judgment.get("judgment")
+        if isinstance(payload, dict) and payload and not payload.get("methodologyVersion"):
+            return True
+    winner_plan = state.get("winnerDevelopmentPlan")
+    if isinstance(winner_plan, dict) and winner_plan and not winner_plan.get("methodologyVersion"):
+        return True
+    return False
+
+
+def ensure_methodology_compatibility_decided(state: Dict[str, Any], *, is_new_job: bool) -> bool:
+    """
+    Decide and persist job-local methodology compatibility mode once.
+    New jobs never enter compatibility mode.
+    """
+    if is_new_job:
+        state["methodologyCompatibilityMode"] = False
+        state.pop("methodologyCompatibilityReason", None)
+        return False
+    if state.get("methodologyCompatibilityDecided"):
+        return bool(state.get("methodologyCompatibilityMode"))
+    if _has_persisted_pre_methodology_completed_output(state):
+        state["methodologyCompatibilityMode"] = True
+        state["methodologyCompatibilityReason"] = "persisted_pre_methodology_state"
+        logger.info(
+            "BUILDER2_METHODOLOGY_COMPATIBILITY_MODE jobId=%s tournamentId=%s reason=%s",
+            state.get("jobId"),
+            state.get("tournamentId"),
+            state["methodologyCompatibilityReason"],
+        )
+    else:
+        state["methodologyCompatibilityMode"] = False
+        state.pop("methodologyCompatibilityReason", None)
+    state["methodologyCompatibilityDecided"] = True
+    return bool(state.get("methodologyCompatibilityMode"))
+
+
+def record_process_failure_tag(state: Dict[str, Any], failure_reason: Optional[str]) -> None:
+    from engine.builder2_methodology_validation import infer_process_failure_tag
+
+    tag = infer_process_failure_tag(failure_reason)
+    if not tag or tag not in PROCESS_FAILURE_TAGS:
+        return
+    tags = state.setdefault("processFailureTags", [])
+    if not isinstance(tags, list):
+        tags = []
+        state["processFailureTags"] = tags
+    if tag not in tags:
+        tags.append(tag)
 
 
 def update_best_candidate_if_stronger(

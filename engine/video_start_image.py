@@ -38,6 +38,18 @@ def build_ace_start_frame_image_prompt(plan: Dict[str, Any]) -> str:
     Opening still for Builder2 variation-montage plans (Runway gen4_turbo promptImage).
     No text, logos, or headline in frame.
     """
+    from engine.builder2_runway_config import resolve_builder2_video_duration_seconds
+    from engine.builder2_winner_downstream import (
+        build_builder2_start_frame_image_prompt,
+        is_builder2_tournament_plan,
+    )
+
+    if is_builder2_tournament_plan(plan):
+        return build_builder2_start_frame_image_prompt(
+            plan,
+            duration_seconds=resolve_builder2_video_duration_seconds(),
+        )
+
     no_text = (
         "No text, letters, words, numbers as graphics, captions, labels, signage, packaging typography, "
         "title cards, watermarks, headline, UI, or brand names in the image — blank/generic surfaces only."

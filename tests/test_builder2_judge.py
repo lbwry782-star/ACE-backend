@@ -30,6 +30,7 @@ from tests.test_builder2_tournament import (
     _judgment,
     _strategy,
     _winner_plan,
+    _winner_plan_from_prompt,
 )
 
 
@@ -471,7 +472,7 @@ class TestJudgeTournamentContinuation(unittest.TestCase):
                 return _strategy()
             if role == "builder2_creator":
                 prototype_id = self._prototype_from_prompt(kwargs.get("prompt", ""))
-                return _candidate(prototype_id)
+                return _candidate(prototype_id, prompt=kwargs.get("prompt", ""))
             if role == "builder2_judge":
                 judge_calls["count"] += 1
                 candidate_id = "unknown"
@@ -490,7 +491,7 @@ class TestJudgeTournamentContinuation(unittest.TestCase):
                     return bad
                 return _valid_judgment(candidate_id, eligible=True)
             if role == "builder2_winner":
-                return _winner_plan()
+                return _winner_plan_from_prompt(kwargs.get("prompt", ""))
             raise AssertionError(role)
 
         with patch.dict(
@@ -521,7 +522,7 @@ class TestJudgeTournamentContinuation(unittest.TestCase):
             if role == "builder2_strategy":
                 return _strategy()
             if role == "builder2_creator":
-                return _candidate("closest")
+                return _candidate("closest", prompt=kwargs.get("prompt", ""))
             if role == "builder2_judge":
                 return "not-json"
             raise AssertionError(role)
@@ -651,7 +652,7 @@ class TestProductionJudgeRegression(unittest.TestCase):
                     if f'"prototypeId": "{pid}"' in prompt or f"Assigned prototype ID: {pid}" in prompt:
                         prototype_id = pid
                         break
-                return _candidate(prototype_id)
+                return _candidate(prototype_id, prompt=prompt)
             if role == "builder2_judge":
                 candidate_id = "unknown"
                 for token in prompt.split():
@@ -670,7 +671,7 @@ class TestProductionJudgeRegression(unittest.TestCase):
                 bad["eligible"] = "true"
                 return bad
             if role == "builder2_winner":
-                return _winner_plan()
+                return _winner_plan_from_prompt(kwargs.get("prompt", ""))
             raise AssertionError(role)
 
         def _run_tournament(**kwargs: Any):

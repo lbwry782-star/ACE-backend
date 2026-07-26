@@ -42,10 +42,26 @@ from engine.builder2_tournament_manager import (
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store, load_tournament_state
 from engine.builder2_winner_development import normalize_winner_plan_for_runway, validate_winner_plan
 from engine.runway_video import RunwayVideoMVPError, _generate_one_video_mvp_body
+from tests.builder2_methodology_fixtures import (
+    methodology_candidate_extras,
+    methodology_judgment_extras,
+    methodology_strategy_extras,
+    methodology_winner_extras,
+)
+
+
+def _deep_merge(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(base)
+    for key, value in extra.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
 
 
 def _strategy(language: str = "en") -> Dict[str, Any]:
-    return {
+    base = {
         "schemaVersion": STRATEGY_SCHEMA_VERSION,
         "productNameResolved": "ACE Product",
         "language": language,
@@ -65,10 +81,20 @@ def _strategy(language: str = "en") -> Dict[str, Any]:
             "creativeOpportunity": "Show closeness as the persuasive proof.",
         },
     }
+    return _deep_merge(base, methodology_strategy_extras(tournament_id="test-tournament"))
 
 
-def _candidate(prototype_id: str, *, structure: str = "continuous_event") -> Dict[str, Any]:
-    return {
+def _strategy_foundation_id_from_prompt(prompt: str) -> str:
+    marker = "strategyFoundationId (return exactly): "
+    if marker in prompt:
+        start = prompt.index(marker) + len(marker)
+        return prompt[start:].split("\n", 1)[0].strip().strip('"').strip("'")
+    return str(_strategy().get("strategyFoundationId") or "")
+
+
+def _candidate(prototype_id: str, *, structure: str = "continuous_event", prompt: str = "") -> Dict[str, Any]:
+    strategy = _strategy()
+    base = {
         "schemaVersion": CANDIDATE_SCHEMA_VERSION,
         "prototypeId": prototype_id,
         "prototypeMethodApplied": "Applied the reusable method without copying the literal source ad.",
@@ -114,6 +140,11 @@ def _candidate(prototype_id: str, *, structure: str = "continuous_event") -> Dic
             "whyRunwayShouldUnderstand": "One action in one location.",
         },
     }
+    merged = _deep_merge(_deep_merge(base, methodology_candidate_extras(prototype_id, strategy=strategy)), {})
+    strategy_id = _strategy_foundation_id_from_prompt(prompt)
+    if strategy_id:
+        merged["strategyFoundationId"] = strategy_id
+    return merged
 
 
 def _judgment(candidate_id: str, *, total_hint: int = 80, eligible: bool = True) -> Dict[str, Any]:
@@ -127,22 +158,27 @@ def _judgment(candidate_id: str, *, total_hint: int = 80, eligible: bool = True)
         "runwayFeasibility": 8,
         "editingContribution": 4,
     }
-    return {
-        "schemaVersion": JUDGMENT_SCHEMA_VERSION,
-        "candidateId": candidate_id,
-        "eligible": eligible,
-        "disqualifiers": [] if eligible else ["fabricated_problem"],
-        "scores": scores,
-        "verdict": "Strong silent visual proof.",
-        "strengths": ["Clear mechanism"],
-        "weaknesses": [],
-        "prototypeQualityComparison": "Applies method without copying surface.",
-        "confidence": 0.82,
-    }
+    return _deep_merge(
+        {
+            "schemaVersion": JUDGMENT_SCHEMA_VERSION,
+            "candidateId": candidate_id,
+            "eligible": eligible,
+            "disqualifiers": [] if eligible else ["fabricated_problem"],
+            "scores": scores,
+            "verdict": "Strong silent visual proof.",
+            "strengths": ["Clear mechanism"],
+            "weaknesses": [],
+            "prototypeQualityComparison": "Applies method without copying surface.",
+            "confidence": 0.82,
+        },
+        methodology_judgment_extras(),
+    )
 
 
 def _winner_plan(language: str = "en") -> Dict[str, Any]:
-    return {
+    strategy = _strategy(language=language)
+    candidate = _candidate("closest")
+    base = {
         "schemaVersion": WINNER_PLAN_SCHEMA_VERSION,
         "productNameResolved": "ACE Product",
         "language": language,
@@ -169,6 +205,56 @@ def _winner_plan(language: str = "en") -> Dict[str, Any]:
             "distance, they embrace clearly. Natural movement. No text."
         ),
     }
+    return _deep_merge(
+        base,
+        methodology_winner_extras(
+            winning_candidate=candidate,
+            strategy=strategy,
+        ),
+    )
+
+
+def _winner_plan_from_prompt(prompt: str, *, language: str = "en") -> Dict[str, Any]:
+    import json as _json
+
+    plan = _winner_plan(language=language)
+    marker = "Preservation snapshot (must match preservationReference identity fields exactly):\n"
+    idx = prompt.find(marker)
+    if idx >= 0:
+        chunk = prompt[idx + len(marker) :].split("\nPrototype method:")[0].strip()
+        try:
+            snapshot = _json.loads(chunk)
+            plan["preservationReference"] = snapshot
+            plan["winningCandidatePreservationSnapshot"] = snapshot
+            for key in (
+                "strategyFoundationId",
+                "prototypeId",
+                "structureType",
+                "visualParallelType",
+                "coreCreativeMechanism",
+            ):
+                if key in snapshot:
+                    plan[key] = snapshot[key]
+        except ValueError:
+            pass
+    win_marker = "Winning candidate:\n"
+    widx = prompt.find(win_marker)
+    if widx >= 0:
+        chunk = prompt[widx + len(win_marker) :].split("\nValid Judge judgment")[0].strip()
+        try:
+            cand = _json.loads(chunk)
+            plan["coreCreativeMechanism"] = cand.get("coreCreativeMechanism", plan["coreCreativeMechanism"])
+            plan["visualParallelType"] = cand.get("visualParallelType", plan["visualParallelType"])
+            plan["structureType"] = cand.get("structureType", plan["structureType"])
+            plan["prototypeId"] = cand.get("prototypeId", plan["prototypeId"])
+            if plan.get("preservationReference"):
+                plan["preservationReference"]["coreCreativeMechanism"] = plan["coreCreativeMechanism"]
+                plan["preservationReference"]["prototypeId"] = plan["prototypeId"]
+                plan["preservationReference"]["structureType"] = plan["structureType"]
+                plan["preservationReference"]["visualParallelType"] = plan["visualParallelType"]
+        except ValueError:
+            pass
+    return plan
 
 
 class TournamentMockLLM:
@@ -187,9 +273,7 @@ class TournamentMockLLM:
                 if f"Assigned prototype ID: {pid}" in prompt:
                     prototype_id = pid
                     break
-            if prototype_id == "think_small" and "weakness" not in prompt:
-                pass
-            candidate = _candidate(prototype_id)
+            candidate = _candidate(prototype_id, prompt=prompt)
             if prototype_id == "think_small":
                 candidate["creatorReport"]["problemPerception"] = (
                     "The real weakness is limited size, and the ad inverts it."
@@ -209,7 +293,7 @@ class TournamentMockLLM:
             total = self.score_by_prototype.get(prototype_id, 70)
             return _judgment(candidate_id, total_hint=total)
         if role == "builder2_winner":
-            return _winner_plan()
+            return _winner_plan_from_prompt(prompt)
         raise AssertionError(f"unexpected role {role}")
 
 

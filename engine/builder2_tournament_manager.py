@@ -31,10 +31,14 @@ from engine.builder2_tournament_metrics import (
     record_judge_valid,
     record_model_call,
 )
+from engine.builder2_methodology_contract import METHODOLOGY_VERSION
+from engine.builder2_strategy_identity import assign_strategy_foundation_identity
 from engine.builder2_tournament_store import (
+    ensure_methodology_compatibility_decided,
     load_tournament_state,
     mutate_tournament_state,
     new_tournament_state,
+    record_process_failure_tag,
     register_candidate,
     register_judgment,
     save_tournament_state,
@@ -218,6 +222,7 @@ def _run_creator_and_judge_for_assignment(
     attempt_number: int,
     runway_mode: str,
     llm_client: Optional[Any],
+    compatibility_mode: bool = False,
 ) -> None:
     strategy = state["strategyFoundation"]
     existing_judged = [
@@ -287,9 +292,11 @@ def _run_creator_and_judge_for_assignment(
                 llm_client=llm_client,
                 state=state,
                 candidate_id=candidate_id,
+                compatibility_mode=compatibility_mode,
             )
         except Builder2TournamentError as exc:
             reason = str(exc.args[0] if exc.args else "builder2_creator_invalid_candidate")
+            record_process_failure_tag(state, reason)
             diagnostics = (state.get("creatorDiagnosticsByCandidate") or {}).get(candidate_id, {})
             logger.info(
                 "BUILDER2_CREATOR_REJECTED prototypeId=%s candidateId=%s reason=%s",
@@ -344,9 +351,11 @@ def _run_creator_and_judge_for_assignment(
             llm_client=llm_client,
             state=state,
             judgment_id=judgment_id,
+            compatibility_mode=compatibility_mode,
         )
     except Builder2TournamentError as exc:
         reason = str(exc.args[0] if exc.args else "builder2_judge_invalid_response")
+        record_process_failure_tag(state, reason)
         diagnostics = (state.get("judgeDiagnosticsByCandidate") or {}).get(candidate_id, {})
         logger.info(
             "BUILDER2_JUDGE_REJECTED candidateId=%s judgmentId=%s reason=%s",
@@ -456,7 +465,9 @@ def run_builder2_tournament(
     t_tournament0 = time.monotonic()
 
     state = load_tournament_state(job_id)
+    is_new_job = state is None
     if state:
+        ensure_methodology_compatibility_decided(state, is_new_job=False)
         next_step = _next_step_name(state)
         logger.info(
             "BUILDER2_TOURNAMENT_RESUMED jobId=%s tournamentId=%s lastCompletedStep=%s nextStep=%s roundIndex=%s",
@@ -474,6 +485,8 @@ def run_builder2_tournament(
             active_prototype_ids=active_ids,
             random_seed=seed,
         )
+        state["methodologyVersion"] = METHODOLOGY_VERSION
+        state["methodologyCompatibilityMode"] = False
         save_tournament_state(job_id, state)
         logger.info(
             "BUILDER2_TOURNAMENT_START jobId=%s tournamentId=%s prototypes=%s maxRounds=%s",
@@ -484,6 +497,7 @@ def run_builder2_tournament(
         )
 
     ensure_metrics(state)
+    compatibility_mode = bool(state.get("methodologyCompatibilityMode"))
 
     if not state.get("strategyFoundation"):
         state["status"] = "strategy_generating"
@@ -500,10 +514,19 @@ def run_builder2_tournament(
         except Builder2TournamentError as exc:
             state["status"] = "failed"
             state["error"] = str(exc.args[0] if exc.args else "builder2_strategy_validation_failed")
+            record_process_failure_tag(state, state["error"])
             save_tournament_state(job_id, state)
             raise
         state["status"] = "strategy_complete"
         state["lastCompletedStep"] = "strategy_complete"
+        state["methodologyVersion"] = METHODOLOGY_VERSION
+        state["methodologyCompatibilityMode"] = False
+        save_tournament_state(job_id, state)
+    elif not state["strategyFoundation"].get("strategyFoundationId"):
+        state["strategyFoundation"] = assign_strategy_foundation_identity(
+            state["strategyFoundation"],
+            tournament_id=state.get("tournamentId") or "",
+        )
         save_tournament_state(job_id, state)
 
     round_index = max(int(state.get("currentRound") or 0), 1)
@@ -545,6 +568,7 @@ def run_builder2_tournament(
                     attempt_number=attempt,
                     runway_mode=runway_mode,
                     llm_client=llm_client,
+                    compatibility_mode=compatibility_mode,
                 )
                 save_tournament_state(job_id, state)
 
@@ -606,6 +630,8 @@ def run_builder2_tournament(
         state["lastCompletedStep"] = "winner_developing"
         save_tournament_state(job_id, state)
         winner_rec = state["candidates"][winner_id]
+        judgment_rec = state["judgments"].get(winner_rec.get("judgmentId") or "")
+        winning_judgment = (judgment_rec or {}).get("judgment") or {}
         try:
             timer = MetricsTimer()
             winner_plan = develop_builder2_winning_candidate(
@@ -614,12 +640,15 @@ def run_builder2_tournament(
                 language=language,
                 strategy_foundation=state["strategyFoundation"],
                 winning_candidate=winner_rec["creatorOutput"],
+                winning_judgment=winning_judgment,
                 prototype_id=winner_rec["prototypeId"],
                 runway_mode=runway_mode,
                 llm_client=llm_client,
+                compatibility_mode=compatibility_mode,
             )
             record_model_call(state, role="builder2_winner", elapsed_ms=timer.elapsed_ms())
-        except Builder2TournamentError:
+        except Builder2TournamentError as exc:
+            record_process_failure_tag(state, str(exc.args[0] if exc.args else "builder2_winner_development_failed"))
             logger.error("BUILDER2_WINNER_DEVELOPMENT_FAILED candidateId=%s", winner_id)
             state["status"] = "failed"
             save_tournament_state(job_id, state)
@@ -629,6 +658,13 @@ def run_builder2_tournament(
         state["lastCompletedStep"] = "winner_plan_complete"
         save_tournament_state(job_id, state)
         logger.info("BUILDER2_WINNER_DEVELOPMENT_OK candidateId=%s", winner_id)
+    elif state.get("winnerDevelopmentPlan"):
+        logger.info(
+            "BUILDER2_PERSISTED_WINNER_RESUME jobId=%s tournamentId=%s winnerCandidateId=%s",
+            job_id,
+            state.get("tournamentId"),
+            state.get("winnerCandidateId"),
+        )
 
     finalize_tournament_metrics(state, elapsed_ms=(time.monotonic() - t_tournament0) * 1000.0)
     save_tournament_state(job_id, state)
