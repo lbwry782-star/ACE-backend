@@ -236,16 +236,6 @@ def validate_creator_methodology(
         )
         return
 
-    order = _require_dict(
-        candidate.get("creativeOrderConfirmation"),
-        field="creativeOrderConfirmation",
-        code="builder2_creator_validation_failed",
-    )
-    for key in ("visualCameBeforeKeyword", "runwayCheckCameBeforeKeyword", "headlineWasNotStartingPoint"):
-        if _require_bool(order.get(key), field=f"creativeOrderConfirmation.{key}", code="builder2_creator_validation_failed") is not True:
-            _raise("builder2_creator_validation_failed", field="creativeOrder")
-    logger.info("BUILDER2_CREATIVE_ORDER_VALIDATED prototypeId=%s", assigned_prototype_id)
-
     pma = _require_dict(
         candidate.get("prototypeMethodApplication"),
         field="prototypeMethodApplication",

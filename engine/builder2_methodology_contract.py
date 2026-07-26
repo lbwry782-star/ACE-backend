@@ -101,7 +101,8 @@ METHODOLOGY_LOG_EVENTS: Tuple[str, ...] = (
     "BUILDER2_STRATEGY_METHODOLOGY_VALIDATED",
     "BUILDER2_CREATOR_METHODOLOGY_VALIDATED",
     "BUILDER2_PROTOTYPE_METHOD_VALIDATED",
-    "BUILDER2_CREATIVE_ORDER_VALIDATED",
+    "BUILDER2_CREATIVE_ORDER_CONTRACT_ATTACHED",
+    "BUILDER2_CREATOR_ORDER_ATTESTATION_IGNORED",
     "BUILDER2_VISUAL_FAMILY_VALIDATED",
     "BUILDER2_PARTICIPATION_VALIDATED",
     "BUILDER2_VERBAL_POTENTIAL_VALIDATED",
@@ -225,9 +226,16 @@ BUILDER2_METHODOLOGY_COVERAGE: Dict[str, Dict[str, Any]] = {
         tests=("tests.test_builder2_methodology.TestMethodologyCoverage",),
     ),
     "05_fixed_creative_order": _entry(
-        modules=("engine/builder2_creator.py", "engine/builder2_methodology_validation.py"),
-        enforcement="creative_order_confirmation",
-        tests=("tests.test_builder2_methodology.TestCreatorMethodology",),
+        modules=(
+            "engine/builder2_creative_order_contract.py",
+            "engine/builder2_tournament_prompts.py",
+            "engine/builder2_methodology_validation.py",
+        ),
+        enforcement="server_creative_order_contract_and_stage_outputs",
+        tests=(
+            "tests.test_builder2_creative_order_contract",
+            "tests.test_builder2_methodology_gaps.TestCreatorMethodology",
+        ),
     ),
     "06_problem_perception": _entry(
         modules=("engine/builder2_strategy.py", "engine/builder2_methodology_validation.py"),

@@ -244,6 +244,9 @@ def validate_creator_candidate(
     prototype_display_name: str,
     strategy_foundation: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
+    job_id: str = "",
+    tournament_id: str = "",
+    candidate_id: str = "",
 ) -> Dict[str, Any]:
     normalized = normalize_creator_raw(
         candidate,
@@ -389,7 +392,15 @@ def validate_creator_candidate(
         strategy_foundation=strategy_foundation,
         compatibility_mode=compatibility_mode,
     )
-    return normalized
+    from engine.builder2_creative_order_contract import finalize_creator_order_metadata
+
+    return finalize_creator_order_metadata(
+        normalized,
+        job_id=job_id,
+        tournament_id=tournament_id,
+        candidate_id=candidate_id,
+        prototype_id=assigned_prototype_id,
+    )
 
 
 _CREATIVE_RETRY_FIELDS = {
@@ -399,7 +410,6 @@ _CREATIVE_RETRY_FIELDS = {
     "essential_pairing.appearance_only",
     "essential_pairing.shape_only",
     "context_collision.bridge_required",
-    "creativeOrder",
     "verbalPotential.bornFromVisibleMechanism",
     "runwayFeasibility.requiresImpossibleMorphing",
     "runwayFeasibility.requiresSubtleUnseenInference",
@@ -730,6 +740,9 @@ def generate_creator_candidate(
                 prototype_display_name=prototype.display_name,
                 strategy_foundation=strategy_foundation,
                 compatibility_mode=compatibility_mode,
+                job_id=job_id,
+                tournament_id=tournament_id,
+                candidate_id=candidate_id,
             )
             _write_creator_diagnostics(
                 diagnostics,

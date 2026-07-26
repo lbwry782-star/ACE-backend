@@ -75,6 +75,11 @@ class TestCreatorMethodology(unittest.TestCase):
             validate_creator_methodology(cand, assigned_prototype_id="closest", strategy_foundation=strategy)
         self.assertEqual(ctx.exception.args[0], "builder2_creator_validation_failed:strategyFoundationId")
 
+    def test_attestation_not_required_for_methodology(self) -> None:
+        cand = _candidate("closest")
+        cand.pop("creativeOrderConfirmation", None)
+        validate_creator_methodology(cand, assigned_prototype_id="closest", strategy_foundation=_strategy())
+
 
 class TestJudgeMethodology(unittest.TestCase):
     def test_interest_first_in_judge_prompt(self) -> None:
