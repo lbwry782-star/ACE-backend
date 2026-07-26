@@ -6,9 +6,6 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from engine.builder2_methodology_validation import (
-    build_winning_candidate_preservation_snapshot,
-)
 from engine.builder2_prototypes import require_prototype
 from engine.builder2_tournament_config import resolve_builder2_winner_model
 from engine.builder2_tournament_contracts import Builder2TournamentError
@@ -16,7 +13,6 @@ from engine.builder2_tournament_llm import call_builder2_role_json_with_text, pa
 from engine.builder2_tournament_metrics import MetricsTimer, record_winner_call_elapsed, record_winner_paid_call_submitted
 from engine.builder2_tournament_prompts import build_winner_development_prompt
 from engine.builder2_winner_development_diagnostics import (
-    PUBLIC_FAILURE_CODE,
     STAGE_EXTRACTION,
     STAGE_METHODOLOGY_VALIDATION,
     STAGE_VALIDATION,
@@ -28,6 +24,12 @@ from engine.builder2_winner_development_diagnostics import (
     safe_top_level_keys,
 )
 from engine.builder2_winner_plan import validate_and_normalize_builder2_winner_plan, validate_builder2_winner_plan
+from engine.builder2_winner_preservation_contract import (
+    build_server_owned_winner_source_reference,
+    build_winning_candidate_preservation_snapshot,
+    persist_parsed_winner_response,
+    process_winner_development_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +40,20 @@ def validate_winner_plan(
     winning_candidate: Optional[Dict[str, Any]] = None,
     preservation_snapshot: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
+    source_reference: Optional[Dict[str, Any]] = None,
+    job_id: str = "",
+    tournament_id: str = "",
 ) -> Dict[str, Any]:
+    if source_reference is not None and winning_candidate is not None:
+        return process_winner_development_response(
+            raw,
+            source_reference=source_reference,
+            winning_candidate=winning_candidate,
+            preservation_snapshot=preservation_snapshot,
+            compatibility_mode=compatibility_mode,
+            job_id=job_id,
+            tournament_id=tournament_id,
+        )
     return validate_builder2_winner_plan(
         raw,
         winning_candidate=winning_candidate,
@@ -75,22 +90,37 @@ def develop_builder2_winning_candidate(
     llm_client: Optional[Any] = None,
     compatibility_mode: bool = False,
     state: Optional[Dict[str, Any]] = None,
+    candidate_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     prototype = require_prototype(prototype_id)
+    resolved_candidate_id = str(
+        candidate_id
+        or (state or {}).get("winnerCandidateId")
+        or winning_candidate.get("candidateId")
+        or ""
+    ).strip()
+    source_reference = build_server_owned_winner_source_reference(
+        strategy_foundation=strategy_foundation,
+        winning_candidate=winning_candidate,
+        candidate_id=resolved_candidate_id,
+    )
     preservation_snapshot = build_winning_candidate_preservation_snapshot(
         strategy_foundation=strategy_foundation,
         winning_candidate=winning_candidate,
+        candidate_id=resolved_candidate_id,
     )
     job_id = str((state or {}).get("jobId") or "")
     tournament_id = str((state or {}).get("tournamentId") or "")
     if state is not None:
         state["currentWinnerPrototypeId"] = prototype_id
+        state["serverOwnedWinnerSource"] = source_reference
 
     logger.info(
-        "BUILDER2_WINNER_DEVELOPMENT_START jobId=%s tournamentId=%s prototypeId=%s",
+        "BUILDER2_WINNER_DEVELOPMENT_START jobId=%s tournamentId=%s prototypeId=%s candidateId=%s",
         job_id,
         tournament_id,
         prototype_id,
+        resolved_candidate_id,
     )
     prompt = build_winner_development_prompt(
         product_name=product_name,
@@ -107,6 +137,7 @@ def develop_builder2_winning_candidate(
     timer = MetricsTimer()
     response_text = ""
     top_level_keys: list[str] = []
+    raw: Dict[str, Any] = {}
 
     def _on_paid_request_submitted() -> None:
         if state is not None:
@@ -170,15 +201,28 @@ def develop_builder2_winning_candidate(
     )
 
     try:
-        winner_plan = validate_winner_plan(
+        winner_plan = process_winner_development_response(
             raw,
+            source_reference=source_reference,
             winning_candidate=winning_candidate,
             preservation_snapshot=preservation_snapshot,
             compatibility_mode=compatibility_mode,
+            job_id=job_id,
+            tournament_id=tournament_id,
         )
     except Builder2TournamentError as exc:
-        stage = STAGE_METHODOLOGY_VALIDATION if str(exc.args[0] if exc.args else "").startswith(
-            "builder2_winner_validation_failed"
+        if state is not None:
+            persist_parsed_winner_response(
+                state,
+                parsed=raw,
+                candidate_id=resolved_candidate_id,
+                prototype_id=prototype_id,
+                top_level_keys=top_level_keys,
+                response_char_count=len(response_text),
+            )
+        reason = str(exc.args[0] if exc.args else "")
+        stage = STAGE_METHODOLOGY_VALIDATION if reason.startswith(
+            ("builder2_winner_validation_failed", "builder2_winner_source_identity_mismatch", "builder2_winner_preservation_contract_missing")
         ) else STAGE_VALIDATION
         raise_public_winner_failure(
             exc,
@@ -188,6 +232,15 @@ def develop_builder2_winning_candidate(
             top_level_keys=top_level_keys,
         )
     except Exception as exc:
+        if state is not None:
+            persist_parsed_winner_response(
+                state,
+                parsed=raw,
+                candidate_id=resolved_candidate_id,
+                prototype_id=prototype_id,
+                top_level_keys=top_level_keys,
+                response_char_count=len(response_text),
+            )
         raise_public_winner_failure(
             exc,
             state=state,
@@ -205,10 +258,11 @@ def develop_builder2_winning_candidate(
     if state is not None:
         clear_winner_failure_diagnostics(state)
     logger.info(
-        "BUILDER2_WINNER_DEVELOPMENT_OK jobId=%s tournamentId=%s prototypeId=%s",
+        "BUILDER2_WINNER_DEVELOPMENT_OK jobId=%s tournamentId=%s prototypeId=%s candidateId=%s",
         job_id,
         tournament_id,
         prototype_id,
+        resolved_candidate_id,
     )
     return winner_plan
 

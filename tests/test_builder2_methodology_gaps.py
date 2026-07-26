@@ -271,18 +271,28 @@ class TestJudgeToWinnerFlow(unittest.TestCase):
 
 class TestWinnerPreservation(unittest.TestCase):
     def test_changed_prototype_rejected(self) -> None:
+        from engine.builder2_winner_preservation_contract import (
+            build_server_owned_winner_source_reference,
+            process_winner_development_response,
+        )
+
         strategy = _strategy()
         candidate = _candidate("closest")
         plan = _winner_plan()
-        snapshot = build_winning_candidate_preservation_snapshot(
+        source = build_server_owned_winner_source_reference(
             strategy_foundation=strategy,
             winning_candidate=candidate,
+            candidate_id="cand-closest",
         )
-        plan["prototypeId"] = "think_small"
+        plan["preservationReference"] = dict(plan.get("preservationReference") or {})
         plan["preservationReference"]["prototypeId"] = "think_small"
         with self.assertRaises(Builder2TournamentError) as ctx:
-            validate_winner_methodology(plan, winning_candidate=candidate, preservation_snapshot=snapshot)
-        self.assertIn("prototypeId", str(ctx.exception.args[0]))
+            process_winner_development_response(
+                plan,
+                source_reference=source,
+                winning_candidate=candidate,
+            )
+        self.assertIn("builder2_winner_source_identity_mismatch", str(ctx.exception.args[0]))
 
 
 class TestOptionalHeadline(unittest.TestCase):

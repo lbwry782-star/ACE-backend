@@ -53,6 +53,18 @@ def classify_winner_failure(
     if stage == STAGE_EXTRACTION:
         category = "structural"
         precise_reason = str(exc.args[0] if exc.args else exc)
+    elif code.startswith("builder2_winner_source_identity_mismatch"):
+        category = "preservation"
+        stage = STAGE_METHODOLOGY_VALIDATION
+        precise_reason = field_path or code
+    elif code.startswith("builder2_winner_preservation_contract_missing"):
+        category = "preservation"
+        stage = STAGE_METHODOLOGY_VALIDATION
+        precise_reason = field_path or code
+    elif code.startswith("builder2_winner_immutable_field_override"):
+        category = "preservation"
+        stage = STAGE_METHODOLOGY_VALIDATION
+        precise_reason = field_path or code
     elif code.startswith("builder2_winner_schema_invalid"):
         category = "structural"
         stage = STAGE_VALIDATION

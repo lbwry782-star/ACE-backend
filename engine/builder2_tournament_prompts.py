@@ -386,14 +386,15 @@ def build_winner_development_prompt(
         f"{json.dumps({'prototypeId': prototype.prototype_id, 'reusableMethod': prototype.reusable_method}, ensure_ascii=False)}\n\n"
         f"Return one JSON object only with schemaVersion={WINNER_PLAN_SCHEMA_VERSION!r}, "
         f"methodologyVersion={METHODOLOGY_VERSION!r}.\n"
-        "Required keys: productNameResolved, language, problemPerception, relativeAdvantage, prototypeId, "
+        "Required keys: productNameResolved, language, prototypeId, "
         "coreCreativeMechanism, visualParallelType, visualFamily, structureType, headlineDecision, headlineForm, "
-        "preservationReference, winnerPreservationCheck, headline, headlineCoreKeyword, "
         "coreVisualIdea, sequence{beginning,development,resolution}, sceneVariations, visualAnchor, "
         "openingFrameDescription, videoPrompt.\n"
+        "Optional diagnostic keys: preservationReference, winnerPreservationCheck.\n"
+        "Strategic fields (problemPerception, relativeAdvantage, coreCreativeMechanism, prototype identity, "
+        "visual anchor foundation) are server-owned and will be restored from the selected winning candidate.\n"
         f'headlineDecision.decision must be one of: {headline_decisions}.\n'
         f'headlineForm must be one of: {headline_forms}. headlineForm="none" requires decision="omit".\n'
-        "preservationReference must echo strategyFoundationId, prototypeId, structureType, visualParallelType, "
-        "and coreCreativeMechanism from the preservation snapshot.\n"
+        "If preservationReference is returned, it must match the source candidate identity fields.\n"
         'When decision="omit", headline may be empty.\n'
     )

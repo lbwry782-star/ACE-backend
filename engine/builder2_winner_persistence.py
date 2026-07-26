@@ -96,6 +96,7 @@ def persist_winner_development_atomically(
         "methodologyVersion": state["winnerDevelopmentMethodologyVersion"],
     }
     state.pop("winnerDevelopmentFailure", None)
+    state.pop("winnerDevelopmentParsedResponse", None)
     state["winnerDevelopmentAccepted"] = True
     log_winner_development_persisted(
         job_id=str(state.get("jobId") or ""),

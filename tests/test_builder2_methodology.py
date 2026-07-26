@@ -148,8 +148,20 @@ class TestVerbalLayer(unittest.TestCase):
         snapshot = build_winning_candidate_preservation_snapshot(
             strategy_foundation=strategy,
             winning_candidate=candidate,
+            candidate_id="cand-1",
         )
-        validate_winner_methodology(plan, winning_candidate=candidate, preservation_snapshot=snapshot)
+        from engine.builder2_winner_preservation_contract import (
+            apply_server_owned_preservation,
+            build_server_owned_winner_source_reference,
+        )
+
+        source = build_server_owned_winner_source_reference(
+            strategy_foundation=strategy,
+            winning_candidate=candidate,
+            candidate_id="cand-1",
+        )
+        prepared = apply_server_owned_preservation(plan, source_reference=source)
+        validate_winner_methodology(prepared, winning_candidate=candidate, preservation_snapshot=snapshot)
 
 
 class TestTournamentBetweenIdeas(unittest.TestCase):

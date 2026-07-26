@@ -397,6 +397,7 @@ def run_one_reasoning_resume(
                     llm_client=llm_client,
                     compatibility_mode=compatibility_mode,
                     state=state,
+                    candidate_id=winner_id,
                 )
                 persist_winner_development_atomically(
                     state,

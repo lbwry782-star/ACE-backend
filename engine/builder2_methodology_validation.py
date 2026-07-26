@@ -81,21 +81,17 @@ def build_winning_candidate_preservation_snapshot(
     *,
     strategy_foundation: Dict[str, Any],
     winning_candidate: Dict[str, Any],
+    candidate_id: str = "",
 ) -> Dict[str, Any]:
-    runway = winning_candidate.get("runwayFeasibility") or {}
-    family = winning_candidate.get("visualFamilyConsistency") or {}
-    return {
-        "strategyFoundationId": expected_strategy_foundation_id(strategy_foundation),
-        "prototypeId": winning_candidate.get("prototypeId"),
-        "structureType": winning_candidate.get("structureType"),
-        "visualParallelType": winning_candidate.get("visualParallelType"),
-        "coreCreativeMechanism": winning_candidate.get("coreCreativeMechanism"),
-        "visualMechanism": winning_candidate.get("visualMechanism"),
-        "visualFamilyDefinition": family.get("familyDefinition") or winning_candidate.get("visualFamily"),
-        "mainSubject": runway.get("mainSubject"),
-        "mainAction": runway.get("mainAction"),
-        "location": runway.get("location"),
-    }
+    from engine.builder2_winner_preservation_contract import (
+        build_winning_candidate_preservation_snapshot as _build_snapshot,
+    )
+
+    return _build_snapshot(
+        strategy_foundation=strategy_foundation,
+        winning_candidate=winning_candidate,
+        candidate_id=candidate_id,
+    )
 
 
 def _raise(code: str, *, field: str | None = None) -> None:
@@ -728,33 +724,32 @@ def _validate_winner_preservation_deterministic(
     *,
     preservation_snapshot: Optional[Dict[str, Any]] = None,
 ) -> None:
-    if not preservation_snapshot:
-        return
-    ref = winner_plan.get("preservationReference") or {}
-    identity_fields = ("strategyFoundationId", "prototypeId", "structureType", "visualParallelType")
-    for key in identity_fields:
-        expected = preservation_snapshot.get(key)
-        actual = ref.get(key) if isinstance(ref, dict) and ref.get(key) is not None else winner_plan.get(key)
-        if str(actual or "") != str(expected or ""):
-            _raise("builder2_winner_validation_failed", field=key)
+    from engine.builder2_winner_preservation_contract import SERVER_OWNED_WINNER_SOURCE_KEY
 
-    preserved_mechanism = str(
-        (ref.get("coreCreativeMechanism") if isinstance(ref, dict) else None)
-        or winner_plan.get("coreCreativeMechanism")
-        or ""
-    ).strip()
-    original_mechanism = str(preservation_snapshot.get("coreCreativeMechanism") or "").strip()
+    owned = winner_plan.get(SERVER_OWNED_WINNER_SOURCE_KEY)
+    if not isinstance(owned, dict) or not owned:
+        _raise("builder2_winner_preservation_contract_missing", field=SERVER_OWNED_WINNER_SOURCE_KEY)
+
+    if preservation_snapshot:
+        identity_fields = ("strategyFoundationId", "prototypeId", "structureType", "visualParallelType")
+        for key in identity_fields:
+            expected = preservation_snapshot.get(key)
+            if key == "prototypeId":
+                actual = owned.get("sourcePrototypeId") or winner_plan.get("prototypeId")
+            else:
+                actual = owned.get(key) if key in owned else winner_plan.get(key)
+            if str(actual or "") != str(expected or ""):
+                _raise("builder2_winner_source_identity_mismatch", field=key)
+
+    server_check = winner_plan.get("serverPreservationCheck")
+    if not isinstance(server_check, dict):
+        _raise("builder2_winner_preservation_contract_missing", field="serverPreservationCheck")
+    if str(server_check.get("source") or "") != "server_owned_contract":
+        _raise("builder2_winner_preservation_contract_missing", field="serverPreservationCheck.source")
+
+    preserved_mechanism = str(owned.get("coreCreativeMechanism") or winner_plan.get("coreCreativeMechanism") or "").strip()
     if not preserved_mechanism:
-        _raise("builder2_winner_validation_failed", field="mechanismPreservation")
-    if not original_mechanism:
-        _raise("builder2_winner_validation_failed", field="mechanismPreservation")
-    preserved_norm = _normalize_text(preserved_mechanism)
-    original_norm = _normalize_text(original_mechanism)
-    if preserved_norm != original_norm and preserved_norm not in original_norm and original_norm not in preserved_norm:
-        unrelated_markers = ("new concept", "different mechanism", "replace the idea", "instead use")
-        blob = _normalize_text(json.dumps(winner_plan, ensure_ascii=False))
-        if any(marker in blob for marker in unrelated_markers):
-            _raise("builder2_winner_validation_failed", field="mechanismPreservation")
+        _raise("builder2_winner_preservation_contract_missing", field="coreCreativeMechanism")
 
 
 def validate_winner_methodology(
@@ -796,23 +791,6 @@ def validate_winner_methodology(
             _raise("builder2_winner_validation_failed", field="headlineDecision.omit_with_headline")
     elif decision == "include":
         _require_text(winner_plan.get("headline"), field="headline", code="builder2_winner_validation_failed")
-
-    preservation = _require_dict(
-        winner_plan.get("winnerPreservationCheck"),
-        field="winnerPreservationCheck",
-        code="builder2_winner_validation_failed",
-    )
-    for key in (
-        "problemPreserved",
-        "relativeAdvantagePreserved",
-        "mechanismPreserved",
-        "prototypeMethodPreserved",
-        "visualParallelPreserved",
-        "structurePreserved",
-        "editingOnlyStrengthens",
-    ):
-        if _require_bool(preservation.get(key), field=f"winnerPreservationCheck.{key}", code="builder2_winner_validation_failed") is not True:
-            _raise("builder2_winner_validation_failed", field=f"winnerPreservationCheck.{key}")
 
     _validate_winner_preservation_deterministic(
         winner_plan,
