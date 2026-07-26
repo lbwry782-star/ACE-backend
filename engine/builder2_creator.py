@@ -393,13 +393,21 @@ def validate_creator_candidate(
         compatibility_mode=compatibility_mode,
     )
     from engine.builder2_creative_order_contract import finalize_creator_order_metadata
+    from engine.builder2_prototype_method_contract import finalize_prototype_method_metadata
 
-    return finalize_creator_order_metadata(
+    with_order = finalize_creator_order_metadata(
         normalized,
         job_id=job_id,
         tournament_id=tournament_id,
         candidate_id=candidate_id,
         prototype_id=assigned_prototype_id,
+    )
+    return finalize_prototype_method_metadata(
+        with_order,
+        prototype_id=assigned_prototype_id,
+        job_id=job_id,
+        tournament_id=tournament_id,
+        candidate_id=candidate_id,
     )
 
 
@@ -435,6 +443,137 @@ def _is_clean_retryable(code: str, field: Optional[str]) -> bool:
     if code == "builder2_creator_validation_failed" and field in _CREATIVE_RETRY_FIELDS:
         return True
     return False
+
+
+def _append_structural_collect(errors: List[str], exc: Builder2TournamentError) -> None:
+    code = _failure_code(exc)
+    field = _failure_field(exc)
+    if not _is_structural_repairable(code, field):
+        return
+    msg = str(exc.args[0] if exc.args else code)
+    if msg not in errors:
+        errors.append(msg)
+
+
+def collect_creator_structural_errors(
+    candidate: Dict[str, Any],
+    *,
+    assigned_prototype_id: str,
+    prototype_display_name: str,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+    job_id: str = "",
+    tournament_id: str = "",
+    candidate_id: str = "",
+    prototype_id: str = "",
+) -> List[str]:
+    from engine.builder2_methodology_validation import collect_creator_methodology_structural_errors
+
+    errors: List[str] = []
+    normalized = normalize_creator_raw(
+        candidate,
+        assigned_prototype_id=assigned_prototype_id,
+        prototype_display_name=prototype_display_name,
+        compatibility_mode=compatibility_mode,
+    )
+
+    def run(check: Any) -> None:
+        try:
+            check()
+        except Builder2TournamentError as exc:
+            _append_structural_collect(errors, exc)
+
+    if normalized.get("planningFailure"):
+        errors.append("builder2_creator_validation_failed:planningFailure")
+    if normalized.get("schemaVersion") != CANDIDATE_SCHEMA_VERSION:
+        errors.append("builder2_creator_schema_invalid:schemaVersion")
+
+    run(lambda: require_non_empty_str(normalized.get("prototypeId"), field="prototypeId"))
+    for field in ("prototypeMethodApplied", "coreCreativeMechanism", "conceptSummary", "visualFamily"):
+        run(lambda f=field: require_non_empty_str(normalized.get(f), field=f))
+
+    vpt = str(normalized.get("visualParallelType") or "")
+    if vpt not in VALID_VISUAL_PARALLEL_TYPES:
+        errors.append("builder2_creator_schema_invalid:visualParallelType")
+    structure = str(normalized.get("structureType") or "")
+    if structure not in VALID_STRUCTURE_TYPES:
+        errors.append("builder2_creator_schema_invalid:structureType")
+
+    seven = normalized.get("sevenSecondStructure")
+    if not isinstance(seven, dict):
+        errors.append("builder2_creator_schema_invalid:sevenSecondStructure")
+    else:
+        for key in ("beginning", "development", "resolution"):
+            run(lambda k=key: require_non_empty_str(seven.get(k), field=f"sevenSecondStructure.{k}"))
+
+    anchor = normalized.get("visualAnchor")
+    if not isinstance(anchor, dict):
+        errors.append("builder2_creator_schema_invalid:visualAnchor")
+    else:
+        for key in ("description", "whyEssential"):
+            run(lambda k=key: require_non_empty_str(anchor.get(k), field=f"visualAnchor.{k}"))
+
+    silent = normalized.get("silentVerification")
+    if not isinstance(silent, dict):
+        errors.append("builder2_creator_schema_invalid:silentVerification")
+    elif silent.get("understandableWithoutAudio") is not True:
+        errors.append("builder2_creator_schema_invalid:silentVerification.understandableWithoutAudio")
+    else:
+        run(lambda: require_non_empty_str(silent.get("explanation"), field="silentVerification.explanation"))
+
+    runway = normalized.get("runwayFeasibility")
+    if not isinstance(runway, dict):
+        errors.append("builder2_creator_schema_invalid:runwayFeasibility")
+    else:
+        for key in ("mainSubject", "mainAction", "location", "openingFrame", "whyRunwayShouldUnderstand"):
+            run(lambda k=key: require_non_empty_str(runway.get(k), field=f"runwayFeasibility.{k}"))
+        risk = str(runway.get("continuityRisk") or "")
+        if risk not in VALID_CONTINUITY_RISK:
+            errors.append("builder2_creator_schema_invalid:runwayFeasibility.continuityRisk")
+        if runway.get("generationRisks") is not None and not isinstance(runway.get("generationRisks"), list):
+            errors.append("builder2_creator_schema_invalid:runwayFeasibility.generationRisks")
+
+    editing = normalized.get("editingPlan")
+    if not isinstance(editing, dict):
+        errors.append("builder2_creator_schema_invalid:editingPlan")
+    else:
+        for key in ("purpose", "reveal", "pacing"):
+            run(lambda k=key: require_non_empty_str(editing.get(k), field=f"editingPlan.{k}"))
+
+    report = normalized.get("creatorReport")
+    if not isinstance(report, dict):
+        errors.append("builder2_creator_schema_invalid:creatorReport")
+    else:
+        for key in (
+            "problemPerception",
+            "relativeAdvantage",
+            "mechanismScanSummary",
+            "goldPrototypeUsed",
+            "visualParallelType",
+            "whyParallelExpressesAdvantage",
+            "whyRunwayShouldUnderstand",
+        ):
+            run(lambda k=key: require_non_empty_str(report.get(k), field=f"creatorReport.{k}"))
+
+    errors.extend(
+        collect_creator_methodology_structural_errors(
+            normalized,
+            assigned_prototype_id=assigned_prototype_id,
+            strategy_foundation=strategy_foundation,
+            compatibility_mode=compatibility_mode,
+        )
+    )
+    unique = list(dict.fromkeys(errors))
+    logger.info(
+        "BUILDER2_CREATOR_STRUCTURAL_ERRORS_COLLECTED jobId=%s tournamentId=%s candidateId=%s prototypeId=%s count=%s paths=%s",
+        job_id or "(none)",
+        tournament_id or "(none)",
+        candidate_id or "(none)",
+        prototype_id or assigned_prototype_id or "(none)",
+        len(unique),
+        ",".join(item.split(":", 1)[-1] for item in unique[:12]),
+    )
+    return unique
 
 
 def _write_creator_diagnostics(
@@ -640,6 +779,7 @@ def generate_creator_candidate(
     last_exc: Optional[Builder2TournamentError] = None
     last_parsed: Dict[str, Any] = {}
     response_text = ""
+    collected_structural_failures: List[str] = []
 
     for phase in ("normal", "repair", "retry"):
         if phase == "repair":
@@ -662,7 +802,7 @@ def generate_creator_candidate(
                 attempt_number=attempt_number,
                 runway_mode=runway_mode,
                 invalid_output=last_parsed,
-                validation_failures=[str(last_exc.args[0])],
+                validation_failures=collected_structural_failures or [str(last_exc.args[0])],
             )
             call_type = "repair"
         elif phase == "retry":
@@ -819,6 +959,17 @@ def generate_creator_candidate(
                     exc.args[0],
                 )
             if phase == "normal" and _is_structural_repairable(code, field):
+                collected_structural_failures = collect_creator_structural_errors(
+                    last_parsed,
+                    assigned_prototype_id=prototype_id,
+                    prototype_display_name=prototype.display_name,
+                    strategy_foundation=strategy_foundation,
+                    compatibility_mode=compatibility_mode,
+                    job_id=job_id,
+                    tournament_id=tournament_id,
+                    candidate_id=candidate_id,
+                    prototype_id=prototype_id,
+                )
                 continue
             if (phase in {"normal", "repair"}) and _is_clean_retryable(code, field):
                 continue

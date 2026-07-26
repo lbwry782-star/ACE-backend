@@ -101,6 +101,9 @@ METHODOLOGY_LOG_EVENTS: Tuple[str, ...] = (
     "BUILDER2_STRATEGY_METHODOLOGY_VALIDATED",
     "BUILDER2_CREATOR_METHODOLOGY_VALIDATED",
     "BUILDER2_PROTOTYPE_METHOD_VALIDATED",
+    "BUILDER2_PROTOTYPE_METHOD_CONTRACT_ATTACHED",
+    "BUILDER2_LEGACY_PROTOTYPE_ATTESTATION_IGNORED",
+    "BUILDER2_CREATOR_STRUCTURAL_ERRORS_COLLECTED",
     "BUILDER2_CREATIVE_ORDER_CONTRACT_ATTACHED",
     "BUILDER2_CREATOR_ORDER_ATTESTATION_IGNORED",
     "BUILDER2_VISUAL_FAMILY_VALIDATED",
@@ -273,9 +276,16 @@ BUILDER2_METHODOLOGY_COVERAGE: Dict[str, Dict[str, Any]] = {
         tests=("tests.test_builder2_methodology.TestStrategyMethodology",),
     ),
     "13_role_of_gold_prototypes": _entry(
-        modules=("engine/builder2_prototypes.py", "engine/builder2_methodology_validation.py"),
-        enforcement="prototype_method_application",
-        tests=("tests.test_builder2_methodology.TestPrototypeMethodology",),
+        modules=(
+            "engine/builder2_prototype_method_contract.py",
+            "engine/builder2_prototypes.py",
+            "engine/builder2_methodology_validation.py",
+        ),
+        enforcement="server_owned_prototype_method_and_application_evidence",
+        tests=(
+            "tests.test_builder2_prototype_method_contract",
+            "tests.test_builder2_methodology.TestPrototypeMethodology",
+        ),
     ),
     "14_random_prototype_inspiration": _entry(
         modules=("engine/builder2_tournament_manager.py", "engine/builder2_tournament_config.py"),

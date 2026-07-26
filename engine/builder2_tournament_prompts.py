@@ -141,6 +141,10 @@ def build_creator_prompt(
         f"Reusable method: {prototype.reusable_method}\n"
         f"Do not copy: {prototype.must_not_copy}\n"
         f"Creator guidance: {prototype.creator_guidance}\n"
+        "The assigned prototype method is supplied by the server. Do not restate or redefine the prototype method.\n"
+        "Apply the method to the current Strategy Foundation through the required prototype-specific application object, "
+        "visualMechanism, creatorReport.whyParallelExpressesAdvantage, and silent video execution.\n"
+        "Return structured application evidence, not a summary of the prototype instructions.\n"
         f"Video duration seconds: {duration}\n"
         f"Runway mode constraint: {runway_mode}\n"
         f"Product name: {product_name or '(empty)'}\n"
@@ -153,7 +157,7 @@ def build_creator_prompt(
         f"Return one JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}, "
         f"methodologyVersion={METHODOLOGY_VERSION!r}. No Markdown fences. No prose.\n"
         "Required keys: strategyFoundationId, prototypeId, prototypeMethodApplied, coreCreativeMechanism, conceptSummary, visualMechanism, "
-        "visualParallelType, visualFamily, structureType, prototypeMethodApplication, "
+        "visualParallelType, visualFamily, structureType, "
         "essenceExtreme, visualFamilyConsistency, participationMechanism, anchorPunchlineSeparation, sourceConcept, "
         "sevenSecondStructure{beginning,development,resolution}, "
         "visualAnchor{description,whyEssential,appearsBeforeOrDuringResolution}, "
@@ -250,10 +254,14 @@ def build_judge_prompt(
         for name, (low, high) in sorted(JUDGE_SCORE_RANGES.items())
     )
     interest_order = " → ".join(INTEREST_PRIORITY_ORDER)
+    contract = candidate.get("prototypeMethodContract") or {}
     return (
         "You are the Builder2 Judge role evaluating ONE candidate independently.\n"
         f"Motto: {TOURNAMENT_MOTTO}\n"
         "Do NOT reward prototype prestige, literal similarity, historical fame, or prototype ID.\n"
+        "Do NOT reward repetition of the prototype description or any Creator-written methodSummary.\n"
+        "Judge whether the actual visual mechanism applied the assigned prototype's problem-solving method "
+        "to the current Problem Perception and Relative Advantage. Judge the application itself.\n"
         "Do NOT redesign the idea, generate a replacement advertisement, or compare to unseen candidates.\n"
         "Do NOT infer missing Creator intent beyond the candidate and Creator Report.\n"
         "Assume the idea is wrong until it proves itself. A valid eligible=false judgment is valid.\n"
@@ -264,7 +272,9 @@ def build_judge_prompt(
         f"Language: {language}\n"
         "Fixed strategic foundation:\n"
         f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n"
-        "Assigned prototype definition:\n"
+        "Canonical prototype method contract (authoritative):\n"
+        f"{json.dumps(contract, ensure_ascii=False)}\n"
+        "Assigned prototype definition (instruction context only — not proof of application):\n"
         f"{json.dumps({'prototypeId': prototype.prototype_id, 'displayName': prototype.display_name, 'originalProblem': prototype.original_problem, 'reusableMethod': prototype.reusable_method, 'mustNotCopy': prototype.must_not_copy, 'judgeQualityGuidance': prototype.judge_quality_guidance}, ensure_ascii=False)}\n"
         "Candidate to judge:\n"
         f"{json.dumps(candidate, ensure_ascii=False)}\n\n"

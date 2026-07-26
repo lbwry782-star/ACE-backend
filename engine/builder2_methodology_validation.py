@@ -236,17 +236,6 @@ def validate_creator_methodology(
         )
         return
 
-    pma = _require_dict(
-        candidate.get("prototypeMethodApplication"),
-        field="prototypeMethodApplication",
-        code="builder2_creator_validation_failed",
-    )
-    for key in ("methodSummary", "applicationToCurrentProblem", "whyThisIsNotLiteralImitation"):
-        _require_text(pma.get(key), field=f"prototypeMethodApplication.{key}", code="builder2_creator_validation_failed")
-    copied = pma.get("surfaceElementsCopied")
-    if not isinstance(copied, list):
-        _raise("builder2_creator_schema_invalid", field="prototypeMethodApplication.surfaceElementsCopied")
-
     report = _require_dict(candidate.get("creatorReport"), field="creatorReport", code="builder2_creator_schema_invalid")
     _require_text(report.get("mechanismScanSummary"), field="creatorReport.mechanismScanSummary", code="builder2_creator_validation_failed")
     _require_text(candidate.get("visualMechanism"), field="visualMechanism", code="builder2_creator_validation_failed")
@@ -383,33 +372,69 @@ def _validate_context_collision_safeguard(candidate: Dict[str, Any]) -> None:
     )
 
 
-def _validate_prototype_application(candidate: Dict[str, Any], *, assigned_prototype_id: str) -> None:
+def _append_methodology_structural(errors: List[str], code: str, field: str) -> None:
+    msg = f"{code}:{field}"
+    if msg not in errors:
+        errors.append(msg)
+
+
+def _validate_prototype_application(
+    candidate: Dict[str, Any],
+    *,
+    assigned_prototype_id: str,
+    structural_errors: Optional[List[str]] = None,
+) -> None:
     """Deterministic structural prototype checks — semantic truth remains Judge responsibility."""
     field_name = _PROTOTYPE_APPLICATION_FIELDS.get(assigned_prototype_id)
     if not field_name:
         return
-    app = _require_dict(candidate.get(field_name), field=field_name, code="builder2_creator_validation_failed")
+    app_raw = candidate.get(field_name)
+    if not isinstance(app_raw, dict):
+        if structural_errors is not None:
+            _append_methodology_structural(
+                structural_errors,
+                "builder2_creator_validation_failed",
+                field_name,
+            )
+            return
+        _raise("builder2_creator_validation_failed", field=field_name)
+    app = app_raw
+
+    def require_field(key: str) -> str:
+        try:
+            return _require_text(app.get(key), field=f"{field_name}.{key}", code="builder2_creator_validation_failed")
+        except Builder2TournamentError:
+            if structural_errors is not None:
+                _append_methodology_structural(
+                    structural_errors,
+                    "builder2_creator_validation_failed",
+                    f"{field_name}.{key}",
+                )
+                return ""
+            raise
 
     if assigned_prototype_id == "winning_card":
-        medium = _require_text(app.get("mediumOrContainerIdentified"), field=f"{field_name}.mediumOrContainerIdentified", code="builder2_creator_validation_failed")
-        _require_text(app.get("whatItBecomes"), field=f"{field_name}.whatItBecomes", code="builder2_creator_validation_failed")
-        _require_text(app.get("whyTheTransformationProvesTheAdvantage"), field=f"{field_name}.whyTheTransformationProvesTheAdvantage", code="builder2_creator_validation_failed")
-        medium_lower = medium.lower()
-        if any(marker in medium_lower for marker in _PLAYING_CARD_SURFACE_MARKERS):
-            if not str(app.get("whatItBecomes") or "").strip():
-                _raise("builder2_creator_validation_failed", field="winning_card.literal_card_imitation")
+        medium = require_field("mediumOrContainerIdentified")
+        require_field("whatItBecomes")
+        require_field("whyTheTransformationProvesTheAdvantage")
+        if structural_errors is None and medium:
+            medium_lower = medium.lower()
+            if any(marker in medium_lower for marker in _PLAYING_CARD_SURFACE_MARKERS):
+                if not str(app.get("whatItBecomes") or "").strip():
+                    _raise("builder2_creator_validation_failed", field="winning_card.literal_card_imitation")
 
     elif assigned_prototype_id == "summer_fan":
         for key in ("visibleBehavior", "inferredAbsentObject", "whyTheViewerInfersItWithoutExplanation"):
-            _require_text(app.get(key), field=f"{field_name}.{key}", code="builder2_creator_validation_failed")
+            require_field(key)
 
     elif assigned_prototype_id == "forgot":
         for key in ("omittedOrForgottenAction", "visibleConsequence", "whyTheViewerSolvesIt"):
-            _require_text(app.get(key), field=f"{field_name}.{key}", code="builder2_creator_validation_failed")
-        contradiction = str(app.get("plannedContradiction") or "").strip()
-        consequence = str(app.get("visibleConsequence") or "").strip()
-        if not contradiction and not consequence:
-            _raise("builder2_creator_validation_failed", field="forgotApplication.plannedContradiction")
+            require_field(key)
+        if structural_errors is None:
+            contradiction = str(app.get("plannedContradiction") or "").strip()
+            consequence = str(app.get("visibleConsequence") or "").strip()
+            if not contradiction and not consequence:
+                _raise("builder2_creator_validation_failed", field="forgotApplication.plannedContradiction")
 
     elif assigned_prototype_id == "greenpeace_essential_pairing":
         for key in (
@@ -421,24 +446,119 @@ def _validate_prototype_application(candidate: Dict[str, Any], *, assigned_proto
             "notMerelyWordplay",
             "emotionalRecognition",
         ):
-            _require_text(app.get(key), field=f"{field_name}.{key}", code="builder2_creator_validation_failed")
-        appearance_decl = _normalize_text(app.get("notMerelyAppearance"))
-        if "shape only" in appearance_decl or appearance_decl == "appearance only":
-            _raise("builder2_creator_validation_failed", field="essential_pairing.shape_only")
+            require_field(key)
+        if structural_errors is None:
+            appearance_decl = _normalize_text(app.get("notMerelyAppearance"))
+            if "shape only" in appearance_decl or appearance_decl == "appearance only":
+                _raise("builder2_creator_validation_failed", field="essential_pairing.shape_only")
 
     elif assigned_prototype_id == "closest":
-        for key in ("admittedGap", "relativeNearness", "physicalOrVisualExpressionOfNearness", "whyThisIsHonestRatherThanInferior"):
-            _require_text(app.get(key), field=f"{field_name}.{key}", code="builder2_creator_validation_failed")
+        for key in (
+            "admittedGap",
+            "relativeNearness",
+            "physicalOrVisualExpressionOfNearness",
+            "whyThisIsHonestRatherThanInferior",
+        ):
+            require_field(key)
 
     elif assigned_prototype_id == "think_small":
-        for key in ("realWeakness", "evidenceTheWeaknessIsReal", "acceptanceRatherThanDenial", "reframing", "relativeAdvantageCreated"):
-            _require_text(app.get(key), field=f"{field_name}.{key}", code="builder2_creator_validation_failed")
-        denial_patterns = ("not small", "not a weakness", "denies weakness", "denial of weakness")
-        blob = _normalize_text(json.dumps(app, ensure_ascii=False))
-        if any(p in blob for p in denial_patterns):
-            _raise("builder2_creator_validation_failed", field="think_small.denial_of_weakness")
-        if "invented weakness" in blob or "invented cosmetic weakness" in blob:
-            _raise("builder2_creator_validation_failed", field="think_small.invented_weakness")
+        for key in (
+            "realWeakness",
+            "evidenceTheWeaknessIsReal",
+            "acceptanceRatherThanDenial",
+            "reframing",
+            "relativeAdvantageCreated",
+        ):
+            require_field(key)
+        if structural_errors is None:
+            denial_patterns = ("not small", "not a weakness", "denies weakness", "denial of weakness")
+            blob = _normalize_text(json.dumps(app, ensure_ascii=False))
+            if any(p in blob for p in denial_patterns):
+                _raise("builder2_creator_validation_failed", field="think_small.denial_of_weakness")
+            if "invented weakness" in blob or "invented cosmetic weakness" in blob:
+                _raise("builder2_creator_validation_failed", field="think_small.invented_weakness")
+
+
+def collect_creator_methodology_structural_errors(
+    candidate: Dict[str, Any],
+    *,
+    assigned_prototype_id: str,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+) -> List[str]:
+    if compatibility_mode and not uses_full_methodology(candidate):
+        return []
+
+    errors: List[str] = []
+
+    def require_dict_field(value: Any, field: str) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            _append_methodology_structural(errors, "builder2_creator_validation_failed", field)
+            return {}
+        return value
+
+    def require_text_field(value: Any, field: str) -> None:
+        try:
+            _require_text(value, field=field, code="builder2_creator_validation_failed")
+        except Builder2TournamentError:
+            _append_methodology_structural(errors, "builder2_creator_validation_failed", field)
+
+    report = require_dict_field(candidate.get("creatorReport"), "creatorReport")
+    require_text_field(report.get("mechanismScanSummary"), "creatorReport.mechanismScanSummary")
+    require_text_field(candidate.get("visualMechanism"), "visualMechanism")
+
+    essence = require_dict_field(candidate.get("essenceExtreme"), "essenceExtreme")
+    for key in ("advantageEssence", "extremePhysicalExpression", "whyChosenObjectsFollowFromTheEssence"):
+        require_text_field(essence.get(key), f"essenceExtreme.{key}")
+
+    participation = require_dict_field(candidate.get("participationMechanism"), "participationMechanism")
+    for key in ("whoOrWhatParticipates", "visibleAction", "visibleCauseAndEffect"):
+        require_text_field(participation.get(key), f"participationMechanism.{key}")
+
+    anchor = require_dict_field(candidate.get("visualAnchor"), "visualAnchor")
+    if anchor and anchor.get("appearsBeforeOrDuringResolution") is not True:
+        _append_methodology_structural(
+            errors,
+            "builder2_creator_schema_invalid",
+            "visualAnchor.appearsBeforeOrDuringResolution",
+        )
+
+    separation = require_dict_field(candidate.get("anchorPunchlineSeparation"), "anchorPunchlineSeparation")
+    for key in ("anchor", "resolutionOrPunchline", "whyTheyAreNotTheSameThing"):
+        require_text_field(separation.get(key), f"anchorPunchlineSeparation.{key}")
+
+    runway = require_dict_field(candidate.get("runwayFeasibility"), "runwayFeasibility")
+    for bool_key in ("fitsSevenSeconds", "requiresImpossibleMorphing", "requiresSubtleUnseenInference"):
+        if bool_key not in runway:
+            _append_methodology_structural(errors, "builder2_creator_schema_invalid", f"runwayFeasibility.{bool_key}")
+
+    verbal = candidate.get("verbalPotential")
+    if verbal is None:
+        _append_methodology_structural(errors, "builder2_creator_validation_failed", "verbalPotential")
+    elif not isinstance(verbal, dict):
+        _append_methodology_structural(errors, "builder2_creator_validation_failed", "verbalPotential")
+    else:
+        for key in ("keywordOrKeyPhrase", "visualMeaning", "strategicMeaning"):
+            require_text_field(verbal.get(key), f"verbalPotential.{key}")
+
+    _validate_prototype_application(
+        candidate,
+        assigned_prototype_id=assigned_prototype_id,
+        structural_errors=errors,
+    )
+
+    if strategy_foundation is not None:
+        try:
+            validate_strategy_identity(
+                expected_strategy_foundation_id=expected_strategy_foundation_id(strategy_foundation),
+                candidate=candidate,
+            )
+        except Builder2TournamentError as exc:
+            msg = str(exc.args[0] if exc.args else "builder2_creator_validation_failed:strategyFoundationId")
+            if msg not in errors:
+                errors.append(msg)
+
+    return list(dict.fromkeys(errors))
 
 
 def _validate_judge_methodology_coherence(judgment: Dict[str, Any]) -> None:
