@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from engine.builder2_creator_core_contract import (
     PROTOTYPE_APPLICATION_ALIASES,
+    PROTOTYPE_APPLICATION_CHILD_ALIASES,
     PROTOTYPE_APPLICATION_FIELDS,
     VALID_VERBAL_DECISIONS,
     VALID_VISUAL_ANCHOR_TIMING,
@@ -30,6 +31,37 @@ def _merge_dict(base: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, Any]:
         else:
             out[key] = value
     return out
+
+
+def _normalize_prototype_application_child_aliases(
+    out: Dict[str, Any],
+    *,
+    assigned_prototype_id: str,
+    resolved: List[str],
+) -> None:
+    canonical = PROTOTYPE_APPLICATION_FIELDS.get(assigned_prototype_id)
+    alias_map = PROTOTYPE_APPLICATION_CHILD_ALIASES.get(assigned_prototype_id) or {}
+    if not canonical:
+        return
+    app_raw = out.get(canonical)
+    if not isinstance(app_raw, dict):
+        return
+    app = dict(app_raw)
+    changed = False
+    for canonical_key, aliases in alias_map.items():
+        if _text(app.get(canonical_key)):
+            continue
+        for alias in aliases:
+            if alias == canonical_key:
+                continue
+            alias_value = app.get(alias)
+            if _text(alias_value):
+                app[canonical_key] = alias_value
+                resolved.append(f"{canonical}.{canonical_key}")
+                changed = True
+                break
+    if changed:
+        out[canonical] = app
 
 
 def _normalize_prototype_application_aliases(out: Dict[str, Any], *, assigned_prototype_id: str) -> None:
@@ -342,6 +374,7 @@ def normalize_creator_candidate(
     out.setdefault("methodologyVersion", METHODOLOGY_VERSION)
 
     _normalize_prototype_application_aliases(out, assigned_prototype_id=assigned_prototype_id)
+    _normalize_prototype_application_child_aliases(out, assigned_prototype_id=assigned_prototype_id, resolved=resolved)
     _normalize_video_execution(out, resolved)
     _normalize_silent_verification(out, resolved)
     _normalize_visual_anchor_timing(out, resolved)

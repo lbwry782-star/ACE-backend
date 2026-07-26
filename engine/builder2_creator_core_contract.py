@@ -32,6 +32,119 @@ PROTOTYPE_APPLICATION_ALIASES: Dict[str, Tuple[str, ...]] = {
     "think_small": ("thinkSmallApplication", "prototypeApplication"),
 }
 
+# Canonical child fields per prototype application object (validator source of truth).
+PROTOTYPE_APPLICATION_CHILD_FIELDS: Dict[str, Tuple[str, ...]] = {
+    "winning_card": (
+        "mediumOrContainerIdentified",
+        "whatItBecomes",
+        "whyTheTransformationProvesTheAdvantage",
+    ),
+    "summer_fan": (
+        "visibleBehavior",
+        "inferredAbsentObject",
+        "whyTheViewerInfersItWithoutExplanation",
+    ),
+    "forgot": (
+        "omittedOrForgottenAction",
+        "visibleConsequence",
+        "whyTheViewerSolvesIt",
+    ),
+    "greenpeace_essential_pairing": (
+        "elementA",
+        "elementB",
+        "essentialRelationship",
+        "notMerelyAppearance",
+        "notMerelyFunction",
+        "notMerelyWordplay",
+        "emotionalRecognition",
+    ),
+    "closest": (
+        "admittedGap",
+        "relativeNearness",
+        "physicalOrVisualExpressionOfNearness",
+        "whyThisIsHonestRatherThanInferior",
+    ),
+    "think_small": (
+        "realWeakness",
+        "evidenceTheWeaknessIsReal",
+        "acceptanceRatherThanDenial",
+        "reframing",
+        "relativeAdvantageCreated",
+    ),
+}
+
+# Deterministic child-field alias map: canonical -> accepted alternate keys (same meaning only).
+PROTOTYPE_APPLICATION_CHILD_ALIASES: Dict[str, Dict[str, Tuple[str, ...]]] = {
+    "winning_card": {
+        "mediumOrContainerIdentified": ("medium", "container", "mediumIdentified", "mediumOrContainer"),
+        "whatItBecomes": ("becomes", "transformation", "whatTheMediumBecomes"),
+        "whyTheTransformationProvesTheAdvantage": (
+            "whyProvesAdvantage",
+            "whyTransformationProvesAdvantage",
+            "whyTheTransformationProvesAdvantage",
+        ),
+    },
+    "summer_fan": {
+        "visibleBehavior": ("behavior", "visibleAction", "observedBehavior"),
+        "inferredAbsentObject": ("absentObject", "inferredObject", "objectInferred"),
+        "whyTheViewerInfersItWithoutExplanation": (
+            "whyViewerInfers",
+            "whyTheViewerInfersIt",
+            "inferenceExplanation",
+        ),
+    },
+    "forgot": {
+        "omittedOrForgottenAction": ("omittedAction", "forgottenAction", "missingAction"),
+        "visibleConsequence": ("consequence", "visibleResult"),
+        "whyTheViewerSolvesIt": ("whyViewerSolves", "viewerSolution", "howViewerSolvesIt"),
+    },
+    "greenpeace_essential_pairing": {
+        "elementA": ("pairA", "firstElement"),
+        "elementB": ("pairB", "secondElement"),
+        "essentialRelationship": ("relationship", "essentialBond"),
+        "notMerelyAppearance": ("notAppearanceOnly", "notOnlyAppearance"),
+        "notMerelyFunction": ("notFunctionOnly", "notOnlyFunction"),
+        "notMerelyWordplay": ("notWordplayOnly", "notOnlyWordplay"),
+        "emotionalRecognition": ("recognition", "emotionalImpact"),
+    },
+    "closest": {
+        "admittedGap": ("gap", "weaknessAdmitted", "honestGap"),
+        "relativeNearness": ("nearness", "relativeCloseness"),
+        "physicalOrVisualExpressionOfNearness": (
+            "physicalExpression",
+            "visualExpression",
+            "expressionOfNearness",
+        ),
+        "whyThisIsHonestRatherThanInferior": (
+            "whyHonest",
+            "whyHonestRatherThanInferior",
+            "honestyExplanation",
+        ),
+    },
+    "think_small": {
+        "realWeakness": ("weakness", "actualWeakness", "identifiedWeakness"),
+        "evidenceTheWeaknessIsReal": (
+            "realWeaknessEvidence",
+            "weaknessEvidence",
+            "evidenceOfWeakness",
+            "evidenceWeaknessIsReal",
+        ),
+        "acceptanceRatherThanDenial": (
+            "acceptance",
+            "acceptedWeakness",
+            "weaknessAcceptance",
+            "acceptanceNotDenial",
+        ),
+        "reframing": ("reframe", "reframedWeakness", "reframingStrategy", "reframedNarrative"),
+        "relativeAdvantageCreated": (
+            "advantageCreated",
+            "reframedAdvantage",
+            "relativeAdvantage",
+            "advantageFromWeakness",
+        ),
+    },
+}
+
 VALID_VERBAL_DECISIONS: FrozenSet[str] = frozenset({"available", "not_needed", "not_found"})
 VALID_VISUAL_ANCHOR_TIMING: FrozenSet[str] = frozenset({"opening", "development", "resolution"})
 
@@ -201,8 +314,23 @@ def is_creator_owned_structural_field(field_path: str) -> bool:
     return False
 
 
+def prototype_application_child_fields(prototype_id: str) -> Tuple[str, ...]:
+    return PROTOTYPE_APPLICATION_CHILD_FIELDS.get(prototype_id, ())
+
+
+def build_prototype_application_prompt_example(prototype_id: str) -> str:
+    field_name = prototype_application_field(prototype_id)
+    children = prototype_application_child_fields(prototype_id)
+    if not children:
+        return f"{field_name}: {{...}}"
+    inner = ", ".join(f"{key}: \"...\"" for key in children)
+    return f"{field_name}: {{{inner}}}"
+
+
 def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
     app_field = prototype_application_field(prototype_id)
+    app_example = build_prototype_application_prompt_example(prototype_id)
+    child_list = ", ".join(prototype_application_child_fields(prototype_id))
     return (
         f"Required keys: schemaVersion={CANDIDATE_SCHEMA_VERSION!r}, methodologyVersion={METHODOLOGY_VERSION!r}, "
         "strategyFoundationId, prototypeId, structureType, visualParallelType, coreCreativeMechanism, visualMechanism, "
@@ -214,6 +342,8 @@ def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
         "verbalPotential{decision,keywordOrKeyPhrase,visualMeaning,strategicMeaning,reason}, "
         "creatorReport{problemPerception,relativeAdvantage,mechanismScanSummary,goldPrototypeUsed,visualParallelType,"
         "whyParallelExpressesAdvantage,whyRunwayShouldUnderstand,silentVerification,puritySelfCheck}.\n"
+        f"Prototype application object {app_field} must use these exact child field names: {child_list}.\n"
+        f"Example: {app_example}\n"
         "For structureType=variation_montage also require visualFamilyId, visualFamilyDefinition, recurringMotif, "
         "sceneVariations (2–4 items with description and familyId).\n"
         "Include replacementCheck when visualParallelType=replacement.\n"

@@ -878,6 +878,16 @@ def generate_creator_candidate(
         try:
             parsed, top_level_keys, schema_version_received = _parse_creator_payload(response_text)
             last_parsed = parsed
+            from engine.builder2_creator_normalization import normalize_creator_candidate
+
+            _, normalization_resolved = normalize_creator_candidate(
+                parsed,
+                assigned_prototype_id=prototype_id,
+                prototype_display_name=prototype.display_name,
+                strategy_foundation=strategy_foundation,
+                compatibility_mode=compatibility_mode,
+                base_normalizer=normalize_creator_raw,
+            )
             candidate = validate_creator_candidate(
                 parsed,
                 assigned_prototype_id=prototype_id,
@@ -904,6 +914,7 @@ def generate_creator_candidate(
                 clean_retry_attempted=clean_retry_attempted,
                 response_excerpt=_redact_excerpt(response_text),
             )
+            diagnostics["normalizationResolvedFields"] = normalization_resolved
             if repair_attempted and phase == "repair":
                 logger.info("BUILDER2_CREATOR_REPAIR_OK candidateId=%s prototypeId=%s", candidate_id, prototype_id)
             if clean_retry_attempted and phase == "retry":

@@ -135,6 +135,31 @@ def main() -> None:
     _install_shutdown_signals()
     hb_thread = threading.Thread(target=_heartbeat_loop, name="video_job_heartbeat", daemon=True)
     hb_thread.start()
+
+    from engine.builder2_creator_preflight import (
+        creator_preflight_only_enabled,
+        print_preflight_report,
+        run_one_isolated_creator_preflight,
+    )
+
+    if creator_preflight_only_enabled():
+        logger.info("BUILDER2_CREATOR_PREFLIGHT_WORKER_MODE enabled=true recoveryScan=false queue=false")
+        product_name = (os.environ.get("BUILDER2_PREFLIGHT_PRODUCT_NAME") or "Preflight Product").strip()
+        product_description = (
+            os.environ.get("BUILDER2_PREFLIGHT_PRODUCT_DESCRIPTION")
+            or "A product used to verify the Builder2 Creator contract before a paid tournament."
+        ).strip()
+        language = (os.environ.get("BUILDER2_PREFLIGHT_LANGUAGE") or "he").strip()
+        prototype_id = (os.environ.get("BUILDER2_PREFLIGHT_PROTOTYPE_ID") or "think_small").strip() or None
+        report = run_one_isolated_creator_preflight(
+            product_name=product_name,
+            product_description=product_description,
+            content_language=language,
+            prototype_id=prototype_id,
+        )
+        print_preflight_report(report)
+        sys.exit(0 if report.get("ok") else 1)
+
     logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)
     try:
         requeued = scan_and_requeue_recoverable_jobs()

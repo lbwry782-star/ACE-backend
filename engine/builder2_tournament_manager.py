@@ -541,9 +541,10 @@ def run_builder2_tournament(
         )
         save_tournament_state(job_id, state)
 
-    if _creator_preflight_enabled():
-        return run_builder2_creator_preflight(
-            job_id=job_id,
+    from engine.builder2_creator_preflight import creator_preflight_only_enabled, run_one_isolated_creator_preflight
+
+    if creator_preflight_only_enabled():
+        return run_one_isolated_creator_preflight(
             product_name=product_name,
             product_description=product_description,
             content_language=language,
@@ -710,78 +711,6 @@ def run_builder2_tournament(
     normalized["winnerCandidateId"] = winner_id
     normalized["completionReason"] = state.get("completionReason")
     return normalized
-
-
-def _creator_preflight_enabled() -> bool:
-    raw = (os.environ.get("BUILDER2_CREATOR_PREFLIGHT_ONLY") or "").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def run_builder2_creator_preflight(
-    *,
-    job_id: str,
-    product_name: str,
-    product_description: str,
-    content_language: str,
-    llm_client: Optional[Any] = None,
-    prototype_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Controlled Creator-contract preflight: 1 Strategy + 1 Creator (+ optional bounded repair).
-    Never calls Judge, Winner Development, Runway, or FFmpeg.
-    """
-    language = content_language
-    runway_model = resolve_builder2_runway_video_model()
-    runway_mode = builder2_runway_generation_mode(runway_model)
-    active_ids = resolve_builder2_active_prototype_ids()
-    assigned = prototype_id or active_ids[0]
-    state = new_tournament_state(
-        job_id=job_id,
-        language=language,
-        active_prototype_ids=[assigned],
-        random_seed=f"preflight-{job_id}",
-    )
-    state["methodologyVersion"] = METHODOLOGY_VERSION
-    state["methodologyCompatibilityMode"] = False
-    state["preflightMode"] = True
-    ensure_metrics(state)
-    save_tournament_state(job_id, state)
-
-    state["strategyFoundation"] = _generate_strategy(
-        product_name=product_name,
-        product_description=product_description,
-        language=language,
-        llm_client=llm_client,
-        state=state,
-    )
-    save_tournament_state(job_id, state)
-
-    candidate_id, candidate = generate_creator_candidate(
-        product_name=product_name,
-        product_description=product_description,
-        language=language,
-        strategy_foundation=state["strategyFoundation"],
-        prototype_id=assigned,
-        round_index=1,
-        attempt_number=1,
-        runway_mode=runway_mode,
-        llm_client=llm_client,
-        state=state,
-    )
-    metrics = dict(state.get("metrics") or {})
-    return {
-        "ok": True,
-        "preflight": True,
-        "jobId": job_id,
-        "prototypeId": assigned,
-        "candidateId": candidate_id,
-        "validationStatus": "accepted",
-        "topLevelKeys": sorted(candidate.keys()),
-        "metrics": metrics,
-        "totalReasoningCalls": int(metrics.get("strategyCalls") or 0)
-        + int(metrics.get("creatorCalls") or 0)
-        + int(metrics.get("creatorRepairCalls") or 0),
-    }
 
 
 def _round_is_complete(state: Dict[str, Any], round_index: int) -> bool:

@@ -140,9 +140,22 @@ def register_recoverable_job(job_id: str) -> None:
     jid = (job_id or "").strip()
     if not jid:
         return
-    meta = _load_recovery_meta(jid)
+    meta = _migrate_legacy_recovery_meta(jid)
+    if _use_memory_recovery:
+        already_registered = jid in _memory_recoverable
+    else:
+        already_registered = bool(get_redis().sismember(RECOVERABLE_JOBS_KEY, jid))
+    if already_registered:
+        meta["recoveryInterruptCount"] = int(meta.get("recoveryInterruptCount") or 0) + 1
+        meta["recoveryAttemptCount"] = max(
+            int(meta.get("recoveryAttemptCount") or 0),
+            int(meta.get("recoveryInterruptCount") or 0),
+        )
+        _save_recovery_meta(jid, meta)
     if not meta.get("recoveryFirstRegisteredAt"):
         meta["recoveryFirstRegisteredAt"] = _utc_now_iso()
+    if "recoveryAttemptCount" not in meta:
+        meta["recoveryAttemptCount"] = 0
     _save_recovery_meta(jid, meta)
     if _use_memory_recovery:
         _memory_recoverable.add(jid)
@@ -151,7 +164,7 @@ def register_recoverable_job(job_id: str) -> None:
     logger.info("BUILDER2_TOURNAMENT_RECOVERY_REGISTERED jobId=%s", jid)
 
 
-def remove_recoverable_job(job_id: str) -> None:
+def remove_recoverable_job(job_id: str, *, clear_meta: bool = True) -> None:
     jid = (job_id or "").strip()
     if not jid:
         return
@@ -159,7 +172,8 @@ def remove_recoverable_job(job_id: str) -> None:
         _memory_recoverable.discard(jid)
     else:
         get_redis().srem(RECOVERABLE_JOBS_KEY, jid)
-    _clear_recovery_meta(jid)
+    if clear_meta:
+        _clear_recovery_meta(jid)
     expire_job_lease(jid)
 
 
@@ -261,6 +275,44 @@ def expire_job_lease(job_id: str) -> None:
         get_redis().delete(_lease_key(jid))
 
 
+def _migrate_legacy_recovery_meta(job_id: str) -> Dict[str, Any]:
+    jid = (job_id or "").strip()
+    meta = _load_recovery_meta(jid)
+    if meta.get("legacyMigrated"):
+        return meta
+    in_registry = False
+    if _use_memory_recovery:
+        in_registry = jid in _memory_recoverable
+    else:
+        in_registry = bool(get_redis().sismember(RECOVERABLE_JOBS_KEY, jid))
+    if not meta and in_registry:
+        meta = {
+            "recoveryFirstRegisteredAt": _utc_now_iso(),
+            "recoveryAttemptCount": _recovery_max_attempts(),
+            "legacyMigrated": True,
+            "legacyMigrationReason": "missing_recovery_meta",
+        }
+        _save_recovery_meta(jid, meta)
+        logger.info(
+            "BUILDER2_TOURNAMENT_RECOVERY_LEGACY_MIGRATED jobId=%s attempts=%s reason=missing_recovery_meta",
+            jid,
+            meta["recoveryAttemptCount"],
+        )
+        _mark_recovery_exhausted(jid, reason="recovery_exhausted")
+        return meta
+    if meta and "recoveryAttemptCount" not in meta:
+        meta["recoveryAttemptCount"] = max(1, int(meta.get("recoveryInterruptCount") or 0))
+        meta["legacyMigrated"] = True
+        meta["legacyMigrationReason"] = "missing_attempt_count"
+        _save_recovery_meta(jid, meta)
+        logger.info(
+            "BUILDER2_TOURNAMENT_RECOVERY_LEGACY_MIGRATED jobId=%s attempts=%s reason=missing_attempt_count",
+            jid,
+            meta["recoveryAttemptCount"],
+        )
+    return meta
+
+
 def _recovery_is_stale(job_id: str, meta: Dict[str, Any]) -> bool:
     first = meta.get("recoveryFirstRegisteredAt") or meta.get("lastRecoveryAttemptAt")
     if not first:
@@ -278,7 +330,7 @@ def _mark_recovery_exhausted(job_id: str, *, reason: str) -> None:
     meta = _load_recovery_meta(jid)
     meta["recoveryTerminalReason"] = reason
     _save_recovery_meta(jid, meta)
-    remove_recoverable_job(jid)
+    remove_recoverable_job(jid, clear_meta=False)
     state = load_tournament_state(jid)
     if state is not None:
         state["status"] = "recovery_exhausted"
@@ -302,7 +354,7 @@ def _job_is_recoverable(job_id: str) -> bool:
             return False
     elif not get_redis().sismember(RECOVERABLE_JOBS_KEY, jid):
         return False
-    meta = _load_recovery_meta(jid)
+    meta = _migrate_legacy_recovery_meta(jid)
     if _recovery_is_stale(jid, meta):
         logger.info("BUILDER2_TOURNAMENT_RECOVERY_STALE_REMOVED jobId=%s", jid)
         _mark_recovery_exhausted(jid, reason="recovery_stale_ttl")
@@ -347,7 +399,13 @@ def set_memory_job_hash(job_id: str, data: Dict[str, Any]) -> None:
 
 
 def requeue_recoverable_job(job_id: str) -> bool:
+    from engine.builder2_creator_preflight import creator_preflight_only_enabled
+
+    if creator_preflight_only_enabled():
+        logger.info("BUILDER2_CREATOR_PREFLIGHT_SKIP_REQUEUE jobId=%s", (job_id or "").strip())
+        return False
     jid = (job_id or "").strip()
+    _migrate_legacy_recovery_meta(jid)
     if not _job_is_recoverable(jid):
         logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=not_recoverable", jid)
         return False
@@ -373,6 +431,11 @@ def requeue_recoverable_job(job_id: str) -> bool:
 
 
 def scan_and_requeue_recoverable_jobs() -> List[str]:
+    from engine.builder2_creator_preflight import creator_preflight_only_enabled
+
+    if creator_preflight_only_enabled():
+        logger.info("BUILDER2_CREATOR_PREFLIGHT_SKIP_RECOVERY reason=preflight_mode")
+        return []
     if not resolve_builder2_tournament_enabled():
         return []
     if _use_memory_recovery:

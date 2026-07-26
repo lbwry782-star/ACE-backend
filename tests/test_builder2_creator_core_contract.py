@@ -31,7 +31,8 @@ from engine.builder2_methodology_validation import validate_creator_methodology
 from engine.builder2_prototypes import require_prototype
 from engine.builder2_tournament_config import DEFAULT_ACTIVE_PROTOTYPE_IDS
 from engine.builder2_tournament_contracts import Builder2TournamentError, CANDIDATE_SCHEMA_VERSION
-from engine.builder2_tournament_manager import run_builder2_creator_preflight, run_builder2_tournament
+from engine.builder2_creator_preflight import run_one_isolated_creator_preflight
+from engine.builder2_tournament_manager import run_builder2_tournament
 from engine.builder2_tournament_prompts import build_creator_prompt
 from engine.builder2_tournament_recovery import (
     clear_job_queued,
@@ -341,17 +342,15 @@ class TestPreflightMode(unittest.TestCase):
 
     def test_preflight_never_calls_judge(self) -> None:
         llm = RealisticMockLLM()
-        report = run_builder2_creator_preflight(
-            job_id="job-preflight",
+        report = run_one_isolated_creator_preflight(
             product_name="Product",
             product_description="desc",
             content_language="en",
             llm_client=llm,
             prototype_id="closest",
         )
-        self.assertTrue(report.get("preflight"))
-        self.assertEqual(report.get("validationStatus"), "accepted")
-        self.assertNotIn("builder2_judge", llm.calls)
+        self.assertTrue(report.get("creatorAccepted"))
+        self.assertEqual(report.get("judgeCalls"), 0)
 
 
 class TestFieldOwnershipAudit(unittest.TestCase):
