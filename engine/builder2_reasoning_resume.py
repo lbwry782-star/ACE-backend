@@ -44,7 +44,7 @@ from engine.builder2_runway_config import builder2_runway_generation_mode, resol
 from engine.builder2_tournament_config import resolve_builder2_active_prototype_ids
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_manager import select_global_winner
-from engine.builder2_tournament_metrics import ensure_metrics, record_model_call, MetricsTimer
+from engine.builder2_tournament_metrics import ensure_metrics
 from engine.builder2_tournament_store import (
     ensure_methodology_compatibility_decided,
     load_tournament_state,
@@ -52,6 +52,7 @@ from engine.builder2_tournament_store import (
     save_tournament_state,
 )
 from engine.builder2_winner_development import develop_builder2_winning_candidate
+from engine.builder2_winner_persistence import is_valid_persisted_winner_development, persist_winner_development_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,9 @@ def _metric_snapshot(metrics: Dict[str, Any]) -> Dict[str, int]:
         "judgeRepairCalls": int(metrics.get("judgeRepairCalls") or 0),
         "judgeRetryCalls": int(metrics.get("judgeRetryCalls") or 0),
         "winnerDevelopmentCalls": int(metrics.get("winnerDevelopmentCalls") or 0),
+        "winnerNormalCalls": int(metrics.get("winnerNormalCalls") or 0),
+        "winnerRepairCalls": int(metrics.get("winnerRepairCalls") or 0),
+        "winnerRetryCalls": int(metrics.get("winnerRetryCalls") or 0),
     }
 
 
@@ -164,6 +168,9 @@ def _initial_report(*, resume_id: str, job_id: str) -> Dict[str, Any]:
         "winnerSelected": False,
         "winnerDevelopmentAccepted": False,
         "winnerCalls": 0,
+        "winnerNormalCalls": 0,
+        "winnerRepairCalls": 0,
+        "winnerRetryCalls": 0,
         "strategyCalls": 0,
         "creatorCalls": 0,
         "startImageCalls": 0,
@@ -358,7 +365,7 @@ def run_one_reasoning_resume(
             save_tournament_state(job_id, state)
         report["winnerSelected"] = True
 
-        if state.get("winnerDevelopmentPlan"):
+        if is_valid_persisted_winner_development(state) or state.get("winnerDevelopmentPlan"):
             report["winnerDevelopmentAccepted"] = True
             logger.info(
                 "BUILDER2_REASONING_RESUME_WINNER_REUSED jobId=%s winnerCandidateId=%s",
@@ -374,26 +381,57 @@ def run_one_reasoning_resume(
             winner_rec = state["candidates"][winner_id]
             judgment_rec = (state.get("judgments") or {}).get(winner_rec.get("judgmentId") or "")
             winning_judgment = (judgment_rec or {}).get("judgment") or {}
+            winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
             state["status"] = "winner_developing"
             save_tournament_state(job_id, state)
-            timer = MetricsTimer()
-            winner_plan = develop_builder2_winning_candidate(
-                product_name=product_name,
-                product_description=product_description,
-                language=language,
-                strategy_foundation=strategy,
-                winning_candidate=winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {},
-                winning_judgment=winning_judgment,
-                prototype_id=str(winner_rec.get("prototypeId") or ""),
-                runway_mode=runway_mode,
-                llm_client=llm_client,
-                compatibility_mode=compatibility_mode,
-            )
-            record_model_call(state, role="builder2_winner", elapsed_ms=timer.elapsed_ms())
-            state["winnerDevelopmentPlan"] = winner_plan
-            state["status"] = "winner_plan_complete"
-            save_tournament_state(job_id, state)
-            report["winnerDevelopmentAccepted"] = True
+            try:
+                winner_plan = develop_builder2_winning_candidate(
+                    product_name=product_name,
+                    product_description=product_description,
+                    language=language,
+                    strategy_foundation=strategy,
+                    winning_candidate=winning_candidate,
+                    winning_judgment=winning_judgment,
+                    prototype_id=str(winner_rec.get("prototypeId") or ""),
+                    runway_mode=runway_mode,
+                    llm_client=llm_client,
+                    compatibility_mode=compatibility_mode,
+                    state=state,
+                )
+                persist_winner_development_atomically(
+                    state,
+                    candidate_id=winner_id,
+                    prototype_id=str(winner_rec.get("prototypeId") or ""),
+                    winner_plan=winner_plan,
+                    winning_candidate=winning_candidate,
+                    preservation_snapshot=winner_plan.get("winningCandidatePreservationSnapshot"),
+                    compatibility_mode=compatibility_mode,
+                )
+                state["status"] = "winner_plan_complete"
+                save_tournament_state(job_id, state)
+                report["winnerDevelopmentAccepted"] = True
+            except Builder2TournamentError as exc:
+                failure = state.get("winnerDevelopmentFailure")
+                if isinstance(failure, dict):
+                    report["failureStage"] = failure.get("stage")
+                report["failureReason"] = str(exc.args[0] if exc.args else "builder2_winner_development_failed")
+                save_tournament_state(job_id, state)
+                ReasoningResumeIsolationGuard.end()
+                metrics_after = _metric_snapshot(state.get("metrics") or {})
+                delta = _metric_delta(metrics_before, metrics_after)
+                report["winnerNormalCalls"] = delta["winnerNormalCalls"]
+                report["winnerRepairCalls"] = delta["winnerRepairCalls"]
+                report["winnerRetryCalls"] = delta["winnerRetryCalls"]
+                report["winnerCalls"] = delta["winnerNormalCalls"] + delta["winnerRepairCalls"] + delta["winnerRetryCalls"]
+                report["strategyCalls"] = delta["strategyCalls"]
+                report["creatorCalls"] = delta["creatorCalls"]
+                report["judgeNormalCalls"] = delta["judgeCalls"]
+                report["judgeRepairCalls"] = delta["judgeRepairCalls"]
+                report["judgeRetryCalls"] = delta["judgeRetryCalls"]
+                report["startImageCalls"] = 0
+                report["runwayCalls"] = 0
+                report["ffmpegCalls"] = 0
+                return report
 
         state["reasoningResumeComplete"] = True
         state["mediaContinuationRequired"] = True
@@ -428,7 +466,10 @@ def run_one_reasoning_resume(
         report["judgeRetryCalls"] = delta["judgeRetryCalls"]
         report["strategyCalls"] = delta["strategyCalls"]
         report["creatorCalls"] = delta["creatorCalls"]
-        report["winnerCalls"] = delta["winnerDevelopmentCalls"]
+        report["winnerCalls"] = delta["winnerNormalCalls"] + delta["winnerRepairCalls"] + delta["winnerRetryCalls"]
+        report["winnerNormalCalls"] = delta["winnerNormalCalls"]
+        report["winnerRepairCalls"] = delta["winnerRepairCalls"]
+        report["winnerRetryCalls"] = delta["winnerRetryCalls"]
         report["startImageCalls"] = 0
         report["runwayCalls"] = 0
         report["ffmpegCalls"] = 0

@@ -62,7 +62,7 @@ def _validate_visual_anchor(raw: Dict[str, Any]) -> Any:
         if anchor.get("whyEssential") is not None:
             require_non_empty_str(anchor.get("whyEssential"), field="visualAnchor.whyEssential")
         return anchor
-    raise Builder2TournamentError("builder2_winner_development_failed")
+    raise Builder2TournamentError("builder2_winner_schema_invalid:visualAnchor")
 
 
 def _clean_scene_variations(raw: Any, *, structure: str, sequence: Dict[str, Any]) -> List[str]:
@@ -110,7 +110,7 @@ def validate_builder2_winner_plan(
     if raw.get("planningFailure"):
         raise Builder2TournamentError(str(raw.get("planningFailure")))
     if raw.get("schemaVersion") != WINNER_PLAN_SCHEMA_VERSION:
-        raise Builder2TournamentError("builder2_winner_development_failed")
+        raise Builder2TournamentError("builder2_winner_schema_invalid:schemaVersion")
     require_non_empty_str(raw.get("productNameResolved"), field="productNameResolved")
     require_non_empty_str(raw.get("language"), field="language")
     require_non_empty_str(raw.get("problemPerception"), field="problemPerception")

@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import httpx
 from openai import OpenAI
@@ -38,7 +38,7 @@ def extract_responses_output_text(response: Any) -> str:
             continue
         for content in contents:
             content_type = getattr(content, "type", None) if not isinstance(content, dict) else content.get("type")
-            if content_type != "output_text":
+            if content_type not in {"output_text", "text"}:
                 continue
             text = getattr(content, "text", None) if not isinstance(content, dict) else content.get("text")
             if text:
@@ -94,9 +94,12 @@ def call_builder2_role_json(
     prompt: str,
     call_type: str = "normal",
     llm_client: Optional[Any] = None,
+    on_paid_request_submitted: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     log_builder2_model_selected(role=role, call_type=call_type)
     if llm_client is not None:
+        if on_paid_request_submitted is not None:
+            on_paid_request_submitted()
         raw = llm_client(role=role, model=model, prompt=prompt)
         if isinstance(raw, dict):
             return raw
@@ -112,5 +115,42 @@ def call_builder2_role_json(
         lambda: client.responses.create(model=model, input=prompt, reasoning=reasoning),
         endpoint="responses",
     )
+    if on_paid_request_submitted is not None:
+        on_paid_request_submitted()
     text = extract_responses_output_text(response)
     return _extract_json_object(text)
+
+
+def call_builder2_role_json_with_text(
+    *,
+    role: str,
+    model: str,
+    prompt: str,
+    call_type: str = "normal",
+    llm_client: Optional[Any] = None,
+    on_paid_request_submitted: Optional[Callable[[], None]] = None,
+) -> tuple[Dict[str, Any], str]:
+    log_builder2_model_selected(role=role, call_type=call_type)
+    if llm_client is not None:
+        if on_paid_request_submitted is not None:
+            on_paid_request_submitted()
+        raw = llm_client(role=role, model=model, prompt=prompt)
+        if isinstance(raw, dict):
+            return raw, json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
+        text = str(raw)
+        return _extract_json_object(text), text
+
+    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY missing")
+    timeout = float((os.environ.get("BUILDER2_TOURNAMENT_TIMEOUT_SECONDS") or "150").strip() or "150")
+    client = OpenAI(api_key=api_key, timeout=httpx.Timeout(timeout), max_retries=0)
+    reasoning = build_builder2_reasoning_payload()
+    response = openai_retry.openai_call_with_retry(
+        lambda: client.responses.create(model=model, input=prompt, reasoning=reasoning),
+        endpoint="responses",
+    )
+    if on_paid_request_submitted is not None:
+        on_paid_request_submitted()
+    text = extract_responses_output_text(response)
+    return _extract_json_object(text), text

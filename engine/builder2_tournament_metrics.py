@@ -26,6 +26,9 @@ DEFAULT_METRICS: Dict[str, Any] = {
     "judgeIneligibleCandidates": 0,
     "judgeUnavailableCandidates": 0,
     "winnerDevelopmentCalls": 0,
+    "winnerNormalCalls": 0,
+    "winnerRepairCalls": 0,
+    "winnerRetryCalls": 0,
     "totalReasoningCalls": 0,
     "strategyElapsedMs": 0,
     "creatorElapsedMs": 0,
@@ -105,6 +108,13 @@ def record_model_call(
         metrics["judgeElapsedMs"] = float(metrics.get("judgeElapsedMs") or 0) + elapsed_ms
         bucket = "judge"
     elif role == "builder2_winner":
+        if repair:
+            key = "winnerRepairCalls"
+        elif retry:
+            key = "winnerRetryCalls"
+        else:
+            key = "winnerNormalCalls"
+        metrics[key] = int(metrics.get(key) or 0) + 1
         metrics["winnerDevelopmentCalls"] = int(metrics.get("winnerDevelopmentCalls") or 0) + 1
         metrics["winnerDevelopmentElapsedMs"] = float(metrics.get("winnerDevelopmentElapsedMs") or 0) + elapsed_ms
         bucket = "winner"
@@ -114,6 +124,20 @@ def record_model_call(
         usage_bucket = metrics.setdefault("tokenUsage", {})
         usage_bucket[bucket] = _merge_token_usage(usage_bucket.get(bucket) or {}, token_usage)
     _recalc_total_calls(metrics)
+
+
+def record_winner_paid_call_submitted(
+    state: Dict[str, Any],
+    *,
+    repair: bool = False,
+    retry: bool = False,
+) -> None:
+    record_model_call(state, role="builder2_winner", elapsed_ms=0.0, repair=repair, retry=retry)
+
+
+def record_winner_call_elapsed(state: Dict[str, Any], elapsed_ms: float) -> None:
+    metrics = ensure_metrics(state)
+    metrics["winnerDevelopmentElapsedMs"] = float(metrics.get("winnerDevelopmentElapsedMs") or 0) + elapsed_ms
 
 
 def record_creator_rejected(state: Dict[str, Any]) -> None:

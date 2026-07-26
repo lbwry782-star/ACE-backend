@@ -65,6 +65,7 @@ from engine.builder2_winner_development import (
     develop_builder2_winning_candidate,
     normalize_winner_plan_for_runway,
 )
+from engine.builder2_winner_persistence import persist_winner_development_atomically
 
 logger = logging.getLogger(__name__)
 
@@ -771,7 +772,6 @@ def run_builder2_tournament(
         judgment_rec = state["judgments"].get(winner_rec.get("judgmentId") or "")
         winning_judgment = (judgment_rec or {}).get("judgment") or {}
         try:
-            timer = MetricsTimer()
             winner_plan = develop_builder2_winning_candidate(
                 product_name=product_name,
                 product_description=product_description,
@@ -783,15 +783,23 @@ def run_builder2_tournament(
                 runway_mode=runway_mode,
                 llm_client=llm_client,
                 compatibility_mode=compatibility_mode,
+                state=state,
             )
-            record_model_call(state, role="builder2_winner", elapsed_ms=timer.elapsed_ms())
+            persist_winner_development_atomically(
+                state,
+                candidate_id=winner_id,
+                prototype_id=str(winner_rec.get("prototypeId") or ""),
+                winner_plan=winner_plan,
+                winning_candidate=winner_rec.get("creatorOutput") or {},
+                preservation_snapshot=winner_plan.get("winningCandidatePreservationSnapshot"),
+                compatibility_mode=compatibility_mode,
+            )
         except Builder2TournamentError as exc:
             record_process_failure_tag(state, str(exc.args[0] if exc.args else "builder2_winner_development_failed"))
             logger.error("BUILDER2_WINNER_DEVELOPMENT_FAILED candidateId=%s", winner_id)
             state["status"] = "failed"
             save_tournament_state(job_id, state)
             raise
-        state["winnerDevelopmentPlan"] = winner_plan
         state["status"] = "winner_plan_complete"
         state["lastCompletedStep"] = "winner_plan_complete"
         save_tournament_state(job_id, state)
