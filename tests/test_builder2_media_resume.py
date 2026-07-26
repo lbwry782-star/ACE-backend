@@ -129,7 +129,7 @@ class TestMediaResumePrerequisites(unittest.TestCase):
     def test_persisted_winner_is_loaded(self) -> None:
         state = _media_ready_state(job_id="job-media-load")
         save_tournament_state("job-media-load", state)
-        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "PUBLIC_BASE_URL": "https://example.com"}, clear=False):
+        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False):
             report = run_one_media_resume(job_id="job-media-load", dry_run=True)
         self.assertTrue(report["winnerLoaded"])
         self.assertEqual(report["headlineDecision"], "omit")
@@ -170,7 +170,7 @@ class TestReasoningIsolation(unittest.TestCase):
 
     def test_dry_run_makes_zero_image_runway_ffmpeg_calls(self) -> None:
         state = _media_ready_state(job_id="job-media-dry")
-        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "PUBLIC_BASE_URL": "https://example.com"}, clear=False):
+        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False):
             report = run_one_media_resume(job_id="job-media-dry", tournament_state=deepcopy(state), dry_run=True)
         self.assertTrue(report["ok"])
         self.assertEqual(report["startImageCalls"], 0)
@@ -187,7 +187,7 @@ class TestDryRunValidation(unittest.TestCase):
 
     def test_dry_run_validates_omit_headline(self) -> None:
         state = _media_ready_state(job_id="job-media-omit")
-        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "PUBLIC_BASE_URL": "https://example.com"}, clear=False):
+        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False):
             report = run_one_media_resume(job_id="job-media-omit", tournament_state=deepcopy(state), dry_run=True)
         self.assertEqual(report["headlineDecision"], "omit")
         self.assertTrue(report["downstreamValidationAccepted"])
@@ -196,7 +196,7 @@ class TestDryRunValidation(unittest.TestCase):
         state = _media_ready_state(job_id="job-media-anchor")
         plan = state["winnerDevelopmentPlan"]
         self.assertIsInstance(plan.get("visualAnchor"), (dict, str))
-        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "PUBLIC_BASE_URL": "https://example.com"}, clear=False):
+        with patch.dict(os.environ, {"BUILDER2_MEDIA_RESUME_DRY_RUN": "true", "RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False):
             report = run_one_media_resume(job_id="job-media-anchor", tournament_state=deepcopy(state), dry_run=True)
         self.assertTrue(report["downstreamValidationAccepted"])
 
@@ -290,7 +290,7 @@ class TestMediaResumeExecution(unittest.TestCase):
     @patch("engine.builder2_media_resume.video_job_mark_done")
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch("engine.builder2_media_resume.save_tournament_state")
-    @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "PUBLIC_BASE_URL": "https://example.com"}, clear=False)
+    @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
     def test_success_updates_job_record(self, _save: Any, _redis_cfg: Any, mark_done: Any) -> None:
         state = _media_ready_state(job_id="job-media-success")
         captured: Dict[str, Any] = {}
@@ -310,7 +310,7 @@ class TestMediaResumeExecution(unittest.TestCase):
         self.assertEqual(captured.get("status"), "completed")
 
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
-    @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "PUBLIC_BASE_URL": "https://example.com"}, clear=False)
+    @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
     def test_zero_reasoning_calls_on_media_path(self, _redis_cfg: Any) -> None:
         state = _media_ready_state(job_id="job-media-zero-reasoning")
         report = run_one_media_resume(
@@ -325,7 +325,7 @@ class TestMediaResumeExecution(unittest.TestCase):
         self.assertEqual(report["winnerCalls"], 0)
 
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
-    @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "PUBLIC_BASE_URL": "https://example.com"}, clear=False)
+    @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
     def test_rerun_reuses_completed_media(self, _redis_cfg: Any) -> None:
         state = _media_ready_state(job_id="job-media-rerun")
         first_state = deepcopy(state)
@@ -345,6 +345,61 @@ class TestMediaResumeExecution(unittest.TestCase):
         self.assertTrue(second["mediaReused"])
         self.assertEqual(second["startImageCalls"], 0)
         self.assertEqual(second["runwaySubmissionCalls"], 0)
+
+
+class TestPublicBaseUrlDryRunParity(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+
+    def tearDown(self) -> None:
+        disable_memory_store()
+
+    def test_missing_url_makes_dry_run_fail(self) -> None:
+        state = _media_ready_state(job_id="job-media-dry-missing-url")
+        with patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test"}, clear=True):
+            report = run_one_media_resume(job_id="job-media-dry-missing-url", tournament_state=deepcopy(state), dry_run=True)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failureStage"], "configuration")
+        self.assertEqual(report["failureReason"], "builder2_media_resume_not_configured:publicBaseUrl")
+
+    def test_missing_url_makes_actual_run_fail_identically(self) -> None:
+        state = _media_ready_state(job_id="job-media-actual-missing-url")
+        with patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test"}, clear=True):
+            dry = run_one_media_resume(job_id="job-media-actual-missing-url", tournament_state=deepcopy(state), dry_run=True)
+            actual = run_one_media_resume(job_id="job-media-actual-missing-url", tournament_state=deepcopy(state), dry_run=False)
+        self.assertEqual(dry["failureReason"], actual["failureReason"])
+        self.assertEqual(dry["failureStage"], actual["failureStage"])
+        self.assertEqual(actual["startImageCalls"], 0)
+        self.assertEqual(actual["runwaySubmissionCalls"], 0)
+
+    def test_ace_public_base_url_allows_dry_run_ready(self) -> None:
+        state = _media_ready_state(job_id="job-media-ace-url")
+        with patch.dict(
+            os.environ,
+            {
+                "RUNWAY_API_KEY": "rk-test",
+                "OPENAI_API_KEY": "sk-test",
+                "ACE_PUBLIC_BASE_URL": "https://ace-backend-k1p6.onrender.com",
+            },
+            clear=True,
+        ):
+            report = run_one_media_resume(job_id="job-media-ace-url", tournament_state=deepcopy(state), dry_run=True)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["publicBaseUrlSource"], "ACE_PUBLIC_BASE_URL")
+
+    @patch("engine.builder2_media_resume.redis_configured", return_value=False)
+    @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
+    def test_valid_url_enters_start_image_stage(self, _redis_cfg: Any) -> None:
+        state = _media_ready_state(job_id="job-media-start-stage")
+        deps = _mock_pipeline_deps()
+        report = run_one_media_resume(
+            job_id="job-media-start-stage",
+            tournament_state=deepcopy(state),
+            dry_run=False,
+            pipeline_deps=deps,
+        )
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["startImageCalls"], 1)
 
 
 class TestBuilder1Isolation(unittest.TestCase):

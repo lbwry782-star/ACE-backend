@@ -11,10 +11,10 @@ from typing import Any, Dict, List, Optional
 
 from engine.builder2_headline_decision_contract import get_normalized_headline_decision, headline_decision_requires_headline
 from engine.builder2_media_pipeline import MediaPipelineDeps, execute_builder2_media_pipeline
+from engine.builder2_media_resume_config import build_media_resume_configuration
 from engine.builder2_media_resume_guard import MEDIA_RESUME_ISOLATION_ERROR, MediaResumeIsolationGuard
 from engine.builder2_methodology_contract import METHODOLOGY_VERSION
 from engine.builder2_runway_config import (
-    BUILDER2_RUNWAY_VIDEO_RATIO,
     builder2_runway_requires_start_image,
     resolve_builder2_runway_video_model,
     resolve_builder2_video_duration_seconds,
@@ -98,25 +98,6 @@ def collect_media_resume_missing_paths(state: Dict[str, Any]) -> List[str]:
         if str(cand.get("prototypeId") or "") != prototype_id:
             missing.append("candidates.prototypeId")
     return missing
-
-
-def verify_media_configuration(*, start_image_required: bool, ffmpeg_required: bool) -> Dict[str, Any]:
-    runway_key = bool(_env("RUNWAY_API_KEY"))
-    openai_key = bool(_env("OPENAI_API_KEY"))
-    return {
-        "runwayApiKeyConfigured": runway_key,
-        "openaiApiKeyConfigured": openai_key if start_image_required else True,
-        "redisConfigured": redis_configured(),
-        "publicBaseUrlConfigured": False,
-        "storageConfigured": redis_configured(),
-    }
-
-
-def _resolve_public_base_url(job_id: str) -> str:
-    if not redis_configured():
-        return _env("PUBLIC_BASE_URL")
-    job = video_job_get(job_id) or {}
-    return str(job.get("public_base_url") or _env("PUBLIC_BASE_URL") or "").strip()
 
 
 def _load_and_normalize_winner(
@@ -203,23 +184,25 @@ def run_one_media_resume(
         report["runwayModel"] = runway_model
         report["durationSeconds"] = duration_seconds
 
-        config = verify_media_configuration(start_image_required=start_image_required, ffmpeg_required=ffmpeg_required)
-        config["publicBaseUrlConfigured"] = bool(_resolve_public_base_url(job_id))
-        if not config.get("runwayApiKeyConfigured"):
-            raise Builder2TournamentError("builder2_media_resume_not_configured:runwayApiKey")
-        if start_image_required and not config.get("openaiApiKeyConfigured"):
-            raise Builder2TournamentError("builder2_media_resume_not_configured:openaiApiKey")
-        if not dry and not config.get("publicBaseUrlConfigured"):
-            raise Builder2TournamentError("builder2_media_resume_not_configured:publicBaseUrl")
+        job_data = video_job_get(job_id) if redis_configured() else None
+        media_config = build_media_resume_configuration(
+            job_id=job_id,
+            job_data=job_data,
+            tournament_state=state,
+            start_image_required=start_image_required,
+            ffmpeg_required=ffmpeg_required,
+        )
+        report["publicBaseUrlSource"] = media_config.public_base_url.source
 
         if dry:
             execute_builder2_media_pipeline(
                 job_id=job_id,
                 state=state,
                 plan=plan,
-                public_base_url=_resolve_public_base_url(job_id),
+                public_base_url=media_config.publicBaseUrl,
                 product_description=str(state.get("productDescription") or ""),
                 dry_run=True,
+                media_config=media_config,
             )
             report["readyForMediaResume"] = True
             report["ok"] = True
@@ -227,13 +210,8 @@ def run_one_media_resume(
             return report
 
         state["status"] = "media_continuing"
-        if redis_configured():
-            job = video_job_get(job_id)
-            if job and job.get("status") in {"error", "interrupted", "failed"}:
-                pass
         save_tournament_state(job_id, state)
 
-        public_base_url = _resolve_public_base_url(job_id)
         if start_image_required:
             MediaResumeIsolationGuard.enable_start_image()
             MediaResumeIsolationGuard.assert_safe_before_start_image()
@@ -245,10 +223,11 @@ def run_one_media_resume(
             job_id=job_id,
             state=state,
             plan=plan,
-            public_base_url=public_base_url,
+            public_base_url=media_config.publicBaseUrl,
             product_description=str(state.get("productDescription") or ""),
             dry_run=False,
             deps=pipeline_deps,
+            media_config=media_config,
         )
         state.update(updated_state)
         report["startImageCalls"] = counters.start_image_calls
@@ -278,6 +257,8 @@ def run_one_media_resume(
         report["failureReason"] = reason
         if reason.startswith(MEDIA_RESUME_ISOLATION_ERROR):
             report["failureStage"] = "isolation"
+        elif reason.startswith("builder2_media_resume_not_configured"):
+            report["failureStage"] = "configuration"
         _persist_media_failure(state, stage=report.get("failureStage") or "media", reason=reason)
         if tournament_state is None:
             save_tournament_state(job_id, state)
@@ -355,6 +336,7 @@ def print_media_resume_report(report: Dict[str, Any]) -> None:
         "jobCompleted",
         "failureStage",
         "failureReason",
+        "publicBaseUrlSource",
         "missingPaths",
         "ok",
     )

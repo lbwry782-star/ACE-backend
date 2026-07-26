@@ -424,6 +424,12 @@ def postprocess_video_headline(
 
     base = (public_base_url or "").strip().rstrip("/")
     if not base:
+        from engine.public_base_url import resolve_public_base_url
+
+        resolution = resolve_public_base_url()
+        if resolution.configured:
+            base = resolution.value
+    if not base:
         logger.warning(
             "VIDEO_HEADLINE_POSTPROCESS failed fallback_to_original=true reason=no_public_base_url"
         )

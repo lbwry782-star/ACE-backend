@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import requests
 
 from engine.builder2_headline_decision_contract import get_normalized_headline_decision, headline_decision_requires_headline
+from engine.builder2_media_resume_config import MediaResumeConfiguration
 from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
 from engine.builder2_runway_config import (
     BUILDER2_RUNWAY_VIDEO_RATIO,
@@ -240,16 +241,21 @@ def execute_builder2_media_pipeline(
     product_description: str,
     dry_run: bool = False,
     deps: Optional[MediaPipelineDeps] = None,
+    media_config: Optional[MediaResumeConfiguration] = None,
 ) -> Tuple[Dict[str, Any], MediaPipelineCounters]:
     counters = MediaPipelineCounters()
     media = _media_bucket(state)
     if not media.get("mediaResumeStartedAt"):
         media["mediaResumeStartedAt"] = _utc_now_iso()
-    runway_model = resolve_builder2_runway_video_model()
-    duration_seconds = resolve_builder2_video_duration_seconds()
+    runway_model = media_config.runwayModel if media_config else resolve_builder2_runway_video_model()
+    duration_seconds = media_config.durationSeconds if media_config else resolve_builder2_video_duration_seconds()
+    ratio = media_config.ratio if media_config else BUILDER2_RUNWAY_VIDEO_RATIO
     media["runwayModel"] = runway_model
     media["durationSeconds"] = duration_seconds
-    media["runwayRatio"] = BUILDER2_RUNWAY_VIDEO_RATIO
+    media["runwayRatio"] = ratio
+    if media_config is not None:
+        media["publicBaseUrlSource"] = media_config.public_base_url.source
+        media["publicBaseUrl"] = media_config.publicBaseUrl
     headline_decision = get_normalized_headline_decision(plan)
 
     if media.get("mediaResumeStatus") == "completed" and media.get("finalPublicUrl"):
