@@ -209,6 +209,7 @@ def methodology_judgment_extras() -> Dict[str, Any]:
         "visualFamilyAssessment": "The visual family remains coherent.",
         "silentMovieAssessment": "The idea works without dialogue or explanatory sound.",
         "verbalLayerAssessment": {
+            "applicability": "available",
             "keywordBornFromVisual": True,
             "visualMeaningIsClear": True,
             "strategicMeaningIsClear": True,

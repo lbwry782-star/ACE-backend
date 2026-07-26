@@ -19,6 +19,10 @@ from engine.builder2_methodology_contract import (
     VALID_VISUAL_PARALLEL_TYPES,
     prompt_enum_list,
 )
+from engine.builder2_judge_core_contract import (
+    build_judge_required_keys_prompt_text,
+    resolve_creator_verbal_decision,
+)
 from engine.builder2_prototypes import Builder2Prototype
 from engine.builder2_runway_config import resolve_builder2_video_duration_seconds
 from engine.builder2_strategy_identity import expected_strategy_foundation_id
@@ -239,12 +243,13 @@ def build_judge_prompt(
     candidate: Dict[str, Any],
     candidate_id: str,
 ) -> str:
-    score_lines = "\n".join(
-        f"- {name}: {low}–{high}"
-        for name, (low, high) in sorted(JUDGE_SCORE_RANGES.items())
-    )
     interest_order = " → ".join(INTEREST_PRIORITY_ORDER)
     contract = candidate.get("prototypeMethodContract") or {}
+    creator_verbal_decision = resolve_creator_verbal_decision(candidate)
+    judge_contract = build_judge_required_keys_prompt_text(
+        creator_verbal_decision=creator_verbal_decision,
+        candidate_id=candidate_id,
+    )
     return (
         "You are the Builder2 Judge role evaluating ONE candidate independently.\n"
         f"Motto: {TOURNAMENT_MOTTO}\n"
@@ -279,12 +284,11 @@ def build_judge_prompt(
         "Every score must be an integer within its category maximum.\n"
         "Do NOT output totalScore, total, or any authoritative total score field.\n"
         "Hebrew free-text fields are allowed in verdict, strengths, weaknesses and prototypeQualityComparison.\n"
+        f"{judge_contract}\n"
         "Required keys: candidateId, eligible, disqualifiers, scores, verdict, strengths, weaknesses, "
         "prototypeQualityComparison, confidence, problemAdvantageAssessment, mechanismDepthAssessment, "
         "prototypeMethodAssessment, visualMechanismAssessment, participationAssessment, visualFamilyAssessment, "
         "silentMovieAssessment, verbalLayerAssessment, headlineNecessityAssessment.\n"
-        "Required score fields:\n"
-        f"{score_lines}\n"
         "If eligible=false, include at least one disqualifier explaining why."
     )
 

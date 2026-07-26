@@ -19,6 +19,12 @@ from engine.builder2_creator_circuit_breaker import (
     record_process_contract_failure,
 )
 from engine.builder2_judge import judge_candidate
+from engine.builder2_judge_circuit_breaker import (
+    SYSTEMIC_FAILURE_CODE as JUDGE_SYSTEMIC_FAILURE_CODE,
+    assert_judge_contract_available,
+    is_judge_contract_circuit_breaker_tripped,
+    record_judge_process_contract_failure,
+)
 from engine.builder2_prototypes import require_prototype
 from engine.builder2_runway_config import builder2_runway_generation_mode, resolve_builder2_runway_video_model
 from engine.builder2_tournament_config import (
@@ -87,16 +93,25 @@ def select_global_winner(state: Dict[str, Any]) -> str:
         for cid, cand in state["candidates"].items()
         if cand.get("eligible") and cand.get("validationStatus") == "accepted"
     ]
-    if not eligible_ids:
-        raise Builder2TournamentError("builder2_tournament_no_valid_candidate")
-    best_id = eligible_ids[0]
-    best_record = _candidate_rank_record(state, best_id)
-    for cid in eligible_ids[1:]:
-        record = _candidate_rank_record(state, cid)
-        if compare_candidate_rankings(record, best_record) > 0:
-            best_id = cid
-            best_record = record
-    return best_id
+    if eligible_ids:
+        best_id = eligible_ids[0]
+        best_record = _candidate_rank_record(state, best_id)
+        for cid in eligible_ids[1:]:
+            record = _candidate_rank_record(state, cid)
+            if compare_candidate_rankings(record, best_record) > 0:
+                best_id = cid
+                best_record = record
+        return best_id
+
+    accepted = [
+        cand
+        for cand in state["candidates"].values()
+        if cand.get("validationStatus") == "accepted"
+    ]
+    judged = [cand for cand in accepted if cand.get("judgmentId")]
+    if judged and len(judged) == len(accepted):
+        raise Builder2TournamentError("builder2_tournament_no_eligible_candidate")
+    raise Builder2TournamentError("builder2_tournament_no_valid_candidate")
 
 
 def _round_record(state: Dict[str, Any], round_index: int) -> Dict[str, Any]:
@@ -350,8 +365,9 @@ def _run_creator_and_judge_for_assignment(
     if cand_rec.get("judgmentId"):
         return
 
-    judgment_id = f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
     try:
+        assert_judge_contract_available(state)
+        judgment_id = f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
         judgment_id, judgment, total, scores = judge_candidate(
             product_name=product_name,
             product_description=product_description,
@@ -367,6 +383,17 @@ def _run_creator_and_judge_for_assignment(
         )
     except Builder2TournamentError as exc:
         reason = str(exc.args[0] if exc.args else "builder2_judge_invalid_response")
+        if reason.startswith(JUDGE_SYSTEMIC_FAILURE_CODE) or is_judge_contract_circuit_breaker_tripped(state):
+            if not reason.startswith(JUDGE_SYSTEMIC_FAILURE_CODE):
+                breaker = state.get("judgeContractCircuitBreaker") or {}
+                paths = breaker.get("repeatedFieldPaths") or []
+                trip_reason = breaker.get("trippedReason") or "contract_failure"
+                exc = Builder2TournamentError(
+                    f"{JUDGE_SYSTEMIC_FAILURE_CODE}:{trip_reason}:{','.join(paths[:8])}"
+                )
+            record_judge_process_contract_failure(state, exc)
+            save_tournament_state(str(state.get("jobId") or ""), state)
+            raise exc
         record_process_failure_tag(state, reason)
         diagnostics = (state.get("judgeDiagnosticsByCandidate") or {}).get(candidate_id, {})
         logger.info(
@@ -582,6 +609,9 @@ def run_builder2_tournament(
             if is_creator_contract_circuit_breaker_tripped(state):
                 logger.error("BUILDER2_CREATOR_CONTRACT_CIRCUIT_BREAKER stoppingRemainingCreators=true")
                 break
+            if is_judge_contract_circuit_breaker_tripped(state):
+                logger.error("BUILDER2_JUDGE_CONTRACT_CIRCUIT_BREAKER stoppingRemainingJudges=true")
+                break
             for attempt in range(1, attempts_per + 1):
                 _run_creator_and_judge_for_assignment(
                     state=state,
@@ -644,6 +674,13 @@ def run_builder2_tournament(
             f"{SYSTEMIC_FAILURE_CODE}:{(state.get('creatorContractCircuitBreaker') or {}).get('trippedReason', 'contract_failure')}"
         )
         record_process_contract_failure(state, exc)
+        save_tournament_state(job_id, state)
+        raise exc
+    if is_judge_contract_circuit_breaker_tripped(state):
+        exc = Builder2TournamentError(
+            f"{JUDGE_SYSTEMIC_FAILURE_CODE}:{(state.get('judgeContractCircuitBreaker') or {}).get('trippedReason', 'contract_failure')}"
+        )
+        record_judge_process_contract_failure(state, exc)
         save_tournament_state(job_id, state)
         raise exc
     winner_id = state.get("winnerCandidateId")

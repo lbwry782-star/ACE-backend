@@ -26,7 +26,15 @@ from engine.builder2_tournament_contracts import (
     require_dict,
     require_non_empty_str,
 )
-from engine.builder2_methodology_validation import validate_judge_methodology
+from engine.builder2_judge_core_contract import (
+    filter_judge_structural_errors,
+    is_judge_structural_repair_field,
+)
+from engine.builder2_judge_normalization import normalize_judge_candidate
+from engine.builder2_methodology_validation import (
+    collect_judge_methodology_structural_errors,
+    validate_judge_methodology,
+)
 from engine.builder2_tournament_llm import extract_responses_output_text, parse_json_object
 from engine.builder2_tournament_metrics import MetricsTimer, record_judge_unavailable, record_model_call
 from engine.builder2_tournament_prompts import (
@@ -40,7 +48,12 @@ logger = logging.getLogger(__name__)
 JUDGE_CONFIDENCE_MIN = 0.0
 JUDGE_CONFIDENCE_MAX = 1.0
 
-_CREATIVE_RETRY_FIELDS = frozenset()
+_CREATIVE_RETRY_FIELDS = frozenset(
+    {
+        "verbalLayerAssessment.notes",
+        "headlineNecessityAssessment.notes",
+    }
+)
 
 
 def _utc_now_iso() -> str:
@@ -72,6 +85,7 @@ def _failure_field(exc: Builder2TournamentError) -> Optional[str]:
         "builder2_judge_schema_invalid:",
         "builder2_judge_score_invalid:",
         "builder2_judge_validation_failed:",
+        "builder2_judge_coherence_violation:",
     )
     for p in prefix:
         if msg.startswith(p):
@@ -183,9 +197,15 @@ def validate_judge_response(
     judgment: Dict[str, Any],
     *,
     candidate_id: str,
+    candidate: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
 ) -> Tuple[Dict[str, Any], int, Dict[str, int]]:
-    normalized = normalize_judge_raw(judgment, candidate_id=candidate_id)
+    normalized, _resolved = normalize_judge_candidate(
+        judgment,
+        candidate_id=candidate_id,
+        candidate=candidate,
+        base_normalizer=normalize_judge_raw,
+    )
 
     if normalized.get("schemaVersion") != JUDGMENT_SCHEMA_VERSION:
         _raise_judge_error("builder2_judge_schema_invalid", field="schemaVersion")
@@ -254,22 +274,133 @@ def validate_judge_response(
         out["disqualifiers"] = ["ineligible_without_reason"]
 
     validate_judge_purity(out)
-    validate_judge_methodology(out, compatibility_mode=compatibility_mode)
+    validate_judge_methodology(out, candidate=candidate, compatibility_mode=compatibility_mode)
     return out, total, scores
+
+
+def _append_judge_structural_collect(errors: List[str], exc: Builder2TournamentError) -> None:
+    code = _failure_code(exc)
+    field = _failure_field(exc)
+    if not _is_structural_repairable(code, field):
+        return
+    msg = str(exc.args[0] if exc.args else code)
+    if msg not in errors:
+        errors.append(msg)
+
+
+def collect_judge_structural_errors(
+    judgment: Dict[str, Any],
+    *,
+    candidate_id: str,
+    candidate: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+    job_id: str = "",
+    tournament_id: str = "",
+) -> List[str]:
+    errors: List[str] = []
+    normalized, _resolved = normalize_judge_candidate(
+        judgment,
+        candidate_id=candidate_id,
+        candidate=candidate,
+        base_normalizer=normalize_judge_raw,
+    )
+
+    def run(check: Any) -> None:
+        try:
+            check()
+        except Builder2TournamentError as exc:
+            _append_judge_structural_collect(errors, exc)
+
+    if normalized.get("schemaVersion") != JUDGMENT_SCHEMA_VERSION:
+        errors.append("builder2_judge_schema_invalid:schemaVersion")
+
+    cid = str(normalized.get("candidateId") or "").strip()
+    if cid != candidate_id:
+        errors.append("builder2_judge_validation_failed:candidateId")
+
+    if not isinstance(normalized.get("eligible"), bool):
+        errors.append("builder2_judge_schema_invalid:eligible")
+
+    disqualifiers = normalized.get("disqualifiers")
+    if not isinstance(disqualifiers, list):
+        errors.append("builder2_judge_schema_invalid:disqualifiers")
+
+    original_scores = judgment.get("scores") if isinstance(judgment.get("scores"), dict) else {}
+    if (
+        "total" in original_scores
+        or "totalScore" in original_scores
+        or "totalScore" in judgment
+        or "total" in judgment
+    ):
+        errors.append("builder2_judge_schema_invalid:scores.total")
+
+    scores_raw = normalized.get("scores")
+    if not isinstance(scores_raw, dict):
+        errors.append("builder2_judge_schema_invalid:scores")
+    else:
+        if "total" in scores_raw or "totalScore" in scores_raw:
+            errors.append("builder2_judge_schema_invalid:scores.total")
+        unknown = [key for key in scores_raw if key not in JUDGE_SCORE_RANGES]
+        if unknown:
+            errors.append("builder2_judge_schema_invalid:scores")
+        for name in JUDGE_SCORE_RANGES:
+            if name not in scores_raw:
+                errors.append(f"builder2_judge_schema_invalid:scores.{name}")
+            else:
+                try:
+                    _coerce_score_value(scores_raw.get(name), field=name)
+                except Builder2TournamentError as exc:
+                    _append_judge_structural_collect(errors, exc)
+
+    run(lambda: require_non_empty_str(normalized.get("verdict"), field="verdict"))
+    strengths = normalized.get("strengths")
+    weaknesses = normalized.get("weaknesses")
+    if not isinstance(strengths, list):
+        errors.append("builder2_judge_schema_invalid:strengths")
+    if not isinstance(weaknesses, list):
+        errors.append("builder2_judge_schema_invalid:weaknesses")
+    run(lambda: require_non_empty_str(normalized.get("prototypeQualityComparison"), field="prototypeQualityComparison"))
+    try:
+        _normalize_confidence(normalized.get("confidence"))
+    except Builder2TournamentError as exc:
+        _append_judge_structural_collect(errors, exc)
+
+    errors.extend(
+        collect_judge_methodology_structural_errors(
+            normalized,
+            candidate=candidate,
+            compatibility_mode=compatibility_mode,
+        )
+    )
+    unique = filter_judge_structural_errors(list(dict.fromkeys(errors)))
+    logger.info(
+        "BUILDER2_JUDGE_STRUCTURAL_ERRORS_COLLECTED jobId=%s tournamentId=%s candidateId=%s count=%s paths=%s",
+        job_id or "(none)",
+        tournament_id or "(none)",
+        candidate_id or "(none)",
+        len(unique),
+        ",".join(item.split(":", 1)[-1] for item in unique[:12]),
+    )
+    return unique
 
 
 def _is_structural_repairable(code: str, field: Optional[str]) -> bool:
     if code in {
         "builder2_judge_schema_invalid",
         "builder2_judge_score_invalid",
-        "builder2_judge_validation_failed",
     }:
-        return field not in _CREATIVE_RETRY_FIELDS
+        return True
+    if code == "builder2_judge_validation_failed":
+        return is_judge_structural_repair_field(field)
     return False
 
 
 def _is_clean_retryable(code: str, field: Optional[str]) -> bool:
     if code == "builder2_judge_purity_violation":
+        return True
+    if code == "builder2_judge_coherence_violation":
+        return True
+    if code == "builder2_judge_validation_failed" and field in _CREATIVE_RETRY_FIELDS:
         return True
     return False
 
@@ -431,9 +562,15 @@ def judge_candidate(
     last_exc: Optional[Builder2TournamentError] = None
     last_parsed: Dict[str, Any] = {}
     response_text = ""
+    collected_structural_failures: List[str] = []
 
     for phase in ("normal", "repair", "retry"):
         if phase == "repair":
+            if state is not None:
+                from engine.builder2_judge_circuit_breaker import is_judge_contract_circuit_breaker_tripped
+
+                if is_judge_contract_circuit_breaker_tripped(state):
+                    break
             if last_exc is None or not _is_structural_repairable(_failure_code(last_exc), _failure_field(last_exc)):
                 continue
             repair_attempted = True
@@ -452,7 +589,7 @@ def judge_candidate(
                 candidate=candidate,
                 candidate_id=candidate_id,
                 invalid_output=last_parsed,
-                validation_failures=[str(last_exc.args[0])],
+                validation_failures=collected_structural_failures or [str(last_exc.args[0])],
             )
             call_type = "repair"
         elif phase == "retry":
@@ -520,6 +657,7 @@ def judge_candidate(
             judgment, total, scores = validate_judge_response(
                 parsed,
                 candidate_id=candidate_id,
+                candidate=candidate,
                 compatibility_mode=compatibility_mode,
             )
             _write_judge_diagnostics(
@@ -556,6 +694,24 @@ def judge_candidate(
         except Builder2TournamentError as exc:
             last_exc = exc
             retry_rule = _failure_rule(exc) or _failure_field(exc)
+            code = _failure_code(exc)
+            field = _failure_field(exc)
+            if state is not None and phase in {"normal", "repair"}:
+                from engine.builder2_judge_circuit_breaker import (
+                    detect_false_boolean_misclassification,
+                    record_judge_contract_failure,
+                )
+
+                paths = [field or str(exc.args[0])]
+                if collected_structural_failures:
+                    paths = [item.split(":", 1)[-1] for item in collected_structural_failures]
+                record_judge_contract_failure(
+                    state,
+                    candidate_id=candidate_id,
+                    error_paths=paths,
+                    after_repair=(phase == "repair"),
+                    false_boolean_misclassified=detect_false_boolean_misclassification(paths),
+                )
             _log_judge_failure(
                 job_id=job_id,
                 tournament_id=tournament_id,
@@ -604,6 +760,14 @@ def judge_candidate(
                     exc.args[0],
                 )
             if phase == "normal" and _is_structural_repairable(code, field):
+                collected_structural_failures = collect_judge_structural_errors(
+                    last_parsed,
+                    candidate_id=candidate_id,
+                    candidate=candidate,
+                    compatibility_mode=compatibility_mode,
+                    job_id=job_id,
+                    tournament_id=tournament_id,
+                )
                 continue
             if phase in {"normal", "repair"} and _is_clean_retryable(code, field):
                 continue

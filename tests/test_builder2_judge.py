@@ -240,14 +240,16 @@ class TestValidNegativeJudgment(unittest.TestCase):
                     "candidateId": "c1",
                     "eligible": False,
                     "validationStatus": "accepted",
+                    "judgmentId": "j1",
                     "totalScore": 95,
                     "tieScores": {},
                     "completedAt": "2026-01-01T00:00:00+00:00",
                 }
             }
         }
-        with self.assertRaises(Builder2TournamentError):
+        with self.assertRaises(Builder2TournamentError) as ctx:
             select_global_winner(state)
+        self.assertEqual(ctx.exception.args[0], "builder2_tournament_no_eligible_candidate")
 
 
 class TestJudgePurity(unittest.TestCase):

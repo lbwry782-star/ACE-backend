@@ -577,35 +577,90 @@ def collect_creator_methodology_structural_errors(
     return list(dict.fromkeys(errors))
 
 
+def _validate_judge_verbal_layer(
+    judgment: Dict[str, Any],
+    *,
+    candidate: Optional[Dict[str, Any]] = None,
+    errors: Optional[List[str]] = None,
+) -> None:
+    from engine.builder2_judge_core_contract import (
+        VERBAL_ASSESSMENT_BOOLEAN_FIELDS,
+        VALID_VERBAL_APPLICABILITY,
+        resolve_creator_verbal_decision,
+        resolve_verbal_applicability,
+    )
+
+    def fail(field: str, code: str = "builder2_judge_validation_failed") -> None:
+        if errors is not None:
+            msg = f"{code}:{field}"
+            if msg not in errors:
+                errors.append(msg)
+            return
+        _raise(code, field=field)
+
+    verbal_raw = judgment.get("verbalLayerAssessment")
+    if not isinstance(verbal_raw, dict):
+        fail("verbalLayerAssessment", code="builder2_judge_schema_invalid")
+        return
+
+    creator_decision = resolve_creator_verbal_decision(candidate)
+    applicability = resolve_verbal_applicability(verbal_raw, creator_verbal_decision=creator_decision)
+    if applicability not in VALID_VERBAL_APPLICABILITY:
+        fail("verbalLayerAssessment.applicability")
+        return
+
+    verbal = dict(verbal_raw)
+    if verbal.get("applicability") != applicability:
+        verbal["applicability"] = applicability
+
+    if applicability == "available":
+        for key in VERBAL_ASSESSMENT_BOOLEAN_FIELDS:
+            value = verbal.get(key)
+            if not isinstance(value, bool):
+                fail(f"verbalLayerAssessment.{key}", code="builder2_judge_schema_invalid")
+        if any(verbal.get(key) is False for key in VERBAL_ASSESSMENT_BOOLEAN_FIELDS):
+            if not str(verbal.get("notes") or "").strip():
+                fail("verbalLayerAssessment.notes")
+        elif not str(verbal.get("notes") or "").strip():
+            fail("verbalLayerAssessment.notes")
+    else:
+        for key in VERBAL_ASSESSMENT_BOOLEAN_FIELDS:
+            value = verbal.get(key)
+            if value is not None and not isinstance(value, bool):
+                fail(f"verbalLayerAssessment.{key}", code="builder2_judge_schema_invalid")
+        if not str(verbal.get("notes") or "").strip():
+            fail("verbalLayerAssessment.notes")
+
+    judgment["verbalLayerAssessment"] = verbal
+
+
 def _validate_judge_methodology_coherence(judgment: Dict[str, Any]) -> None:
     verbal = judgment.get("verbalLayerAssessment") or {}
     headline = judgment.get("headlineNecessityAssessment") or {}
     eligible = judgment.get("eligible") is True
-    weaknesses = judgment.get("weaknesses") or []
-    disqualifiers = judgment.get("disqualifiers") or []
 
-    if verbal.get("keywordBornFromVisual") is False:
-        if eligible and not weaknesses and not disqualifiers:
-            _raise("builder2_judge_validation_failed", field="verbalLayerAssessment.keywordBornFromVisual")
-
-    if verbal.get("twoMeaningsReinforceEachOther") is False and eligible:
+    if eligible and any(
+        verbal.get(key) is False
+        for key in ("keywordBornFromVisual", "visualMeaningIsClear", "strategicMeaningIsClear", "twoMeaningsReinforceEachOther")
+    ):
         if not str(verbal.get("notes") or "").strip():
-            _raise("builder2_judge_validation_failed", field="verbalLayerAssessment.notes")
+            _raise("builder2_judge_coherence_violation", field="verbalLayerAssessment.notes")
 
     silent_score = int((judgment.get("scores") or {}).get("silentVisualClarity") or 0)
     if headline.get("visualWouldWorkWithoutHeadline") is False and silent_score >= 12 and eligible:
         if not str(headline.get("notes") or "").strip():
-            _raise("builder2_judge_validation_failed", field="headlineNecessityAssessment.notes")
+            _raise("builder2_judge_coherence_violation", field="headlineNecessityAssessment.notes")
 
 
-def validate_judge_methodology(
+def collect_judge_methodology_structural_errors(
     judgment: Dict[str, Any],
     *,
+    candidate: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
-) -> None:
+) -> List[str]:
+    errors: List[str] = []
     if compatibility_mode and not uses_full_methodology(judgment):
-        logger.info("BUILDER2_METHODOLOGY_COMPATIBILITY_MODE role=judge")
-        return
+        return errors
 
     for key in (
         "problemAdvantageAssessment",
@@ -616,29 +671,53 @@ def validate_judge_methodology(
         "visualFamilyAssessment",
         "silentMovieAssessment",
     ):
-        _require_text(judgment.get(key), field=key, code="builder2_judge_validation_failed")
+        try:
+            _require_text(judgment.get(key), field=key, code="builder2_judge_validation_failed")
+        except Builder2TournamentError as exc:
+            msg = str(exc.args[0] if exc.args else f"builder2_judge_validation_failed:{key}")
+            if msg not in errors:
+                errors.append(msg)
 
-    verbal = _require_dict(
-        judgment.get("verbalLayerAssessment"),
-        field="verbalLayerAssessment",
-        code="builder2_judge_validation_failed",
-    )
-    for key in ("keywordBornFromVisual", "visualMeaningIsClear", "strategicMeaningIsClear", "twoMeaningsReinforceEachOther"):
-        _require_bool(verbal.get(key), field=f"verbalLayerAssessment.{key}", code="builder2_judge_validation_failed")
-    _require_text(verbal.get("notes"), field="verbalLayerAssessment.notes", code="builder2_judge_validation_failed")
+    _validate_judge_verbal_layer(judgment, candidate=candidate, errors=errors)
 
-    headline = _require_dict(
-        judgment.get("headlineNecessityAssessment"),
-        field="headlineNecessityAssessment",
-        code="builder2_judge_validation_failed",
+    headline = judgment.get("headlineNecessityAssessment")
+    if not isinstance(headline, dict):
+        errors.append("builder2_judge_validation_failed:headlineNecessityAssessment")
+    else:
+        headline_needed = headline.get("headlineNeeded")
+        if headline_needed is None and isinstance(headline.get("headlineRecommended"), bool):
+            headline_needed = headline.get("headlineRecommended")
+        if not isinstance(headline_needed, bool):
+            errors.append("builder2_judge_validation_failed:headlineNecessityAssessment.headlineNeeded")
+        if not isinstance(headline.get("visualWouldWorkWithoutHeadline"), bool):
+            errors.append("builder2_judge_validation_failed:headlineNecessityAssessment.visualWouldWorkWithoutHeadline")
+        if not str(headline.get("notes") or "").strip():
+            errors.append("builder2_judge_validation_failed:headlineNecessityAssessment.notes")
+
+    return list(dict.fromkeys(errors))
+
+
+def validate_judge_methodology(
+    judgment: Dict[str, Any],
+    *,
+    candidate: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+) -> None:
+    if compatibility_mode and not uses_full_methodology(judgment):
+        logger.info("BUILDER2_METHODOLOGY_COMPATIBILITY_MODE role=judge")
+        return
+
+    errors = collect_judge_methodology_structural_errors(
+        judgment,
+        candidate=candidate,
+        compatibility_mode=compatibility_mode,
     )
-    _require_bool(headline.get("headlineNeeded"), field="headlineNecessityAssessment.headlineNeeded", code="builder2_judge_validation_failed")
-    _require_bool(
-        headline.get("visualWouldWorkWithoutHeadline"),
-        field="headlineNecessityAssessment.visualWouldWorkWithoutHeadline",
-        code="builder2_judge_validation_failed",
-    )
-    _require_text(headline.get("notes"), field="headlineNecessityAssessment.notes", code="builder2_judge_validation_failed")
+    if errors:
+        first = errors[0]
+        if ":" in first:
+            code, field = first.split(":", 1)
+            _raise(code, field=field)
+        _raise("builder2_judge_validation_failed", field=first)
 
     _validate_judge_methodology_coherence(judgment)
     logger.info("BUILDER2_JUDGE_METHODOLOGY_VALIDATED")
