@@ -102,6 +102,31 @@ def _prototype_application(prototype_id: str) -> Dict[str, Any]:
     return apps.get(prototype_id, {})
 
 
+def realistic_core_candidate_extras(prototype_id: str, *, strategy: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Production-like Creator core without redundant analytical duplicate objects."""
+    identity = methodology_strategy_identity_for(strategy or methodology_strategy_extras())
+    app = _prototype_application(prototype_id)
+    return {
+        "methodologyVersion": METHODOLOGY_VERSION,
+        **identity,
+        "visualMechanism": "Closing distance makes strategic closeness visible through one human gesture.",
+        "verbalPotential": {
+            "decision": "not_needed",
+            "reason": "The visible closing gesture communicates closeness without a headline.",
+        },
+        "runwayFeasibility": {
+            "fitsSevenSeconds": True,
+            "requiresImpossibleMorphing": False,
+            "requiresSubtleUnseenInference": False,
+        },
+        "creatorReport": {
+            "silentVerification": "The closing distance is visible without sound.",
+            "puritySelfCheck": True,
+        },
+        **app,
+    }
+
+
 def methodology_candidate_extras(prototype_id: str, *, strategy: Dict[str, Any] | None = None) -> Dict[str, Any]:
     identity = methodology_strategy_identity_for(strategy or methodology_strategy_extras())
     return {

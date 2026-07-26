@@ -32,14 +32,10 @@ from engine.builder2_tournament_contracts import (
 
 logger = logging.getLogger(__name__)
 
-_PROTOTYPE_APPLICATION_FIELDS: Dict[str, str] = {
-    "winning_card": "winningCardApplication",
-    "summer_fan": "summerFanApplication",
-    "forgot": "forgotApplication",
-    "greenpeace_essential_pairing": "essentialPairingApplication",
-    "closest": "closestApplication",
-    "think_small": "thinkSmallApplication",
-}
+from engine.builder2_creator_core_contract import (
+    PROTOTYPE_APPLICATION_FIELDS as _PROTOTYPE_APPLICATION_FIELDS,
+    VALID_VERBAL_DECISIONS,
+)
 
 _PLAYING_CARD_SURFACE_MARKERS = ("playing card", "card symbol", "playing-card")
 
@@ -210,15 +206,25 @@ def _validate_visual_family_for_structure(candidate: Dict[str, Any]) -> None:
     structure = str(candidate.get("structureType") or "")
     if structure not in VALID_STRUCTURE_TYPES:
         return
+    if structure == "variation_montage":
+        _validate_montage_visual_family(candidate)
+        consistency = candidate.get("visualFamilyConsistency")
+        if isinstance(consistency, dict) and consistency.get("derivedByServer"):
+            return
+    consistency = candidate.get("visualFamilyConsistency")
+    if isinstance(consistency, dict) and consistency.get("derivedByServer"):
+        logger.info("BUILDER2_VISUAL_FAMILY_VALIDATED prototypeId=%s derived=true", candidate.get("prototypeId"))
+        return
     family = _require_dict(
         candidate.get("visualFamilyConsistency"),
         field="visualFamilyConsistency",
         code="builder2_creator_validation_failed",
     )
-    for key in ("familyDefinition", "recurringMotif", "whyAllVariationsBelongTogether", "sideBySideFrameTest"):
+    for key in ("familyDefinition", "recurringMotif"):
         _require_text(family.get(key), field=f"visualFamilyConsistency.{key}", code="builder2_creator_validation_failed")
     if structure == "variation_montage":
-        _validate_montage_visual_family(candidate)
+        for key in ("whyAllVariationsBelongTogether", "sideBySideFrameTest"):
+            _require_text(family.get(key), field=f"visualFamilyConsistency.{key}", code="builder2_creator_validation_failed")
     logger.info("BUILDER2_VISUAL_FAMILY_VALIDATED prototypeId=%s", candidate.get("prototypeId"))
 
 
@@ -242,39 +248,46 @@ def validate_creator_methodology(
     if candidate.get("visualMechanism") == report.get("mechanismScanSummary"):
         _raise("builder2_creator_validation_failed", field="visualMechanism")
 
-    essence = _require_dict(candidate.get("essenceExtreme"), field="essenceExtreme", code="builder2_creator_validation_failed")
-    for key in ("advantageEssence", "extremePhysicalExpression", "whyChosenObjectsFollowFromTheEssence"):
-        _require_text(essence.get(key), field=f"essenceExtreme.{key}", code="builder2_creator_validation_failed")
+    essence = candidate.get("essenceExtreme")
+    if not (isinstance(essence, dict) and essence.get("derivedByServer")):
+        essence_obj = _require_dict(essence, field="essenceExtreme", code="builder2_creator_validation_failed")
+        for key in ("advantageEssence", "extremePhysicalExpression", "whyChosenObjectsFollowFromTheEssence"):
+            _require_text(essence_obj.get(key), field=f"essenceExtreme.{key}", code="builder2_creator_validation_failed")
 
     _validate_visual_family_for_structure(candidate)
 
-    participation = _require_dict(
-        candidate.get("participationMechanism"),
-        field="participationMechanism",
-        code="builder2_creator_validation_failed",
-    )
-    for key in ("whoOrWhatParticipates", "visibleAction", "visibleCauseAndEffect"):
-        _require_text(participation.get(key), field=f"participationMechanism.{key}", code="builder2_creator_validation_failed")
-    _require_bool(
-        participation.get("notMerelyAReadyMadeResult"),
-        field="participationMechanism.notMerelyAReadyMadeResult",
-        code="builder2_creator_validation_failed",
-    )
+    participation = candidate.get("participationMechanism")
+    if not (isinstance(participation, dict) and participation.get("derivedByServer")):
+        participation_obj = _require_dict(
+            participation,
+            field="participationMechanism",
+            code="builder2_creator_validation_failed",
+        )
+        for key in ("whoOrWhatParticipates", "visibleAction", "visibleCauseAndEffect"):
+            _require_text(participation_obj.get(key), field=f"participationMechanism.{key}", code="builder2_creator_validation_failed")
+        _require_bool(
+            participation_obj.get("notMerelyAReadyMadeResult"),
+            field="participationMechanism.notMerelyAReadyMadeResult",
+            code="builder2_creator_validation_failed",
+        )
     logger.info("BUILDER2_PARTICIPATION_VALIDATED prototypeId=%s", assigned_prototype_id)
 
     anchor = _require_dict(candidate.get("visualAnchor"), field="visualAnchor", code="builder2_creator_schema_invalid")
-    _require_bool(
-        anchor.get("appearsBeforeOrDuringResolution"),
-        field="visualAnchor.appearsBeforeOrDuringResolution",
-        code="builder2_creator_schema_invalid",
-    )
-    separation = _require_dict(
-        candidate.get("anchorPunchlineSeparation"),
-        field="anchorPunchlineSeparation",
-        code="builder2_creator_validation_failed",
-    )
-    for key in ("anchor", "resolutionOrPunchline", "whyTheyAreNotTheSameThing"):
-        _require_text(separation.get(key), field=f"anchorPunchlineSeparation.{key}", code="builder2_creator_validation_failed")
+    if anchor.get("appearsBeforeOrDuringResolution") is not True and not _normalize_text(anchor.get("visualAnchorTiming")):
+        _require_bool(
+            anchor.get("appearsBeforeOrDuringResolution"),
+            field="visualAnchor.appearsBeforeOrDuringResolution",
+            code="builder2_creator_schema_invalid",
+        )
+    separation = candidate.get("anchorPunchlineSeparation")
+    if not (isinstance(separation, dict) and separation.get("derivedByServer")):
+        separation_obj = _require_dict(
+            separation,
+            field="anchorPunchlineSeparation",
+            code="builder2_creator_validation_failed",
+        )
+        for key in ("anchor", "resolutionOrPunchline"):
+            _require_text(separation_obj.get(key), field=f"anchorPunchlineSeparation.{key}", code="builder2_creator_validation_failed")
 
     runway = _require_dict(candidate.get("runwayFeasibility"), field="runwayFeasibility", code="builder2_creator_schema_invalid")
     _require_bool(runway.get("fitsSevenSeconds"), field="runwayFeasibility.fitsSevenSeconds", code="builder2_creator_schema_invalid")
@@ -297,21 +310,32 @@ def validate_creator_methodology(
     if verbal is None:
         _raise("builder2_creator_validation_failed", field="verbalPotential")
     verbal_obj = _require_dict(verbal, field="verbalPotential", code="builder2_creator_validation_failed")
-    for key in ("keywordOrKeyPhrase", "visualMeaning", "strategicMeaning"):
-        _require_text(verbal_obj.get(key), field=f"verbalPotential.{key}", code="builder2_creator_validation_failed")
-    if _require_bool(
-        verbal_obj.get("bornFromVisibleMechanism"),
-        field="verbalPotential.bornFromVisibleMechanism",
-        code="builder2_creator_validation_failed",
-    ) is not True:
-        _raise("builder2_creator_validation_failed", field="verbalPotential.bornFromVisibleMechanism")
+    decision = _normalize_text(verbal_obj.get("decision")).lower()
+    if decision not in VALID_VERBAL_DECISIONS:
+        if _normalize_text(verbal_obj.get("keywordOrKeyPhrase")):
+            decision = "available"
+        else:
+            decision = "not_needed"
+        verbal_obj = dict(verbal_obj)
+        verbal_obj["decision"] = decision
+    if decision == "available":
+        for key in ("keywordOrKeyPhrase", "visualMeaning", "strategicMeaning"):
+            _require_text(verbal_obj.get(key), field=f"verbalPotential.{key}", code="builder2_creator_validation_failed")
+        if _require_bool(
+            verbal_obj.get("bornFromVisibleMechanism"),
+            field="verbalPotential.bornFromVisibleMechanism",
+            code="builder2_creator_validation_failed",
+        ) is not True:
+            _raise("builder2_creator_validation_failed", field="verbalPotential.bornFromVisibleMechanism")
+    else:
+        _require_text(verbal_obj.get("reason"), field="verbalPotential.reason", code="builder2_creator_validation_failed")
     if verbal_obj.get("headlineMayBeUnnecessary") is not None:
         _require_bool(
             verbal_obj.get("headlineMayBeUnnecessary"),
             field="verbalPotential.headlineMayBeUnnecessary",
             code="builder2_creator_validation_failed",
         )
-    logger.info("BUILDER2_VERBAL_POTENTIAL_VALIDATED prototypeId=%s", assigned_prototype_id)
+    logger.info("BUILDER2_VERBAL_POTENTIAL_VALIDATED prototypeId=%s decision=%s", assigned_prototype_id, decision)
 
     source = candidate.get("sourceConcept") or {"type": "native_builder2"}
     source_obj = _require_dict(source, field="sourceConcept", code="builder2_creator_schema_invalid")
@@ -507,26 +531,6 @@ def collect_creator_methodology_structural_errors(
     require_text_field(report.get("mechanismScanSummary"), "creatorReport.mechanismScanSummary")
     require_text_field(candidate.get("visualMechanism"), "visualMechanism")
 
-    essence = require_dict_field(candidate.get("essenceExtreme"), "essenceExtreme")
-    for key in ("advantageEssence", "extremePhysicalExpression", "whyChosenObjectsFollowFromTheEssence"):
-        require_text_field(essence.get(key), f"essenceExtreme.{key}")
-
-    participation = require_dict_field(candidate.get("participationMechanism"), "participationMechanism")
-    for key in ("whoOrWhatParticipates", "visibleAction", "visibleCauseAndEffect"):
-        require_text_field(participation.get(key), f"participationMechanism.{key}")
-
-    anchor = require_dict_field(candidate.get("visualAnchor"), "visualAnchor")
-    if anchor and anchor.get("appearsBeforeOrDuringResolution") is not True:
-        _append_methodology_structural(
-            errors,
-            "builder2_creator_schema_invalid",
-            "visualAnchor.appearsBeforeOrDuringResolution",
-        )
-
-    separation = require_dict_field(candidate.get("anchorPunchlineSeparation"), "anchorPunchlineSeparation")
-    for key in ("anchor", "resolutionOrPunchline", "whyTheyAreNotTheSameThing"):
-        require_text_field(separation.get(key), f"anchorPunchlineSeparation.{key}")
-
     runway = require_dict_field(candidate.get("runwayFeasibility"), "runwayFeasibility")
     for bool_key in ("fitsSevenSeconds", "requiresImpossibleMorphing", "requiresSubtleUnseenInference"):
         if bool_key not in runway:
@@ -538,8 +542,20 @@ def collect_creator_methodology_structural_errors(
     elif not isinstance(verbal, dict):
         _append_methodology_structural(errors, "builder2_creator_validation_failed", "verbalPotential")
     else:
-        for key in ("keywordOrKeyPhrase", "visualMeaning", "strategicMeaning"):
-            require_text_field(verbal.get(key), f"verbalPotential.{key}")
+        decision = _normalize_text(verbal.get("decision")).lower()
+        if decision not in VALID_VERBAL_DECISIONS:
+            decision = "available" if _normalize_text(verbal.get("keywordOrKeyPhrase")) else "not_needed"
+        if decision == "available":
+            for key in ("keywordOrKeyPhrase", "visualMeaning", "strategicMeaning"):
+                require_text_field(verbal.get(key), f"verbalPotential.{key}")
+        else:
+            require_text_field(verbal.get("reason"), "verbalPotential.reason")
+
+    structure = str(candidate.get("structureType") or "")
+    if structure == "variation_montage":
+        for key in ("visualFamilyId", "visualFamilyDefinition", "recurringMotif", "sceneVariations"):
+            if key not in candidate or candidate.get(key) in (None, "", []):
+                _append_methodology_structural(errors, "builder2_creator_validation_failed", key)
 
     _validate_prototype_application(
         candidate,

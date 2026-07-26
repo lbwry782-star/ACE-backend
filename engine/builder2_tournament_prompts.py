@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
+from engine.builder2_creator_core_contract import build_creator_required_keys_prompt_text
 from engine.builder2_methodology_contract import (
     CREATIVE_STAGE_ORDER,
     INTEREST_PRIORITY_ORDER,
@@ -156,28 +157,17 @@ def build_creator_prompt(
         f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n\n"
         f"Return one JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}, "
         f"methodologyVersion={METHODOLOGY_VERSION!r}. No Markdown fences. No prose.\n"
-        "Required keys: strategyFoundationId, prototypeId, prototypeMethodApplied, coreCreativeMechanism, conceptSummary, visualMechanism, "
-        "visualParallelType, visualFamily, structureType, "
-        "essenceExtreme, visualFamilyConsistency, participationMechanism, anchorPunchlineSeparation, sourceConcept, "
-        "sevenSecondStructure{beginning,development,resolution}, "
-        "visualAnchor{description,whyEssential,appearsBeforeOrDuringResolution}, "
-        "silentVerification{understandableWithoutAudio,explanation}, "
-        "runwayFeasibility{mainSubject,mainAction,location,openingFrame,continuityRisk,generationRisks,"
-        "whyRunwayShouldUnderstand,fitsSevenSeconds,requiresImpossibleMorphing,requiresSubtleUnseenInference}, "
-        "editingPlan{purpose,reveal,pacing}, verbalPotential, creatorReport{problemPerception,relativeAdvantage,"
-        "mechanismScanSummary,goldPrototypeUsed,visualParallelType,whyParallelExpressesAdvantage,"
-        "whyRunwayShouldUnderstand,creatorPuritySelfCheck}.\n"
-        "Include the prototype-specific application object required for the assigned prototype when applicable.\n"
-        "Include replacementCheck when visualParallelType=replacement.\n"
-        "Include contextCollisionSafeguard when visualParallelType=context_collision.\n"
-        "Include sceneVariations (2–4 items) when structureType=variation_montage.\n"
+        f"{build_creator_required_keys_prompt_text(prototype_id=prototype.prototype_id)}\n"
         f"strategyFoundationId must be exactly {strategy_id!r}.\n"
         f"prototypeId must be exactly {prototype.prototype_id!r}.\n"
         f"structureType must be exactly one of: {structure_types}.\n"
         f"continuityRisk must be exactly one of: {continuity_risks}.\n"
         f"visualParallelType must be exactly one of: {visual_parallel_types}. "
         'If using "other", explain the parallel clearly in creatorReport.whyParallelExpressesAdvantage.\n'
-        "silentVerification.understandableWithoutAudio must be JSON boolean true, not a string.\n"
+        "verbalPotential.decision must be exactly one of: available, not_needed, not_found.\n"
+        "When decision=available provide keywordOrKeyPhrase, visualMeaning, strategicMeaning, and bornFromVisibleMechanism=true.\n"
+        "When decision=not_needed or not_found provide a short reason.\n"
+        "creatorReport.silentVerification may be a string explanation OR use silentVerification{understandableWithoutAudio,explanation}.\n"
         "runwayFeasibility.generationRisks must be a JSON array (empty array allowed when risk is low).\n"
         f"creatorReport.goldPrototypeUsed must be {prototype.prototype_id!r} or {prototype.display_name!r}.\n"
         "Hebrew free-text fields are allowed. Enum fields must use the exact canonical English tokens above.\n"

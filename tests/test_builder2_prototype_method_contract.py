@@ -239,8 +239,8 @@ class TestStructuralRepairAggregation(unittest.TestCase):
     def test_three_missing_fields_collected(self) -> None:
         cand = _candidate("closest")
         cand.pop("closestApplication", None)
-        cand["verbalPotential"] = {}
-        cand["essenceExtreme"] = {}
+        cand.pop("visualMechanism", None)
+        cand["runwayFeasibility"] = {}
         errors = collect_creator_structural_errors(
             cand,
             assigned_prototype_id="closest",
@@ -250,8 +250,8 @@ class TestStructuralRepairAggregation(unittest.TestCase):
         self.assertGreaterEqual(len(errors), 3)
         joined = " ".join(errors)
         self.assertIn("closestApplication", joined)
-        self.assertIn("verbalPotential", joined)
-        self.assertIn("essenceExtreme", joined)
+        self.assertIn("visualMechanism", joined)
+        self.assertIn("runwayFeasibility", joined)
 
     def test_one_repair_receives_all_paths(self) -> None:
         repair_prompts: List[str] = []
@@ -264,7 +264,8 @@ class TestStructuralRepairAggregation(unittest.TestCase):
                 return _candidate("closest")
             bad = _candidate("closest")
             bad.pop("closestApplication", None)
-            bad["verbalPotential"] = {}
+            bad.pop("visualMechanism", None)
+            bad["runwayFeasibility"] = {}
             return bad
 
         generate_creator_candidate(

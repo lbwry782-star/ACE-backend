@@ -248,11 +248,15 @@ def validate_creator_candidate(
     tournament_id: str = "",
     candidate_id: str = "",
 ) -> Dict[str, Any]:
-    normalized = normalize_creator_raw(
+    from engine.builder2_creator_normalization import normalize_creator_candidate
+
+    normalized, _resolved = normalize_creator_candidate(
         candidate,
         assigned_prototype_id=assigned_prototype_id,
         prototype_display_name=prototype_display_name,
+        strategy_foundation=strategy_foundation,
         compatibility_mode=compatibility_mode,
+        base_normalizer=normalize_creator_raw,
     )
     if normalized.get("planningFailure"):
         _raise_creator_error("builder2_creator_validation_failed", field="planningFailure")
@@ -266,16 +270,15 @@ def validate_creator_candidate(
     except Builder2TournamentError as exc:
         _raise_creator_error("builder2_creator_schema_invalid", field=_field_from_error(exc))
 
-    for field in (
-        "prototypeMethodApplied",
-        "coreCreativeMechanism",
-        "conceptSummary",
-        "visualFamily",
-    ):
-        try:
-            require_non_empty_str(normalized.get(field), field=field)
-        except Builder2TournamentError as exc:
-            _raise_creator_error("builder2_creator_schema_invalid", field=_field_from_error(exc))
+    try:
+        require_non_empty_str(normalized.get("coreCreativeMechanism"), field="coreCreativeMechanism")
+    except Builder2TournamentError as exc:
+        _raise_creator_error("builder2_creator_schema_invalid", field=_field_from_error(exc))
+
+    try:
+        require_non_empty_str(normalized.get("visualMechanism"), field="visualMechanism")
+    except Builder2TournamentError as exc:
+        _raise_creator_error("builder2_creator_validation_failed", field=_field_from_error(exc))
 
     vpt = require_non_empty_str(normalized.get("visualParallelType"), field="visualParallelType")
     if vpt not in VALID_VISUAL_PARALLEL_TYPES:
@@ -305,16 +308,19 @@ def validate_creator_candidate(
         except Builder2TournamentError as exc:
             _raise_creator_error("builder2_creator_validation_failed", field=_field_from_error(exc))
 
-    try:
-        silent = require_dict(normalized.get("silentVerification"), field="silentVerification")
-    except Builder2TournamentError as exc:
-        _raise_creator_error("builder2_creator_schema_invalid", field=_field_from_error(exc))
-    if silent.get("understandableWithoutAudio") is not True:
-        _raise_creator_error("builder2_creator_schema_invalid", field="silentVerification.understandableWithoutAudio")
-    try:
-        require_non_empty_str(silent.get("explanation"), field="silentVerification.explanation")
-    except Builder2TournamentError as exc:
-        _raise_creator_error("builder2_creator_validation_failed", field=_field_from_error(exc))
+    silent = normalized.get("silentVerification")
+    report = normalized.get("creatorReport") if isinstance(normalized.get("creatorReport"), dict) else {}
+    silent_text = str(report.get("silentVerification") or "").strip()
+    if isinstance(silent, dict):
+        if silent.get("understandableWithoutAudio") is not True:
+            _raise_creator_error("builder2_creator_schema_invalid", field="silentVerification.understandableWithoutAudio")
+        try:
+            require_non_empty_str(silent.get("explanation"), field="silentVerification.explanation")
+        except Builder2TournamentError as exc:
+            _raise_creator_error("builder2_creator_validation_failed", field=_field_from_error(exc))
+        silent_text = str(silent.get("explanation") or "").strip()
+    elif not silent_text:
+        _raise_creator_error("builder2_creator_schema_invalid", field="creatorReport.silentVerification")
 
     try:
         runway = require_dict(normalized.get("runwayFeasibility"), field="runwayFeasibility")
@@ -337,16 +343,6 @@ def validate_creator_candidate(
         runway["generationRisks"] = []
 
     try:
-        editing = require_dict(normalized.get("editingPlan"), field="editingPlan")
-    except Builder2TournamentError as exc:
-        _raise_creator_error("builder2_creator_schema_invalid", field=_field_from_error(exc))
-    for key in ("purpose", "reveal", "pacing"):
-        try:
-            require_non_empty_str(editing.get(key), field=f"editingPlan.{key}")
-        except Builder2TournamentError as exc:
-            _raise_creator_error("builder2_creator_validation_failed", field=_field_from_error(exc))
-
-    try:
         report = require_dict(normalized.get("creatorReport"), field="creatorReport")
     except Builder2TournamentError as exc:
         _raise_creator_error("builder2_creator_schema_invalid", field=_field_from_error(exc))
@@ -361,6 +357,11 @@ def validate_creator_candidate(
     ):
         try:
             require_non_empty_str(report.get(key), field=f"creatorReport.{key}")
+        except Builder2TournamentError as exc:
+            _raise_creator_error("builder2_creator_validation_failed", field=_field_from_error(exc))
+    if not silent_text and not isinstance(silent, dict):
+        try:
+            require_non_empty_str(report.get("silentVerification"), field="creatorReport.silentVerification")
         except Builder2TournamentError as exc:
             _raise_creator_error("builder2_creator_validation_failed", field=_field_from_error(exc))
     report_vpt = require_non_empty_str(report.get("visualParallelType"), field="creatorReport.visualParallelType")
@@ -467,14 +468,18 @@ def collect_creator_structural_errors(
     candidate_id: str = "",
     prototype_id: str = "",
 ) -> List[str]:
+    from engine.builder2_creator_core_contract import filter_creator_owned_structural_errors
+    from engine.builder2_creator_normalization import normalize_creator_candidate
     from engine.builder2_methodology_validation import collect_creator_methodology_structural_errors
 
     errors: List[str] = []
-    normalized = normalize_creator_raw(
+    normalized, _resolved = normalize_creator_candidate(
         candidate,
         assigned_prototype_id=assigned_prototype_id,
         prototype_display_name=prototype_display_name,
+        strategy_foundation=strategy_foundation,
         compatibility_mode=compatibility_mode,
+        base_normalizer=normalize_creator_raw,
     )
 
     def run(check: Any) -> None:
@@ -488,9 +493,13 @@ def collect_creator_structural_errors(
     if normalized.get("schemaVersion") != CANDIDATE_SCHEMA_VERSION:
         errors.append("builder2_creator_schema_invalid:schemaVersion")
 
+    run(lambda: require_non_empty_str(normalized.get("coreCreativeMechanism"), field="coreCreativeMechanism"))
+    try:
+        require_non_empty_str(normalized.get("visualMechanism"), field="visualMechanism")
+    except Builder2TournamentError as exc:
+        _append_structural_collect(errors, exc)
+
     run(lambda: require_non_empty_str(normalized.get("prototypeId"), field="prototypeId"))
-    for field in ("prototypeMethodApplied", "coreCreativeMechanism", "conceptSummary", "visualFamily"):
-        run(lambda f=field: require_non_empty_str(normalized.get(f), field=f))
 
     vpt = str(normalized.get("visualParallelType") or "")
     if vpt not in VALID_VISUAL_PARALLEL_TYPES:
@@ -514,12 +523,14 @@ def collect_creator_structural_errors(
             run(lambda k=key: require_non_empty_str(anchor.get(k), field=f"visualAnchor.{k}"))
 
     silent = normalized.get("silentVerification")
-    if not isinstance(silent, dict):
-        errors.append("builder2_creator_schema_invalid:silentVerification")
-    elif silent.get("understandableWithoutAudio") is not True:
-        errors.append("builder2_creator_schema_invalid:silentVerification.understandableWithoutAudio")
-    else:
-        run(lambda: require_non_empty_str(silent.get("explanation"), field="silentVerification.explanation"))
+    report = normalized.get("creatorReport")
+    if isinstance(silent, dict):
+        if silent.get("understandableWithoutAudio") is not True:
+            errors.append("builder2_creator_schema_invalid:silentVerification.understandableWithoutAudio")
+        else:
+            run(lambda: require_non_empty_str(silent.get("explanation"), field="silentVerification.explanation"))
+    elif not (isinstance(report, dict) and str(report.get("silentVerification") or "").strip()):
+        errors.append("builder2_creator_schema_invalid:creatorReport.silentVerification")
 
     runway = normalized.get("runwayFeasibility")
     if not isinstance(runway, dict):
@@ -532,13 +543,6 @@ def collect_creator_structural_errors(
             errors.append("builder2_creator_schema_invalid:runwayFeasibility.continuityRisk")
         if runway.get("generationRisks") is not None and not isinstance(runway.get("generationRisks"), list):
             errors.append("builder2_creator_schema_invalid:runwayFeasibility.generationRisks")
-
-    editing = normalized.get("editingPlan")
-    if not isinstance(editing, dict):
-        errors.append("builder2_creator_schema_invalid:editingPlan")
-    else:
-        for key in ("purpose", "reveal", "pacing"):
-            run(lambda k=key: require_non_empty_str(editing.get(k), field=f"editingPlan.{k}"))
 
     report = normalized.get("creatorReport")
     if not isinstance(report, dict):
@@ -563,7 +567,7 @@ def collect_creator_structural_errors(
             compatibility_mode=compatibility_mode,
         )
     )
-    unique = list(dict.fromkeys(errors))
+    unique = filter_creator_owned_structural_errors(list(dict.fromkeys(errors)))
     logger.info(
         "BUILDER2_CREATOR_STRUCTURAL_ERRORS_COLLECTED jobId=%s tournamentId=%s candidateId=%s prototypeId=%s count=%s paths=%s",
         job_id or "(none)",
@@ -951,6 +955,18 @@ def generate_creator_candidate(
                     prototype_id,
                     exc.args[0],
                 )
+                if state is not None:
+                    from engine.builder2_creator_circuit_breaker import record_creator_contract_failure
+
+                    paths = [_failure_field(exc) or str(exc.args[0])]
+                    if collected_structural_failures:
+                        paths = [item.split(":", 1)[-1] for item in collected_structural_failures]
+                    record_creator_contract_failure(
+                        state,
+                        prototype_id=prototype_id,
+                        error_paths=paths,
+                        after_repair=True,
+                    )
             if phase == "retry":
                 logger.error(
                     "BUILDER2_CREATOR_RETRY_FAILED candidateId=%s prototypeId=%s reason=%s",

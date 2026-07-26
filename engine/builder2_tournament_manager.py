@@ -4,6 +4,7 @@ Builder2 tournament manager — deterministic orchestration (never a model role)
 from __future__ import annotations
 
 import logging
+import os
 import random
 import time
 import uuid
@@ -11,6 +12,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from engine.builder2_creator import generate_creator_candidate
+from engine.builder2_creator_circuit_breaker import (
+    SYSTEMIC_FAILURE_CODE,
+    assert_creator_contract_available,
+    is_creator_contract_circuit_breaker_tripped,
+    record_process_contract_failure,
+)
 from engine.builder2_judge import judge_candidate
 from engine.builder2_prototypes import require_prototype
 from engine.builder2_runway_config import builder2_runway_generation_mode, resolve_builder2_runway_video_model
@@ -278,6 +285,7 @@ def _run_creator_and_judge_for_assignment(
             round_index,
             attempt_number,
         )
+        assert_creator_contract_available(state)
         candidate_id = f"cand-{round_index}-{prototype_id}-{attempt_number}-{uuid.uuid4().hex[:8]}"
         try:
             candidate_id, candidate = generate_creator_candidate(
@@ -296,6 +304,10 @@ def _run_creator_and_judge_for_assignment(
             )
         except Builder2TournamentError as exc:
             reason = str(exc.args[0] if exc.args else "builder2_creator_invalid_candidate")
+            if reason.startswith(SYSTEMIC_FAILURE_CODE) or is_creator_contract_circuit_breaker_tripped(state):
+                record_process_contract_failure(state, exc)
+                save_tournament_state(str(state.get("jobId") or ""), state)
+                raise
             record_process_failure_tag(state, reason)
             diagnostics = (state.get("creatorDiagnosticsByCandidate") or {}).get(candidate_id, {})
             logger.info(
@@ -529,6 +541,15 @@ def run_builder2_tournament(
         )
         save_tournament_state(job_id, state)
 
+    if _creator_preflight_enabled():
+        return run_builder2_creator_preflight(
+            job_id=job_id,
+            product_name=product_name,
+            product_description=product_description,
+            content_language=language,
+            llm_client=llm_client,
+        )
+
     round_index = max(int(state.get("currentRound") or 0), 1)
     state["currentRound"] = round_index
 
@@ -557,6 +578,9 @@ def run_builder2_tournament(
         save_tournament_state(job_id, state)
 
         for prototype_id in deck:
+            if is_creator_contract_circuit_breaker_tripped(state):
+                logger.error("BUILDER2_CREATOR_CONTRACT_CIRCUIT_BREAKER stoppingRemainingCreators=true")
+                break
             for attempt in range(1, attempts_per + 1):
                 _run_creator_and_judge_for_assignment(
                     state=state,
@@ -614,6 +638,13 @@ def run_builder2_tournament(
 
     state["status"] = "tournament_complete"
     state["lastCompletedStep"] = "tournament_complete"
+    if is_creator_contract_circuit_breaker_tripped(state):
+        exc = Builder2TournamentError(
+            f"{SYSTEMIC_FAILURE_CODE}:{(state.get('creatorContractCircuitBreaker') or {}).get('trippedReason', 'contract_failure')}"
+        )
+        record_process_contract_failure(state, exc)
+        save_tournament_state(job_id, state)
+        raise exc
     winner_id = state.get("winnerCandidateId")
     if not winner_id:
         winner_id = select_global_winner(state)
@@ -679,6 +710,78 @@ def run_builder2_tournament(
     normalized["winnerCandidateId"] = winner_id
     normalized["completionReason"] = state.get("completionReason")
     return normalized
+
+
+def _creator_preflight_enabled() -> bool:
+    raw = (os.environ.get("BUILDER2_CREATOR_PREFLIGHT_ONLY") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def run_builder2_creator_preflight(
+    *,
+    job_id: str,
+    product_name: str,
+    product_description: str,
+    content_language: str,
+    llm_client: Optional[Any] = None,
+    prototype_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Controlled Creator-contract preflight: 1 Strategy + 1 Creator (+ optional bounded repair).
+    Never calls Judge, Winner Development, Runway, or FFmpeg.
+    """
+    language = content_language
+    runway_model = resolve_builder2_runway_video_model()
+    runway_mode = builder2_runway_generation_mode(runway_model)
+    active_ids = resolve_builder2_active_prototype_ids()
+    assigned = prototype_id or active_ids[0]
+    state = new_tournament_state(
+        job_id=job_id,
+        language=language,
+        active_prototype_ids=[assigned],
+        random_seed=f"preflight-{job_id}",
+    )
+    state["methodologyVersion"] = METHODOLOGY_VERSION
+    state["methodologyCompatibilityMode"] = False
+    state["preflightMode"] = True
+    ensure_metrics(state)
+    save_tournament_state(job_id, state)
+
+    state["strategyFoundation"] = _generate_strategy(
+        product_name=product_name,
+        product_description=product_description,
+        language=language,
+        llm_client=llm_client,
+        state=state,
+    )
+    save_tournament_state(job_id, state)
+
+    candidate_id, candidate = generate_creator_candidate(
+        product_name=product_name,
+        product_description=product_description,
+        language=language,
+        strategy_foundation=state["strategyFoundation"],
+        prototype_id=assigned,
+        round_index=1,
+        attempt_number=1,
+        runway_mode=runway_mode,
+        llm_client=llm_client,
+        state=state,
+    )
+    metrics = dict(state.get("metrics") or {})
+    return {
+        "ok": True,
+        "preflight": True,
+        "jobId": job_id,
+        "prototypeId": assigned,
+        "candidateId": candidate_id,
+        "validationStatus": "accepted",
+        "topLevelKeys": sorted(candidate.keys()),
+        "metrics": metrics,
+        "totalReasoningCalls": int(metrics.get("strategyCalls") or 0)
+        + int(metrics.get("creatorCalls") or 0)
+        + int(metrics.get("creatorRepairCalls") or 0),
+    }
 
 
 def _round_is_complete(state: Dict[str, Any], round_index: int) -> bool:

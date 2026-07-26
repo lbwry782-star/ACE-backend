@@ -242,15 +242,14 @@ class TestCreativeOrderRealEnforcement(unittest.TestCase):
         self.assertEqual(state["metrics"].get("creatorRetryCalls"), 1)
         self.assertEqual(state["metrics"].get("creatorRepairCalls", 0), 0)
 
-    def test_missing_verbal_potential_triggers_structural_repair(self) -> None:
+    def test_missing_verbal_potential_is_normalized_without_repair(self) -> None:
         calls = {"count": 0}
         state = {"jobId": "job", "tournamentId": "t1", "metrics": {}}
 
         def llm(**kwargs: Any) -> Dict[str, Any]:
             calls["count"] += 1
             cand = _candidate("closest")
-            if calls["count"] == 1:
-                cand.pop("verbalPotential")
+            cand.pop("verbalPotential")
             return cand
 
         generate_creator_candidate(
@@ -265,8 +264,8 @@ class TestCreativeOrderRealEnforcement(unittest.TestCase):
             llm_client=llm,
             state=state,
         )
-        self.assertEqual(calls["count"], 2)
-        self.assertEqual(state["metrics"].get("creatorRepairCalls"), 1)
+        self.assertEqual(calls["count"], 1)
+        self.assertEqual(state["metrics"].get("creatorRepairCalls", 0), 0)
 
     def test_final_headline_fields_remain_prohibited(self) -> None:
         cand = _candidate("closest")

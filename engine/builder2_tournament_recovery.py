@@ -8,38 +8,106 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
-from engine.builder2_tournament_store import load_tournament_state, tournament_key
+from engine.builder2_tournament_store import load_tournament_state, save_tournament_state, tournament_key
 from engine.video_jobs_redis import QUEUE_KEY, get_redis, job_key
 
 logger = logging.getLogger(__name__)
 
 RECOVERABLE_JOBS_KEY = "ace:builder2:recoverable_jobs"
+RECOVERY_META_KEY_PREFIX = "ace:builder2:recovery_meta:"
 QUEUED_KEY_PREFIX = "ace:builder2:queued:"
 LEASE_KEY_PREFIX = "ace:builder2:lease:"
+
+TERMINAL_JOB_STATUSES = frozenset({"done", "error", "failed", "cancelled", "recovery_exhausted"})
+TERMINAL_TOURNAMENT_STATUSES = frozenset({"failed", "cancelled", "recovery_exhausted"})
+
+def _recovery_max_attempts() -> int:
+    raw = (os.environ.get("BUILDER2_RECOVERY_MAX_AUTOMATIC_ATTEMPTS") or "2").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 2
+
+
+def _recovery_ttl_seconds() -> int:
+    raw = (os.environ.get("BUILDER2_RECOVERY_TTL_SECONDS") or "604800").strip()
+    try:
+        return max(3600, int(raw))
+    except ValueError:
+        return 604800
+
+
+def _recovery_meta_key(job_id: str) -> str:
+    return f"{RECOVERY_META_KEY_PREFIX}{(job_id or '').strip()}"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_recovery_meta(job_id: str) -> Dict[str, Any]:
+    jid = (job_id or "").strip()
+    if not jid:
+        return {}
+    if _use_memory_recovery:
+        return dict(_memory_recovery_meta.get(jid) or {})
+    raw = get_redis().get(_recovery_meta_key(jid))
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_recovery_meta(job_id: str, meta: Dict[str, Any]) -> None:
+    jid = (job_id or "").strip()
+    if not jid:
+        return
+    if _use_memory_recovery:
+        _memory_recovery_meta[jid] = dict(meta)
+        return
+    get_redis().set(_recovery_meta_key(jid), json.dumps(meta), ex=_recovery_ttl_seconds() * 2)
+
+
+def _clear_recovery_meta(job_id: str) -> None:
+    jid = (job_id or "").strip()
+    if not jid:
+        return
+    if _use_memory_recovery:
+        _memory_recovery_meta.pop(jid, None)
+    else:
+        get_redis().delete(_recovery_meta_key(jid))
+
 
 _memory_recoverable: set[str] = set()
 _memory_queued: set[str] = set()
 _memory_leases: Dict[str, Dict[str, Any]] = {}
+_memory_recovery_meta: Dict[str, Dict[str, Any]] = {}
 _use_memory_recovery = False
 
 
 def enable_memory_recovery() -> None:
-    global _use_memory_recovery, _memory_recoverable, _memory_queued, _memory_leases
+    global _use_memory_recovery, _memory_recoverable, _memory_queued, _memory_leases, _memory_recovery_meta
     _use_memory_recovery = True
     _memory_recoverable = set()
     _memory_queued = set()
     _memory_leases = {}
+    _memory_recovery_meta = {}
 
 
 def disable_memory_recovery() -> None:
-    global _use_memory_recovery, _memory_recoverable, _memory_queued, _memory_leases
+    global _use_memory_recovery, _memory_recoverable, _memory_queued, _memory_leases, _memory_recovery_meta
     _use_memory_recovery = False
     _memory_recoverable = set()
     _memory_queued = set()
     _memory_leases = {}
+    _memory_recovery_meta = {}
 
 
 def _lease_seconds() -> int:
@@ -72,6 +140,10 @@ def register_recoverable_job(job_id: str) -> None:
     jid = (job_id or "").strip()
     if not jid:
         return
+    meta = _load_recovery_meta(jid)
+    if not meta.get("recoveryFirstRegisteredAt"):
+        meta["recoveryFirstRegisteredAt"] = _utc_now_iso()
+    _save_recovery_meta(jid, meta)
     if _use_memory_recovery:
         _memory_recoverable.add(jid)
     else:
@@ -87,6 +159,8 @@ def remove_recoverable_job(job_id: str) -> None:
         _memory_recoverable.discard(jid)
     else:
         get_redis().srem(RECOVERABLE_JOBS_KEY, jid)
+    _clear_recovery_meta(jid)
+    expire_job_lease(jid)
 
 
 def is_job_queued(job_id: str) -> bool:
@@ -187,6 +261,38 @@ def expire_job_lease(job_id: str) -> None:
         get_redis().delete(_lease_key(jid))
 
 
+def _recovery_is_stale(job_id: str, meta: Dict[str, Any]) -> bool:
+    first = meta.get("recoveryFirstRegisteredAt") or meta.get("lastRecoveryAttemptAt")
+    if not first:
+        return False
+    try:
+        first_dt = datetime.fromisoformat(str(first).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    age = datetime.now(timezone.utc) - first_dt.astimezone(timezone.utc)
+    return age.total_seconds() > _recovery_ttl_seconds()
+
+
+def _mark_recovery_exhausted(job_id: str, *, reason: str) -> None:
+    jid = (job_id or "").strip()
+    meta = _load_recovery_meta(jid)
+    meta["recoveryTerminalReason"] = reason
+    _save_recovery_meta(jid, meta)
+    remove_recoverable_job(jid)
+    state = load_tournament_state(jid)
+    if state is not None:
+        state["status"] = "recovery_exhausted"
+        state["error"] = reason
+        save_tournament_state(jid, state)
+    data = _read_job_hash(jid)
+    if data:
+        data["status"] = "recovery_exhausted"
+        if _use_memory_recovery:
+            _memory_job_hashes[jid] = data
+        else:
+            get_redis().hset(job_key(jid), mapping=data)
+
+
 def _job_is_recoverable(job_id: str) -> bool:
     jid = (job_id or "").strip()
     if not jid or not resolve_builder2_tournament_enabled():
@@ -196,20 +302,33 @@ def _job_is_recoverable(job_id: str) -> bool:
             return False
     elif not get_redis().sismember(RECOVERABLE_JOBS_KEY, jid):
         return False
+    meta = _load_recovery_meta(jid)
+    if _recovery_is_stale(jid, meta):
+        logger.info("BUILDER2_TOURNAMENT_RECOVERY_STALE_REMOVED jobId=%s", jid)
+        _mark_recovery_exhausted(jid, reason="recovery_stale_ttl")
+        return False
+    if meta.get("recoveryTerminalReason"):
+        logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED_TERMINAL jobId=%s reason=%s", jid, meta["recoveryTerminalReason"])
+        return False
     if not load_tournament_state(jid):
         return False
     data = _read_job_hash(jid)
     if not data:
         return False
     status = (data.get("status") or "").strip()
-    if status in {"done", "error"}:
-        return False
-    if status == "error" and (data.get("error") or "").strip() not in {"", "worker_shutdown_during_job"}:
+    if status in TERMINAL_JOB_STATUSES:
+        logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED_TERMINAL jobId=%s status=%s", jid, status)
         return False
     state = load_tournament_state(jid) or {}
-    if state.get("status") == "failed":
+    if state.get("status") in TERMINAL_TOURNAMENT_STATUSES:
+        logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED_TERMINAL jobId=%s tournamentStatus=%s", jid, state.get("status"))
         return False
     if state.get("lastCompletedStep") in {"winner_plan_complete", "runway_complete", "done"}:
+        return False
+    attempts = int(meta.get("recoveryAttemptCount") or 0)
+    if attempts >= _recovery_max_attempts():
+        logger.info("BUILDER2_TOURNAMENT_RECOVERY_EXHAUSTED jobId=%s attempts=%s", jid, attempts)
+        _mark_recovery_exhausted(jid, reason="recovery_exhausted")
         return False
     return True
 
@@ -241,6 +360,10 @@ def requeue_recoverable_job(job_id: str) -> bool:
     if not mark_job_queued(jid):
         logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=queue_dedupe", jid)
         return False
+    meta = _load_recovery_meta(jid)
+    meta["recoveryAttemptCount"] = int(meta.get("recoveryAttemptCount") or 0) + 1
+    meta["lastRecoveryAttemptAt"] = _utc_now_iso()
+    _save_recovery_meta(jid, meta)
     if _use_memory_recovery:
         pass
     else:
