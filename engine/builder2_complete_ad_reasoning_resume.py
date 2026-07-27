@@ -8,6 +8,7 @@ Environment:
   BUILDER2_COMPLETE_AD_REASONING_RESUME_JOB_ID
   BUILDER2_COMPLETE_AD_REASONING_RESUME_MAX_CALLS (default 3)
   BUILDER2_COMPLETE_AD_REASONING_RESUME_STOP_BEFORE_MEDIA (default true)
+  BUILDER2_COMPLETE_AD_REASONING_RESUME_ALLOW_WINNER_HEADLINE_REPAIR (default false)
 """
 from __future__ import annotations
 
@@ -73,6 +74,7 @@ from engine.builder2_winner_preservation_contract import (
     build_server_owned_winner_source_reference,
     offline_revalidate_parsed_winner_response,
 )
+from engine.builder2_winner_headline_repair import attempt_winner_headline_repair_after_offline_failure
 from engine.video_jobs_redis import redis_configured, video_job_get_raw
 
 logger = logging.getLogger(__name__)
@@ -783,23 +785,61 @@ def run_controlled_complete_ad_reasoning_resume(
                 report["winnerDevelopmentAccepted"] = True
             except Builder2TournamentError as exc:
                 reason = str(exc.args[0] if exc.args else "builder2_winner_offline_revalidation_failed")
-                _persist_resumable_failure(
+                allow_headline_repair = _env_bool(
+                    "BUILDER2_COMPLETE_AD_REASONING_RESUME_ALLOW_WINNER_HEADLINE_REPAIR",
+                    False,
+                )
+                metrics_before_winner = _reasoning_call_snapshot(state)
+                repair_outcome = attempt_winner_headline_repair_after_offline_failure(
                     state,
                     job_id=job_id,
-                    failure_stage="winner_development",
-                    failure_reason=reason,
+                    winner_candidate_id=winner_id,
+                    prototype_id=_clean(winner_rec.get("prototypeId")),
+                    product_name=product_name,
+                    language=language,
+                    strategy_foundation=strategy,
+                    winning_candidate=winning_candidate,
+                    winning_judgment=winning_judgment,
+                    offline_failure_reason=reason,
+                    allow_repair=allow_headline_repair,
+                    remaining_call_budget=max(0, budget.max_calls - budget.total_this_run),
+                    compatibility_mode=compatibility_mode,
+                    llm_client=llm_client,
+                    tournament_id=_clean(state.get("tournamentId")),
+                    on_eligible_before_call=lambda: budget.assert_can_call("builder2_winner"),
                 )
-                return _emit_resume_stage_failure(
-                    report,
-                    state,
-                    job_id=job_id,
-                    failure_stage="winner_development",
-                    failure_reason=reason,
-                    budget=budget,
-                    reasoning_role="builder2_winner",
-                    redis_mutated=True,
-                    lease_acquired=lease_acquired,
+                _sync_budget_from_metrics_delta(
+                    budget,
+                    baseline=metrics_before_winner,
+                    state=state,
                 )
+                if repair_outcome.get("accepted"):
+                    winner_reused = True
+                    report["winnerDevelopmentAccepted"] = True
+                    report["winnerHeadlineRepairAttempted"] = True
+                    report["winnerHeadlineRepairAccepted"] = True
+                else:
+                    failure_reason = str(repair_outcome.get("failure_reason") or reason)
+                    if repair_outcome.get("attempted"):
+                        report["winnerHeadlineRepairAttempted"] = True
+                        report["winnerHeadlineRepairAccepted"] = False
+                    _persist_resumable_failure(
+                        state,
+                        job_id=job_id,
+                        failure_stage="winner_development",
+                        failure_reason=failure_reason,
+                    )
+                    return _emit_resume_stage_failure(
+                        report,
+                        state,
+                        job_id=job_id,
+                        failure_stage="winner_development",
+                        failure_reason=failure_reason,
+                        budget=budget,
+                        reasoning_role="builder2_winner",
+                        redis_mutated=True,
+                        lease_acquired=lease_acquired,
+                    )
         else:
             budget.assert_can_call("builder2_winner")
             ReasoningResumeIsolationGuard.assert_safe_before_winner_development()

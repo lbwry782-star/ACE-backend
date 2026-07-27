@@ -356,6 +356,39 @@ def normalize_builder2_winner_downstream(
     return out
 
 
+def validate_builder2_winner_headline_composition_pure(plan: Dict[str, Any]) -> None:
+    """
+    Pure Builder2 headline composition and keyword validation — no media side effects.
+    """
+    apply_builder2_headline_composition(plan)
+    decision = get_headline_decision(plan)
+    if not headline_decision_requires_headline(decision):
+        return
+    headline_rem = (plan.get("headline") or "").strip()
+    core_kw = (plan.get("headlineCoreKeyword") or "").strip()
+    if not headline_rem or not core_kw:
+        _headline_invalid("headline_or_keyword")
+    from engine.video_planning import (
+        _headline_contains_core_keyword,
+        _headline_depends_on_fixed_phrase,
+        _headline_remainder_word_count,
+        _is_weak_industry_keyword,
+        _keyword_depends_on_headline_phrase,
+        _MAX_HEADLINE_REMAINDER_WORDS,
+    )
+
+    if _headline_remainder_word_count(headline_rem) > _MAX_HEADLINE_REMAINDER_WORDS:
+        _headline_invalid("remainder_word_count")
+    if _headline_depends_on_fixed_phrase(headline_rem):
+        _headline_invalid("phrase_dependent_headline")
+    if len(core_kw.split()) != 1 or _is_weak_industry_keyword(core_kw):
+        _headline_invalid("invalid_keyword")
+    if _keyword_depends_on_headline_phrase(headline_rem, core_kw):
+        _headline_invalid("phrase_dependent_keyword")
+    if not _headline_contains_core_keyword(headline_rem, core_kw):
+        _headline_invalid("keyword_not_in_headline")
+
+
 def validate_builder2_pre_runway(plan: Dict[str, Any]) -> None:
     structure = (plan.get("structureType") or "").strip()
     if structure not in {"continuous_event", "variation_montage"}:

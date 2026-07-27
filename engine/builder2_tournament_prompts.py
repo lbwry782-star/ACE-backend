@@ -403,3 +403,54 @@ def build_winner_development_prompt(
         "If preservationReference is returned, it must match the source candidate identity fields.\n"
         'When decision="omit", headline may be empty.\n'
     )
+
+
+def build_winner_headline_repair_prompt(
+    *,
+    product_name: str,
+    language: str,
+    strategy_foundation: Dict[str, Any],
+    winning_candidate: Dict[str, Any],
+    winning_judgment: Dict[str, Any],
+    parsed_winner_plan: Dict[str, Any],
+    validation_failures: List[str],
+) -> str:
+    headline_form = str(parsed_winner_plan.get("headlineForm") or "").strip() or "(unspecified)"
+    headline_decision = parsed_winner_plan.get("headlineDecision")
+    scene_context = {
+        "coreVisualIdea": parsed_winner_plan.get("coreVisualIdea"),
+        "coreCreativeMechanism": parsed_winner_plan.get("coreCreativeMechanism"),
+        "sequence": parsed_winner_plan.get("sequence"),
+        "visualAnchor": parsed_winner_plan.get("visualAnchor"),
+        "videoPrompt": parsed_winner_plan.get("videoPrompt"),
+        "headlineForm": headline_form,
+        "headlineDecision": headline_decision,
+    }
+    return (
+        "You are the Builder2 Winner headline repair role.\n"
+        "Repair ONLY the missing in-scene headline fields for an already accepted Winner plan.\n"
+        "Preserve the existing advertisement exactly.\n"
+        "Do NOT redesign, reinterpret, or replace the creative idea.\n"
+        "Do NOT change the visual sequence, videoPrompt, strategy, mechanism, prototype, or advertising closure.\n"
+        "Do NOT return a complete Winner plan.\n"
+        "Do NOT copy the end-card slogan merely because it exists; the in-scene headline is a separate element.\n"
+        "Do NOT depend on a fixed idiom unless the existing contract already permits it.\n"
+        f"Product name: {product_name or '(empty)'}\n"
+        f"Language: {language}\n"
+        "Fixed strategic foundation:\n"
+        f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n"
+        "Winning Creator candidate:\n"
+        f"{json.dumps(winning_candidate, ensure_ascii=False)}\n"
+        "Winning Judge judgment (headline necessity is authoritative):\n"
+        f"{json.dumps(winning_judgment, ensure_ascii=False)}\n"
+        "Existing parsed Winner plan scene context (preserve unchanged):\n"
+        f"{json.dumps(scene_context, ensure_ascii=False)}\n"
+        "Exact validation failures to fix:\n"
+        + "\n".join(f"- {item}" for item in validation_failures)
+        + "\n\n"
+        "Return one JSON object only with exactly these keys:\n"
+        '- "headline": non-empty remainder text excluding the product name; maximum seven words in the remainder.\n'
+        '- "headlineCoreKeyword": exactly one meaningful word that appears in the headline remainder.\n'
+        "The headline must be understandable in the requested language.\n"
+        "No explanations outside JSON.\n"
+    )
