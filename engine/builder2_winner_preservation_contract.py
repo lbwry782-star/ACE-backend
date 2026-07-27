@@ -360,6 +360,17 @@ def process_winner_development_response(
 
         if not compatibility_mode:
             validate_winner_slogan_preservation(merged, winning_candidate=winning_candidate)
+        from engine.builder2_winner_scene_variations_normalization import (
+            normalize_continuous_event_scene_variations_for_execution,
+        )
+
+        normalize_continuous_event_scene_variations_for_execution(
+            merged,
+            job_id=job_id,
+            tournament_id=tournament_id,
+            candidate_id=str(source_reference.get("sourceCandidateId") or ""),
+            prototype_id=str(source_reference.get("sourcePrototypeId") or ""),
+        )
         return validate_builder2_winner_plan(
             merged,
             winning_candidate=winning_candidate,

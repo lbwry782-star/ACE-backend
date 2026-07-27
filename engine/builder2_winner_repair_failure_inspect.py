@@ -40,6 +40,11 @@ from engine.builder2_winner_plan import (
     _validate_visual_anchor,
     validate_builder2_winner_plan,
 )
+from engine.builder2_winner_scene_variations_normalization import (
+    CONTINUOUS_EVENT_STRUCTURE,
+    describe_scene_variations_metadata,
+    normalize_continuous_event_scene_variations_for_execution,
+)
 from engine.builder2_winner_preservation_contract import (
     PARSED_WINNER_RESPONSE_KEY,
     SERVER_OWNED_WINNER_SOURCE_KEY,
@@ -1031,6 +1036,177 @@ def _derive_concrete_failure_summary(
     }
 
 
+def _non_scene_variations_fingerprint(plan: Dict[str, Any]) -> str:
+    filtered = {
+        key: plan[key]
+        for key in sorted(plan.keys())
+        if key not in _HEADLINE_FIELD_KEYS
+        and key != "headlineDecision"
+        and key != "headlineForm"
+        and key != "sceneVariations"
+    }
+    payload = json.dumps(filtered, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _inspect_continuous_event_scene_variations_normalization(
+    preserved_plan: Dict[str, Any],
+    *,
+    job_id: str,
+    tournament_id: str,
+    candidate_id: str,
+    prototype_id: str,
+) -> Dict[str, Any]:
+    structure = _clean(preserved_plan.get("structureType"))
+    applicable = structure == CONTINUOUS_EVENT_STRUCTURE
+    if not applicable:
+        return {
+            "applicable": False,
+            "keyExisted": False,
+            "originalValueType": None,
+            "originalListCount": None,
+            "normalizedListCount": None,
+            "sequenceAuthoritative": False,
+            "downstreamUsesOriginalSceneVariations": None,
+            "normalizationChangedOtherFields": False,
+            "nonSceneVariationsFingerprintBefore": None,
+            "nonSceneVariationsFingerprintAfter": None,
+        }
+
+    metadata = describe_scene_variations_metadata(preserved_plan)
+    before_fp = _non_scene_variations_fingerprint(preserved_plan)
+    normalized_copy = deepcopy(preserved_plan)
+    normalize_continuous_event_scene_variations_for_execution(
+        normalized_copy,
+        job_id=job_id,
+        tournament_id=tournament_id,
+        candidate_id=candidate_id,
+        prototype_id=prototype_id,
+    )
+    after_fp = _non_scene_variations_fingerprint(normalized_copy)
+    return {
+        "applicable": True,
+        "keyExisted": metadata["keyExisted"],
+        "originalValueType": metadata["originalValueType"],
+        "originalListCount": metadata["originalListCount"],
+        "normalizedListCount": 0,
+        "sequenceAuthoritative": True,
+        "downstreamUsesOriginalSceneVariations": False,
+        "normalizationChangedOtherFields": before_fp != after_fp,
+        "nonSceneVariationsFingerprintBefore": before_fp,
+        "nonSceneVariationsFingerprintAfter": after_fp,
+    }
+
+
+def _replay_offline_after_normalization(
+    *,
+    parsed_plan: Dict[str, Any],
+    preserved_plan: Dict[str, Any],
+    source_reference: Dict[str, Any],
+    winning_candidate: Dict[str, Any],
+    winning_judgment: Dict[str, Any],
+    preservation_snapshot: Dict[str, Any],
+    compatibility_mode: bool,
+    job_id: str,
+    tournament_id: str,
+    candidate_id: str,
+    prototype_id: str,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "offlineWinnerRevalidationAfterNormalizationAttempted": False,
+        "offlineWinnerRevalidationAfterNormalizationAccepted": False,
+        "firstFailureAfterNormalizationStage": None,
+        "firstFailureAfterNormalizationCode": None,
+        "firstFailureAfterNormalizationField": None,
+        "headlineCompositionAttempted": False,
+        "headlineCompositionAccepted": False,
+        "headlineTextDerived": False,
+        "finalWinnerPlanValidOffline": False,
+        "additionalPaidCallRequired": False,
+        "inspectionOpenAICalls": 0,
+        "inspectionRedisMutations": 0,
+    }
+    if _clean(preserved_plan.get("structureType")) != CONTINUOUS_EVENT_STRUCTURE:
+        return result
+
+    result["offlineWinnerRevalidationAfterNormalizationAttempted"] = True
+    try:
+        validated = validate_and_finalize_repaired_winner_plan(
+            deepcopy(parsed_plan),
+            source_reference=source_reference,
+            winning_candidate=winning_candidate,
+            winning_judgment=winning_judgment,
+            preservation_snapshot=preservation_snapshot,
+            compatibility_mode=compatibility_mode,
+            job_id=job_id,
+            tournament_id=tournament_id,
+        )
+        result["offlineWinnerRevalidationAfterNormalizationAccepted"] = True
+        result["headlineCompositionAttempted"] = True
+        result["headlineCompositionAccepted"] = True
+        result["headlineTextDerived"] = bool(_clean(validated.get("headlineText")))
+        result["finalWinnerPlanValidOffline"] = True
+        return result
+    except Builder2TournamentError as exc:
+        normalized_preserved = deepcopy(preserved_plan)
+        normalize_continuous_event_scene_variations_for_execution(
+            normalized_preserved,
+            job_id=job_id,
+            tournament_id=tournament_id,
+            candidate_id=candidate_id,
+            prototype_id=prototype_id,
+        )
+        low_stages = _replay_low_level_winner_plan_validation(
+            normalized_preserved,
+            winning_candidate=winning_candidate,
+            preservation_snapshot=preservation_snapshot,
+            winning_judgment=winning_judgment,
+            compatibility_mode=compatibility_mode,
+        )
+        first_fail = next((stage for stage in low_stages if not stage.get("accepted")), None)
+        if first_fail is not None:
+            result["firstFailureAfterNormalizationStage"] = first_fail.get("stageName")
+            result["firstFailureAfterNormalizationCode"] = first_fail.get("exactSafeErrorCode")
+            result["firstFailureAfterNormalizationField"] = first_fail.get("exactFieldPath")
+            return result
+
+        result["headlineCompositionAttempted"] = True
+        result["firstFailureAfterNormalizationStage"] = "headlineCompositionValidation"
+        result["firstFailureAfterNormalizationCode"] = _exact_error_code(exc)
+        result["firstFailureAfterNormalizationField"] = _safe_failure_field(exc)
+        return result
+    except Builder2WinnerDownstreamError as exc:
+        normalized_preserved = deepcopy(preserved_plan)
+        normalize_continuous_event_scene_variations_for_execution(
+            normalized_preserved,
+            job_id=job_id,
+            tournament_id=tournament_id,
+            candidate_id=candidate_id,
+            prototype_id=prototype_id,
+        )
+        low_stages = _replay_low_level_winner_plan_validation(
+            normalized_preserved,
+            winning_candidate=winning_candidate,
+            preservation_snapshot=preservation_snapshot,
+            winning_judgment=winning_judgment,
+            compatibility_mode=compatibility_mode,
+        )
+        if all(stage.get("accepted") for stage in low_stages):
+            result["headlineCompositionAttempted"] = True
+            result["firstFailureAfterNormalizationStage"] = "headlineCompositionValidation"
+            result["firstFailureAfterNormalizationCode"] = exc.code
+            result["firstFailureAfterNormalizationField"] = (
+                exc.code.split(":", 1)[-1] if ":" in exc.code else exc.code
+            )
+        else:
+            first_fail = next((stage for stage in low_stages if not stage.get("accepted")), None)
+            if first_fail is not None:
+                result["firstFailureAfterNormalizationStage"] = first_fail.get("stageName")
+                result["firstFailureAfterNormalizationCode"] = first_fail.get("exactSafeErrorCode")
+                result["firstFailureAfterNormalizationField"] = first_fail.get("exactFieldPath")
+        return result
+
+
 def _structural_fingerprint(plan: Dict[str, Any]) -> str:
     filtered = {
         key: plan[key]
@@ -1269,6 +1445,16 @@ def inspect_builder2_winner_repair_failure(job_id: str = "") -> Dict[str, Any]:
         required_winner_field_audit: List[Dict[str, Any]] = []
         low_level_validation_stages: List[Dict[str, Any]] = []
         preserved_plan_for_audit: Optional[Dict[str, Any]] = None
+        continuous_event_scene_variations_normalization: Dict[str, Any] = {
+            "applicable": False,
+        }
+        offline_after_normalization: Dict[str, Any] = {
+            "offlineWinnerRevalidationAfterNormalizationAttempted": False,
+            "offlineWinnerRevalidationAfterNormalizationAccepted": False,
+            "additionalPaidCallRequired": False,
+            "inspectionOpenAICalls": 0,
+            "inspectionRedisMutations": 0,
+        }
         if parsed_exists and winner_id and source_reference:
             stages, reproduce_exc, first_failing_stage, first_failing_field, offline_repairable = _reproduce_validation_stages(
                 parsed_plan=parsed_plan,
@@ -1302,6 +1488,26 @@ def inspect_builder2_winner_repair_failure(job_id: str = "") -> Dict[str, Any]:
                     preservation_snapshot=preservation_snapshot,
                     winning_judgment=winning_judgment,
                     compatibility_mode=compatibility_mode,
+                )
+                continuous_event_scene_variations_normalization = _inspect_continuous_event_scene_variations_normalization(
+                    preserved_plan_for_audit,
+                    job_id=jid,
+                    tournament_id=_clean(state.get("tournamentId")),
+                    candidate_id=winner_id or "",
+                    prototype_id=_clean(winner_rec.get("prototypeId")) or "",
+                )
+                offline_after_normalization = _replay_offline_after_normalization(
+                    parsed_plan=parsed_plan,
+                    preserved_plan=preserved_plan_for_audit,
+                    source_reference=source_reference,
+                    winning_candidate=winning_candidate,
+                    winning_judgment=winning_judgment,
+                    preservation_snapshot=preservation_snapshot,
+                    compatibility_mode=compatibility_mode,
+                    job_id=jid,
+                    tournament_id=_clean(state.get("tournamentId")),
+                    candidate_id=winner_id or "",
+                    prototype_id=_clean(winner_rec.get("prototypeId")) or "",
                 )
         else:
             reason = "parsed_winner_or_winner_identity_unavailable"
@@ -1389,6 +1595,8 @@ def inspect_builder2_winner_repair_failure(job_id: str = "") -> Dict[str, Any]:
             "validationStages": stages,
             "requiredWinnerFieldAudit": required_winner_field_audit,
             "lowLevelValidationStages": low_level_validation_stages,
+            "continuousEventSceneVariationsNormalization": continuous_event_scene_variations_normalization,
+            **offline_after_normalization,
             "outerException": outer_code,
             "innermostException": inner_code,
             "exceptionChain": chain,
