@@ -34,6 +34,7 @@ from engine.builder2_tournament_contracts import (
     require_non_empty_str,
 )
 from engine.builder2_tournament_llm import extract_responses_output_text, parse_json_object
+from engine.builder2_reasoning_failure_diagnostics import openai_http_status, parsing_failure_category, safe_exception_message
 from engine.builder2_tournament_metrics import MetricsTimer, record_creator_rejected, record_model_call
 from engine.builder2_tournament_prompts import (
     build_creator_prompt,
@@ -839,12 +840,35 @@ def generate_creator_candidate(
             call_type = "normal"
 
         timer = MetricsTimer()
-        response_text, _response_obj = _invoke_creator_model(
-            prompt=prompt,
-            model=model,
-            llm_client=llm_client,
-            call_type=call_type,
-        )
+        try:
+            response_text, _response_obj = _invoke_creator_model(
+                prompt=prompt,
+                model=model,
+                llm_client=llm_client,
+                call_type=call_type,
+            )
+        except Builder2TournamentError:
+            raise
+        except Exception as exc:
+            http_status = openai_http_status(exc)
+            logger.exception(
+                "BUILDER2_CREATOR_OPENAI_FAILED jobId=%s tournamentId=%s candidateId=%s prototypeId=%s "
+                "roundIndex=%s attempt=%s reasoningRole=builder2_creator model=%s failureStage=openai_call "
+                "exceptionClass=%s httpStatus=%s responseTextPresent=false responseTextChars=0 "
+                "parsingFailureCategory=(none) validationRejectionCode=builder2_creator_openai_failed",
+                job_id,
+                tournament_id,
+                candidate_id,
+                prototype_id,
+                round_index,
+                attempt_number,
+                model,
+                type(exc).__name__,
+                http_status if http_status is not None else "(none)",
+            )
+            raise Builder2TournamentError(
+                f"builder2_creator_openai_failed:{type(exc).__name__}:{safe_exception_message(exc)}"
+            ) from exc
         elapsed = timer.elapsed_ms()
         if state is not None:
             record_model_call(
@@ -1021,6 +1045,26 @@ def generate_creator_candidate(
             )
         record_creator_rejected(state)
     final_reason = str(last_exc.args[0])
+    parse_category = parsing_failure_category(final_reason) or "(none)"
+    logger.error(
+        "BUILDER2_CREATOR_REJECTED jobId=%s tournamentId=%s candidateId=%s prototypeId=%s "
+        "roundIndex=%s attempt=%s reasoningRole=builder2_creator model=%s failureStage=creator_validation "
+        "rejectionCode=%s responseTextPresent=%s responseTextChars=%s parsingFailureCategory=%s "
+        "repairAttempted=%s cleanRetryAttempted=%s",
+        job_id,
+        tournament_id,
+        candidate_id,
+        prototype_id,
+        round_index,
+        attempt_number,
+        model,
+        final_reason,
+        str(bool(response_text)).lower(),
+        len(response_text or ""),
+        parse_category,
+        str(repair_attempted).lower(),
+        str(clean_retry_attempted).lower(),
+    )
     logger.error(
         "BUILDER2_CREATOR_ATTEMPT_INELIGIBLE candidateId=%s prototypeId=%s reason=%s repairAttempted=%s cleanRetryAttempted=%s",
         candidate_id,

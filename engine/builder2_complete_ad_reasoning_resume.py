@@ -35,6 +35,12 @@ from engine.builder2_creator import generate_creator_candidate
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_judge import judge_candidate
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
+from engine.builder2_reasoning_failure_diagnostics import (
+    log_reasoning_resume_failed,
+    openai_http_status,
+    parsing_failure_category,
+    safe_exception_message,
+)
 from engine.builder2_reasoning_resume_guard import ReasoningResumeIsolationGuard
 from engine.builder2_resume_contract import BUILDER2_RESUME_CONTRACT_VERSION
 from engine.builder2_runway_config import builder2_runway_generation_mode, resolve_builder2_runway_video_model
@@ -308,6 +314,53 @@ def _persist_resumable_failure(
     save_tournament_state(job_id, state)
 
 
+def _emit_resume_stage_failure(
+    report: Dict[str, Any],
+    state: Optional[Dict[str, Any]],
+    *,
+    job_id: str,
+    failure_stage: str,
+    failure_reason: str,
+    reasoning_role: str = "",
+    prototype_id: str = "",
+    model: str = "",
+    response_text_present: Optional[bool] = None,
+    response_text_chars: Optional[int] = None,
+    validation_rejection_code: str = "",
+    redis_mutated: bool = False,
+    lease_acquired: bool = False,
+    exception_class: str = "",
+    http_status: Optional[int] = None,
+    with_traceback: bool = False,
+    exc: Optional[BaseException] = None,
+) -> Dict[str, Any]:
+    report["failureReason"] = failure_reason
+    report["failureStage"] = failure_stage
+    tournament_id = _clean((state or {}).get("tournamentId"))
+    log_reasoning_resume_failed(
+        logger,
+        job_id=job_id,
+        tournament_id=tournament_id,
+        prototype_id=prototype_id,
+        reasoning_role=reasoning_role,
+        model=model,
+        failure_stage=failure_stage,
+        failure_reason=failure_reason,
+        event="BUILDER2_COMPLETE_AD_REASONING_RESUME_TERMINAL_FAILURE",
+        exception_class=exception_class,
+        http_status=http_status,
+        response_text_present=response_text_present,
+        response_text_chars=response_text_chars,
+        parsing_failure_category_value=parsing_failure_category(failure_reason) or "",
+        validation_rejection_code=validation_rejection_code or failure_reason,
+        redis_mutated=redis_mutated,
+        lease_released=lease_acquired,
+        with_traceback=with_traceback,
+        exc=exc,
+    )
+    return report
+
+
 def _finalize_stop_before_media(state: Dict[str, Any], *, job_id: str) -> None:
     state["status"] = "paused_for_media_validation"
     state["lastCompletedStep"] = "reasoning_complete"
@@ -342,8 +395,10 @@ def run_controlled_complete_ad_reasoning_resume(
     worker_token = new_worker_token()
     lease_acquired = False
     state: Optional[Dict[str, Any]] = None
+    current_stage = "startup"
 
     try:
+        current_stage = "preconditions"
         if not redis_configured() and tournament_state is None:
             report["failureReason"] = "builder2_complete_ad_reasoning_resume_redis_unconfigured"
             return report
@@ -393,6 +448,7 @@ def run_controlled_complete_ad_reasoning_resume(
 
         if GREENPEACE_PROTOTYPE in missing_creator_prototype_ids(state):
             if not _candidate_id_for_prototype(state, GREENPEACE_PROTOTYPE):
+                current_stage = "creator_generation"
                 budget.assert_can_call("builder2_creator")
                 candidate_id = f"cand-1-{GREENPEACE_PROTOTYPE}-1-{uuid.uuid4().hex[:8]}"
                 try:
@@ -420,9 +476,18 @@ def run_controlled_complete_ad_reasoning_resume(
                         failure_stage="creator_generation",
                         failure_reason=reason,
                     )
-                    report["failureReason"] = reason
-                    report["failureStage"] = "creator_generation"
-                    return report
+                    return _emit_resume_stage_failure(
+                        report,
+                        state,
+                        job_id=job_id,
+                        failure_stage="creator_generation",
+                        failure_reason=reason,
+                        reasoning_role="builder2_creator",
+                        prototype_id=GREENPEACE_PROTOTYPE,
+                        validation_rejection_code=reason,
+                        redis_mutated=True,
+                        lease_acquired=lease_acquired,
+                    )
                 budget.record("builder2_creator")
                 persist_accepted_creator_candidate(
                     state,
@@ -438,15 +503,24 @@ def run_controlled_complete_ad_reasoning_resume(
         backfill_accepted_creator_index(state)
         greenpeace_candidate_id = _candidate_id_for_prototype(state, GREENPEACE_PROTOTYPE)
         if not greenpeace_candidate_id:
-            report["failureReason"] = "builder2_complete_ad_reasoning_resume_greenpeace_creator_missing"
-            report["failureStage"] = "creator_generation"
+            reason = "builder2_complete_ad_reasoning_resume_greenpeace_creator_missing"
             _persist_resumable_failure(
                 state,
                 job_id=job_id,
                 failure_stage="creator_generation",
-                failure_reason=str(report["failureReason"]),
+                failure_reason=reason,
             )
-            return report
+            return _emit_resume_stage_failure(
+                report,
+                state,
+                job_id=job_id,
+                failure_stage="creator_generation",
+                failure_reason=reason,
+                reasoning_role="builder2_creator",
+                prototype_id=GREENPEACE_PROTOTYPE,
+                redis_mutated=True,
+                lease_acquired=lease_acquired,
+            )
 
         backfill_accepted_judgment_index(state)
         snapshot = (state.get(ACCEPTED_CREATOR_INDEX_KEY) or {}).get(greenpeace_candidate_id) or {}
@@ -467,6 +541,7 @@ def run_controlled_complete_ad_reasoning_resume(
             compatibility_mode=compatibility_mode,
         )
         if not reusable and GREENPEACE_PROTOTYPE in missing_judge_prototype_ids(state):
+            current_stage = "judge_generation"
             budget.assert_can_call("builder2_judge")
             ReasoningResumeIsolationGuard.assert_safe_before_judge()
             judgment_id = f"judge-{greenpeace_candidate_id}-{uuid.uuid4().hex[:8]}"
@@ -494,9 +569,18 @@ def run_controlled_complete_ad_reasoning_resume(
                     failure_stage="judge_generation",
                     failure_reason=reason,
                 )
-                report["failureReason"] = reason
-                report["failureStage"] = "judge_generation"
-                return report
+                return _emit_resume_stage_failure(
+                    report,
+                    state,
+                    job_id=job_id,
+                    failure_stage="judge_generation",
+                    failure_reason=reason,
+                    reasoning_role="builder2_judge",
+                    prototype_id=GREENPEACE_PROTOTYPE,
+                    validation_rejection_code=reason,
+                    redis_mutated=True,
+                    lease_acquired=lease_acquired,
+                )
             budget.record("builder2_judge")
             persist_accepted_judgment(
                 state,
@@ -512,16 +596,24 @@ def run_controlled_complete_ad_reasoning_resume(
         report["acceptedCreatorCount"] = accepted_creator_count(state)
         report["acceptedJudgmentCount"] = accepted_judgment_count(state)
         if report["acceptedCreatorCount"] != 6 or report["acceptedJudgmentCount"] != 6:
-            report["failureReason"] = "builder2_complete_ad_reasoning_resume_six_way_incomplete"
-            report["failureStage"] = "judge_generation"
+            reason = "builder2_complete_ad_reasoning_resume_six_way_incomplete"
             _persist_resumable_failure(
                 state,
                 job_id=job_id,
                 failure_stage="judge_generation",
-                failure_reason=str(report["failureReason"]),
+                failure_reason=reason,
             )
-            return report
+            return _emit_resume_stage_failure(
+                report,
+                state,
+                job_id=job_id,
+                failure_stage="judge_generation",
+                failure_reason=reason,
+                redis_mutated=True,
+                lease_acquired=lease_acquired,
+            )
 
+        current_stage = "winner_selection"
         _clear_stale_winner_before_recompute(state)
 
         try:
@@ -534,9 +626,16 @@ def run_controlled_complete_ad_reasoning_resume(
                 failure_stage="winner_selection",
                 failure_reason=reason,
             )
-            report["failureReason"] = reason
-            report["failureStage"] = "winner_selection"
-            return report
+            return _emit_resume_stage_failure(
+                report,
+                state,
+                job_id=job_id,
+                failure_stage="winner_selection",
+                failure_reason=reason,
+                reasoning_role="builder2_winner",
+                redis_mutated=True,
+                lease_acquired=lease_acquired,
+            )
 
         mark_authoritative_winner_selection(state, winner_id=winner_id)
         winner_rec = (state.get("candidates") or {}).get(winner_id) or {}
@@ -596,9 +695,16 @@ def run_controlled_complete_ad_reasoning_resume(
                     failure_stage="winner_development",
                     failure_reason=reason,
                 )
-                report["failureReason"] = reason
-                report["failureStage"] = "winner_development"
-                return report
+                return _emit_resume_stage_failure(
+                    report,
+                    state,
+                    job_id=job_id,
+                    failure_stage="winner_development",
+                    failure_reason=reason,
+                    reasoning_role="builder2_winner",
+                    redis_mutated=True,
+                    lease_acquired=lease_acquired,
+                )
         else:
             budget.assert_can_call("builder2_winner")
             ReasoningResumeIsolationGuard.assert_safe_before_winner_development()
@@ -625,9 +731,16 @@ def run_controlled_complete_ad_reasoning_resume(
                     failure_stage="winner_development",
                     failure_reason=reason,
                 )
-                report["failureReason"] = reason
-                report["failureStage"] = "winner_development"
-                return report
+                return _emit_resume_stage_failure(
+                    report,
+                    state,
+                    job_id=job_id,
+                    failure_stage="winner_development",
+                    failure_reason=reason,
+                    reasoning_role="builder2_winner",
+                    redis_mutated=True,
+                    lease_acquired=lease_acquired,
+                )
             budget.record("builder2_winner")
             persist_winner_development_atomically(
                 state,
@@ -654,6 +767,42 @@ def run_controlled_complete_ad_reasoning_resume(
             _finalize_stop_before_media(state, job_id=job_id)
 
         return report
+    except Exception as exc:
+        reason = f"builder2_complete_ad_reasoning_resume_unhandled:{type(exc).__name__}:{safe_exception_message(exc)}"
+        if state is not None:
+            try:
+                record_process_failure_tag(state, reason)
+                _persist_resumable_failure(
+                    state,
+                    job_id=job_id,
+                    failure_stage=current_stage,
+                    failure_reason=reason,
+                )
+                redis_mutated = True
+            except Exception:
+                logger.exception(
+                    "BUILDER2_REASONING_RESUME_PERSIST_FAILURE jobId=%s failureStage=%s",
+                    job_id,
+                    current_stage,
+                )
+                redis_mutated = False
+        else:
+            redis_mutated = False
+        return _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage=current_stage,
+            failure_reason=reason,
+            reasoning_role="builder2_creator" if current_stage == "creator_generation" else "",
+            prototype_id=GREENPEACE_PROTOTYPE if current_stage == "creator_generation" else "",
+            exception_class=type(exc).__name__,
+            http_status=openai_http_status(exc),
+            redis_mutated=redis_mutated,
+            lease_acquired=lease_acquired,
+            with_traceback=True,
+            exc=exc,
+        )
     finally:
         if lease_acquired:
             release_job_lease(job_id, worker_token)
@@ -665,6 +814,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     job_id = _clean(os.environ.get("BUILDER2_COMPLETE_AD_REASONING_RESUME_JOB_ID"))
     if not job_id:
         print(json.dumps({"ok": False, "failureReason": "builder2_complete_ad_reasoning_resume_job_id_missing"}, indent=2))
+        log_reasoning_resume_failed(
+            logger,
+            job_id="(none)",
+            failure_stage="startup",
+            failure_reason="builder2_complete_ad_reasoning_resume_job_id_missing",
+        )
         return 1
     max_calls = _env_int("BUILDER2_COMPLETE_AD_REASONING_RESUME_MAX_CALLS", DEFAULT_MAX_CALLS)
     stop_before_media = _env_bool("BUILDER2_COMPLETE_AD_REASONING_RESUME_STOP_BEFORE_MEDIA", True)
@@ -674,6 +829,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         stop_before_media=stop_before_media,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
+    if not report.get("ok"):
+        log_reasoning_resume_failed(
+            logger,
+            job_id=job_id,
+            tournament_id=_clean(report.get("tournamentId")),
+            failure_stage=str(report.get("failureStage") or "unknown"),
+            failure_reason=str(report.get("failureReason") or "unknown"),
+            lease_released=True,
+        )
     return 0 if report.get("ok") else 1
 
 

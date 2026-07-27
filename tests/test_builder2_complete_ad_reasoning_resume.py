@@ -21,10 +21,6 @@ from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_resume_contract import BUILDER2_RESUME_CONTRACT_VERSION
 from engine.builder2_tournament_completion_gate import accepted_creator_count, accepted_judgment_count
 from engine.builder2_tournament_contracts import Builder2TournamentError, TOURNAMENT_STATE_SCHEMA_VERSION
-
-
-def _clean(value: Any) -> str:
-    return str(value or "").strip()
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store, save_tournament_state
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development, persist_winner_development_atomically
 from engine.builder2_winner_preservation_contract import (
@@ -35,6 +31,10 @@ from engine.builder2_winner_preservation_contract import (
 from tests.builder2_methodology_fixtures import methodology_winner_extras
 from tests.test_builder2_complete_ad_flow import _six_prototype_state
 from tests.test_builder2_tournament import _candidate, _judgment, _strategy, _winner_plan_from_prompt
+
+
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _missing_greenpeace_state(*, forgot_id: str = "cand-1-forgot-1-test") -> Dict[str, Any]:
@@ -235,7 +235,7 @@ class TestControlledReasoningResumeFlow(unittest.TestCase):
     def test_winner_not_reused_when_winner_changes(self) -> None:
         state = _missing_greenpeace_state()
         state[PARSED_WINNER_RESPONSE_KEY] = _parsed_forgot_winner()
-        report = self._run_with_mocks(state, greenpeace_total=95)
+        report = self._run_with_mocks(state, greenpeace_total=99)
         self.assertFalse(report["winnerDevelopmentReused"])
         self.assertEqual(report["winnerCallsThisRun"], 1)
         self.assertEqual(report["totalReasoningCallsThisRun"], 3)
