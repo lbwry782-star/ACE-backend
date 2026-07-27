@@ -350,8 +350,17 @@ def generate_video():
         base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
         job_id = str(uuid.uuid4())
         logger.info("VIDEO_TIMING_STAGE_START stage=request_received jobId=%s", job_id)
+        extra_fields = None
         try:
-            video_job_create(job_id, product_name, product_description, base)
+            from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
+            from engine.builder2_job_ownership import ownership_fields_for_job_create
+
+            if resolve_builder2_tournament_enabled():
+                extra_fields = ownership_fields_for_job_create(request, payload)
+        except Exception:
+            extra_fields = None
+        try:
+            video_job_create(job_id, product_name, product_description, base, extra_fields=extra_fields)
         except Exception as e:
             logger.error("VIDEO_JOB_REDIS_ENQUEUE_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
             return jsonify({"ok": False, "error": "video_generation_failed"}), 200
@@ -365,7 +374,7 @@ def generate_video():
             {
                 "ok": True,
                 "jobId": job_id,
-                "status": "running",
+                "status": "queued",
             }
         ), 200
     except Exception as e:
@@ -399,7 +408,18 @@ def video_status():
         except Exception as e:
             logger.error("VIDEO_JOB_STALE_CHECK_ERR jobId=%s err=%s", job_id, e, exc_info=True)
     logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
-    out = {"ok": True, "status": status}
+    out = {"ok": True, "status": status, "jobId": job_id}
+    try:
+        from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
+        from engine.builder2_resume_service import build_builder2_status_payload
+        from engine.video_jobs_redis import video_job_get_raw
+
+        if resolve_builder2_tournament_enabled():
+            raw = video_job_get_raw(job_id) or {}
+            if raw.get("builder") == "builder2" or raw.get("builder2ResumeContractVersion"):
+                out.update(build_builder2_status_payload(job_id, raw, request=request))
+    except Exception as e:
+        logger.debug("BUILDER2_STATUS_ENRICH_SKIP jobId=%s err=%s", job_id, e)
     if status == "interrupted":
         err = (job.get("error") or "").strip() or "worker_shutdown_during_job"
         icode = (job.get("interruptCode") or "").strip() or "interrupted_worker_shutdown"
@@ -436,6 +456,34 @@ def video_status():
         logger.info("VIDEO_JOB_POLL terminal_error jobId=%s reason=%s", job_id, err)
         out["error"] = err
     return jsonify(out), 200
+
+
+@app.route("/api/builder2-resume", methods=["POST"])
+def builder2_resume():
+    """Resume an existing Builder2 job from the first incomplete stage (same jobId)."""
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "video_jobs_unconfigured"}), 503
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    job_id = (payload.get("jobId") or "").strip()
+    if not job_id:
+        return jsonify({"ok": False, "error": "missing_param", "message": "jobId is required"}), 400
+    try:
+        from engine.builder2_resume_service import request_builder2_resume
+
+        result = request_builder2_resume(job_id, request=request)
+        status_code = 200 if result.get("ok") else 403 if result.get("error") in {
+            "ownership_mismatch",
+            "ownership_required",
+            "ownership_required_historical_job",
+        } else 409 if result.get("error") == "not_resumable" else 404 if result.get("error") == "not_found" else 400
+        return jsonify(result), status_code
+    except Exception as e:
+        logger.error("BUILDER2_RESUME_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
+        return jsonify({"ok": False, "error": "builder2_resume_failed", "jobId": job_id}), 500
 
 
 @app.route("/api/builder1-demo", methods=["GET"])

@@ -51,6 +51,14 @@ def _heartbeat_loop() -> None:
             video_job_touch_progress(jid)
         except Exception:
             logger.debug("VIDEO_JOB_HEARTBEAT_FAIL jobId=%s", jid, exc_info=True)
+        try:
+            from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
+            from engine.builder2_tournament_recovery import renew_job_lease
+
+            if resolve_builder2_tournament_enabled() and _worker_token:
+                renew_job_lease(jid, _worker_token)
+        except Exception:
+            logger.debug("BUILDER2_LEASE_HEARTBEAT_FAIL jobId=%s", jid, exc_info=True)
 
 
 def _install_shutdown_signals() -> None:
@@ -69,12 +77,24 @@ def _install_shutdown_signals() -> None:
                     release_job_lease,
                 )
                 from engine.video_job_context import video_job_get_phase
-                from engine.video_jobs_redis import video_job_mark_interrupted
+                from engine.video_jobs_redis import get_redis, job_key, video_job_mark_interrupted
 
                 phase = video_job_get_phase()
                 logger.info("VIDEO_JOB_PHASE_AT_INTERRUPT=%s", phase)
                 logger.info("VIDEO_JOB_INFRA_FAILURE=true")
                 video_job_mark_interrupted(jid)
+                try:
+                    get_redis().hset(
+                        job_key(jid),
+                        mapping={
+                            "canResume": "1",
+                            "failureStage": phase or "worker_shutdown",
+                            "failureReason": "worker_shutdown_during_job",
+                            "failureClass": "infrastructure_interrupt",
+                        },
+                    )
+                except Exception:
+                    pass
                 if resolve_builder2_tournament_enabled():
                     register_recoverable_job(jid)
                     release_job_lease(jid, _worker_token)
@@ -182,11 +202,25 @@ def main() -> None:
         logger.info("VIDEO_WORKER_DEQUEUED jobId=%s", job_id)
         if not acquire_job_lease(job_id, _worker_token):
             logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=lease_not_acquired", job_id)
+            try:
+                from engine.builder2_tournament_recovery import mark_job_queued, register_recoverable_job
+
+                if mark_job_queued(job_id):
+                    r = get_redis()
+                    r.lpush(QUEUE_KEY, job_id)
+                    register_recoverable_job(job_id)
+                    logger.info("BUILDER2_RESUME_REQUEUED_AFTER_LEASE_FAIL jobId=%s", job_id)
+            except Exception:
+                pass
             continue
         clear_job_queued(job_id)
         logger.info("VIDEO_TIMING_STAGE_START stage=worker_dequeued jobId=%s", job_id)
 
         logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
+        try:
+            get_redis().hset(job_key(job_id), mapping={"status": "running", "progressStage": "processing"})
+        except Exception:
+            pass
         _set_active_job_id(job_id)
         t_worker_job0 = time.monotonic()
         try:

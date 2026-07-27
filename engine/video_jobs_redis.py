@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -75,33 +76,74 @@ def video_job_set_resolved_product_name(job_id: str, resolved: str, source: str)
     )
 
 
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+_memory_job_hashes: Dict[str, Dict[str, str]] = {}
+_use_memory_jobs = False
+
+
+def enable_memory_jobs() -> None:
+    global _use_memory_jobs, _memory_job_hashes
+    _use_memory_jobs = True
+    _memory_job_hashes = {}
+
+
+def disable_memory_jobs() -> None:
+    global _use_memory_jobs, _memory_job_hashes
+    _use_memory_jobs = False
+    _memory_job_hashes = {}
+
+
+def set_memory_job_hash(job_id: str, data: Dict[str, str]) -> None:
+    _memory_job_hashes[job_id] = dict(data)
+
+
+def video_job_get_raw(job_id: str) -> Optional[Dict[str, str]]:
+    """Return raw Redis hash for a job or None if missing."""
+    if _use_memory_jobs:
+        data = _memory_job_hashes.get(job_id)
+        return dict(data) if data else None
+    data = get_redis().hgetall(job_key(job_id))
+    return data if data else None
+
+
 def video_job_create(
     job_id: str,
     product_name: str,
     product_description: str,
     public_base_url: str,
+    *,
+    extra_fields: Optional[Dict[str, str]] = None,
 ) -> None:
     """Persist job hash and push job_id onto the queue."""
     r = get_redis()
     key = job_key(job_id)
     now = int(time.time())
+    now_iso = _utc_now_iso()
+    mapping: Dict[str, str] = {
+        "status": "queued",
+        "product_name": product_name or "",
+        "product_description": product_description or "",
+        "public_base_url": public_base_url or "",
+        "video_url": "",
+        "marketing_text": "",
+        "overlay_headline": "",
+        "postprocess_ran": "0",
+        "error": "",
+        "last_progress_ts": str(now),
+        "enqueued_ts": str(now),
+        "progressStage": "queued",
+        "progressStartedAt": now_iso,
+        "canResume": "1",
+    }
+    if isinstance(extra_fields, dict):
+        for field_key, field_value in extra_fields.items():
+            if field_key and field_value is not None:
+                mapping[str(field_key)] = str(field_value)
     pipe = r.pipeline()
-    pipe.hset(
-        key,
-        mapping={
-            "status": "running",
-            "product_name": product_name or "",
-            "product_description": product_description or "",
-            "public_base_url": public_base_url or "",
-            "video_url": "",
-            "marketing_text": "",
-            "overlay_headline": "",
-            "postprocess_ran": "0",
-            "error": "",
-            "last_progress_ts": str(now),
-            "enqueued_ts": str(now),
-        },
-    )
+    pipe.hset(key, mapping=mapping)
     pipe.expire(key, _JOB_TTL_SECONDS)
     pipe.lpush(QUEUE_KEY, job_id)
     pipe.execute()
@@ -133,6 +175,11 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
         "productNameResolved": rp,
         "productNameSource": (data.get("product_name_source") or "").strip(),
         "productDescription": (data.get("product_description") or "").strip(),
+        "progressStage": (data.get("progressStage") or data.get("progress_stage") or "").strip(),
+        "progressStartedAt": (data.get("progressStartedAt") or "").strip(),
+        "builder": (data.get("builder") or "").strip(),
+        "builder2ResumeContractVersion": (data.get("builder2ResumeContractVersion") or "").strip(),
+        "ownerContextPresent": (data.get("ownerContextPresent") or "").strip() in {"1", "true", "True"},
     }
 
 

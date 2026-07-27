@@ -208,6 +208,33 @@ def clear_job_queued(job_id: str) -> None:
         get_redis().delete(_queued_key(jid))
 
 
+def renew_job_lease(job_id: str, worker_token: str) -> bool:
+    jid = (job_id or "").strip()
+    token = (worker_token or "").strip()
+    if not jid or not token:
+        return False
+    payload = json.dumps({"owner": token, "acquiredAt": int(time.time())})
+    if _use_memory_recovery:
+        current = _memory_leases.get(jid)
+        if not current or current.get("owner") != token:
+            return False
+        _memory_leases[jid] = {"owner": token, "expiresAt": int(time.time()) + _lease_seconds()}
+        return True
+    key = _lease_key(jid)
+    r = get_redis()
+    raw = r.get(key)
+    if not raw:
+        return acquire_job_lease(jid, token)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        data = {}
+    if data.get("owner") != token:
+        return False
+    r.set(key, payload, ex=_lease_seconds())
+    return True
+
+
 def acquire_job_lease(job_id: str, worker_token: str) -> bool:
     jid = (job_id or "").strip()
     token = (worker_token or "").strip()
@@ -375,7 +402,7 @@ def _job_is_recoverable(job_id: str) -> bool:
     if state.get("status") in TERMINAL_TOURNAMENT_STATUSES:
         logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED_TERMINAL jobId=%s tournamentStatus=%s", jid, state.get("status"))
         return False
-    if state.get("lastCompletedStep") in {"winner_plan_complete", "runway_complete", "done"}:
+    if state.get("lastCompletedStep") in {"done"}:
         return False
     attempts = int(meta.get("recoveryAttemptCount") or 0)
     if attempts >= _recovery_max_attempts():
@@ -387,7 +414,16 @@ def _job_is_recoverable(job_id: str) -> bool:
 
 def _read_job_hash(job_id: str) -> Dict[str, Any]:
     if _use_memory_recovery:
-        return _memory_job_hashes.get(job_id, {})
+        from engine.video_jobs_redis import _use_memory_jobs, video_job_get_raw
+
+        if _use_memory_jobs:
+            data = video_job_get_raw(job_id)
+            if data:
+                return dict(data)
+        cached = _memory_job_hashes.get(job_id)
+        if cached:
+            return dict(cached)
+        return {}
     return get_redis().hgetall(job_key(job_id)) or {}
 
 
@@ -395,6 +431,9 @@ _memory_job_hashes: Dict[str, Dict[str, Any]] = {}
 
 
 def set_memory_job_hash(job_id: str, data: Dict[str, Any]) -> None:
+    from engine.video_jobs_redis import set_memory_job_hash as _set_video_job_hash
+
+    _set_video_job_hash(job_id, {str(k): str(v) for k, v in data.items()})
     _memory_job_hashes[job_id] = dict(data)
 
 
