@@ -7,6 +7,10 @@ from typing import Any, Dict
 
 from engine.builder2_methodology_contract import METHODOLOGY_VERSION
 from engine.builder2_strategy_identity import assign_strategy_foundation_identity, compute_strategy_foundation_digest
+from engine.builder2_complete_ad_contract import (
+    build_default_creator_advertising_closure,
+    build_default_creator_semantic_bridge,
+)
 
 
 def methodology_strategy_extras(*, tournament_id: str = "test-tournament") -> Dict[str, Any]:
@@ -123,6 +127,10 @@ def realistic_core_candidate_extras(prototype_id: str, *, strategy: Dict[str, An
             "silentVerification": "The closing distance is visible without sound.",
             "puritySelfCheck": True,
         },
+        **complete_ad_creator_extras(
+            product_name=str((strategy or {}).get("productNameResolved") or "ACE Product"),
+            language=str((strategy or {}).get("language") or "en"),
+        ),
         **app,
     }
 
@@ -194,11 +202,62 @@ def methodology_candidate_extras(prototype_id: str, *, strategy: Dict[str, Any] 
         "creatorReport": {
             "creatorPuritySelfCheck": "No other candidates, scores, or tournament data were referenced.",
         },
+        **complete_ad_creator_extras(
+            product_name="ACE Product",
+            language=str((strategy or {}).get("language") or "en"),
+        ),
         **_prototype_application(prototype_id),
     }
 
 
-def methodology_judgment_extras() -> Dict[str, Any]:
+def complete_ad_creator_extras(
+    *,
+    product_name: str = "ACE Product",
+    slogan_text: str = "קרוב יותר ממה שחשבת",
+    language: str = "he",
+    key_word: str = "closer",
+) -> Dict[str, Any]:
+    return {
+        "advertisingClosure": build_default_creator_advertising_closure(
+            product_name=product_name,
+            slogan_text=slogan_text,
+            language=language,
+        ),
+        "semanticBridge": build_default_creator_semantic_bridge(
+            key_word=key_word,
+            visual_meaning="Physical closing of distance between two people",
+            slogan_meaning="Strategic closeness to the buyer's need",
+            strategic_meaning="Closeness becomes the advantage",
+            how_they_meet="The visible gesture proves the same strategic promise the slogan closes",
+        ),
+    }
+
+
+def complete_ad_judgment_extras(*, prototype_id: str = "closest") -> Dict[str, Any]:
+    return {
+        "semanticAlignmentAssessment": {
+            "visualMeaning": "Physical closeness is visible in the film plan",
+            "sloganMeaning": "The slogan closes the same strategic closeness advantage",
+            "combinedAdvertisingMeaning": "Together they communicate closeness as the product promise",
+            "sameStrategicPromise": True,
+            "sloganCompletesRatherThanChangesVisual": True,
+            "understandableWithoutCreatorReport": True,
+            "keyWordMeaningsConnected": True,
+            "semanticAlignment": True,
+            "failureReason": None,
+        },
+        "prototypeApplicationAssessment": {
+            "assignedPrototypeId": prototype_id,
+            "prototypeMethodVisibleInFilm": True,
+            "prototypeMethodReinforcedBySlogan": True,
+            "applicationFeelsIntrinsic": True,
+            "applicationRequiresRetrospectiveExplanation": False,
+            "prototypeFitScore": 12,
+        },
+    }
+
+
+def methodology_judgment_extras(*, prototype_id: str = "closest") -> Dict[str, Any]:
     return {
         "methodologyVersion": METHODOLOGY_VERSION,
         "problemAdvantageAssessment": "The advantage directly answers the grounded buyer problem.",
@@ -227,8 +286,9 @@ def methodology_judgment_extras() -> Dict[str, Any]:
             "relativeAdvantageClosed": True,
             "sloganSpecificToIdea": True,
             "functionsAsAdvertisement": True,
-            "notes": "Final delivery still requires Advertising Closure even when the Runway scene stays text-free.",
+            "notes": "The Creator slogan closes the same relative advantage embodied by the film.",
         },
+        **complete_ad_judgment_extras(prototype_id=prototype_id),
     }
 
 

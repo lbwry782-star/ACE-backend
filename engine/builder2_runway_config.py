@@ -10,9 +10,9 @@ from typing import FrozenSet
 logger = logging.getLogger(__name__)
 
 VALID_BUILDER2_RUNWAY_VIDEO_MODELS: FrozenSet[str] = frozenset({"gen4_turbo", "gen4.5"})
-DEFAULT_BUILDER2_RUNWAY_VIDEO_MODEL = "gen4_turbo"
+DEFAULT_BUILDER2_RUNWAY_VIDEO_MODEL = "gen4.5"
 BUILDER2_RUNWAY_VIDEO_RATIO = "1280:720"
-DEFAULT_BUILDER2_VIDEO_DURATION_SECONDS = 7
+DEFAULT_BUILDER2_VIDEO_DURATION_SECONDS = 10
 BUILDER2_VIDEO_DURATION_MIN_SECONDS = 2
 BUILDER2_VIDEO_DURATION_MAX_SECONDS = 10
 DEFAULT_BUILDER2_START_IMAGE_SIZE = "1536x1024"
@@ -60,7 +60,7 @@ def resolve_builder2_video_duration_seconds() -> int:
 
 
 def builder2_runway_requires_start_image(model: str) -> bool:
-    return (model or "").strip() == "gen4_turbo"
+    return (model or "").strip() in {"gen4_turbo", "gen4.5"}
 
 
 def builder2_runway_generation_mode(model: str) -> str:

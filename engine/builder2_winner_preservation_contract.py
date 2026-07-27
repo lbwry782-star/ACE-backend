@@ -328,6 +328,13 @@ def process_winner_development_response(
     model_diagnostic = capture_model_preservation_diagnostic(normalized)
     detect_winner_immutable_identity_violations(normalized, source_reference=source_reference)
     merged = apply_server_owned_preservation(normalized, source_reference=source_reference)
+    creator_closure = (winning_candidate or {}).get("advertisingClosure")
+    if isinstance(creator_closure, dict):
+        from engine.builder2_advertising_closure_contract import normalize_advertising_closure
+
+        merged["advertisingClosure"] = normalize_advertising_closure(
+            {**creator_closure, "headlineSource": creator_closure.get("headlineSource") or "creator_candidate"}
+        )
     validate_winner_source_identity(merged, source_reference=source_reference)
     log_preservation_contract_applied(
         job_id=job_id,
@@ -342,6 +349,10 @@ def process_winner_development_response(
         candidate_id=str(source_reference.get("sourceCandidateId") or ""),
     )
     try:
+        from engine.builder2_complete_ad_contract import validate_winner_slogan_preservation
+
+        if not compatibility_mode:
+            validate_winner_slogan_preservation(merged, winning_candidate=winning_candidate)
         return validate_builder2_winner_plan(
             merged,
             winning_candidate=winning_candidate,

@@ -194,6 +194,12 @@ FIELD_OWNERSHIP: Dict[str, str] = {
     "verbalPotential.visualMeaning": CREATOR_OWNERSHIP_CREATOR_CORE,
     "verbalPotential.strategicMeaning": CREATOR_OWNERSHIP_CREATOR_CORE,
     "verbalPotential.reason": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "advertisingClosure": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "advertisingClosure.productNameText": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "advertisingClosure.sloganText": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "semanticBridge": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "semanticBridge.visualMeaning": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "semanticBridge.sloganMeaning": CREATOR_OWNERSHIP_CREATOR_CORE,
     "visualFamilyId": CREATOR_OWNERSHIP_CREATOR_CORE,
     "visualFamilyDefinition": CREATOR_OWNERSHIP_CREATOR_CORE,
     "recurringMotif": CREATOR_OWNERSHIP_CREATOR_CORE,
@@ -247,6 +253,8 @@ CREATOR_MODEL_REQUIRED_TOP_LEVEL: Tuple[str, ...] = (
     "runwayFeasibility",
     "creatorReport",
     "verbalPotential",
+    "advertisingClosure",
+    "semanticBridge",
 )
 
 CREATOR_MODEL_REQUIRED_NESTED: Tuple[str, ...] = (
@@ -272,6 +280,13 @@ CREATOR_MODEL_REQUIRED_NESTED: Tuple[str, ...] = (
     "creatorReport.whyParallelExpressesAdvantage",
     "creatorReport.whyRunwayShouldUnderstand",
     "verbalPotential.decision",
+    "advertisingClosure.productNameText",
+    "advertisingClosure.sloganText",
+    "semanticBridge.keyWordOrConcept",
+    "semanticBridge.visualMeaning",
+    "semanticBridge.sloganMeaning",
+    "semanticBridge.strategicMeaning",
+    "semanticBridge.howTheMeaningsMeet",
 )
 
 MONTAGE_REQUIRED_TOP_LEVEL: Tuple[str, ...] = (
@@ -340,6 +355,10 @@ def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
         "whyRunwayShouldUnderstand,fitsSevenSeconds,requiresImpossibleMorphing,requiresSubtleUnseenInference}, "
         "visualAnchor{description,whyEssential,visualAnchorTiming}, "
         "verbalPotential{decision,keywordOrKeyPhrase,visualMeaning,strategicMeaning,reason}, "
+        "advertisingClosure{required,productNameText,sloganText,language,presentationMode,durationSeconds,noLogo}, "
+        "semanticBridge{keyWordOrConcept,visualMeaning,sloganMeaning,strategicMeaning,howTheMeaningsMeet,"
+        "understandableWithoutCreatorReport,dualMeaningUsed,physicalMeaningActivatedByVisual,"
+        "strategicMeaningActivatedBySlogan,meaningsConverge}, "
         "creatorReport{problemPerception,relativeAdvantage,mechanismScanSummary,goldPrototypeUsed,visualParallelType,"
         "whyParallelExpressesAdvantage,whyRunwayShouldUnderstand,silentVerification,puritySelfCheck}.\n"
         f"Prototype application object {app_field} must use these exact child field names: {child_list}.\n"

@@ -16,11 +16,11 @@ from engine.builder2_tournament_contracts import Builder2TournamentError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CLOSURE_DURATION_SECONDS = 1.5
+DEFAULT_CLOSURE_DURATION_SECONDS = 2.0
 DEFAULT_CLOSURE_PRESENTATION_MODE = "end_card"
 VALID_CLOSURE_PRESENTATION_MODES = frozenset({"end_card", "final_overlay"})
 VALID_CLOSURE_HEADLINE_SOURCES = frozenset(
-    {"winner_development", "advertising_closure_role", "persisted", "approved_proposal"}
+    {"winner_development", "advertising_closure_role", "persisted", "approved_proposal", "creator_candidate"}
 )
 VALID_ADVERTISING_CLOSURE_STATUSES = frozenset(
     {"missing", "proposed", "approved", "rendering", "completed", "failed"}
@@ -32,6 +32,12 @@ GENERIC_SLOGAN_PATTERNS = (
     re.compile(r"^\s*the\s+best\s+choice\s*$", re.I),
     re.compile(r"^\s*experience\s+the\s+difference\s*$", re.I),
     re.compile(r"^\s*video\s+delivery\s*\.?\s*$", re.I),
+    re.compile(r"^\s*made\s+for\s+you\s*$", re.I),
+    re.compile(r"^\s*part\s+of\s+the\s+journey\s*$", re.I),
+    re.compile(r"^\s*חלק\s+מהדרך\s*$"),
+    re.compile(r"^\s*איכות\s+שאפשר\s+לסמוך\s+עליה\s*$"),
+    re.compile(r"^\s*הבחירה\s+המושלמת\s*$"),
+    re.compile(r"^\s*במיוחד\s+בשבילך\s*$"),
 )
 
 NEW_PROMISE_PATTERNS = (

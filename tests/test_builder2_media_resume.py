@@ -37,6 +37,20 @@ def _mock_start_image_data_uri() -> str:
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def _mock_render_advertising_closure(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
+    from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+
+    state = kwargs["state"]
+    media = state.setdefault("mediaResume", {})
+    final_url = "https://example.com/final-with-closure.mp4"
+    media["finalVideoWithClosureUrl"] = final_url
+    media["finalPublicUrl"] = final_url
+    media["finalVideoPath"] = final_url
+    media["advertisingClosureStatus"] = "completed"
+    state["advertisingClosureStatus"] = "completed"
+    return state, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
+
+
 def _winner_plan_for_media(*, headline_decision: str = "omit") -> Dict[str, Any]:
     strategy = _strategy(language="he")
     candidate = _candidate("summer_fan")
@@ -118,6 +132,11 @@ def _media_ready_state(*, job_id: str = HISTORICAL_JOB_ID) -> Dict[str, Any]:
     state["productName"] = "ACE Product"
     state["productDescription"] = "Product description"
     state["contentLanguage"] = "he"
+    closure = (state.get("winnerDevelopmentPlan") or {}).get("advertisingClosure")
+    if isinstance(closure, dict):
+        state["advertisingClosure"] = dict(closure)
+        state["advertisingClosureStatus"] = "approved"
+        state["advertisingClosureSource"] = "winner_creator_candidate"
     return state
 
 
@@ -227,8 +246,15 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
         MediaResumeIsolationGuard.begin()
         MediaResumeIsolationGuard.enable_start_image()
         MediaResumeIsolationGuard.enable_runway()
+        MediaResumeIsolationGuard.enable_ffmpeg()
+        self.render_patch = patch(
+            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
+            side_effect=_mock_render_advertising_closure,
+        )
+        self.render_patch.start()
 
     def tearDown(self) -> None:
+        self.render_patch.stop()
         MediaResumeIsolationGuard.end()
         disable_memory_store()
 
@@ -277,7 +303,8 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
             "runwayTaskId": "task-existing",
             "runwayVideoUrl": "https://runway/existing.mp4",
             "downloadedVideoPath": "https://runway/existing.mp4",
-            "finalPublicUrl": "https://runway/existing.mp4",
+            "finalPublicUrl": "https://example.com/final-with-closure.mp4",
+            "finalVideoWithClosureUrl": "https://example.com/final-with-closure.mp4",
             "mediaResumeStatus": "completed",
         }
         _, counters = execute_builder2_media_pipeline(
@@ -303,8 +330,14 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
 class TestMediaResumeExecution(unittest.TestCase):
     def setUp(self) -> None:
         enable_memory_store()
+        self.render_patch = patch(
+            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
+            side_effect=_mock_render_advertising_closure,
+        )
+        self.render_patch.start()
 
     def tearDown(self) -> None:
+        self.render_patch.stop()
         disable_memory_store()
 
     @patch("engine.builder2_media_resume.video_job_mark_done")
@@ -414,16 +447,21 @@ class TestPublicBaseUrlDryRunParity(unittest.TestCase):
     def test_valid_url_enters_start_image_stage(self, _redis_cfg: Any) -> None:
         state = _media_ready_state(job_id="job-media-start-stage")
         deps = _mock_pipeline_deps()
-        report = run_one_media_resume(
-            job_id="job-media-start-stage",
-            tournament_state=deepcopy(state),
-            dry_run=False,
-            pipeline_deps=deps,
-        )
+        with patch(
+            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
+            side_effect=_mock_render_advertising_closure,
+        ):
+            report = run_one_media_resume(
+                job_id="job-media-start-stage",
+                tournament_state=deepcopy(state),
+                dry_run=False,
+                pipeline_deps=deps,
+            )
         self.assertTrue(report["ok"])
         self.assertEqual(report["startImageCalls"], 1)
         self.assertEqual(report["startImageNormalCalls"], 1)
         self.assertEqual(report["startImageGeneratedCount"], 1)
+        self.assertEqual(report["ffmpegCalls"], 1)
 
 
 class TestBuilder1Isolation(unittest.TestCase):

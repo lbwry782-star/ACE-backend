@@ -25,9 +25,9 @@ from engine.video_start_image import build_ace_start_frame_image_prompt
 
 class TestBuilder2VideoDurationConfig(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
-    def test_default_duration_is_seven(self) -> None:
-        self.assertEqual(resolve_builder2_video_duration_seconds(), 7)
-        self.assertEqual(DEFAULT_BUILDER2_VIDEO_DURATION_SECONDS, 7)
+    def test_default_duration_is_ten(self) -> None:
+        self.assertEqual(resolve_builder2_video_duration_seconds(), 10)
+        self.assertEqual(DEFAULT_BUILDER2_VIDEO_DURATION_SECONDS, 10)
 
     @patch.dict(os.environ, {"BUILDER2_VIDEO_DURATION_SECONDS": "2"}, clear=True)
     def test_minimum_duration_two_accepted(self) -> None:
@@ -70,7 +70,7 @@ class TestBuilder2VideoDurationConfig(unittest.TestCase):
         clear=True,
     )
     def test_builder1_env_does_not_change_builder2_duration(self) -> None:
-        self.assertEqual(resolve_builder2_video_duration_seconds(), 7)
+        self.assertEqual(resolve_builder2_video_duration_seconds(), 10)
         self.assertEqual(quality_model(), "gpt-5.6-sol")
 
 
@@ -118,7 +118,7 @@ class TestBuilder2VideoDurationPlanning(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     def test_planning_prompt_includes_dynamic_duration(self) -> None:
         block = video_planning._planner_duration_instruction_block()
-        self.assertIn("7 seconds", block)
+        self.assertIn("10 seconds", block)
         self.assertIn("TOTAL video length", block)
 
     @patch.dict(os.environ, {"BUILDER2_VIDEO_DURATION_SECONDS": "8"}, clear=True)
@@ -144,7 +144,7 @@ class TestBuilder2VideoDurationPlanning(unittest.TestCase):
             self.assertNotIn("5-second", text.lower())
             self.assertNotIn("5 seconds", text.lower())
             self.assertNotIn("within 5 seconds", text.lower())
-        self.assertEqual(tag, "variation_montage_7s")
+        self.assertEqual(tag, "variation_montage_10s")
 
     @patch.dict(os.environ, {}, clear=True)
     def test_runway_prompt_builder_uses_dynamic_duration(self) -> None:
@@ -155,7 +155,7 @@ class TestBuilder2VideoDurationPlanning(unittest.TestCase):
             "language": "en",
         }
         prompt = video_planning.build_runway_prompt_from_plan(plan)
-        self.assertIn("7-second", prompt)
+        self.assertIn("10-second", prompt)
         self.assertNotIn("5-second", prompt.lower())
 
 
@@ -203,8 +203,8 @@ class TestBuilder2VideoDurationStartImage(unittest.TestCase):
             "videoPrompt": "Montage of hugs. No text.",
         }
         prompt = build_ace_start_frame_image_prompt(plan)
-        self.assertIn("7-second", prompt)
-        self.assertIn("over 7 seconds", prompt)
+        self.assertIn("10-second", prompt)
+        self.assertIn("over 10 seconds", prompt)
         self.assertNotIn("5-second", prompt.lower())
 
 

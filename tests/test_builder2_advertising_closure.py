@@ -69,9 +69,20 @@ def _summer_fan_plan(*, headline_decision: str = "omit", with_closure: bool = Fa
     return plan
 
 
-def _completed_state(*, with_closure: bool = False, approved: bool = False, rendered: bool = False) -> Dict[str, Any]:
+def _completed_state(
+    *,
+    with_closure: bool = False,
+    approved: bool = False,
+    rendered: bool = False,
+    clear_creator_closure: bool = False,
+) -> Dict[str, Any]:
     state = _media_ready_state(job_id=HISTORICAL_JOB_ID)
     plan = _summer_fan_plan(with_closure=with_closure)
+    if clear_creator_closure:
+        plan.pop("advertisingClosure", None)
+        state.pop("advertisingClosure", None)
+        state.pop("advertisingClosureStatus", None)
+        state.pop("advertisingClosureSource", None)
     state["winnerDevelopmentPlan"] = plan
     media = state.setdefault("mediaResume", {})
     media["finalPublicUrl"] = "https://example.com/raw-runway.mp4"
@@ -174,7 +185,7 @@ class TestAdvertisingClosureResume(unittest.TestCase):
         AdvertisingClosureResumeGuard.end()
 
     def test_proposal_only_one_call_maximum(self) -> None:
-        state = _completed_state()
+        state = _completed_state(clear_creator_closure=True)
         calls = {"count": 0}
 
         def _llm(**kwargs: Any) -> Dict[str, Any]:

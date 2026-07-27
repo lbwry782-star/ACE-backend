@@ -123,8 +123,8 @@ class TestMediaResumeConfigurationParity(unittest.TestCase):
             )
         self.assertEqual(config.publicBaseUrl, "https://ace-backend-k1p6.onrender.com")
         self.assertEqual(config.public_base_url.source, "ACE_PUBLIC_BASE_URL")
-        self.assertEqual(config.runwayModel, "gen4_turbo")
-        self.assertEqual(config.durationSeconds, 7)
+        self.assertEqual(config.runwayModel, "gen4.5")
+        self.assertEqual(config.durationSeconds, 10)
 
     def test_missing_public_url_fails_configuration(self) -> None:
         with patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test"}, clear=True):

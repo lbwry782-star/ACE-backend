@@ -29,6 +29,7 @@ from tests.test_builder2_media_resume import (
     HISTORICAL_JOB_ID,
     _media_ready_state,
     _mock_pipeline_deps,
+    _mock_render_advertising_closure,
     _mock_start_image_data_uri,
 )
 
@@ -137,8 +138,15 @@ class TestMediaPipelineMarketingIsolation(unittest.TestCase):
         MediaResumeIsolationGuard.begin()
         MediaResumeIsolationGuard.enable_start_image()
         MediaResumeIsolationGuard.enable_runway()
+        MediaResumeIsolationGuard.enable_ffmpeg()
+        self.render_patch = patch(
+            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
+            side_effect=_mock_render_advertising_closure,
+        )
+        self.render_patch.start()
 
     def tearDown(self) -> None:
+        self.render_patch.stop()
         MediaResumeIsolationGuard.end()
         disable_memory_store()
 
@@ -160,7 +168,7 @@ class TestMediaPipelineMarketingIsolation(unittest.TestCase):
         media = updated["mediaResume"]
         self.assertTrue(media.get("finalPublicUrl"))
         self.assertEqual(media.get("marketingCopySource"), "deterministic_fallback")
-        self.assertEqual(counters.ffmpeg_calls, 0)
+        self.assertEqual(counters.ffmpeg_calls, 1)
 
     def test_mp4_completion_does_not_depend_on_marketing_copy(self) -> None:
         state = _media_ready_state(job_id="job-mp4-first")
@@ -181,8 +189,14 @@ class TestMediaPipelineMarketingIsolation(unittest.TestCase):
 class TestMediaResumeReporting(unittest.TestCase):
     def setUp(self) -> None:
         enable_memory_store()
+        self.render_patch = patch(
+            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
+            side_effect=_mock_render_advertising_closure,
+        )
+        self.render_patch.start()
 
     def tearDown(self) -> None:
+        self.render_patch.stop()
         disable_memory_store()
 
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)

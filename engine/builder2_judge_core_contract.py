@@ -168,6 +168,25 @@ def build_judge_example_json(*, candidate_id: str = "cand-example") -> Dict[str,
             "functionsAsAdvertisement": True,
             "notes": "...",
         },
+        "semanticAlignmentAssessment": {
+            "visualMeaning": "...",
+            "sloganMeaning": "...",
+            "combinedAdvertisingMeaning": "...",
+            "sameStrategicPromise": True,
+            "sloganCompletesRatherThanChangesVisual": True,
+            "understandableWithoutCreatorReport": True,
+            "keyWordMeaningsConnected": True,
+            "semanticAlignment": True,
+            "failureReason": None,
+        },
+        "prototypeApplicationAssessment": {
+            "assignedPrototypeId": "closest",
+            "prototypeMethodVisibleInFilm": True,
+            "prototypeMethodReinforcedBySlogan": True,
+            "applicationFeelsIntrinsic": True,
+            "applicationRequiresRetrospectiveExplanation": False,
+            "prototypeFitScore": 12,
+        },
     }
 
 
@@ -184,6 +203,12 @@ def build_judge_required_keys_prompt_text(*, creator_verbal_decision: str, candi
         "visualWouldWorkWithoutHeadline (boolean), and notes.\n"
         "advertisingCompletionAssessment must include advertiserIdentifiable, productNamePresent, "
         "relativeAdvantageClosed, sloganSpecificToIdea, functionsAsAdvertisement (booleans), and notes.\n"
+        "semanticAlignmentAssessment must include visualMeaning, sloganMeaning, combinedAdvertisingMeaning, "
+        "sameStrategicPromise, sloganCompletesRatherThanChangesVisual, understandableWithoutCreatorReport, "
+        "keyWordMeaningsConnected, semanticAlignment (boolean), and failureReason (null when aligned).\n"
+        "prototypeApplicationAssessment must include assignedPrototypeId, prototypeMethodVisibleInFilm, "
+        "prototypeMethodReinforcedBySlogan, applicationFeelsIntrinsic, "
+        "applicationRequiresRetrospectiveExplanation (booleans), and prototypeFitScore (0-15).\n"
         "Required score fields:\n"
         f"{score_lines}\n"
     )

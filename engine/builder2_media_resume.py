@@ -189,7 +189,12 @@ def run_one_media_resume(
         runway_model = resolve_builder2_runway_video_model()
         duration_seconds = resolve_builder2_video_duration_seconds()
         start_image_required = builder2_runway_requires_start_image(runway_model)
-        ffmpeg_required = headline_decision_requires_headline(headline_decision)
+        from engine.builder2_new_format_config import builder2_media_requires_closure_ffmpeg
+
+        ffmpeg_required = headline_decision_requires_headline(headline_decision) or builder2_media_requires_closure_ffmpeg(
+            state=state,
+            plan=plan,
+        )
         report["startImageRequired"] = start_image_required
         report["runwayRequired"] = True
         report["runwayModel"] = runway_model

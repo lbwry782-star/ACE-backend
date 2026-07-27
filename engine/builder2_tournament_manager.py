@@ -565,13 +565,40 @@ def run_builder2_tournament(
     llm_client: Optional[Any] = None,
     rng_seed: Optional[str] = None,
 ) -> Dict[str, Any]:
+    t_tournament0 = time.monotonic()
+    from engine.builder2_normal_production_guard import NormalProductionGuard
+
+    NormalProductionGuard.begin()
+    try:
+        return _run_builder2_tournament_body(
+            job_id=job_id,
+            product_name=product_name,
+            product_description=product_description,
+            content_language=content_language,
+            llm_client=llm_client,
+            rng_seed=rng_seed,
+            t_tournament0=t_tournament0,
+        )
+    finally:
+        NormalProductionGuard.end()
+
+
+def _run_builder2_tournament_body(
+    *,
+    job_id: str,
+    product_name: str,
+    product_description: str,
+    content_language: str,
+    llm_client: Optional[Any],
+    rng_seed: Optional[str],
+    t_tournament0: float,
+) -> Dict[str, Any]:
     language = content_language
     runway_model = resolve_builder2_runway_video_model()
     runway_mode = builder2_runway_generation_mode(runway_model)
     active_ids = resolve_builder2_active_prototype_ids()
     attempts_per = resolve_builder2_tournament_attempts_per_prototype_per_round()
     max_rounds = resolve_builder2_tournament_max_rounds()
-    t_tournament0 = time.monotonic()
 
     state = load_tournament_state(job_id)
     is_new_job = state is None
@@ -757,6 +784,17 @@ def run_builder2_tournament(
     if not winner_id:
         winner_id = select_global_winner(state)
         state["winnerCandidateId"] = winner_id
+        winner_rec = state["candidates"][winner_id]
+        judgment_rec = state["judgments"].get(winner_rec.get("judgmentId") or "")
+        from engine.builder2_complete_ad_contract import copy_winner_advertising_closure_from_candidate
+
+        if not compatibility_mode:
+            copy_winner_advertising_closure_from_candidate(
+                state,
+                candidate_id=winner_id,
+                winning_candidate=winner_rec.get("creatorOutput") or {},
+                winning_judgment=(judgment_rec or {}).get("judgment"),
+            )
         logger.info(
             "BUILDER2_TOURNAMENT_WINNER_SELECTED jobId=%s candidateId=%s",
             job_id,
@@ -803,6 +841,10 @@ def run_builder2_tournament(
             raise
         state["status"] = "winner_plan_complete"
         state["lastCompletedStep"] = "winner_plan_complete"
+        state["mediaContinuationRequired"] = True
+        from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
+
+        state["builder2NewFormatVersion"] = BUILDER2_NEW_FORMAT_VERSION
         save_tournament_state(job_id, state)
         logger.info("BUILDER2_WINNER_DEVELOPMENT_OK candidateId=%s", winner_id)
     elif state.get("winnerDevelopmentPlan"):

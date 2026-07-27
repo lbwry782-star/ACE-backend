@@ -268,6 +268,15 @@ def validate_creator_methodology(
         )
     logger.info("BUILDER2_PARTICIPATION_VALIDATED prototypeId=%s", assigned_prototype_id)
 
+    from engine.builder2_complete_ad_contract import validate_creator_complete_ad_fields
+
+    if not compatibility_mode:
+        validate_creator_complete_ad_fields(
+            candidate,
+            strategy_foundation=strategy_foundation,
+            assigned_prototype_id=assigned_prototype_id,
+        )
+
     anchor = _require_dict(candidate.get("visualAnchor"), field="visualAnchor", code="builder2_creator_schema_invalid")
     if anchor.get("appearsBeforeOrDuringResolution") is not True and not _normalize_text(anchor.get("visualAnchorTiming")):
         _require_bool(
@@ -705,6 +714,50 @@ def collect_judge_methodology_structural_errors(
                 errors.append(f"builder2_judge_validation_failed:advertisingCompletionAssessment.{key}")
         if not str(advertising.get("notes") or "").strip():
             errors.append("builder2_judge_validation_failed:advertisingCompletionAssessment.notes")
+
+    semantic = judgment.get("semanticAlignmentAssessment")
+    if not isinstance(semantic, dict):
+        errors.append("builder2_judge_validation_failed:semanticAlignmentAssessment")
+    else:
+        for key in (
+            "visualMeaning",
+            "sloganMeaning",
+            "combinedAdvertisingMeaning",
+            "sameStrategicPromise",
+            "sloganCompletesRatherThanChangesVisual",
+            "understandableWithoutCreatorReport",
+            "keyWordMeaningsConnected",
+            "semanticAlignment",
+        ):
+            value = semantic.get(key)
+            if key == "semanticAlignment":
+                if not isinstance(value, bool):
+                    errors.append(f"builder2_judge_validation_failed:semanticAlignmentAssessment.{key}")
+            elif not isinstance(value, bool) and not str(value or "").strip():
+                errors.append(f"builder2_judge_validation_failed:semanticAlignmentAssessment.{key}")
+
+    prototype_assessment = judgment.get("prototypeApplicationAssessment")
+    if not isinstance(prototype_assessment, dict):
+        errors.append("builder2_judge_validation_failed:prototypeApplicationAssessment")
+    else:
+        for key in (
+            "assignedPrototypeId",
+            "prototypeMethodVisibleInFilm",
+            "prototypeMethodReinforcedBySlogan",
+            "applicationFeelsIntrinsic",
+            "applicationRequiresRetrospectiveExplanation",
+        ):
+            value = prototype_assessment.get(key)
+            if key == "assignedPrototypeId":
+                if not str(value or "").strip():
+                    errors.append(f"builder2_judge_validation_failed:prototypeApplicationAssessment.{key}")
+            elif not isinstance(value, bool):
+                errors.append(f"builder2_judge_validation_failed:prototypeApplicationAssessment.{key}")
+        fit_score = prototype_assessment.get("prototypeFitScore")
+        if fit_score is None:
+            fit_score = (judgment.get("scores") or {}).get("prototypeMethodApplication")
+        if not isinstance(fit_score, int) or fit_score < 0 or fit_score > 15:
+            errors.append("builder2_judge_validation_failed:prototypeApplicationAssessment.prototypeFitScore")
 
     return list(dict.fromkeys(errors))
 

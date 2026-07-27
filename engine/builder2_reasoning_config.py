@@ -78,6 +78,10 @@ def log_builder2_model_selected(
     from engine.builder2_advertising_closure_resume_guard import AdvertisingClosureResumeGuard
 
     AdvertisingClosureResumeGuard.assert_reasoning_call_allowed(role)
+    from engine.builder2_normal_production_guard import NormalProductionGuard
+
+    NormalProductionGuard.assert_reasoning_call_allowed(role)
+    NormalProductionGuard.record_call(role)
     model = resolve_builder2_reasoning_model()
     mode = resolve_builder2_reasoning_mode()
     effort = resolve_builder2_reasoning_effort()

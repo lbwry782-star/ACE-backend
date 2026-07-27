@@ -35,7 +35,7 @@ VALID_CONTINUITY_RISK: FrozenSet[str] = frozenset({"low", "medium", "high"})
 JUDGE_SCORE_RANGES: Dict[str, Tuple[int, int]] = {
     "problemAdvantageIntegrity": (0, 20),
     "mechanismQuality": (0, 15),
-    "prototypeMethodApplication": (0, 10),
+    "prototypeMethodApplication": (0, 15),
     "silentVisualClarity": (0, 15),
     "originalityFreshness": (0, 15),
     "eleganceSimplicity": (0, 10),

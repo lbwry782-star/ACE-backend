@@ -20,15 +20,16 @@ from engine.builder2_runway_config import (
     resolve_builder2_runway_video_model,
     resolve_builder2_video_duration_seconds,
 )
+from engine.builder2_runway_submission import submit_builder2_runway_task
 from engine.runway_video import RunwayVideoMVPError, _create_image_to_video_task, _create_text_to_video_task
 from engine.video_start_image import build_ace_start_frame_image_prompt
 
 
 class TestBuilder2RunwayModelConfig(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
-    def test_default_model_is_gen4_turbo(self) -> None:
-        self.assertEqual(resolve_builder2_runway_video_model(), "gen4_turbo")
-        self.assertEqual(DEFAULT_BUILDER2_RUNWAY_VIDEO_MODEL, "gen4_turbo")
+    def test_default_model_is_gen4_5(self) -> None:
+        self.assertEqual(resolve_builder2_runway_video_model(), "gen4.5")
+        self.assertEqual(DEFAULT_BUILDER2_RUNWAY_VIDEO_MODEL, "gen4.5")
 
     @patch.dict(os.environ, {"BUILDER2_RUNWAY_VIDEO_MODEL": "gen4.5"}, clear=True)
     def test_gen4_5_env_override(self) -> None:
@@ -40,9 +41,9 @@ class TestBuilder2RunwayModelConfig(unittest.TestCase):
         self.assertEqual(builder2_runway_generation_mode("gen4_turbo"), "image_to_video")
 
     @patch.dict(os.environ, {"BUILDER2_RUNWAY_VIDEO_MODEL": "gen4.5"}, clear=True)
-    def test_gen4_5_does_not_require_start_image(self) -> None:
-        self.assertFalse(builder2_runway_requires_start_image("gen4.5"))
-        self.assertEqual(builder2_runway_generation_mode("gen4.5"), "text_to_video")
+    def test_gen4_5_requires_start_image(self) -> None:
+        self.assertTrue(builder2_runway_requires_start_image("gen4.5"))
+        self.assertEqual(builder2_runway_generation_mode("gen4.5"), "image_to_video")
 
     @patch.dict(os.environ, {"BUILDER2_RUNWAY_VIDEO_MODEL": "veo3"}, clear=True)
     def test_invalid_model_raises(self) -> None:
@@ -92,22 +93,31 @@ class TestBuilder2RunwayTaskCreation(unittest.TestCase):
 
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "test-key"}, clear=False)
     @patch("engine.runway_video._headers", return_value={"Authorization": "Bearer test"})
-    def test_gen4_5_text_to_video_payload(self, _headers_mock) -> None:
-        task_id = _create_text_to_video_task(
-            self.session,
-            "https://api.dev.runwayml.com",
-            "gen4.5",
-            "A simple cinematic scene. No text.",
+    def test_gen4_5_image_to_video_payload(self, _headers_mock) -> None:
+        data_uri = "data:image/png;base64,abc123"
+        plan: Dict[str, Any] = {
+            "productNameResolved": "Product",
+            "coreVisualIdea": "connection",
+            "sceneVariations": ["friends hugging"],
+            "videoPrompt": "Montage of hugs. No text.",
+            "language": "en",
+        }
+        result = submit_builder2_runway_task(
+            session=self.session,
+            api_key="test-key",
+            plan=plan,
+            runway_model="gen4.5",
             duration_seconds=resolve_builder2_video_duration_seconds(),
+            prompt_image_data_uri=data_uri,
         )
-        self.assertEqual(task_id, "task-123")
+        self.assertEqual(result.task_id, "task-123")
         call_args = self.session.post.call_args
-        self.assertEqual(call_args[0][0], "https://api.dev.runwayml.com/v1/text_to_video")
+        self.assertEqual(call_args[0][0], "https://api.dev.runwayml.com/v1/image_to_video")
         body = call_args[1]["json"]
         self.assertEqual(body["model"], "gen4.5")
         self.assertEqual(body["ratio"], "1280:720")
         self.assertEqual(body["duration"], DEFAULT_BUILDER2_VIDEO_DURATION_SECONDS)
-        self.assertNotIn("promptImage", body)
+        self.assertEqual(body["promptImage"], data_uri)
 
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "test-key"}, clear=False)
     @patch("engine.runway_video._headers", return_value={"Authorization": "Bearer test"})

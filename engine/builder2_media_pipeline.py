@@ -34,7 +34,8 @@ MEDIA_PROGRESS_STAGES = (
     "waiting_for_runway",
     "downloading_video",
     "postprocessing_video",
-    "finalizing_delivery",
+    "rendering_advertising_closure",
+    "publishing_final_video",
     "completed",
 )
 
@@ -534,35 +535,69 @@ def execute_builder2_media_pipeline(
     else:
         _update_media_progress(state, "downloading_video", downloadedVideoPath=runway_url)
         media["downloadedVideoPath"] = runway_url
+        media["rawRunwayVideoUrl"] = runway_url
+        media["rawRunwayVideoPath"] = runway_url
+        media["rawRunwayDurationSeconds"] = resolve_builder2_video_duration_seconds()
         downloaded_path = runway_url
 
-    final_url = str(media.get("finalPublicUrl") or "").strip()
-    marketing_text = str(media.get("marketingText") or "")
-    overlay_headline = ""
-    if final_url:
+    from engine.builder2_new_format_config import (
+        resolve_builder2_end_card_duration_seconds,
+        resolve_builder2_final_video_duration_seconds,
+        validate_new_format_runway_configuration,
+    )
+
+    ok_config, config_failures = validate_new_format_runway_configuration(dry_run=True)
+    if not ok_config:
+        raise Builder2TournamentError(config_failures[0] if config_failures else "builder2_new_format_config_mismatch")
+
+    closure = state.get("advertisingClosure") or plan.get("advertisingClosure") or {}
+    if not isinstance(closure, dict) or not str(closure.get("sloganText") or "").strip():
+        raise Builder2TournamentError("builder2_media_missing_winner_advertising_closure")
+
+    closure_url = str(media.get("finalVideoWithClosureUrl") or "").strip()
+    if closure_url:
         counters.media_reused = True
+        final_url = closure_url
     else:
+        from engine.builder2_advertising_closure_pipeline import render_advertising_closure_for_state
+        from engine.video_endcard_postprocess import append_advertising_closure_endcard
+
+        _update_media_progress(state, "rendering_advertising_closure")
+        MediaResumeIsolationGuard.assert_safe_before_ffmpeg()
+        state, closure_counters = render_advertising_closure_for_state(
+            job_id=job_id,
+            state=state,
+            plan=plan,
+            closure=closure,
+            public_base_url=public_base_url,
+            render_endcard=append_advertising_closure_endcard,
+        )
+        counters.ffmpeg_calls += closure_counters.closure_ffmpeg_calls
+        media = _media_bucket(state)
+        final_url = str(media.get("finalVideoWithClosureUrl") or media.get("finalPublicUrl") or "").strip()
+        media["endCardDurationSeconds"] = resolve_builder2_end_card_duration_seconds()
+        media["finalVideoDurationSeconds"] = resolve_builder2_final_video_duration_seconds()
+        media["advertisingClosureStatus"] = "completed"
+        media["advertisingClosureSource"] = state.get("advertisingClosureSource") or "winner_creator_candidate"
+        state["advertisingClosureStatus"] = "completed"
+
+    if headline_decision_requires_headline(headline_decision) and not closure_url:
         pipeline_deps = deps or default_media_pipeline_deps()
-        if headline_decision_requires_headline(headline_decision):
-            _update_media_progress(state, "postprocessing_video")
-            MediaResumeIsolationGuard.assert_safe_before_ffmpeg()
-            final_url = pipeline_deps.postprocess_video(
-                runway_url=downloaded_path,
-                public_base_url=public_base_url,
-                plan=plan,
-                job_id=job_id,
-            )
-            counters.ffmpeg_calls += 1
-            media["ffmpegStatus"] = "completed"
-            overlay_headline = (plan.get("headlineText") or "").strip()
-        else:
-            _update_media_progress(state, "finalizing_delivery")
-            final_url = downloaded_path
-            media["ffmpegStatus"] = "skipped_omit"
-        media["finalVideoPath"] = final_url
-        media["finalPublicUrl"] = final_url
+        _update_media_progress(state, "postprocessing_video")
+        MediaResumeIsolationGuard.assert_safe_before_ffmpeg()
+        final_url = pipeline_deps.postprocess_video(
+            runway_url=downloaded_path,
+            public_base_url=public_base_url,
+            plan=plan,
+            job_id=job_id,
+        )
+        counters.ffmpeg_calls += 1
+        media["ffmpegStatus"] = "completed"
+
+    marketing_text = str(media.get("marketingText") or "")
+    if not marketing_text:
         marketing_text, marketing_source = _resolve_pipeline_marketing_text(
-            pipeline_deps=pipeline_deps,
+            pipeline_deps=deps or default_media_pipeline_deps(),
             state=state,
             plan=plan,
             product_name=str(plan.get("productNameResolved") or ""),
@@ -571,7 +606,12 @@ def execute_builder2_media_pipeline(
         )
         media["marketingText"] = marketing_text
         media["marketingCopySource"] = marketing_source
-        media["deliveryArtifactPaths"] = [final_url]
+
+    _update_media_progress(state, "publishing_final_video")
+    media["finalPublicUrl"] = final_url
+    media["finalVideoPath"] = final_url
+    media["finalArtifactPublishedAt"] = _utc_now_iso()
+    media["deliveryArtifactPaths"] = [final_url]
 
     _update_media_progress(
         state,
@@ -579,6 +619,7 @@ def execute_builder2_media_pipeline(
         mediaCompletedAt=_utc_now_iso(),
         finalPublicUrl=final_url,
         finalVideoPath=final_url,
+        finalVideoWithClosureUrl=final_url,
         marketingText=marketing_text,
     )
     state["mediaContinuationRequired"] = False

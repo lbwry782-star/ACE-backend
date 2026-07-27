@@ -151,7 +151,7 @@ def _judgment(candidate_id: str, *, total_hint: int = 80, eligible: bool = True)
     scores = {
         "problemAdvantageIntegrity": min(20, total_hint // 5),
         "mechanismQuality": 12,
-        "prototypeMethodApplication": 8,
+        "prototypeMethodApplication": 12,
         "silentVisualClarity": 12,
         "originalityFreshness": 10,
         "eleganceSimplicity": 8,

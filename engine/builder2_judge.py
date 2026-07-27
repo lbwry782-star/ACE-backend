@@ -275,6 +275,9 @@ def validate_judge_response(
 
     validate_judge_purity(out)
     validate_judge_methodology(out, candidate=candidate, compatibility_mode=compatibility_mode)
+    from engine.builder2_complete_ad_contract import apply_semantic_eligibility_rules
+
+    out = apply_semantic_eligibility_rules(out)
     return out, total, scores
 
 
