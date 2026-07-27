@@ -258,6 +258,8 @@ def validate_creator_candidate(
         strategy_foundation=strategy_foundation,
         compatibility_mode=compatibility_mode,
         base_normalizer=normalize_creator_raw,
+        job_id=job_id,
+        candidate_id=candidate_id,
     )
     if normalized.get("planningFailure"):
         _raise_creator_error("builder2_creator_validation_failed", field="planningFailure")
@@ -481,6 +483,8 @@ def collect_creator_structural_errors(
         strategy_foundation=strategy_foundation,
         compatibility_mode=compatibility_mode,
         base_normalizer=normalize_creator_raw,
+        job_id=job_id,
+        candidate_id=candidate_id,
     )
 
     def run(check: Any) -> None:
@@ -912,6 +916,8 @@ def generate_creator_candidate(
                 strategy_foundation=strategy_foundation,
                 compatibility_mode=compatibility_mode,
                 base_normalizer=normalize_creator_raw,
+                job_id=job_id,
+                candidate_id=candidate_id,
             )
             candidate = validate_creator_candidate(
                 parsed,

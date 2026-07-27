@@ -3,6 +3,7 @@ Builder2 complete-ad Creator recovery — persist and offline revalidate rejecte
 """
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,8 @@ from engine.builder2_creator import validate_creator_candidate
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
 REJECTED_CREATOR_PARSED_INDEX_KEY = "rejectedCreatorParsedResponses"
+
+logger = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
@@ -131,6 +134,7 @@ def offline_revalidate_and_accept_rejected_creator(
     candidate_id: str,
     product_name: str = "",
     compatibility_mode: bool = False,
+    log_events: bool = True,
 ) -> Dict[str, Any]:
     payload = load_rejected_creator_parsed_response(state, candidate_id)
     if payload is None:
@@ -140,22 +144,43 @@ def offline_revalidate_and_accept_rejected_creator(
     round_index = int(payload.get("roundIndex") or parsed.get("roundIndex") or 1)
     attempt_number = int(payload.get("attemptNumber") or parsed.get("attemptNumber") or 1)
     strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
-    candidate = validate_creator_candidate(
-        parsed,
-        assigned_prototype_id=prototype_id,
-        prototype_display_name=prototype_id,
-        strategy_foundation=strategy,
-        compatibility_mode=compatibility_mode,
-        job_id=_clean(state.get("jobId")),
-        tournament_id=_clean(state.get("tournamentId")),
-        candidate_id=candidate_id,
-    )
-    validate_creator_complete_ad_fields(
-        candidate,
-        strategy_foundation=strategy,
-        assigned_prototype_id=prototype_id,
-        product_name=product_name or _clean(strategy.get("productNameResolved")),
-    )
+    job_id = _clean(state.get("jobId"))
+    if log_events:
+        logger.info(
+            "BUILDER2_REJECTED_CREATOR_OFFLINE_REVALIDATION_START jobId=%s candidateId=%s prototypeId=%s",
+            job_id or "(none)",
+            candidate_id,
+            prototype_id,
+        )
+    try:
+        candidate = validate_creator_candidate(
+            parsed,
+            assigned_prototype_id=prototype_id,
+            prototype_display_name=prototype_id,
+            strategy_foundation=strategy,
+            compatibility_mode=compatibility_mode,
+            job_id=job_id,
+            tournament_id=_clean(state.get("tournamentId")),
+            candidate_id=candidate_id,
+        )
+        validate_creator_complete_ad_fields(
+            candidate,
+            strategy_foundation=strategy,
+            assigned_prototype_id=prototype_id,
+            product_name=product_name or _clean(strategy.get("productNameResolved")),
+        )
+    except Builder2TournamentError as exc:
+        reason = str(exc.args[0] if exc.args else "revalidation_failed")
+        if log_events:
+            logger.info(
+                "BUILDER2_REJECTED_CREATOR_OFFLINE_REVALIDATION_FAILED jobId=%s candidateId=%s prototypeId=%s "
+                "validationCode=%s",
+                job_id or "(none)",
+                candidate_id,
+                prototype_id,
+                reason[:120],
+            )
+        raise
     persist_accepted_creator_candidate(
         state,
         candidate_id=candidate_id,
@@ -185,4 +210,44 @@ def offline_revalidate_and_accept_rejected_creator(
     index = state.get(REJECTED_CREATOR_PARSED_INDEX_KEY)
     if isinstance(index, dict):
         index.pop(candidate_id, None)
+    if log_events:
+        logger.info(
+            "BUILDER2_REJECTED_CREATOR_OFFLINE_REVALIDATION_ACCEPTED jobId=%s candidateId=%s prototypeId=%s",
+            job_id or "(none)",
+            candidate_id,
+            prototype_id,
+        )
     return candidate
+
+
+def try_offline_recover_rejected_creator_for_prototype(
+    state: Dict[str, Any],
+    *,
+    prototype_id: str,
+    product_name: str = "",
+    compatibility_mode: bool = False,
+) -> Tuple[bool, Optional[str], Optional[str]]:
+    """
+    Load, normalize, revalidate, and accept a persisted rejected Creator for prototype_id.
+    Returns (recovered, candidate_id, failure_reason).
+    """
+    payload = find_rejected_creator_for_prototype(state, prototype_id)
+    if payload is None:
+        return False, None, "rejected_creator_parsed_response_missing"
+    candidate_id = _clean(payload.get("candidateId"))
+    if not candidate_id:
+        parsed = payload.get("parsed") if isinstance(payload.get("parsed"), dict) else {}
+        candidate_id = _clean(parsed.get("candidateId"))
+    if not candidate_id:
+        return False, None, "rejected_creator_candidate_id_missing"
+    try:
+        offline_revalidate_and_accept_rejected_creator(
+            state,
+            candidate_id=candidate_id,
+            product_name=product_name,
+            compatibility_mode=compatibility_mode,
+            log_events=True,
+        )
+    except Builder2TournamentError as exc:
+        return False, candidate_id, str(exc.args[0] if exc.args else "revalidation_failed")
+    return True, candidate_id, None

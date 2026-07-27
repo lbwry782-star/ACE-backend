@@ -30,6 +30,10 @@ from engine.builder2_accepted_judgment_store import (
     persist_accepted_judgment,
 )
 from engine.builder2_complete_ad_contract import copy_winner_advertising_closure_from_candidate
+from engine.builder2_complete_ad_creator_recovery import (
+    find_rejected_creator_for_prototype,
+    try_offline_recover_rejected_creator_for_prototype,
+)
 from engine.builder2_complete_ad_resume_plan import parsed_winner_reusable_for_candidate
 from engine.builder2_creator import generate_creator_candidate
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
@@ -55,6 +59,7 @@ from engine.builder2_tournament_completion_gate import (
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_manager import select_global_winner
+from engine.builder2_tournament_metrics import ensure_metrics
 from engine.builder2_tournament_recovery import new_worker_token
 from engine.builder2_tournament_store import (
     ensure_methodology_compatibility_decided,
@@ -127,6 +132,47 @@ class ControlledReasoningCallBudget:
             self.winner_calls_this_run += 1
         else:
             raise Builder2TournamentError(f"builder2_complete_ad_reasoning_resume_unknown_role:{role}")
+
+
+def _reasoning_call_snapshot(state: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    if not state:
+        return {"creator": 0, "judge": 0, "winner": 0}
+    metrics = ensure_metrics(state)
+    return {
+        "creator": int(metrics.get("creatorCalls") or 0)
+        + int(metrics.get("creatorRepairCalls") or 0)
+        + int(metrics.get("creatorRetryCalls") or 0),
+        "judge": int(metrics.get("judgeCalls") or 0)
+        + int(metrics.get("judgeRepairCalls") or 0)
+        + int(metrics.get("judgeRetryCalls") or 0),
+        "winner": int(metrics.get("winnerDevelopmentCalls") or 0),
+    }
+
+
+def _sync_budget_from_metrics_delta(
+    budget: ControlledReasoningCallBudget,
+    *,
+    baseline: Dict[str, int],
+    state: Dict[str, Any],
+) -> None:
+    current = _reasoning_call_snapshot(state)
+    budget.creator_calls_this_run = max(budget.creator_calls_this_run, current["creator"] - baseline["creator"])
+    budget.judge_calls_this_run = max(budget.judge_calls_this_run, current["judge"] - baseline["judge"])
+    budget.winner_calls_this_run = max(budget.winner_calls_this_run, current["winner"] - baseline["winner"])
+
+
+def _populate_report_accepted_counts(report: Dict[str, Any], state: Optional[Dict[str, Any]]) -> None:
+    if state is None:
+        return
+    report["acceptedCreatorCount"] = accepted_creator_count(state)
+    report["acceptedJudgmentCount"] = accepted_judgment_count(state)
+
+
+def _populate_report_reasoning_calls(report: Dict[str, Any], budget: ControlledReasoningCallBudget) -> None:
+    report["creatorCallsThisRun"] = budget.creator_calls_this_run
+    report["judgeCallsThisRun"] = budget.judge_calls_this_run
+    report["winnerCallsThisRun"] = budget.winner_calls_this_run
+    report["totalReasoningCallsThisRun"] = budget.total_this_run
 
 
 def _media_bucket(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -321,6 +367,7 @@ def _emit_resume_stage_failure(
     job_id: str,
     failure_stage: str,
     failure_reason: str,
+    budget: Optional[ControlledReasoningCallBudget] = None,
     reasoning_role: str = "",
     prototype_id: str = "",
     model: str = "",
@@ -336,6 +383,9 @@ def _emit_resume_stage_failure(
 ) -> Dict[str, Any]:
     report["failureReason"] = failure_reason
     report["failureStage"] = failure_stage
+    _populate_report_accepted_counts(report, state)
+    if budget is not None:
+        _populate_report_reasoning_calls(report, budget)
     tournament_id = _clean((state or {}).get("tournamentId"))
     log_reasoning_resume_failed(
         logger,
@@ -449,56 +499,92 @@ def run_controlled_complete_ad_reasoning_resume(
         if GREENPEACE_PROTOTYPE in missing_creator_prototype_ids(state):
             if not _candidate_id_for_prototype(state, GREENPEACE_PROTOTYPE):
                 current_stage = "creator_generation"
-                budget.assert_can_call("builder2_creator")
-                candidate_id = f"cand-1-{GREENPEACE_PROTOTYPE}-1-{uuid.uuid4().hex[:8]}"
-                try:
-                    candidate_id, candidate = generate_creator_candidate(
-                        product_name=product_name,
-                        product_description=product_description,
-                        language=language,
-                        strategy_foundation=strategy,
+                rejected_payload = find_rejected_creator_for_prototype(state, GREENPEACE_PROTOTYPE)
+                recovered, recovered_id, offline_reason = try_offline_recover_rejected_creator_for_prototype(
+                    state,
+                    prototype_id=GREENPEACE_PROTOTYPE,
+                    product_name=product_name,
+                    compatibility_mode=compatibility_mode,
+                )
+                if recovered:
+                    logger.info(
+                        "BUILDER2_REJECTED_CREATOR_OFFLINE_RECOVERY_SUCCEEDED jobId=%s prototypeId=%s candidateId=%s",
+                        job_id,
+                        GREENPEACE_PROTOTYPE,
+                        recovered_id,
+                    )
+                    save_tournament_state(job_id, state)
+                elif rejected_payload:
+                    logger.info(
+                        "BUILDER2_REJECTED_CREATOR_OFFLINE_RECOVERY_IMPOSSIBLE jobId=%s prototypeId=%s reason=%s",
+                        job_id,
+                        GREENPEACE_PROTOTYPE,
+                        offline_reason or "unknown",
+                    )
+                if not _candidate_id_for_prototype(state, GREENPEACE_PROTOTYPE):
+                    if rejected_payload:
+                        logger.warning(
+                            "BUILDER2_REJECTED_CREATOR_OFFLINE_RECOVERY_FALLBACK_OPENAI jobId=%s prototypeId=%s "
+                            "offlineReason=%s",
+                            job_id,
+                            GREENPEACE_PROTOTYPE,
+                            offline_reason or "unknown",
+                        )
+                    budget.assert_can_call("builder2_creator")
+                    metrics_before = _reasoning_call_snapshot(state)
+                    candidate_id = f"cand-1-{GREENPEACE_PROTOTYPE}-1-{uuid.uuid4().hex[:8]}"
+                    try:
+                        candidate_id, candidate = generate_creator_candidate(
+                            product_name=product_name,
+                            product_description=product_description,
+                            language=language,
+                            strategy_foundation=strategy,
+                            prototype_id=GREENPEACE_PROTOTYPE,
+                            round_index=1,
+                            attempt_number=1,
+                            runway_mode=runway_mode,
+                            llm_client=llm_client,
+                            state=state,
+                            candidate_id=candidate_id,
+                            compatibility_mode=compatibility_mode,
+                            single_attempt_only=True,
+                        )
+                    except Builder2TournamentError as exc:
+                        _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+                        reason = str(exc.args[0] if exc.args else "builder2_creator_validation_failed")
+                        record_process_failure_tag(state, reason)
+                        _persist_resumable_failure(
+                            state,
+                            job_id=job_id,
+                            failure_stage="creator_generation",
+                            failure_reason=reason,
+                        )
+                        return _emit_resume_stage_failure(
+                            report,
+                            state,
+                            job_id=job_id,
+                            failure_stage="creator_generation",
+                            failure_reason=reason,
+                            budget=budget,
+                            reasoning_role="builder2_creator",
+                            prototype_id=GREENPEACE_PROTOTYPE,
+                            validation_rejection_code=reason,
+                            redis_mutated=True,
+                            lease_acquired=lease_acquired,
+                        )
+                    _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+                    if budget.creator_calls_this_run == metrics_before["creator"]:
+                        budget.record("builder2_creator")
+                    persist_accepted_creator_candidate(
+                        state,
+                        candidate_id=candidate_id,
                         prototype_id=GREENPEACE_PROTOTYPE,
                         round_index=1,
                         attempt_number=1,
-                        runway_mode=runway_mode,
-                        llm_client=llm_client,
-                        state=state,
-                        candidate_id=candidate_id,
-                        compatibility_mode=compatibility_mode,
-                        single_attempt_only=True,
+                        creator_output=candidate,
+                        strategy_foundation=strategy,
                     )
-                except Builder2TournamentError as exc:
-                    reason = str(exc.args[0] if exc.args else "builder2_creator_validation_failed")
-                    record_process_failure_tag(state, reason)
-                    _persist_resumable_failure(
-                        state,
-                        job_id=job_id,
-                        failure_stage="creator_generation",
-                        failure_reason=reason,
-                    )
-                    return _emit_resume_stage_failure(
-                        report,
-                        state,
-                        job_id=job_id,
-                        failure_stage="creator_generation",
-                        failure_reason=reason,
-                        reasoning_role="builder2_creator",
-                        prototype_id=GREENPEACE_PROTOTYPE,
-                        validation_rejection_code=reason,
-                        redis_mutated=True,
-                        lease_acquired=lease_acquired,
-                    )
-                budget.record("builder2_creator")
-                persist_accepted_creator_candidate(
-                    state,
-                    candidate_id=candidate_id,
-                    prototype_id=GREENPEACE_PROTOTYPE,
-                    round_index=1,
-                    attempt_number=1,
-                    creator_output=candidate,
-                    strategy_foundation=strategy,
-                )
-                save_tournament_state(job_id, state)
+                    save_tournament_state(job_id, state)
 
         backfill_accepted_creator_index(state)
         greenpeace_candidate_id = _candidate_id_for_prototype(state, GREENPEACE_PROTOTYPE)
@@ -516,6 +602,7 @@ def run_controlled_complete_ad_reasoning_resume(
                 job_id=job_id,
                 failure_stage="creator_generation",
                 failure_reason=reason,
+                budget=budget,
                 reasoning_role="builder2_creator",
                 prototype_id=GREENPEACE_PROTOTYPE,
                 redis_mutated=True,
@@ -545,6 +632,7 @@ def run_controlled_complete_ad_reasoning_resume(
             budget.assert_can_call("builder2_judge")
             ReasoningResumeIsolationGuard.assert_safe_before_judge()
             judgment_id = f"judge-{greenpeace_candidate_id}-{uuid.uuid4().hex[:8]}"
+            metrics_before = _reasoning_call_snapshot(state)
             try:
                 judgment_id, judgment, total, scores = judge_candidate(
                     product_name=product_name,
@@ -561,6 +649,7 @@ def run_controlled_complete_ad_reasoning_resume(
                     single_attempt_only=True,
                 )
             except Builder2TournamentError as exc:
+                _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
                 reason = str(exc.args[0] if exc.args else "builder2_judge_invalid_response")
                 record_process_failure_tag(state, reason)
                 _persist_resumable_failure(
@@ -575,13 +664,16 @@ def run_controlled_complete_ad_reasoning_resume(
                     job_id=job_id,
                     failure_stage="judge_generation",
                     failure_reason=reason,
+                    budget=budget,
                     reasoning_role="builder2_judge",
                     prototype_id=GREENPEACE_PROTOTYPE,
                     validation_rejection_code=reason,
                     redis_mutated=True,
                     lease_acquired=lease_acquired,
                 )
-            budget.record("builder2_judge")
+            _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+            if budget.judge_calls_this_run == metrics_before["judge"]:
+                budget.record("builder2_judge")
             persist_accepted_judgment(
                 state,
                 candidate_id=greenpeace_candidate_id,
@@ -609,6 +701,7 @@ def run_controlled_complete_ad_reasoning_resume(
                 job_id=job_id,
                 failure_stage="judge_generation",
                 failure_reason=reason,
+                budget=budget,
                 redis_mutated=True,
                 lease_acquired=lease_acquired,
             )
@@ -632,6 +725,7 @@ def run_controlled_complete_ad_reasoning_resume(
                 job_id=job_id,
                 failure_stage="winner_selection",
                 failure_reason=reason,
+                budget=budget,
                 reasoning_role="builder2_winner",
                 redis_mutated=True,
                 lease_acquired=lease_acquired,
@@ -701,6 +795,7 @@ def run_controlled_complete_ad_reasoning_resume(
                     job_id=job_id,
                     failure_stage="winner_development",
                     failure_reason=reason,
+                    budget=budget,
                     reasoning_role="builder2_winner",
                     redis_mutated=True,
                     lease_acquired=lease_acquired,
@@ -708,6 +803,7 @@ def run_controlled_complete_ad_reasoning_resume(
         else:
             budget.assert_can_call("builder2_winner")
             ReasoningResumeIsolationGuard.assert_safe_before_winner_development()
+            metrics_before = _reasoning_call_snapshot(state)
             try:
                 winner_plan = develop_builder2_winning_candidate(
                     product_name=product_name,
@@ -724,6 +820,7 @@ def run_controlled_complete_ad_reasoning_resume(
                     candidate_id=winner_id,
                 )
             except Builder2TournamentError as exc:
+                _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
                 reason = str(exc.args[0] if exc.args else "builder2_winner_development_failed")
                 _persist_resumable_failure(
                     state,
@@ -737,11 +834,14 @@ def run_controlled_complete_ad_reasoning_resume(
                     job_id=job_id,
                     failure_stage="winner_development",
                     failure_reason=reason,
+                    budget=budget,
                     reasoning_role="builder2_winner",
                     redis_mutated=True,
                     lease_acquired=lease_acquired,
                 )
-            budget.record("builder2_winner")
+            _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+            if budget.winner_calls_this_run == metrics_before["winner"]:
+                budget.record("builder2_winner")
             persist_winner_development_atomically(
                 state,
                 candidate_id=winner_id,
@@ -794,6 +894,7 @@ def run_controlled_complete_ad_reasoning_resume(
             job_id=job_id,
             failure_stage=current_stage,
             failure_reason=reason,
+            budget=budget,
             reasoning_role="builder2_creator" if current_stage == "creator_generation" else "",
             prototype_id=GREENPEACE_PROTOTYPE if current_stage == "creator_generation" else "",
             exception_class=type(exc).__name__,

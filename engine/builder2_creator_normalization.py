@@ -349,6 +349,8 @@ def normalize_creator_candidate(
     strategy_foundation: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
     base_normalizer: Any = None,
+    job_id: str = "",
+    candidate_id: str = "",
 ) -> Tuple[Dict[str, Any], List[str]]:
     """
     Full Creator normalization pipeline. Returns (candidate, resolved_field_paths).
@@ -381,6 +383,17 @@ def normalize_creator_candidate(
     _normalize_verbal_potential(out, resolved)
     _normalize_montage_aliases(out, resolved)
     _normalize_strategy_identity(out, strategy_foundation=strategy_foundation, resolved=resolved)
+
+    from engine.builder2_complete_ad_contract import normalize_creator_advertising_closure_execution_metadata
+
+    out, duration_normalized = normalize_creator_advertising_closure_execution_metadata(
+        out,
+        job_id=job_id,
+        candidate_id=candidate_id,
+        prototype_id=assigned_prototype_id,
+    )
+    if duration_normalized:
+        resolved.append("advertisingClosure.durationSeconds")
 
     _derive_concept_summary(out, resolved)
     _derive_visual_family(out, resolved)

@@ -3,6 +3,7 @@ Builder2 complete-ad contract — Creator slogans, Judge semantic alignment, Win
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -12,6 +13,8 @@ from engine.builder2_advertising_closure_contract import (
     validate_slogan_text_structure,
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
+
+logger = logging.getLogger(__name__)
 
 COMPLETE_AD_CREATOR_FIELDS = ("advertisingClosure", "semanticBridge")
 FINAL_DURATION_TOLERANCE_SECONDS = 0.35
@@ -90,6 +93,68 @@ def _raise(code: str, *, field: str) -> None:
     raise Builder2TournamentError(f"{code}:{field}")
 
 
+def resolve_canonical_creator_end_card_duration_seconds() -> float:
+    from engine.builder2_new_format_config import resolve_builder2_end_card_duration_seconds
+
+    return resolve_builder2_end_card_duration_seconds()
+
+
+def _parse_duration_seconds_raw(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    match = re.match(r"^\s*([\d.]+)\s*(?:seconds?|sec|s)?\s*$", text, re.I)
+    if match:
+        return float(match.group(1))
+    return None
+
+
+def normalize_creator_advertising_closure_execution_metadata(
+    candidate: Dict[str, Any],
+    *,
+    job_id: str = "",
+    candidate_id: str = "",
+    prototype_id: str = "",
+) -> Tuple[Dict[str, Any], bool]:
+    """
+    Coerce advertisingClosure.durationSeconds to the canonical Builder2 end-card duration.
+    This is deterministic execution metadata, not creative model reasoning.
+    """
+    canonical = resolve_canonical_creator_end_card_duration_seconds()
+    closure_raw = candidate.get("advertisingClosure")
+    if not isinstance(closure_raw, dict):
+        return candidate, False
+    closure = dict(closure_raw)
+    original = closure.get("durationSeconds")
+    parsed = _parse_duration_seconds_raw(original)
+    if parsed is not None and abs(parsed - canonical) <= 0.01:
+        if closure.get("durationSeconds") != canonical:
+            closure["durationSeconds"] = canonical
+            candidate["advertisingClosure"] = closure
+        return candidate, False
+    closure["durationSeconds"] = canonical
+    candidate["advertisingClosure"] = closure
+    logger.info(
+        "BUILDER2_CREATOR_DURATION_NORMALIZED jobId=%s candidateId=%s prototypeId=%s "
+        "originalValue=%s originalType=%s normalizedDuration=%s canonicalSource=resolve_builder2_end_card_duration_seconds",
+        job_id or "(none)",
+        candidate_id or "(none)",
+        prototype_id or "(none)",
+        repr(original)[:80],
+        type(original).__name__,
+        canonical,
+    )
+    return candidate, True
+
+
 def build_default_creator_advertising_closure(
     *,
     product_name: str,
@@ -103,7 +168,7 @@ def build_default_creator_advertising_closure(
             "sloganText": slogan_text,
             "language": language,
             "presentationMode": "end_card",
-            "durationSeconds": 2,
+            "durationSeconds": resolve_canonical_creator_end_card_duration_seconds(),
             "noLogo": True,
             "headlineSource": "creator_candidate",
         }
@@ -168,7 +233,8 @@ def validate_creator_complete_ad_fields(
         duration = float(closure.get("durationSeconds"))
     except (TypeError, ValueError):
         duration = 0.0
-    if abs(duration - 2.0) > 0.01:
+    canonical_duration = resolve_canonical_creator_end_card_duration_seconds()
+    if abs(duration - canonical_duration) > 0.01:
         _raise("builder2_creator_validation_failed", field="advertisingClosure.durationSeconds")
     if closure.get("noLogo") is not True:
         _raise("builder2_creator_validation_failed", field="advertisingClosure.noLogo")
