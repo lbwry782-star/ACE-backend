@@ -11,11 +11,19 @@ from typing import Any, Dict
 from unittest.mock import patch
 
 from engine.builder2_tournament_contracts import Builder2TournamentError
-from engine.builder2_winner_preservation_contract import PARSED_WINNER_RESPONSE_KEY
 from engine.builder2_winner_repair_failure_inspect import (
+    _build_headline_text_timing_assessment,
+    _build_required_winner_field_audit,
+    _prepare_preserved_plan,
+    _replay_low_level_winner_plan_validation,
     _build_exception_chain,
     inspect_builder2_winner_repair_failure,
     main,
+)
+from engine.builder2_winner_preservation_contract import (
+    PARSED_WINNER_RESPONSE_KEY,
+    build_server_owned_winner_source_reference,
+    build_winning_candidate_preservation_snapshot,
 )
 from tests.builder2_methodology_fixtures import methodology_judgment_extras, methodology_winner_extras
 from tests.test_builder2_tournament import _candidate, _judgment, _strategy, _winner_plan_from_prompt
@@ -46,6 +54,133 @@ def _repaired_failure_state(*, headline: str, keyword: str) -> Dict[str, Any]:
     state["failureStage"] = "winner_development"
     state["failureReason"] = "builder2_winner_development_failed"
     return state
+
+
+def _preserved_plan_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    winner_id = _forgot_winner_id(state)
+    parsed = dict(state[PARSED_WINNER_RESPONSE_KEY]["parsed"])
+    winner_rec = state["candidates"][winner_id]
+    winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+    judgment_id = winner_rec["judgmentId"]
+    winning_judgment = state["judgments"][judgment_id]["judgment"]
+    strategy = state["strategyFoundation"]
+    source_reference = build_server_owned_winner_source_reference(
+        strategy_foundation=strategy,
+        winning_candidate=winning_candidate,
+        candidate_id=winner_id,
+    )
+    return _prepare_preserved_plan(
+        parsed,
+        source_reference=source_reference,
+        winning_candidate=winning_candidate,
+        winning_judgment=winning_judgment,
+        compatibility_mode=bool(state.get("methodologyCompatibilityMode")),
+    )
+
+
+class TestWinnerRepairFailureInspectDiagnostics(unittest.TestCase):
+    def test_low_level_identifies_missing_sequence_development(self) -> None:
+        state = _repaired_failure_state(headline="valid words here", keyword="valid")
+        winner_id = _forgot_winner_id(state)
+        winner_rec = state["candidates"][winner_id]
+        winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+        winning_judgment = state["judgments"][winner_rec["judgmentId"]]["judgment"]
+        preserved = _preserved_plan_from_state(state)
+        preserved["sequence"] = dict(preserved.get("sequence") or {})
+        preserved["sequence"].pop("development", None)
+        stages = _replay_low_level_winner_plan_validation(
+            preserved,
+            winning_candidate=winning_candidate,
+            preservation_snapshot=build_winning_candidate_preservation_snapshot(
+                strategy_foundation=state["strategyFoundation"],
+                winning_candidate=winning_candidate,
+                candidate_id=winner_id,
+            ),
+            winning_judgment=winning_judgment,
+            compatibility_mode=False,
+        )
+        first = next(stage for stage in stages if stage.get("firstFailure"))
+        self.assertEqual(first["exactFieldPath"], "sequence.development")
+        self.assertEqual(first["exactSafeErrorCode"], "builder2_tournament_invalid_field:sequence.development")
+
+    def test_wrong_type_distinguished_from_missing(self) -> None:
+        state = _repaired_failure_state(headline="valid words here", keyword="valid")
+        winner_id = _forgot_winner_id(state)
+        winner_rec = state["candidates"][winner_id]
+        winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+        winning_judgment = state["judgments"][winner_rec["judgmentId"]]["judgment"]
+        preserved = _preserved_plan_from_state(state)
+        preserved["sequence"] = "not-a-dict"
+        audit = _build_required_winner_field_audit(
+            preserved,
+            winning_candidate=winning_candidate,
+            winning_judgment=winning_judgment,
+        )
+        sequence_entry = next(entry for entry in audit if entry["fieldPath"] == "sequence")
+        self.assertEqual(sequence_entry["structuralStatus"], "wrong_type")
+        missing_entry = next(entry for entry in audit if entry["fieldPath"] == "sequence.development")
+        self.assertIn(missing_entry["structuralStatus"], {"missing", "null"})
+
+    def test_invalid_enum_reported_safely(self) -> None:
+        state = _repaired_failure_state(headline="valid words here", keyword="valid")
+        winner_id = _forgot_winner_id(state)
+        winner_rec = state["candidates"][winner_id]
+        winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+        winning_judgment = state["judgments"][winner_rec["judgmentId"]]["judgment"]
+        preserved = _preserved_plan_from_state(state)
+        preserved["structureType"] = "invalid_structure"
+        audit = _build_required_winner_field_audit(
+            preserved,
+            winning_candidate=winning_candidate,
+            winning_judgment=winning_judgment,
+        )
+        structure_entry = next(entry for entry in audit if entry["fieldPath"] == "structureType")
+        self.assertEqual(structure_entry["structuralStatus"], "invalid_enum")
+        stages = _replay_low_level_winner_plan_validation(
+            preserved,
+            winning_candidate=winning_candidate,
+            preservation_snapshot={},
+            winning_judgment=winning_judgment,
+            compatibility_mode=False,
+        )
+        first = next(stage for stage in stages if stage.get("firstFailure"))
+        self.assertEqual(first["stageName"], "structureType_unrecognized")
+        self.assertEqual(first["exactFieldPath"], "structureType")
+
+    @patch("engine.builder2_winner_repair_failure_inspect.redis_configured", return_value=True)
+    @patch("engine.builder2_winner_repair_failure_inspect._read_raw")
+    def test_generic_wrapper_origin_for_montage_language(self, read_raw: Any, _redis: Any) -> None:
+        state = _repaired_failure_state(headline="valid words here", keyword="valid")
+        plan = state[PARSED_WINNER_RESPONSE_KEY]["parsed"]
+        plan["videoPrompt"] = "A montage of quick cuts across the scene"
+        read_raw.return_value = deepcopy(state)
+        report = inspect_builder2_winner_repair_failure("job-montage-language")
+        self.assertTrue(report["genericWrapperLostInnerError"])
+        origin = report["genericWrapperOrigin"]
+        self.assertEqual(origin["file"], "engine/builder2_winner_plan.py")
+        self.assertEqual(origin["function"], "validate_builder2_winner_plan")
+        self.assertEqual(report["firstConcreteFailureField"], "videoPrompt")
+        self.assertEqual(report["firstConcreteFailingStage"], "continuous_event_videoPrompt_montage_language")
+        self.assertTrue(report["offlineDataSufficientForDiagnosis"])
+
+    def test_headline_text_timing_assessment(self) -> None:
+        timing = _build_headline_text_timing_assessment()
+        self.assertEqual(timing["canonicalHelper"], "compose_builder2_headline_text")
+        self.assertFalse(timing["requiredByBaseWinnerPlanValidation"])
+        self.assertTrue(timing["requiredByHeadlineCompositionValidation"])
+        self.assertFalse(timing["missingHeadlineTextCanExplainBaseWinnerPlanFailure"])
+
+    @patch("engine.builder2_winner_repair_failure_inspect.redis_configured", return_value=True)
+    @patch("engine.builder2_winner_repair_failure_inspect._read_raw")
+    def test_audit_never_emits_non_empty_creative_text(self, read_raw: Any, _redis: Any) -> None:
+        secret = "TOP SECRET CREATIVE COPY"
+        state = _repaired_failure_state(headline=secret, keyword="SECRET")
+        read_raw.return_value = deepcopy(state)
+        report = inspect_builder2_winner_repair_failure("job-audit-redact")
+        payload = json.dumps(report)
+        self.assertNotIn(secret, payload)
+        for entry in report["requiredWinnerFieldAudit"]:
+            self.assertNotIn("value", entry)
 
 
 class TestWinnerRepairFailureInspectReadOnly(unittest.TestCase):
