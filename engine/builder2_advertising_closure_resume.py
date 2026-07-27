@@ -15,7 +15,10 @@ from engine.builder2_advertising_closure_contract import (
     set_advertising_closure_status,
     validate_advertising_closure_object,
 )
-from engine.builder2_advertising_closure_pipeline import render_advertising_closure_for_state
+from engine.builder2_advertising_closure_pipeline import (
+    render_advertising_closure_for_state,
+    resolve_raw_runway_video,
+)
 from engine.builder2_advertising_closure_proposal import generate_advertising_closure_proposal
 from engine.builder2_advertising_closure_resume_guard import AdvertisingClosureResumeGuard
 from engine.builder2_tournament_store import load_tournament_state, save_tournament_state
@@ -145,12 +148,14 @@ def run_one_advertising_closure_resume(
 
             renderer = render_endcard or append_advertising_closure_endcard
             AdvertisingClosureResumeGuard.enable_closure_ffmpeg()
+            source_video_url = resolve_raw_runway_video(state)
             updated, counters = render_advertising_closure_for_state(
                 job_id=jid,
                 state=state,
                 plan=plan,
                 closure=closure,
                 public_base_url=public_base_url,
+                source_video_url=source_video_url,
                 render_endcard=renderer,
             )
             state.update(updated)

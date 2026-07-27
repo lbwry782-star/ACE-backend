@@ -29,6 +29,12 @@ from engine.builder2_new_format_config import (
     resolve_builder2_final_video_duration_seconds,
 )
 from engine.builder2_read_only_inspection import read_only_builder2_inspection
+from engine.builder2_media_finalization_contract import (
+    assess_false_completion,
+    closure_inclusive_artifact_valid,
+    resolve_legacy_headline_artifact_url,
+    validate_builder2_media_completion_contract,
+)
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development
 from engine.builder2_tournament_store import _read_raw
 from engine.video_jobs_redis import redis_configured, video_job_get_raw
@@ -340,29 +346,27 @@ def _build_artifact_identity_graph(
 def _pipeline_order_audit(*, headline_required: bool) -> Dict[str, Any]:
     return {
         "documentedOrderForHeadlineUse": (
-            "raw_runway -> closure_render_attempt -> headline_overlay_on_downloaded_raw -> publish"
+            "raw_runway -> headline_overlay -> advertising_closure -> publish"
         ),
-        "closureBeforeHeadlineInCode": True,
+        "closureBeforeHeadlineInCode": False,
         "headlineInputInCode": "mediaResume.downloadedVideoPath (raw Runway URL)",
-        "closureInputInCode": "resolve_raw_runway_video(state) (raw Runway URL first)",
-        "canProduceCorrectTwelveSecondHeadlinePlusClosure": False,
+        "closureInputInCode": "headlineArtifactUrl when headlineDecision=use else raw Runway URL",
+        "canProduceCorrectTwelveSecondHeadlinePlusClosure": True,
         "orderingDefectSummary": (
-            "Closure runs on raw Runway before headline overlay; headline overlay then runs on raw "
-            "downloaded_path, not on a closure-inclusive intermediate. Even when closure succeeds, "
-            "headline is not applied to the 12-second artifact."
+            "Corrected pipeline applies headline overlay to the 10-second visual first, then appends "
+            "the deterministic 2-second advertising closure to that headline artifact."
         ),
         "continuesAfterClosureFailureBecause": (
-            "append_advertising_closure_endcard catches exceptions and returns source_video_url; "
-            "render_advertising_closure_for_state treats any returned URL as success and sets "
-            "advertisingClosureStatus=completed without verifying a distinct closure artifact."
+            "Legacy code returned source_video_url on FFmpeg failure; corrected code raises "
+            "Builder2ClosureRenderError and blocks completion."
         ),
         "videoJobMarkDoneCalledBecause": (
-            "run_one_media_resume calls video_job_mark_done whenever mediaResume.finalPublicUrl is "
-            "truthy after execute_builder2_media_pipeline returns, without validating closure contract."
+            "Legacy run_one_media_resume called video_job_mark_done on any truthy finalPublicUrl; "
+            "corrected code requires validate_builder2_media_completion_contract."
         ),
         "finalUrlVariableInPipeline": (
-            "execute_builder2_media_pipeline local final_url; after headline overlay it becomes the "
-            "headline artifact URL and is copied to finalPublicUrl and finalVideoWithClosureUrl."
+            "execute_builder2_media_pipeline assigns finalPublicUrl/finalVideoWithClosureUrl only "
+            "from verified closure render output."
         ),
         "headlineRequiredForThisAudit": headline_required,
     }
@@ -431,8 +435,12 @@ def _closure_failure_code_audit(*, media: Dict[str, Any], state: Dict[str, Any])
         "closureFailureStderrAvailable": stderr_available,
         "exactClosureFailureCauseKnown": False,
         "persistedClosureFailureReason": persisted_reason or None,
-        "codeSwallowsCalledProcessError": True,
-        "codeFallbackReturnsSourceVideoUrl": True,
+        "codeSwallowsCalledProcessError": False,
+        "codeFallbackReturnsSourceVideoUrl": False,
+        "legacyBehaviorNote": (
+            "Production failure occurred under legacy behavior that returned source_video_url; "
+            "current code raises Builder2ClosureRenderError instead."
+        ),
     }
 
 
@@ -609,25 +617,20 @@ def inspect_builder2_media_finalization_failure(
         closure_url = _first_present_url(media.get("finalVideoWithClosureUrl"))
         job_video_url = _first_present_url(job_raw.get("video_url"), job_raw.get("videoUrl"))
         duration_meta = _duration_metadata(media)
-        headline_url = _resolve_headline_artifact_url(
+        headline_url = resolve_legacy_headline_artifact_url(
             state=state,
-            media=media,
-            job_raw=job_raw,
-            final_public_url=final_public_url or job_video_url,
-            raw_url=raw_url,
+            job_video_url=job_video_url,
             headline_required=headline_required,
-            duration_meta=duration_meta,
-            closure_url=closure_url,
         )
 
         expected_final_duration = resolve_builder2_final_video_duration_seconds()
         closure_rendered_flag = bool(_clean(media.get("closureRenderedAt"))) or _clean(media.get("advertisingClosureStatus")) == "completed"
-        closure_inclusive_present = _closure_inclusive_artifact_present(
+        closure_inclusive_present = closure_inclusive_artifact_valid(
+            state=state,
             closure_url=closure_url,
             raw_url=raw_url,
             headline_url=headline_url,
-            duration_meta=duration_meta,
-            expected_final_duration=expected_final_duration,
+            job_video_url=job_video_url,
         )
 
         media_failure = media.get("mediaFailure")
@@ -700,34 +703,19 @@ def inspect_builder2_media_finalization_failure(
         job_points_to_closure = _compare_url_identities(job_video_url, closure_url) == "same" and closure_inclusive_present
         observed_duration_present = any(value is not None for value in duration_meta.values())
 
-        false_reasons: List[str] = []
-        if closure_required and not closure_inclusive_present:
-            false_reasons.append("closure_required_but_closure_inclusive_artifact_missing_or_invalid")
-        if closure_required and closure_rendered_flag and not closure_inclusive_present:
-            false_reasons.append("advertising_closure_marked_rendered_without_distinct_closure_artifact")
-        if headline_required and not headline_present:
-            false_reasons.append("headline_required_but_headline_artifact_not_identified")
-        if job_video_url and headline_url and _compare_url_identities(job_video_url, headline_url) == "same" and closure_required:
-            if not closure_inclusive_present or _compare_url_identities(job_video_url, closure_url) != "same" or not closure_inclusive_present:
-                false_reasons.append("job_video_url_points_to_headline_artifact_not_closure_inclusive_final")
-        if closure_url and raw_url and _compare_url_identities(closure_url, raw_url) == "same" and closure_required:
-            false_reasons.append("finalVideoWithClosureUrl_matches_raw_runway_artifact")
-        if closure_url and headline_url and _compare_url_identities(closure_url, headline_url) == "same" and closure_required:
-            false_reasons.append("finalVideoWithClosureUrl_matches_headline_artifact_only")
-        if _approx_equal(duration_meta.get("finalVideoDurationSeconds"), expected_final_duration) is False and closure_required:
-            if duration_meta.get("finalVideoDurationSeconds") is not None:
-                false_reasons.append("final_video_duration_metadata_not_twelve_seconds")
-        if _clean(state.get("status")) == "completed" and false_reasons:
-            false_reasons.append("persisted_status_completed_despite_contract_violation")
-
-        completion_contract_satisfied = (
-            runway_present
-            and (not headline_required or headline_present)
-            and (not closure_required or closure_inclusive_present)
-            and bool(closure_url)
-            and job_points_to_closure
+        false_completion, false_reasons = assess_false_completion(
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
         )
 
+        contract_ok, _contract_failure, contract_failures = validate_builder2_media_completion_contract(
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
+        )
+        completion_contract_satisfied = contract_ok
+        persisted_status = _clean(state.get("status")) or _clean(media.get("mediaResumeStatus")) or None
         report["completionContractAudit"] = {
             "runwayArtifactPresent": runway_present,
             "headlineRequired": headline_required,
@@ -742,13 +730,12 @@ def inspect_builder2_media_finalization_failure(
             "expectedEndCardDurationSeconds": resolve_builder2_end_card_duration_seconds(),
             "observedDurationMetadataPresent": observed_duration_present,
             "completionContractSatisfied": completion_contract_satisfied,
+            "completionContractFailures": contract_failures,
         }
-
-        persisted_status = _clean(state.get("status")) or _clean(media.get("mediaResumeStatus")) or None
         effective_status = "completed" if completion_contract_satisfied else "incomplete"
         report["persistedCompletionStatus"] = persisted_status
         report["effectiveCompletionStatus"] = effective_status
-        report["falseCompletionDetected"] = persisted_status == "completed" and effective_status != "completed"
+        report["falseCompletionDetected"] = false_completion
         report["falseCompletionReasons"] = false_reasons
 
         closure_audit = _closure_failure_code_audit(media=media, state=state)

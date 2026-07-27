@@ -88,6 +88,8 @@ def _false_completion_state(*, with_valid_closure: bool = False) -> Dict[str, An
             "finalVideoDurationSeconds": 12.0 if with_valid_closure else 10.042,
             "endCardDurationSeconds": 2.0,
             "advertisingClosureStatus": "completed",
+            "advertisingClosureRendered": with_valid_closure,
+            "actualFinalVideoDurationSeconds": 12.01 if with_valid_closure else None,
             "closureRenderedAt": "2026-05-20T00:00:00+00:00",
             "ffmpegStatus": "completed",
             "headlineArtifactUrl": HEADLINE_URL if with_valid_closure else None,
@@ -175,6 +177,9 @@ class TestBuilder2MediaFinalizationFailureInspect(unittest.TestCase):
         state["mediaResume"]["finalPublicUrl"] = CLOSURE_URL
         state["mediaResume"]["finalVideoPath"] = CLOSURE_URL
         state["mediaResume"]["headlineArtifactUrl"] = HEADLINE_URL
+        state["mediaResume"]["headlineArtifactUrl"] = HEADLINE_URL
+        state["mediaResume"]["advertisingClosureRendered"] = True
+        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 12.01
         read_raw.return_value = deepcopy(state)
         job_get_raw.return_value = _job_raw(video_url=CLOSURE_URL)
         report = inspect_builder2_media_finalization_failure(JOB_ID)

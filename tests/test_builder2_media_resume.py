@@ -47,6 +47,8 @@ def _mock_render_advertising_closure(**kwargs: Any) -> tuple[Dict[str, Any], Any
     media["finalPublicUrl"] = final_url
     media["finalVideoPath"] = final_url
     media["advertisingClosureStatus"] = "completed"
+    media["advertisingClosureRendered"] = True
+    media["actualFinalVideoDurationSeconds"] = 12.0
     state["advertisingClosureStatus"] = "completed"
     return state, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
 

@@ -25,6 +25,7 @@ from engine.builder2_advertising_closure_contract import (
     validate_strategic_understanding,
 )
 from engine.builder2_advertising_closure_proposal import generate_advertising_closure_proposal
+from engine.builder2_closure_render import ClosureRenderResult
 from engine.builder2_advertising_closure_resume import approve_persisted_proposal, run_one_advertising_closure_resume
 from engine.builder2_advertising_closure_resume_guard import AdvertisingClosureResumeGuard
 from engine.builder2_headline_decision_contract import get_normalized_headline_decision, headline_decision_is_omit
@@ -94,6 +95,9 @@ def _completed_state(
         set_advertising_closure_status(state, "approved" if approved else "proposed")
     if rendered:
         media["finalVideoWithClosureUrl"] = "https://example.com/final-with-closure.mp4"
+        media["finalPublicUrl"] = "https://example.com/final-with-closure.mp4"
+        media["advertisingClosureRendered"] = True
+        media["actualFinalVideoDurationSeconds"] = 12.01
         media["advertisingClosureStatus"] = "completed"
         state["advertisingClosureStatus"] = "completed"
     return state
@@ -257,7 +261,13 @@ class TestAdvertisingClosureResume(unittest.TestCase):
             job_id=HISTORICAL_JOB_ID,
             tournament_state=deepcopy(state),
             render_only=True,
-            render_endcard=lambda *args, **kwargs: "https://example.com/final-with-closure.mp4",
+            render_endcard=lambda *args, **kwargs: ClosureRenderResult(
+                public_url="https://example.com/final-with-closure.mp4",
+                local_path="/tmp/final-with-closure.mp4",
+                measured_duration_seconds=12.01,
+                output_token="tok" * 8,
+                input_fingerprint="abc",
+            ),
         )
         self.assertTrue(report["ok"])
         self.assertEqual(report["totalReasoningCalls"], 0)

@@ -155,19 +155,33 @@ def run_one_media_resume(
 
         media = state.get("mediaResume")
         if isinstance(media, dict) and media.get("mediaResumeStatus") == "completed" and media.get("finalPublicUrl"):
-            candidate_id = str(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId") or "").strip()
-            prototype_id = str(state.get("winnerDevelopmentPrototypeId") or "").strip()
-            report["winnerCandidateId"] = candidate_id or None
-            report["winnerPrototypeId"] = prototype_id or None
-            report["winnerLoaded"] = is_valid_persisted_winner_development(state)
-            report["headlineDecision"] = get_normalized_headline_decision(state.get("winnerDevelopmentPlan") or {})
-            report["downstreamValidationAccepted"] = True
-            report["mediaReused"] = True
-            report["finalVideoAvailable"] = True
-            report["jobCompleted"] = True
-            report["readyForMediaResume"] = True
-            report["ok"] = True
-            return report
+            from engine.builder2_media_finalization_contract import validate_builder2_media_completion_contract
+
+            job_data = video_job_get(job_id) if redis_configured() else None
+            job_video_url = ""
+            if isinstance(job_data, dict):
+                job_video_url = str(job_data.get("videoUrl") or job_data.get("video_url") or "")
+            existing_plan = state.get("winnerDevelopmentPlan")
+            contract_plan = existing_plan if isinstance(existing_plan, dict) else {}
+            contract_ok, _, _failures = validate_builder2_media_completion_contract(
+                state=state,
+                plan=contract_plan,
+                job_video_url=job_video_url,
+            )
+            if contract_ok:
+                candidate_id = str(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId") or "").strip()
+                prototype_id = str(state.get("winnerDevelopmentPrototypeId") or "").strip()
+                report["winnerCandidateId"] = candidate_id or None
+                report["winnerPrototypeId"] = prototype_id or None
+                report["winnerLoaded"] = is_valid_persisted_winner_development(state)
+                report["headlineDecision"] = get_normalized_headline_decision(state.get("winnerDevelopmentPlan") or {})
+                report["downstreamValidationAccepted"] = True
+                report["mediaReused"] = True
+                report["finalVideoAvailable"] = True
+                report["jobCompleted"] = True
+                report["readyForMediaResume"] = True
+                report["ok"] = True
+                return report
 
         missing = collect_media_resume_missing_paths(state)
         if missing:
@@ -287,6 +301,33 @@ def run_one_media_resume(
         final_url = str((state.get("mediaResume") or {}).get("finalPublicUrl") or "")
         marketing_text = str((state.get("mediaResume") or {}).get("marketingText") or "")
         overlay_headline = "" if not headline_decision_requires_headline(headline_decision) else (plan.get("headlineText") or "")
+        job_video_url = ""
+        if redis_configured():
+            job_record = video_job_get(job_id)
+            if isinstance(job_record, dict):
+                job_video_url = str(job_record.get("videoUrl") or job_record.get("video_url") or "")
+        from engine.builder2_media_finalization_contract import validate_builder2_media_completion_contract
+
+        contract_ok, contract_failure, contract_failures = validate_builder2_media_completion_contract(
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
+            require_job_video_url_match=False,
+        )
+        if not contract_ok:
+            report["failureStage"] = "finalization_contract"
+            report["failureReason"] = contract_failure or "builder2_media_completion_contract_failed"
+            report["completionContractFailures"] = contract_failures
+            state["status"] = "media_finalization_incomplete"
+            state["mediaContinuationRequired"] = True
+            media_bucket = state.setdefault("mediaResume", {})
+            if isinstance(media_bucket, dict):
+                media_bucket["mediaResumeStatus"] = "finalization_incomplete"
+            save_tournament_state(job_id, state)
+            report["finalVideoAvailable"] = False
+            report["jobCompleted"] = False
+            report["ok"] = False
+            return report
         if redis_configured() and final_url:
             video_job_mark_done(job_id, final_url, marketing_text, overlay_headline=str(overlay_headline or ""))
         save_tournament_state(job_id, state)
@@ -324,8 +365,12 @@ def run_one_media_resume(
             report["failureStage"] = "start_image_postprocess"
         elif reason.startswith("builder2_start_image_runway") or reason.startswith("builder2_start_image_invalid_artifact"):
             report["failureStage"] = "pre_runway_image_validation"
-        elif reason.startswith("builder2_runway_invalid_endpoint_url") or reason == "builder2_runway_prompt_too_long":
-            report["failureStage"] = "runway_configuration"
+        elif reason.startswith("builder2_closure_") or reason.startswith("builder2_media_final_duration"):
+            report["failureStage"] = "advertising_closure"
+        elif reason.startswith("builder2_media_missing_final_closure"):
+            report["failureStage"] = "advertising_closure"
+        elif reason.startswith("builder2_media_headline_postprocess"):
+            report["failureStage"] = "headline_postprocess"
         elif reason == "builder2_runway_submission_http_error":
             report["failureStage"] = "runway_submission"
         elif reason.startswith("builder2_runway_"):

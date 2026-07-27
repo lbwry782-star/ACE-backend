@@ -1,0 +1,658 @@
+"""
+Builder2 media finalization correction and recovery tests.
+"""
+from __future__ import annotations
+
+import subprocess
+import tempfile
+import unittest
+from copy import deepcopy
+from pathlib import Path
+from typing import Any, Dict
+from unittest.mock import MagicMock, patch
+
+from engine.builder2_advertising_closure_pipeline import render_advertising_closure_for_state
+from engine.builder2_closure_render import (
+    Builder2ClosureRenderError,
+    ClosureRenderResult,
+    render_builder2_advertising_closure_endcard,
+    sanitize_ffmpeg_stderr,
+)
+from engine.builder2_media_finalization_contract import (
+    backfill_legacy_headline_reference,
+    validate_builder2_media_completion_contract,
+)
+from engine.builder2_media_finalization_failure_inspect import inspect_builder2_media_finalization_failure
+from engine.builder2_media_finalization_resume import run_finalization_preflight, run_one_media_finalization_resume
+from engine.builder2_media_pipeline import execute_builder2_media_pipeline
+from engine.builder2_media_resume import run_one_media_resume
+from engine.builder2_tournament_contracts import WINNER_PLAN_SCHEMA_VERSION
+from engine.builder2_winner_preservation_contract import SERVER_OWNED_WINNER_SOURCE_KEY
+from tests.test_builder2_media_finalization_failure_inspect import (
+    CLOSURE_URL,
+    HEADLINE_URL,
+    JOB_ID,
+    RAW_RUNWAY,
+    _false_completion_state,
+    _job_raw,
+)
+from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_deps, _mock_start_image_data_uri
+from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+from engine.builder2_tournament_store import disable_memory_store, enable_memory_store
+
+
+def _valid_closure_result(**overrides: Any) -> ClosureRenderResult:
+    return ClosureRenderResult(
+        public_url=overrides.get("public_url", CLOSURE_URL),
+        local_path=overrides.get("local_path", "/tmp/out.mp4"),
+        measured_duration_seconds=overrides.get("measured_duration_seconds", 12.01),
+        output_token=overrides.get("output_token", "tok" * 8),
+        input_fingerprint=overrides.get("input_fingerprint", "abc"),
+    )
+
+
+class TestClosureRenderErrors(unittest.TestCase):
+    @patch("engine.builder2_closure_render.requests.get")
+    @patch("engine.builder2_closure_render._default_font_path", return_value="/font.ttf")
+    @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/ffmpeg")
+    @patch("engine.builder2_closure_render._path_for_token", return_value=Path("/tmp/out.mp4"))
+    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", return_value=10.0)
+    @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
+    def test_called_process_error_raises_not_source_fallback(
+        self,
+        _audio: Any,
+        _probe: Any,
+        _token: Any,
+        _ffmpeg: Any,
+        _font: Any,
+        get_req: Any,
+    ) -> None:
+        get_req.return_value = MagicMock(status_code=200, iter_content=lambda **k: [b"x"])
+        get_req.return_value.raise_for_status = MagicMock()
+
+        def runner(cmd: list[str], stage: str, category: str) -> None:
+            raise subprocess.CalledProcessError(1, cmd, stderr=b"Invalid filter graph")
+
+        with self.assertRaises(Builder2ClosureRenderError) as ctx:
+            render_builder2_advertising_closure_endcard(
+                "https://example.com/in.mp4",
+                "https://ace.example.com",
+                product_name="Product",
+                slogan="Slogan",
+                ffmpeg_runner=runner,
+            )
+        self.assertEqual(ctx.exception.stage, "card_generation")
+        self.assertEqual(ctx.exception.return_code, 1)
+        self.assertTrue(ctx.exception.stderr_tail)
+
+    def test_sanitize_stderr_redacts_paths(self) -> None:
+        text = sanitize_ffmpeg_stderr(b"Error reinitializing filters at /tmp/secret/in.mp4")
+        self.assertNotIn("/tmp/secret/in.mp4", text)
+        self.assertIn("<path>", text)
+
+    @patch("engine.builder2_closure_render._path_for_token")
+    @patch("engine.builder2_closure_render.requests.get")
+    @patch("engine.builder2_closure_render._default_font_path", return_value="/font.ttf")
+    @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/ffmpeg")
+    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.0, 12.01])
+    @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
+    def test_success_returns_distinct_result(
+        self,
+        _audio: Any,
+        _probe: Any,
+        _ffmpeg: Any,
+        _font: Any,
+        get_req: Any,
+        token_path: Any,
+    ) -> None:
+        out = Path(tempfile.gettempdir()) / "closure_success_out.mp4"
+        token_path.return_value = out
+        get_req.return_value = MagicMock(status_code=200, iter_content=lambda **k: [b"x"])
+        get_req.return_value.raise_for_status = MagicMock()
+
+        def runner(cmd: list[str], stage: str, category: str) -> None:
+            if cmd and str(cmd[-1]).endswith("out.mp4"):
+                Path(cmd[-1]).write_bytes(b"fake")
+
+        result = render_builder2_advertising_closure_endcard(
+            "https://example.com/in.mp4",
+            "https://ace.example.com",
+            product_name="Product",
+            slogan="Slogan",
+            publish=False,
+            ffmpeg_runner=runner,
+        )
+        self.assertNotEqual(result.public_url, "https://example.com/in.mp4")
+        self.assertAlmostEqual(result.measured_duration_seconds, 12.01, places=2)
+
+
+class TestAdvertisingClosurePipelineSemantics(unittest.TestCase):
+    def test_same_url_as_input_is_failure(self) -> None:
+        state: Dict[str, Any] = {
+            "mediaResume": {
+                "rawRunwayVideoUrl": RAW_RUNWAY,
+                "downloadedVideoPath": RAW_RUNWAY,
+            },
+            "advertisingClosure": {"required": True, "productNameText": "P", "sloganText": "S", "language": "he"},
+        }
+        plan = {"productNameResolved": "P", "headlineDecision": {"decision": "omit"}}
+
+        def bad_render(*args: Any, **kwargs: Any) -> ClosureRenderResult:
+            return _valid_closure_result(public_url=RAW_RUNWAY)
+
+        with self.assertRaises(Builder2ClosureRenderError):
+            render_advertising_closure_for_state(
+                job_id=JOB_ID,
+                state=state,
+                plan=plan,
+                closure=state["advertisingClosure"],
+                public_base_url="https://ace.example.com",
+                source_video_url=RAW_RUNWAY,
+                render_endcard=bad_render,
+            )
+
+    def test_success_sets_rendered_and_actual_duration(self) -> None:
+        state: Dict[str, Any] = {
+            "mediaResume": {
+                "rawRunwayVideoUrl": RAW_RUNWAY,
+                "downloadedVideoPath": RAW_RUNWAY,
+            },
+            "advertisingClosure": {"required": True, "productNameText": "P", "sloganText": "S", "language": "he"},
+        }
+        plan = {"productNameResolved": "P", "headlineDecision": {"decision": "omit"}}
+
+        def good_render(*args: Any, **kwargs: Any) -> ClosureRenderResult:
+            return _valid_closure_result()
+
+        updated, counters = render_advertising_closure_for_state(
+            job_id=JOB_ID,
+            state=state,
+            plan=plan,
+            closure=state["advertisingClosure"],
+            public_base_url="https://ace.example.com",
+            source_video_url=RAW_RUNWAY,
+            render_endcard=good_render,
+        )
+        media = updated["mediaResume"]
+        self.assertTrue(media["advertisingClosureRendered"])
+        self.assertEqual(media["advertisingClosureStatus"], "completed")
+        self.assertEqual(media["actualFinalVideoDurationSeconds"], 12.01)
+        self.assertEqual(counters.closure_ffmpeg_calls, 1)
+
+
+class TestMediaPipelineOrdering(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+        MediaResumeIsolationGuard.begin()
+        MediaResumeIsolationGuard.enable_start_image()
+        MediaResumeIsolationGuard.enable_runway()
+        MediaResumeIsolationGuard.enable_ffmpeg()
+
+    def tearDown(self) -> None:
+        MediaResumeIsolationGuard.end()
+        disable_memory_store()
+
+    @patch("engine.builder2_media_pipeline.patch_tournament_state", side_effect=lambda job_id, fn: None)
+    def test_headline_runs_before_closure(self, _patch: Any) -> None:
+        calls: list[str] = []
+        state = _media_ready_state(job_id=JOB_ID)
+        plan = state["winnerDevelopmentPlan"]
+        plan["headlineDecision"] = {"decision": "use", "reasonSource": "judge", "reason": "Required."}
+        plan["headlineText"] = "Headline text"
+        plan["headlineTextRemainder"] = "remainder"
+        media = state.setdefault("mediaResume", {})
+        media.update(
+            {
+                "startImageArtifact": _mock_start_image_data_uri(),
+                "startImageStatus": "completed",
+                "runwayTaskId": "task-1",
+                "runwayVideoUrl": RAW_RUNWAY,
+                "downloadedVideoPath": RAW_RUNWAY,
+                "rawRunwayVideoUrl": RAW_RUNWAY,
+                "mediaResumeStatus": "running",
+                "progressStage": "postprocessing_video",
+            }
+        )
+
+        def postprocess(**kwargs: Any) -> str:
+            calls.append("headline")
+            return HEADLINE_URL
+
+        def _fake_closure_render(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
+            source = kwargs["source_video_url"]
+            calls.append(f"closure:{source}")
+            state_obj = kwargs["state"]
+            media_obj = state_obj.setdefault("mediaResume", {})
+            media_obj.update(
+                {
+                    "finalVideoWithClosureUrl": CLOSURE_URL,
+                    "finalPublicUrl": CLOSURE_URL,
+                    "advertisingClosureRendered": True,
+                    "actualFinalVideoDurationSeconds": 12.01,
+                    "advertisingClosureStatus": "completed",
+                }
+            )
+            from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+
+            return state_obj, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
+
+        deps = _mock_pipeline_deps()
+        deps.postprocess_video = lambda **kwargs: postprocess(**kwargs)
+        with patch(
+            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
+            side_effect=_fake_closure_render,
+        ):
+            execute_builder2_media_pipeline(
+                job_id=JOB_ID,
+                state=state,
+                plan=plan,
+                public_base_url="https://ace.example.com",
+                product_description="desc",
+                deps=deps,
+            )
+        self.assertEqual(calls[0], "headline")
+        self.assertTrue(calls[1].startswith("closure:"))
+        self.assertIn(HEADLINE_URL, calls[1])
+
+
+class TestCompletionGate(unittest.TestCase):
+    def test_headline_only_final_fails_contract(self) -> None:
+        state = _false_completion_state(with_valid_closure=False)
+        plan = state["winnerDevelopmentPlan"]
+        ok, failure, failures = validate_builder2_media_completion_contract(
+            state=state,
+            plan=plan,
+            job_video_url=HEADLINE_URL,
+        )
+        self.assertFalse(ok)
+        self.assertTrue(failures)
+
+    @patch("engine.builder2_media_resume._load_and_normalize_winner")
+    @patch("engine.builder2_media_resume.redis_configured", return_value=False)
+    @patch("engine.builder2_media_resume.save_tournament_state")
+    @patch("engine.builder2_media_resume.execute_builder2_media_pipeline")
+    @patch("engine.builder2_media_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_resume.load_tournament_state")
+    def test_media_resume_blocks_mark_done_on_invalid_contract(
+        self,
+        load_state: Any,
+        build_config: Any,
+        pipeline: Any,
+        save_state: Any,
+        _redis: Any,
+        load_winner: Any,
+    ) -> None:
+        load_winner.side_effect = lambda **kwargs: kwargs["state"]["winnerDevelopmentPlan"]
+        state = _false_completion_state(with_valid_closure=False)
+        state["mediaContinuationRequired"] = True
+        load_state.return_value = deepcopy(state)
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
+        updated = deepcopy(state)
+        media = updated["mediaResume"]
+        media["finalPublicUrl"] = HEADLINE_URL
+        media["finalVideoWithClosureUrl"] = HEADLINE_URL
+        pipeline.return_value = (updated, MagicMock(
+            start_image_calls=0,
+            start_image_normal_calls=0,
+            start_image_repair_calls=0,
+            start_image_retry_calls=0,
+            start_image_generated_count=0,
+            start_image_reused=True,
+            runway_submission_calls=0,
+            runway_task_created_count=0,
+            runway_polling_calls=0,
+            runway_polling_resumed=True,
+            ffmpeg_calls=2,
+            media_reused=False,
+        ))
+        report = run_one_media_resume(job_id=JOB_ID, dry_run=False)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failureStage"], "finalization_contract")
+
+
+class TestInspectorRecoveryFlags(unittest.TestCase):
+    @patch("engine.builder2_media_finalization_failure_inspect.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_failure_inspect.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_failure_inspect._read_raw")
+    def test_legacy_headline_recovery_flags(self, read_raw: Any, job_get_raw: Any, _redis: Any) -> None:
+        read_raw.return_value = deepcopy(_false_completion_state(with_valid_closure=False))
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        report = inspect_builder2_media_finalization_failure(JOB_ID)
+        self.assertTrue(report["artifactIdentityGraph"]["jobMarkedDoneViaHeadlineArtifact"])
+        self.assertTrue(report["headlineArtifactCanBeReused"])
+        self.assertTrue(report["recoveryRequiresFFmpeg"])
+        self.assertTrue(report["recoveryRequiresPublication"])
+
+
+class TestLegacyHeadlineBackfill(unittest.TestCase):
+    def test_backfill_from_false_completion_urls(self) -> None:
+        state = _false_completion_state(with_valid_closure=False)
+        url = backfill_legacy_headline_reference(state, job_video_url=HEADLINE_URL)
+        self.assertEqual(url, HEADLINE_URL)
+        self.assertEqual(state["mediaResume"]["headlineArtifactUrl"], HEADLINE_URL)
+
+
+class TestFinalizationPreflight(unittest.TestCase):
+    @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
+    @patch("engine.builder2_media_finalization_resume._download_to_path")
+    @patch("engine.builder2_media_finalization_resume._probe_duration", return_value=10.042)
+    def test_preflight_no_redis_writes(
+        self,
+        _probe: Any,
+        _download: Any,
+        render: Any,
+        build_config: Any,
+    ) -> None:
+        render.return_value = _valid_closure_result()
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
+        state = _false_completion_state(with_valid_closure=False)
+        report = run_finalization_preflight(job_id=JOB_ID, state=state, job_video_url=HEADLINE_URL)
+        self.assertTrue(report["preflight"])
+        self.assertEqual(report["redisMutations"], 0)
+        self.assertEqual(report["publicationCalls"], 0)
+
+
+class TestDurationVerification(unittest.TestCase):
+    def test_configured_duration_alone_fails_contract(self) -> None:
+        state = _false_completion_state(with_valid_closure=False)
+        state["mediaResume"]["finalVideoDurationSeconds"] = 12.0
+        state["mediaResume"]["advertisingClosureRendered"] = True
+        state["mediaResume"]["advertisingClosureStatus"] = "completed"
+        ok, failure, failures = validate_builder2_media_completion_contract(
+            state=state,
+            plan=state["winnerDevelopmentPlan"],
+            job_video_url=HEADLINE_URL,
+        )
+        self.assertFalse(ok)
+        self.assertIn("actual_final_duration_missing", failures)
+
+    def test_measured_duration_required_not_configured(self) -> None:
+        from engine.builder2_closure_render import verify_builder2_final_video_duration
+
+        with self.assertRaises(Exception):
+            verify_builder2_final_video_duration(10.042)
+
+
+class TestNoHeadlinePipelineOrdering(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+        MediaResumeIsolationGuard.begin()
+        MediaResumeIsolationGuard.enable_start_image()
+        MediaResumeIsolationGuard.enable_runway()
+        MediaResumeIsolationGuard.enable_ffmpeg()
+
+    def tearDown(self) -> None:
+        MediaResumeIsolationGuard.end()
+        disable_memory_store()
+
+    @patch("engine.builder2_media_pipeline.patch_tournament_state", side_effect=lambda job_id, fn: None)
+    def test_raw_runs_before_closure_without_headline(self, _patch: Any) -> None:
+        calls: list[str] = []
+        state = _media_ready_state(job_id=JOB_ID)
+        plan = state["winnerDevelopmentPlan"]
+        media = state.setdefault("mediaResume", {})
+        media.update(
+            {
+                "startImageArtifact": _mock_start_image_data_uri(),
+                "startImageStatus": "completed",
+                "runwayTaskId": "task-1",
+                "runwayVideoUrl": RAW_RUNWAY,
+                "downloadedVideoPath": RAW_RUNWAY,
+                "rawRunwayVideoUrl": RAW_RUNWAY,
+                "mediaResumeStatus": "running",
+            }
+        )
+
+        def _fake_closure_render(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
+            calls.append(f"closure:{kwargs['source_video_url']}")
+            state_obj = kwargs["state"]
+            media_obj = state_obj.setdefault("mediaResume", {})
+            media_obj.update(
+                {
+                    "finalVideoWithClosureUrl": CLOSURE_URL,
+                    "finalPublicUrl": CLOSURE_URL,
+                    "advertisingClosureRendered": True,
+                    "actualFinalVideoDurationSeconds": 12.01,
+                    "advertisingClosureStatus": "completed",
+                }
+            )
+            from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+
+            return state_obj, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
+
+        deps = _mock_pipeline_deps()
+        deps.postprocess_video = lambda **kwargs: (_ for _ in ()).throw(AssertionError("headline must not run"))
+        with patch(
+            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
+            side_effect=_fake_closure_render,
+        ):
+            execute_builder2_media_pipeline(
+                job_id=JOB_ID,
+                state=state,
+                plan=plan,
+                public_base_url="https://ace.example.com",
+                product_description="desc",
+                deps=deps,
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertIn(RAW_RUNWAY, calls[0])
+
+
+class TestClosureDiagnosticsSafety(unittest.TestCase):
+    def test_failure_metadata_excludes_creative_text(self) -> None:
+        state: Dict[str, Any] = {
+            "mediaResume": {"rawRunwayVideoUrl": RAW_RUNWAY},
+            "advertisingClosure": {
+                "required": True,
+                "productNameText": "SECRET PRODUCT",
+                "sloganText": "SECRET SLOGAN",
+                "language": "he",
+            },
+        }
+        plan = state["winnerDevelopmentPlan"] = {
+            "productNameResolved": "SECRET PRODUCT",
+            "headlineDecision": {"decision": "omit"},
+        }
+
+        def bad_render(*args: Any, **kwargs: Any) -> ClosureRenderResult:
+            raise Builder2ClosureRenderError(
+                "builder2_closure_ffmpeg_failed",
+                stage="concatenation",
+                return_code=1,
+                stderr_tail="filter graph invalid",
+                command_category="ffmpeg_concat",
+            )
+
+        with self.assertRaises(Builder2ClosureRenderError):
+            render_advertising_closure_for_state(
+                job_id=JOB_ID,
+                state=state,
+                plan=plan,
+                closure=state["advertisingClosure"],
+                public_base_url="https://ace.example.com",
+                source_video_url=RAW_RUNWAY,
+                render_endcard=bad_render,
+            )
+        failure = state["mediaResume"]["advertisingClosureFailure"]
+        self.assertNotIn("SECRET PRODUCT", str(failure))
+        self.assertNotIn("SECRET SLOGAN", str(failure))
+        self.assertEqual(failure["returnCode"], 1)
+
+
+class TestFinalizationRecovery(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+
+    def tearDown(self) -> None:
+        disable_memory_store()
+
+    @patch("engine.builder2_media_finalization_resume.video_job_mark_done")
+    @patch("engine.builder2_media_finalization_resume.save_tournament_state")
+    @patch("engine.builder2_media_finalization_resume.render_advertising_closure_for_state")
+    @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_finalization_resume.video_job_get")
+    @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_resume._read_raw")
+    @patch("engine.builder2_media_finalization_resume.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.acquire_job_lease", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.release_job_lease")
+    def test_recovery_zero_openai_runway_image(
+        self,
+        _release: Any,
+        _lease: Any,
+        _redis: Any,
+        read_raw: Any,
+        job_get_raw: Any,
+        job_get: Any,
+        build_config: Any,
+        render_closure: Any,
+        save_state: Any,
+        mark_done: Any,
+    ) -> None:
+        state = deepcopy(_false_completion_state(with_valid_closure=False))
+        read_raw.return_value = deepcopy(state)
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
+
+        def _render(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
+            st = kwargs["state"]
+            media = st.setdefault("mediaResume", {})
+            media.update(
+                {
+                    "headlineArtifactUrl": HEADLINE_URL,
+                    "finalVideoWithClosureUrl": CLOSURE_URL,
+                    "finalPublicUrl": CLOSURE_URL,
+                    "finalVideoPath": CLOSURE_URL,
+                    "advertisingClosureRendered": True,
+                    "actualFinalVideoDurationSeconds": 12.01,
+                    "advertisingClosureStatus": "completed",
+                }
+            )
+            from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+
+            return st, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
+
+        render_closure.side_effect = _render
+        report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["openAICalls"], 0)
+        self.assertEqual(report["imageCalls"], 0)
+        self.assertEqual(report["runwaySubmissionCalls"], 0)
+        self.assertEqual(report["runwayPollingCalls"], 0)
+        self.assertEqual(report["ffmpegCalls"], 1)
+        self.assertEqual(report["publicationCalls"], 1)
+        mark_done.assert_called_once()
+        save_state.assert_called()
+
+    @patch("engine.builder2_media_finalization_resume._read_raw")
+    @patch("engine.builder2_media_finalization_resume.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.acquire_job_lease", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.release_job_lease")
+    @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
+    def test_recovery_idempotent_when_valid_closure_exists(
+        self,
+        job_get_raw: Any,
+        _release: Any,
+        _lease: Any,
+        _redis: Any,
+        read_raw: Any,
+    ) -> None:
+        state = _false_completion_state(with_valid_closure=True)
+        state["mediaResume"]["advertisingClosureRendered"] = True
+        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 12.01
+        read_raw.return_value = deepcopy(state)
+        job_get_raw.return_value = _job_raw(video_url=CLOSURE_URL)
+        report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["finalizationReused"])
+        self.assertEqual(report["ffmpegCalls"], 0)
+        self.assertEqual(report["publicationCalls"], 0)
+
+    @patch("engine.builder2_media_finalization_resume._read_raw")
+    @patch("engine.builder2_media_finalization_resume.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.acquire_job_lease", return_value=False)
+    @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
+    def test_concurrent_recovery_blocked_by_lease(
+        self,
+        job_get_raw: Any,
+        _lease: Any,
+        _redis: Any,
+        read_raw: Any,
+    ) -> None:
+        state = _false_completion_state(with_valid_closure=False)
+        read_raw.return_value = deepcopy(state)
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failureStage"], "lease")
+
+    @patch("engine.builder2_media_finalization_resume.save_tournament_state")
+    @patch("engine.builder2_media_finalization_resume.render_advertising_closure_for_state")
+    @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_finalization_resume.video_job_get")
+    @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_resume._read_raw")
+    @patch("engine.builder2_media_finalization_resume.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.acquire_job_lease", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.release_job_lease")
+    @patch("engine.builder2_media_finalization_resume.video_job_mark_done")
+    def test_failed_recovery_remains_resumable(
+        self,
+        mark_done: Any,
+        _release: Any,
+        _lease: Any,
+        _redis: Any,
+        read_raw: Any,
+        job_get_raw: Any,
+        job_get: Any,
+        build_config: Any,
+        render_closure: Any,
+        save_state: Any,
+    ) -> None:
+        state = deepcopy(_false_completion_state(with_valid_closure=False))
+        read_raw.return_value = deepcopy(state)
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
+        render_closure.side_effect = Builder2ClosureRenderError(
+            "builder2_closure_ffmpeg_failed",
+            stage="concatenation",
+            return_code=1,
+            stderr_tail="safe stderr",
+            command_category="ffmpeg_concat",
+        )
+        report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failureStage"], "concatenation")
+        mark_done.assert_not_called()
+        saved_state = save_state.call_args[0][1]
+        self.assertTrue(saved_state.get("mediaContinuationRequired"))
+        self.assertEqual(saved_state["mediaResume"]["advertisingClosureStatus"], "failed")
+
+
+class TestPreflightSynthetic(unittest.TestCase):
+    @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
+    @patch("engine.builder2_media_finalization_resume._download_to_path")
+    @patch("engine.builder2_media_finalization_resume._probe_duration", side_effect=[10.042, 12.01])
+    def test_preflight_validates_10s_headline_to_12s_final(
+        self,
+        _probe: Any,
+        _download: Any,
+        render: Any,
+        build_config: Any,
+    ) -> None:
+        render.return_value = _valid_closure_result(measured_duration_seconds=12.01)
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
+        state = _false_completion_state(with_valid_closure=False)
+        report = run_finalization_preflight(job_id=JOB_ID, state=state, job_video_url=HEADLINE_URL)
+        self.assertTrue(report["ok"])
+        self.assertAlmostEqual(report["measuredHeadlineDurationSeconds"], 10.042, places=3)
+        self.assertAlmostEqual(report["measuredFinalDurationSeconds"], 12.01, places=2)
+        self.assertTrue(report["finalDurationAccepted"])
+
+
+if __name__ == "__main__":
+    unittest.main()
