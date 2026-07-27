@@ -4,15 +4,27 @@ Builder2 tournament completion gate — six prototype slots before authoritative
 from __future__ import annotations
 
 import hashlib
+import logging
+from copy import deepcopy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from engine.builder2_accepted_creator_store import ACCEPTED_CREATOR_INDEX_KEY, backfill_accepted_creator_index
-from engine.builder2_accepted_judgment_store import ACCEPTED_JUDGMENT_INDEX_KEY, backfill_accepted_judgment_index
+from engine.builder2_accepted_creator_store import (
+    ACCEPTED_CREATOR_INDEX_KEY,
+    backfill_accepted_creator_index,
+    derive_accepted_creator_index,
+)
+from engine.builder2_accepted_judgment_store import (
+    ACCEPTED_JUDGMENT_INDEX_KEY,
+    backfill_accepted_judgment_index,
+    derive_accepted_judgment_index,
+)
 from engine.builder2_tournament_config import resolve_builder2_active_prototype_ids
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
 TOURNAMENT_INCOMPLETE_BEFORE_WINNER = "builder2_tournament_incomplete_before_winner"
 STRICT_SIX_WAY_PROTOTYPE_COUNT = 6
+
+logger = logging.getLogger(__name__)
 
 
 def _clean(value: Any) -> str:
@@ -26,30 +38,56 @@ def assigned_prototype_ids(state: Dict[str, Any]) -> List[str]:
     return list(resolve_builder2_active_prototype_ids())
 
 
-def accepted_creator_index(state: Dict[str, Any]) -> Dict[str, Any]:
+def accepted_creator_index(state: Dict[str, Any], *, read_only: bool = False) -> Dict[str, Any]:
+    if read_only:
+        existing = state.get(ACCEPTED_CREATOR_INDEX_KEY)
+        existing_count = len(existing) if isinstance(existing, dict) else 0
+        merged = derive_accepted_creator_index(state)
+        added = len(merged) - existing_count
+        if added > 0:
+            logger.info(
+                "BUILDER2_ACCEPTED_CREATOR_INDEX_DERIVED_READ_ONLY jobId=%s tournamentId=%s count=%s",
+                state.get("jobId"),
+                state.get("tournamentId"),
+                added,
+            )
+        return merged
     backfill_accepted_creator_index(state)
     index = state.get(ACCEPTED_CREATOR_INDEX_KEY)
     return index if isinstance(index, dict) else {}
 
 
-def accepted_judgment_index(state: Dict[str, Any]) -> Dict[str, Any]:
+def accepted_judgment_index(state: Dict[str, Any], *, read_only: bool = False) -> Dict[str, Any]:
+    if read_only:
+        existing = state.get(ACCEPTED_JUDGMENT_INDEX_KEY)
+        existing_count = len(existing) if isinstance(existing, dict) else 0
+        merged = derive_accepted_judgment_index(state)
+        added = len(merged) - existing_count
+        if added > 0:
+            logger.info(
+                "BUILDER2_ACCEPTED_JUDGMENT_INDEX_DERIVED_READ_ONLY jobId=%s tournamentId=%s count=%s",
+                state.get("jobId"),
+                state.get("tournamentId"),
+                added,
+            )
+        return merged
     backfill_accepted_judgment_index(state)
     index = state.get(ACCEPTED_JUDGMENT_INDEX_KEY)
     return index if isinstance(index, dict) else {}
 
 
-def accepted_creator_count(state: Dict[str, Any]) -> int:
-    return len(accepted_creator_index(state))
+def accepted_creator_count(state: Dict[str, Any], *, read_only: bool = False) -> int:
+    return len(accepted_creator_index(state, read_only=read_only))
 
 
-def accepted_judgment_count(state: Dict[str, Any]) -> int:
-    return len(accepted_judgment_index(state))
+def accepted_judgment_count(state: Dict[str, Any], *, read_only: bool = False) -> int:
+    return len(accepted_judgment_index(state, read_only=read_only))
 
 
-def prototype_ids_with_accepted_creators(state: Dict[str, Any]) -> Set[str]:
+def prototype_ids_with_accepted_creators(state: Dict[str, Any], *, read_only: bool = False) -> Set[str]:
     accepted = {
         _clean(rec.get("prototypeId"))
-        for rec in accepted_creator_index(state).values()
+        for rec in accepted_creator_index(state, read_only=read_only).values()
         if isinstance(rec, dict) and _clean(rec.get("prototypeId"))
     }
     assigned = set(assigned_prototype_ids(state))
@@ -64,10 +102,10 @@ def prototype_ids_with_accepted_creators(state: Dict[str, Any]) -> Set[str]:
     return accepted
 
 
-def prototype_ids_with_accepted_judgments(state: Dict[str, Any]) -> Set[str]:
+def prototype_ids_with_accepted_judgments(state: Dict[str, Any], *, read_only: bool = False) -> Set[str]:
     judged = {
         _clean(rec.get("prototypeId"))
-        for rec in accepted_judgment_index(state).values()
+        for rec in accepted_judgment_index(state, read_only=read_only).values()
         if isinstance(rec, dict) and _clean(rec.get("prototypeId"))
     }
     assigned = set(assigned_prototype_ids(state))
@@ -82,15 +120,15 @@ def prototype_ids_with_accepted_judgments(state: Dict[str, Any]) -> Set[str]:
     return judged
 
 
-def missing_creator_prototype_ids(state: Dict[str, Any]) -> List[str]:
+def missing_creator_prototype_ids(state: Dict[str, Any], *, read_only: bool = False) -> List[str]:
     assigned = assigned_prototype_ids(state)
-    accepted = prototype_ids_with_accepted_creators(state)
+    accepted = prototype_ids_with_accepted_creators(state, read_only=read_only)
     return [pid for pid in assigned if pid not in accepted]
 
 
-def missing_judge_prototype_ids(state: Dict[str, Any]) -> List[str]:
+def missing_judge_prototype_ids(state: Dict[str, Any], *, read_only: bool = False) -> List[str]:
     assigned = assigned_prototype_ids(state)
-    judged = prototype_ids_with_accepted_judgments(state)
+    judged = prototype_ids_with_accepted_judgments(state, read_only=read_only)
     return [pid for pid in assigned if pid not in judged]
 
 
@@ -126,30 +164,30 @@ def uses_strict_six_way_winner_gate(state: Dict[str, Any]) -> bool:
     return len(assigned_prototype_ids(state)) >= STRICT_SIX_WAY_PROTOTYPE_COUNT
 
 
-def is_prototype_slot_terminal(state: Dict[str, Any], prototype_id: str) -> bool:
+def is_prototype_slot_terminal(state: Dict[str, Any], prototype_id: str, *, read_only: bool = False) -> bool:
     if prototype_id in structurally_rejected_creator_prototype_ids(state):
         return True
-    if prototype_id not in prototype_ids_with_accepted_creators(state):
+    if prototype_id not in prototype_ids_with_accepted_creators(state, read_only=read_only):
         return False
-    if prototype_id in prototype_ids_with_accepted_judgments(state):
+    if prototype_id in prototype_ids_with_accepted_judgments(state, read_only=read_only):
         return True
     return prototype_id in terminal_judge_prototype_ids(state)
 
 
-def unresolved_creator_prototype_ids(state: Dict[str, Any]) -> List[str]:
+def unresolved_creator_prototype_ids(state: Dict[str, Any], *, read_only: bool = False) -> List[str]:
     assigned = assigned_prototype_ids(state)
     rejected = set(structurally_rejected_creator_prototype_ids(state))
-    accepted = prototype_ids_with_accepted_creators(state)
+    accepted = prototype_ids_with_accepted_creators(state, read_only=read_only)
     return [pid for pid in assigned if pid not in accepted and pid not in rejected]
 
 
-def unresolved_judge_prototype_ids(state: Dict[str, Any]) -> List[str]:
+def unresolved_judge_prototype_ids(state: Dict[str, Any], *, read_only: bool = False) -> List[str]:
     unresolved: List[str] = []
     assigned = assigned_prototype_ids(state)
     rejected = set(structurally_rejected_creator_prototype_ids(state))
-    judged = prototype_ids_with_accepted_judgments(state)
+    judged = prototype_ids_with_accepted_judgments(state, read_only=read_only)
     judge_terminal = terminal_judge_prototype_ids(state)
-    accepted_creators = prototype_ids_with_accepted_creators(state)
+    accepted_creators = prototype_ids_with_accepted_creators(state, read_only=read_only)
     for pid in assigned:
         if pid in rejected:
             continue
@@ -162,33 +200,33 @@ def unresolved_judge_prototype_ids(state: Dict[str, Any]) -> List[str]:
     return unresolved
 
 
-def tournament_resolution_summary(state: Dict[str, Any]) -> Dict[str, Any]:
+def tournament_resolution_summary(state: Dict[str, Any], *, read_only: bool = False) -> Dict[str, Any]:
     assigned = assigned_prototype_ids(state)
-    missing_creators = missing_creator_prototype_ids(state)
-    missing_judges = missing_judge_prototype_ids(state)
+    missing_creators = missing_creator_prototype_ids(state, read_only=read_only)
+    missing_judges = missing_judge_prototype_ids(state, read_only=read_only)
     rejected = structurally_rejected_creator_prototype_ids(state)
     return {
         "assignedPrototypeCount": len(assigned),
-        "acceptedCreatorCount": accepted_creator_count(state),
-        "acceptedJudgmentCount": accepted_judgment_count(state),
+        "acceptedCreatorCount": accepted_creator_count(state, read_only=read_only),
+        "acceptedJudgmentCount": accepted_judgment_count(state, read_only=read_only),
         "missingCreatorPrototypeIds": missing_creators,
         "missingJudgePrototypeIds": missing_judges,
         "structurallyRejectedCreatorPrototypeIds": rejected,
-        "readyForAuthoritativeWinnerSelection": is_tournament_ready_for_winner_selection(state),
+        "readyForAuthoritativeWinnerSelection": is_tournament_ready_for_winner_selection(state, read_only=read_only),
     }
 
 
-def is_tournament_ready_for_winner_selection(state: Dict[str, Any]) -> bool:
+def is_tournament_ready_for_winner_selection(state: Dict[str, Any], *, read_only: bool = False) -> bool:
     assigned = assigned_prototype_ids(state)
     if not assigned:
         return False
     if uses_strict_six_way_winner_gate(state) and structurally_rejected_creator_prototype_ids(state):
         return False
-    if unresolved_creator_prototype_ids(state):
+    if unresolved_creator_prototype_ids(state, read_only=read_only):
         return False
-    if unresolved_judge_prototype_ids(state):
+    if unresolved_judge_prototype_ids(state, read_only=read_only):
         return False
-    return all(is_prototype_slot_terminal(state, prototype_id) for prototype_id in assigned)
+    return all(is_prototype_slot_terminal(state, prototype_id, read_only=read_only) for prototype_id in assigned)
 
 
 def assert_tournament_ready_for_winner_selection(state: Dict[str, Any]) -> None:

@@ -267,12 +267,12 @@ class TestInspectCLI(unittest.TestCase):
         disable_memory_store()
 
     @patch("engine.builder2_complete_ad_resume_inspect.redis_configured", return_value=True)
-    @patch("engine.builder2_complete_ad_resume_inspect.load_tournament_state")
+    @patch("engine.builder2_complete_ad_resume_inspect._read_raw")
     @patch("engine.builder2_complete_ad_resume_inspect.video_job_get_raw", return_value={})
-    def test_inspector_zero_paid_calls(self, _raw: Any, load_state: Any, _redis: Any) -> None:
+    def test_inspector_zero_paid_calls(self, _raw: Any, read_raw: Any, _redis: Any) -> None:
         state = _six_prototype_state(judged=5, creators=6)
         state["provisionalWinnerCandidateId"] = "cand-1-forgot-1-test"
-        load_state.return_value = state
+        read_raw.return_value = deepcopy(state)
         report = inspect_builder2_complete_ad_resume("job-six-way")
         self.assertTrue(report["ok"])
         self.assertEqual(report["openAICalls"], 0)

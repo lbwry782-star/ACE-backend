@@ -146,11 +146,48 @@ def _snapshot_from_candidate_record(candidate_id: str, record: Dict[str, Any]) -
     }
 
 
-def backfill_accepted_creator_index(state: Dict[str, Any]) -> int:
+def backfill_accepted_creator_index(state: Dict[str, Any], *, persist: bool = True) -> int:
+    from engine.builder2_read_only_inspection import read_only_inspection_active
+
+    derived_entries = _derive_missing_creator_index_entries(state)
+    if not derived_entries:
+        return 0
+    if not persist or read_only_inspection_active():
+        logger.info(
+            "BUILDER2_ACCEPTED_CREATOR_INDEX_DERIVED_READ_ONLY jobId=%s tournamentId=%s count=%s",
+            state.get("jobId"),
+            state.get("tournamentId"),
+            len(derived_entries),
+        )
+        return len(derived_entries)
     index = _ensure_index(state)
     added = 0
+    for candidate_id, snapshot in derived_entries.items():
+        index[candidate_id] = snapshot
+        added += 1
+    if added:
+        logger.info(
+            "BUILDER2_ACCEPTED_CREATOR_INDEX_BACKFILLED jobId=%s tournamentId=%s count=%s",
+            state.get("jobId"),
+            state.get("tournamentId"),
+            added,
+        )
+    return added
+
+
+def derive_accepted_creator_index(state: Dict[str, Any]) -> Dict[str, AcceptedCreatorCandidate]:
+    index = state.get(ACCEPTED_CREATOR_INDEX_KEY)
+    merged: Dict[str, AcceptedCreatorCandidate] = deepcopy(index) if isinstance(index, dict) else {}
+    merged.update(_derive_missing_creator_index_entries(state))
+    return merged
+
+
+def _derive_missing_creator_index_entries(state: Dict[str, Any]) -> Dict[str, AcceptedCreatorCandidate]:
+    index = state.get(ACCEPTED_CREATOR_INDEX_KEY)
+    existing = index if isinstance(index, dict) else {}
+    derived: Dict[str, AcceptedCreatorCandidate] = {}
     for candidate_id, record in (state.get("candidates") or {}).items():
-        if not isinstance(record, dict) or candidate_id in index:
+        if not isinstance(record, dict) or candidate_id in existing:
             continue
         snapshot = _snapshot_from_candidate_record(str(candidate_id), record)
         if snapshot is None:
@@ -161,16 +198,8 @@ def backfill_accepted_creator_index(state: Dict[str, Any]) -> int:
             "accepted",
             "judge_unavailable",
         }:
-            index[candidate_id] = snapshot
-            added += 1
-    if added:
-        logger.info(
-            "BUILDER2_ACCEPTED_CREATOR_INDEX_BACKFILLED jobId=%s tournamentId=%s count=%s",
-            state.get("jobId"),
-            state.get("tournamentId"),
-            added,
-        )
-    return added
+            derived[str(candidate_id)] = snapshot
+    return derived
 
 
 def load_accepted_creator_candidate(

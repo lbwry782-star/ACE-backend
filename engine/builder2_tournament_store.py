@@ -69,6 +69,14 @@ def _read_raw(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _write_raw(job_id: str, state: Dict[str, Any]) -> None:
+    from engine.builder2_read_only_inspection import read_only_inspection_active
+
+    if read_only_inspection_active():
+        logger.warning(
+            "BUILDER2_READ_ONLY_INSPECTION_BLOCKED_WRITE jobId=%s method=_write_raw",
+            job_id,
+        )
+        return
     state["updatedAt"] = _utc_now_iso()
     payload = json.dumps(state, ensure_ascii=False)
     if _use_memory_store:
@@ -79,9 +87,9 @@ def _write_raw(job_id: str, state: Dict[str, Any]) -> None:
     r.set(key, payload, ex=_TOURNAMENT_TTL_SECONDS)
 
 
-def load_tournament_state(job_id: str) -> Optional[Dict[str, Any]]:
+def load_tournament_state(job_id: str, *, read_only: bool = False) -> Optional[Dict[str, Any]]:
     state = _read_raw(job_id)
-    if state is not None:
+    if state is not None and not read_only:
         from engine.builder2_accepted_creator_store import backfill_accepted_creator_index
 
         backfill_accepted_creator_index(state)
@@ -89,6 +97,14 @@ def load_tournament_state(job_id: str) -> Optional[Dict[str, Any]]:
 
 
 def save_tournament_state(job_id: str, state: Dict[str, Any]) -> None:
+    from engine.builder2_read_only_inspection import read_only_inspection_active
+
+    if read_only_inspection_active():
+        logger.warning(
+            "BUILDER2_READ_ONLY_INSPECTION_BLOCKED_WRITE jobId=%s method=save_tournament_state",
+            job_id,
+        )
+        return
     if state.get("schemaVersion") != TOURNAMENT_STATE_SCHEMA_VERSION:
         raise Builder2TournamentError("builder2_tournament_state_error")
     _write_raw(job_id, state)

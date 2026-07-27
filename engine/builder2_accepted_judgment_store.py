@@ -173,11 +173,48 @@ def audit_reusable_accepted_judgment(
     return True, None
 
 
-def backfill_accepted_judgment_index(state: Dict[str, Any]) -> int:
+def backfill_accepted_judgment_index(state: Dict[str, Any], *, persist: bool = True) -> int:
+    from engine.builder2_read_only_inspection import read_only_inspection_active
+
+    derived_entries = _derive_missing_judgment_index_entries(state)
+    if not derived_entries:
+        return 0
+    if not persist or read_only_inspection_active():
+        logger.info(
+            "BUILDER2_ACCEPTED_JUDGMENT_INDEX_DERIVED_READ_ONLY jobId=%s tournamentId=%s count=%s",
+            state.get("jobId"),
+            state.get("tournamentId"),
+            len(derived_entries),
+        )
+        return len(derived_entries)
     index = _ensure_index(state)
     added = 0
+    for candidate_id, entry in derived_entries.items():
+        index[candidate_id] = entry
+        added += 1
+    if added:
+        logger.info(
+            "BUILDER2_ACCEPTED_JUDGMENT_INDEX_BACKFILLED jobId=%s tournamentId=%s count=%s",
+            state.get("jobId"),
+            state.get("tournamentId"),
+            added,
+        )
+    return added
+
+
+def derive_accepted_judgment_index(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    index = state.get(ACCEPTED_JUDGMENT_INDEX_KEY)
+    merged: Dict[str, Dict[str, Any]] = deepcopy(index) if isinstance(index, dict) else {}
+    merged.update(_derive_missing_judgment_index_entries(state))
+    return merged
+
+
+def _derive_missing_judgment_index_entries(state: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    index = state.get(ACCEPTED_JUDGMENT_INDEX_KEY)
+    existing = index if isinstance(index, dict) else {}
+    derived: Dict[str, Dict[str, Any]] = {}
     for candidate_id, cand in (state.get("candidates") or {}).items():
-        if not isinstance(cand, dict) or candidate_id in index:
+        if not isinstance(cand, dict) or candidate_id in existing:
             continue
         reusable, _reason = audit_reusable_accepted_judgment(
             state,
@@ -203,7 +240,7 @@ def backfill_accepted_judgment_index(state: Dict[str, Any]) -> int:
         record = _judgment_record_for_candidate(state, str(candidate_id))
         if record is None:
             continue
-        index[str(candidate_id)] = {
+        derived[str(candidate_id)] = {
             "judgmentId": record.get("judgmentId"),
             "candidateId": str(candidate_id),
             "prototypeId": str(cand.get("prototypeId") or ""),
@@ -215,15 +252,7 @@ def backfill_accepted_judgment_index(state: Dict[str, Any]) -> int:
             "methodologyVersion": str((record.get("judgment") or {}).get("methodologyVersion") or METHODOLOGY_VERSION),
             "acceptedAt": str(cand.get("completedAt") or _utc_now_iso()),
         }
-        added += 1
-    if added:
-        logger.info(
-            "BUILDER2_ACCEPTED_JUDGMENT_INDEX_BACKFILLED jobId=%s tournamentId=%s count=%s",
-            state.get("jobId"),
-            state.get("tournamentId"),
-            added,
-        )
-    return added
+    return derived
 
 
 def persist_accepted_judgment(

@@ -351,6 +351,16 @@ def run_one_reasoning_resume(
             ReasoningResumeIsolationGuard.end()
             return report
 
+        from engine.builder2_complete_ad_resume_plan import assert_resume_ready_for_winner_selection
+
+        try:
+            assert_resume_ready_for_winner_selection(state)
+        except Exception as exc:
+            report["failureReason"] = str(getattr(exc, "args", ["builder2_reasoning_resume_judgments_incomplete"])[0])
+            save_tournament_state(job_id, state)
+            ReasoningResumeIsolationGuard.end()
+            return report
+
         winner_id = str(state.get("winnerCandidateId") or "").strip()
         if not winner_id:
             winner_id = select_global_winner(state)
@@ -373,10 +383,17 @@ def run_one_reasoning_resume(
                 winner_id,
             )
         else:
-            if not paid_call_started:
-                ReasoningResumeIsolationGuard.assert_safe_before_winner_development()
-            else:
-                ReasoningResumeIsolationGuard.assert_safe_before_winner_development()
+            from engine.builder2_complete_ad_resume_plan import assert_resume_ready_for_winner_development
+
+            try:
+                assert_resume_ready_for_winner_development(state)
+            except Exception as exc:
+                report["failureReason"] = str(getattr(exc, "args", ["builder2_complete_ad_resume_winner_gate:tournament_incomplete"])[0])
+                save_tournament_state(job_id, state)
+                ReasoningResumeIsolationGuard.end()
+                return report
+
+            ReasoningResumeIsolationGuard.assert_safe_before_winner_development()
 
             winner_rec = state["candidates"][winner_id]
             judgment_rec = (state.get("judgments") or {}).get(winner_rec.get("judgmentId") or "")

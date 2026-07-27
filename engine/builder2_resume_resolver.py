@@ -23,10 +23,10 @@ from engine.builder2_resume_contract import (
 )
 from engine.builder2_tournament_completion_gate import (
     is_tournament_ready_for_winner_selection,
-    unresolved_creator_prototype_ids,
-    unresolved_judge_prototype_ids,
-    uses_strict_six_way_winner_gate,
+    missing_creator_prototype_ids,
+    missing_judge_prototype_ids,
 )
+from engine.builder2_complete_ad_resume_plan import resolve_complete_ad_resume_stage
 from engine.builder2_tournament_config import resolve_builder2_active_prototype_ids
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development
 
@@ -112,7 +112,7 @@ def _validate_checkpoint_artifact(state: Mapping[str, Any], stage: str) -> Optio
     return None
 
 
-def _infer_resume_stage(state: Mapping[str, Any], job_state: Optional[Mapping[str, Any]]) -> str:
+def _infer_resume_stage(state: Mapping[str, Any], job_state: Optional[Mapping[str, Any]], *, read_only: bool = False) -> str:
     final_url = _final_video_url(job_state, state)
     if final_url:
         return "completed"
@@ -121,29 +121,44 @@ def _infer_resume_stage(state: Mapping[str, Any], job_state: Optional[Mapping[st
     if not isinstance(strategy, dict) or not strategy:
         return "strategy"
 
-    backfill_accepted_creator_index(dict(state))
-    creator_index = state.get(ACCEPTED_CREATOR_INDEX_KEY) or {}
-    active_prototypes = list(
-        state.get("initialActivePrototypeIds")
-        or state.get("activePrototypeIds")
-        or resolve_builder2_active_prototype_ids()
-    )
     state_dict = dict(state)
-    if unresolved_creator_prototype_ids(state_dict):
+    if not read_only:
+        backfill_accepted_creator_index(state_dict)
+    else:
+        backfill_accepted_creator_index(state_dict, persist=False)
+
+    complete_ad_stage = resolve_complete_ad_resume_stage(state_dict, read_only=read_only)
+    assigned_count = len(
+        list(
+            state.get("initialActivePrototypeIds")
+            or state.get("activePrototypeIds")
+            or resolve_builder2_active_prototype_ids()
+        )
+    )
+    if assigned_count >= 6 and complete_ad_stage in {
+        "creator_generation",
+        "judge_generation",
+        "winner_selection",
+        "winner_development",
+    }:
+        if complete_ad_stage == "winner_development" and not _clean(state.get("winnerCandidateId")):
+            return "winner_selection"
+        return complete_ad_stage
+
+    if missing_creator_prototype_ids(state_dict, read_only=read_only):
         return "creator_generation"
 
-    backfill_accepted_judgment_index(dict(state))
-    judgment_index = state.get(ACCEPTED_JUDGMENT_INDEX_KEY) or {}
-    if unresolved_judge_prototype_ids(state_dict):
+    if not read_only:
+        backfill_accepted_judgment_index(state_dict)
+    else:
+        backfill_accepted_judgment_index(state_dict, persist=False)
+
+    if missing_judge_prototype_ids(state_dict, read_only=read_only):
         return "judge_generation"
 
-    if not is_tournament_ready_for_winner_selection(state_dict):
-        if uses_strict_six_way_winner_gate(state_dict):
-            if unresolved_creator_prototype_ids(state_dict):
-                return "creator_generation"
-            return "judge_generation"
-        if unresolved_judge_prototype_ids(state_dict):
-            return "judge_generation"
+    if not is_tournament_ready_for_winner_selection(state_dict, read_only=read_only):
+        if missing_creator_prototype_ids(state_dict, read_only=read_only):
+            return "creator_generation"
         return "judge_generation"
 
     if not _clean(state.get("winnerCandidateId")):
@@ -223,8 +238,14 @@ def _reusable_artifacts(state: Mapping[str, Any]) -> List[str]:
 def resolve_builder2_resume_stage(
     job_state: Optional[Mapping[str, Any]],
     tournament_state: Optional[Mapping[str, Any]],
+    *,
+    read_only: bool = False,
 ) -> Dict[str, Any]:
     enriched: Dict[str, Any] = dict(tournament_state) if isinstance(tournament_state, dict) else {}
+    if read_only:
+        from copy import deepcopy
+
+        enriched = deepcopy(enriched)
     sync_builder2_stage_checkpoints_from_state(job_state=job_state, tournament_state=enriched)
 
     completed: Set[str] = set(completed_stage_names(enriched))
@@ -260,7 +281,7 @@ def resolve_builder2_resume_stage(
             "consistencyFailures": consistency_failures,
         }
 
-    resume_from = _infer_resume_stage(enriched, job_state)
+    resume_from = _infer_resume_stage(enriched, job_state, read_only=read_only)
     resume_from = normalize_builder2_stage(resume_from)
 
     failure_info = enriched.get("resumeFailure") if isinstance(enriched.get("resumeFailure"), dict) else {}
