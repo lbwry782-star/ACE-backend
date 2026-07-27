@@ -534,6 +534,7 @@ def judge_candidate(
     state: Optional[Dict[str, Any]] = None,
     judgment_id: Optional[str] = None,
     compatibility_mode: bool = False,
+    single_attempt_only: bool = False,
 ) -> Tuple[str, Dict[str, Any], int, Dict[str, int]]:
     prototype = require_prototype(prototype_id)
     judgment_id = judgment_id or f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
@@ -567,7 +568,7 @@ def judge_candidate(
     response_text = ""
     collected_structural_failures: List[str] = []
 
-    for phase in ("normal", "repair", "retry"):
+    for phase in (("normal",) if single_attempt_only else ("normal", "repair", "retry")):
         if phase == "repair":
             if state is not None:
                 from engine.builder2_judge_circuit_breaker import is_judge_contract_circuit_breaker_tripped

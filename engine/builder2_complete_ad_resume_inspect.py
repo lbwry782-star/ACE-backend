@@ -24,6 +24,7 @@ from engine.builder2_resume_contract import BUILDER2_RESUME_CONTRACT_VERSION
 from engine.builder2_resume_resolver import resolve_builder2_resume_stage
 from engine.builder2_tournament_completion_gate import tournament_resolution_summary
 from engine.builder2_tournament_store import _read_raw
+from engine.builder2_winner_persistence import is_valid_persisted_winner_development
 from engine.builder2_winner_preservation_contract import load_revalidatable_parsed_winner_response
 from engine.video_jobs_redis import redis_configured, video_job_get_raw
 
@@ -64,6 +65,23 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         "openAICalls": 0,
         "builder2ResumeContractVersion": BUILDER2_RESUME_CONTRACT_VERSION,
         "builder2NewFormatVersion": BUILDER2_NEW_FORMAT_VERSION,
+        "reasoningComplete": False,
+        "mediaStarted": False,
+        "finalWinnerCandidateId": None,
+        "finalWinnerPrototypeId": None,
+        "finalWinnerScore": None,
+        "semanticAlignmentAccepted": False,
+        "prototypeFitScore": None,
+        "advertisingClosurePresent": False,
+        "productNamePresent": False,
+        "sloganPresent": False,
+        "sloganWordCount": 0,
+        "winnerDevelopmentAccepted": False,
+        "winnerDevelopmentReused": False,
+        "resolvedNextStage": None,
+        "startImageCalls": 0,
+        "runwaySubmissionCount": 0,
+        "finalVideoAvailable": False,
     }
     if not jid:
         report["failureReason"] = "builder2_complete_ad_resume_inspect_job_id_missing"
@@ -117,6 +135,49 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         report["expectedNextReasoningRoles"] = list(role_plan.get("expectedNextReasoningRoles") or [])
         report["minimumAdditionalReasoningCalls"] = int(role_plan.get("minimumAdditionalReasoningCalls") or 0)
         report["maximumAdditionalReasoningCalls"] = int(role_plan.get("maximumAdditionalReasoningCalls") or 0)
+
+        report["reasoningComplete"] = bool(state.get("reasoningComplete"))
+        report["mediaStarted"] = bool(state.get("mediaStarted"))
+        report["resolvedNextStage"] = resolve_complete_ad_resume_stage(state, read_only=True)
+        winner_id = _clean(state.get("winnerCandidateId") or state.get("winnerDevelopmentCandidateId")) or None
+        report["finalWinnerCandidateId"] = winner_id
+        winner_rec = (state.get("candidates") or {}).get(winner_id or "") or {}
+        report["finalWinnerPrototypeId"] = _clean(winner_rec.get("prototypeId")) or None
+        report["finalWinnerScore"] = winner_rec.get("totalScore")
+        judgment_rec = (state.get("judgments") or {}).get(winner_rec.get("judgmentId") or "")
+        winning_judgment = (judgment_rec or {}).get("judgment") or {}
+        semantic = winning_judgment.get("semanticAlignmentAssessment") or {}
+        report["semanticAlignmentAccepted"] = bool(semantic.get("semanticAlignment"))
+        scores = winning_judgment.get("scores") if isinstance(winning_judgment.get("scores"), dict) else {}
+        report["prototypeFitScore"] = scores.get("prototypeMethodApplication")
+        closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
+        if not closure and isinstance(winner_rec.get("creatorOutput"), dict):
+            closure = (winner_rec["creatorOutput"].get("advertisingClosure") or {})
+        report["advertisingClosurePresent"] = bool(closure.get("sloganText"))
+        report["productNamePresent"] = bool(closure.get("productNameText"))
+        slogan = _clean(closure.get("sloganText"))
+        report["sloganPresent"] = bool(slogan)
+        report["sloganWordCount"] = len(slogan.split()) if slogan else 0
+        report["winnerDevelopmentAccepted"] = is_valid_persisted_winner_development(state)
+        parsed_winner_id = _clean((parsed_winner or {}).get("candidateId"))
+        report["winnerDevelopmentReused"] = bool(
+            report["winnerDevelopmentAccepted"]
+            and parsed_winner_id
+            and parsed_winner_id == _clean(winner_id)
+        )
+        media = state.get("mediaResume") if isinstance(state.get("mediaResume"), dict) else {}
+        report["startImageCalls"] = int((state.get("metrics") or {}).get("startImageCalls") or 0)
+        report["runwaySubmissionCount"] = int(
+            (state.get("metrics") or {}).get("runwaySubmissionCalls")
+            or (state.get("metrics") or {}).get("runwayCalls")
+            or 0
+        )
+        report["finalVideoAvailable"] = bool(
+            _clean(state.get("finalVideoUrl"))
+            or _clean(media.get("finalVideoUrl"))
+            or _clean(media.get("runwayVideoUrl"))
+        )
+
         report["redisMutations"] = mutation_counter.redis_mutations
         report["ok"] = True
         return report

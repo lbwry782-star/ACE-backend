@@ -750,6 +750,7 @@ def generate_creator_candidate(
     state: Optional[Dict[str, Any]] = None,
     candidate_id: Optional[str] = None,
     compatibility_mode: bool = False,
+    single_attempt_only: bool = False,
 ) -> Tuple[str, Dict[str, Any]]:
     prototype = require_prototype(prototype_id)
     candidate_id = candidate_id or f"cand-{round_index}-{prototype_id}-{attempt_number}-{uuid.uuid4().hex[:8]}"
@@ -785,7 +786,7 @@ def generate_creator_candidate(
     response_text = ""
     collected_structural_failures: List[str] = []
 
-    for phase in ("normal", "repair", "retry"):
+    for phase in (("normal",) if single_attempt_only else ("normal", "repair", "retry")):
         if phase == "repair":
             if last_exc is None or not _is_structural_repairable(_failure_code(last_exc), _failure_field(last_exc)):
                 continue
