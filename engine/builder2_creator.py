@@ -1005,6 +1005,19 @@ def generate_creator_candidate(
     assert last_exc is not None
     if state is not None:
         state.setdefault("creatorDiagnosticsByCandidate", {})[candidate_id] = dict(diagnostics)
+        if last_parsed:
+            from engine.builder2_complete_ad_creator_recovery import persist_rejected_creator_parsed_response
+
+            persist_rejected_creator_parsed_response(
+                state,
+                candidate_id=candidate_id,
+                prototype_id=prototype_id,
+                round_index=round_index,
+                attempt_number=attempt_number,
+                parsed=last_parsed,
+                failure_reason=str(last_exc.args[0] if last_exc.args else ""),
+                top_level_keys=sorted(last_parsed.keys()),
+            )
         record_creator_rejected(state)
     final_reason = str(last_exc.args[0])
     logger.error(

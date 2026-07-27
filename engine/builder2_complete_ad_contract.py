@@ -7,10 +7,9 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from engine.builder2_advertising_closure_contract import (
-    GENERIC_SLOGAN_PATTERNS,
-    NEW_PROMISE_PATTERNS,
     normalize_advertising_closure,
-    validate_slogan_text,
+    validate_slogan_text_quality,
+    validate_slogan_text_structure,
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
@@ -42,6 +41,45 @@ PROTOTYPE_APPLICATION_ASSESSMENT_FIELDS = (
 )
 
 HEBREW_GENERIC_JOURNEY = re.compile(r"חלק\s+מהדרך", re.I)
+
+
+def is_complete_ad_new_format_job(state: Optional[Dict[str, Any]] = None, *, plan: Optional[Dict[str, Any]] = None) -> bool:
+    from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
+
+    if isinstance(state, dict) and _clean(state.get("builder2NewFormatVersion")) == BUILDER2_NEW_FORMAT_VERSION:
+        return True
+    if isinstance(plan, dict) and _clean(plan.get("builder2NewFormatVersion")) == BUILDER2_NEW_FORMAT_VERSION:
+        return True
+    return False
+
+
+def apply_complete_ad_winner_plan_normalization(
+    winner_plan: Dict[str, Any],
+    *,
+    winning_candidate: Dict[str, Any],
+    winning_judgment: Optional[Dict[str, Any]] = None,
+) -> None:
+    from engine.builder2_headline_decision_contract import (
+        apply_headline_decision_execution_normalization,
+        headline_decision_is_omit,
+        normalize_headline_decision_object,
+    )
+
+    creator_closure = normalize_advertising_closure((winning_candidate or {}).get("advertisingClosure"))
+    winner_plan["advertisingClosure"] = creator_closure
+    normalized_decision = normalize_headline_decision_object(
+        winner_plan.get("headlineDecision"),
+        winning_judgment=winning_judgment,
+    )
+    if headline_decision_is_omit(normalized_decision.get("decision")):
+        normalized_decision = {
+            "decision": "omit",
+            "reason": normalized_decision.get("reason"),
+            "reasonSource": normalized_decision.get("reasonSource") or "not_required",
+        }
+    apply_headline_decision_execution_normalization(winner_plan, headline_decision=normalized_decision)
+    if headline_decision_is_omit(normalized_decision.get("decision")):
+        winner_plan["headlineForm"] = "none"
 
 
 def _clean(value: Any) -> str:
@@ -106,6 +144,7 @@ def validate_creator_complete_ad_fields(
     *,
     strategy_foundation: Optional[Dict[str, Any]] = None,
     assigned_prototype_id: str = "",
+    product_name: str = "",
 ) -> None:
     closure_raw = candidate.get("advertisingClosure")
     if not isinstance(closure_raw, dict):
@@ -113,23 +152,26 @@ def validate_creator_complete_ad_fields(
     closure = normalize_advertising_closure(closure_raw)
     if closure.get("required") is not True:
         _raise("builder2_creator_validation_failed", field="advertisingClosure.required")
-    product_name = _clean(closure.get("productNameText"))
-    if not product_name:
+    authoritative_product = _clean(product_name)
+    if not authoritative_product and isinstance(strategy_foundation, dict):
+        authoritative_product = _clean(strategy_foundation.get("productNameResolved"))
+    product_name_text = _clean(closure.get("productNameText"))
+    if not product_name_text:
         _raise("builder2_creator_validation_failed", field="advertisingClosure.productNameText")
+    if authoritative_product and product_name_text != authoritative_product:
+        _raise("builder2_creator_validation_failed", field="advertisingClosure.productNameText.identity")
     slogan = _clean(closure.get("sloganText"))
-    relative = ""
-    if isinstance(strategy_foundation, dict):
-        adv = strategy_foundation.get("relativeAdvantage") or {}
-        if isinstance(adv, dict):
-            relative = _clean(adv.get("statement"))
-    validate_slogan_text(
-        slogan=slogan,
-        product_name=product_name,
-        relative_advantage=relative,
-        core_mechanism=_clean(candidate.get("coreCreativeMechanism")),
-    )
-    if HEBREW_GENERIC_JOURNEY.search(slogan):
-        _raise("builder2_creator_validation_failed", field="advertisingClosure.sloganText.generic")
+    validate_slogan_text_structure(slogan=slogan, product_name=product_name_text)
+    if _clean(closure.get("presentationMode")) != "end_card":
+        _raise("builder2_creator_validation_failed", field="advertisingClosure.presentationMode")
+    try:
+        duration = float(closure.get("durationSeconds"))
+    except (TypeError, ValueError):
+        duration = 0.0
+    if abs(duration - 2.0) > 0.01:
+        _raise("builder2_creator_validation_failed", field="advertisingClosure.durationSeconds")
+    if closure.get("noLogo") is not True:
+        _raise("builder2_creator_validation_failed", field="advertisingClosure.noLogo")
 
     bridge = candidate.get("semanticBridge")
     if not isinstance(bridge, dict):
@@ -232,6 +274,9 @@ def apply_semantic_eligibility_rules(judgment: Dict[str, Any]) -> Dict[str, Any]
         if advertising.get("functionsAsAdvertisement") is False:
             out["eligible"] = False
             out.setdefault("disqualifiers", []).append("advertising_not_complete")
+        if advertising.get("sloganSpecificToIdea") is False:
+            out["eligible"] = False
+            out.setdefault("disqualifiers", []).append("slogan_not_specific_to_idea")
     return out
 
 
@@ -257,13 +302,19 @@ def copy_winner_advertising_closure_from_candidate(
     winning_candidate: Dict[str, Any],
     winning_judgment: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    from engine.builder2_tournament_completion_gate import persist_winner_slogan_identity
+
     closure = normalize_advertising_closure((winning_candidate or {}).get("advertisingClosure"))
     closure["headlineSource"] = "creator_candidate"
     state["advertisingClosure"] = closure
     state["advertisingClosureStatus"] = "approved"
     state["advertisingClosureSource"] = "winner_creator_candidate"
-    state["winnerSelectedSloganText"] = _clean(closure.get("sloganText"))
-    state["winnerSelectedProductNameText"] = _clean(closure.get("productNameText"))
+    persist_winner_slogan_identity(
+        state,
+        candidate_id=candidate_id,
+        prototype_id=str((winning_candidate or {}).get("prototypeId") or ""),
+        advertising_closure=closure,
+    )
     if isinstance(winning_judgment, dict):
         state["winnerSemanticAlignmentAssessment"] = winning_judgment.get("semanticAlignmentAssessment")
         state["winnerPrototypeApplicationAssessment"] = winning_judgment.get("prototypeApplicationAssessment")

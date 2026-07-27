@@ -244,7 +244,21 @@ def _register_rejected_creator(
     attempt_number: int,
     failure_reason: str,
     creator_diagnostics: Optional[Dict[str, Any]] = None,
+    parsed_creator: Optional[Dict[str, Any]] = None,
 ) -> None:
+    if isinstance(parsed_creator, dict) and parsed_creator:
+        from engine.builder2_complete_ad_creator_recovery import persist_rejected_creator_parsed_response
+
+        persist_rejected_creator_parsed_response(
+            state,
+            candidate_id=candidate_id,
+            prototype_id=prototype_id,
+            round_index=round_index,
+            attempt_number=attempt_number,
+            parsed=parsed_creator,
+            failure_reason=failure_reason,
+            top_level_keys=sorted(parsed_creator.keys()),
+        )
     register_candidate(
         state,
         {
@@ -780,10 +794,27 @@ def _run_builder2_tournament_body(
         record_judge_process_contract_failure(state, exc)
         save_tournament_state(job_id, state)
         raise exc
+    from engine.builder2_tournament_completion_gate import (
+        assert_tournament_ready_for_winner_selection,
+        invalidate_provisional_winner_if_incomplete,
+        mark_authoritative_winner_selection,
+    )
+
+    invalidate_provisional_winner_if_incomplete(state)
+    try:
+        assert_tournament_ready_for_winner_selection(state)
+    except Builder2TournamentError as exc:
+        state["status"] = "tournament_incomplete"
+        state["lastCompletedStep"] = "awaiting_creator_or_judge_completion"
+        state["tournamentBlockingReason"] = str(exc.args[0] if exc.args else exc)
+        state["canResume"] = True
+        save_tournament_state(job_id, state)
+        raise
+
     winner_id = state.get("winnerCandidateId")
     if not winner_id:
         winner_id = select_global_winner(state)
-        state["winnerCandidateId"] = winner_id
+        mark_authoritative_winner_selection(state, winner_id=winner_id)
         winner_rec = state["candidates"][winner_id]
         judgment_rec = state["judgments"].get(winner_rec.get("judgmentId") or "")
         from engine.builder2_complete_ad_contract import copy_winner_advertising_closure_from_candidate

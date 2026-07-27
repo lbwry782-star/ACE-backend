@@ -21,6 +21,12 @@ from engine.builder2_resume_contract import (
     normalize_builder2_stage,
     sync_builder2_stage_checkpoints_from_state,
 )
+from engine.builder2_tournament_completion_gate import (
+    is_tournament_ready_for_winner_selection,
+    unresolved_creator_prototype_ids,
+    unresolved_judge_prototype_ids,
+    uses_strict_six_way_winner_gate,
+)
 from engine.builder2_tournament_config import resolve_builder2_active_prototype_ids
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development
 
@@ -122,12 +128,22 @@ def _infer_resume_stage(state: Mapping[str, Any], job_state: Optional[Mapping[st
         or state.get("activePrototypeIds")
         or resolve_builder2_active_prototype_ids()
     )
-    if len(creator_index) < len(active_prototypes):
+    state_dict = dict(state)
+    if unresolved_creator_prototype_ids(state_dict):
         return "creator_generation"
 
     backfill_accepted_judgment_index(dict(state))
     judgment_index = state.get(ACCEPTED_JUDGMENT_INDEX_KEY) or {}
-    if len(judgment_index) < len(active_prototypes):
+    if unresolved_judge_prototype_ids(state_dict):
+        return "judge_generation"
+
+    if not is_tournament_ready_for_winner_selection(state_dict):
+        if uses_strict_six_way_winner_gate(state_dict):
+            if unresolved_creator_prototype_ids(state_dict):
+                return "creator_generation"
+            return "judge_generation"
+        if unresolved_judge_prototype_ids(state_dict):
+            return "judge_generation"
         return "judge_generation"
 
     if not _clean(state.get("winnerCandidateId")):

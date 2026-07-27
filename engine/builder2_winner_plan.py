@@ -126,6 +126,7 @@ def validate_builder2_winner_plan(
     require_non_empty_str(raw.get("visualFamily"), field="visualFamily")
     structure = require_non_empty_str(raw.get("structureType"), field="structureType")
     headline_decision = _headline_decision_value(raw)
+    complete_ad_winner = isinstance((winning_candidate or {}).get("advertisingClosure"), dict)
     if winning_candidate is not None:
         normalized_headline = normalize_headline_decision_object(
             raw.get("headlineDecision"),
@@ -134,7 +135,11 @@ def validate_builder2_winner_plan(
         if normalized_headline.get("decision") not in CANONICAL_HEADLINE_DECISIONS:
             raise Builder2TournamentError("builder2_winner_validation_failed:headlineDecision.decision")
         headline_decision = str(normalized_headline.get("decision") or "")
-    if headline_decision_requires_headline(headline_decision):
+        if complete_ad_winner and headline_decision_is_omit(headline_decision):
+            headline_decision = "omit"
+    if headline_decision_requires_headline(headline_decision) and not (
+        complete_ad_winner and headline_decision_is_omit(headline_decision)
+    ):
         require_non_empty_str(raw.get("headline"), field="headline")
         require_non_empty_str(raw.get("headlineCoreKeyword"), field="headlineCoreKeyword")
     require_non_empty_str(raw.get("coreVisualIdea"), field="coreVisualIdea")

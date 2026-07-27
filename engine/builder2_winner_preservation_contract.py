@@ -331,10 +331,17 @@ def process_winner_development_response(
     creator_closure = (winning_candidate or {}).get("advertisingClosure")
     if isinstance(creator_closure, dict):
         from engine.builder2_advertising_closure_contract import normalize_advertising_closure
+        from engine.builder2_complete_ad_contract import apply_complete_ad_winner_plan_normalization
 
         merged["advertisingClosure"] = normalize_advertising_closure(
             {**creator_closure, "headlineSource": creator_closure.get("headlineSource") or "creator_candidate"}
         )
+        if not compatibility_mode:
+            apply_complete_ad_winner_plan_normalization(
+                merged,
+                winning_candidate=winning_candidate,
+                winning_judgment=winning_judgment,
+            )
     validate_winner_source_identity(merged, source_reference=source_reference)
     log_preservation_contract_applied(
         job_id=job_id,
@@ -398,3 +405,33 @@ def load_revalidatable_parsed_winner_response(state: Dict[str, Any]) -> Optional
     if not isinstance(parsed, dict) or not parsed:
         return None
     return deepcopy(payload)
+
+
+def offline_revalidate_parsed_winner_response(
+    state: Dict[str, Any],
+    *,
+    source_reference: Dict[str, Any],
+    winning_candidate: Dict[str, Any],
+    preservation_snapshot: Optional[Dict[str, Any]] = None,
+    winning_judgment: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+    job_id: str = "",
+    tournament_id: str = "",
+) -> Dict[str, Any]:
+    payload = load_revalidatable_parsed_winner_response(state)
+    if payload is None:
+        raise Builder2TournamentError("builder2_winner_offline_revalidation_missing_parsed_response")
+    expected_candidate = str(source_reference.get("sourceCandidateId") or "").strip()
+    if expected_candidate and str(payload.get("candidateId") or "").strip() != expected_candidate:
+        raise Builder2TournamentError("builder2_winner_offline_revalidation_candidate_mismatch")
+    parsed = dict(payload.get("parsed") or {})
+    return process_winner_development_response(
+        parsed,
+        source_reference=source_reference,
+        winning_candidate=winning_candidate,
+        preservation_snapshot=preservation_snapshot,
+        winning_judgment=winning_judgment,
+        compatibility_mode=compatibility_mode,
+        job_id=job_id,
+        tournament_id=tournament_id,
+    )

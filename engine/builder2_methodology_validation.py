@@ -275,6 +275,7 @@ def validate_creator_methodology(
             candidate,
             strategy_foundation=strategy_foundation,
             assigned_prototype_id=assigned_prototype_id,
+            product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
         )
 
     anchor = _require_dict(candidate.get("visualAnchor"), field="visualAnchor", code="builder2_creator_schema_invalid")

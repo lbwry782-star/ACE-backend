@@ -106,12 +106,10 @@ def advertising_closure_is_required(plan: Dict[str, Any]) -> bool:
     return True
 
 
-def validate_slogan_text(
+def validate_slogan_text_structure(
     *,
     slogan: str,
     product_name: str,
-    relative_advantage: str = "",
-    core_mechanism: str = "",
 ) -> None:
     text = _clean(slogan)
     if not text:
@@ -119,18 +117,43 @@ def validate_slogan_text(
     word_count = _word_count_excluding_product(text, product_name)
     if word_count > 7:
         _raise("builder2_advertising_closure_invalid", field="sloganText.word_limit")
+
+
+def validate_slogan_text_quality(
+    *,
+    slogan: str,
+    product_name: str,
+    relative_advantage: str = "",
+    core_mechanism: str = "",
+) -> None:
+    text = _clean(slogan)
+    validate_slogan_text_structure(slogan=text, product_name=product_name)
     for pattern in GENERIC_SLOGAN_PATTERNS:
         if pattern.search(text):
             _raise("builder2_advertising_closure_invalid", field="sloganText.generic")
     for pattern in NEW_PROMISE_PATTERNS:
         if pattern.search(text):
             _raise("builder2_advertising_closure_invalid", field="sloganText.unsupported_claim")
-    if relative_advantage:
-        adv = _clean(relative_advantage)
-        if adv and adv.lower() not in text.lower() and not any(token in text.lower() for token in adv.lower().split()[:3]):
-            pass
     if core_mechanism and text.lower() == _clean(core_mechanism).lower():
         _raise("builder2_advertising_closure_invalid", field="sloganText.describes_action_only")
+
+
+def validate_slogan_text(
+    *,
+    slogan: str,
+    product_name: str,
+    relative_advantage: str = "",
+    core_mechanism: str = "",
+    quality_checks: bool = True,
+) -> None:
+    validate_slogan_text_structure(slogan=slogan, product_name=product_name)
+    if quality_checks:
+        validate_slogan_text_quality(
+            slogan=slogan,
+            product_name=product_name,
+            relative_advantage=relative_advantage,
+            core_mechanism=core_mechanism,
+        )
 
 
 def build_closure_from_winner_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
@@ -167,7 +190,12 @@ def build_closure_from_winner_plan(plan: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def validate_advertising_closure_object(closure: Dict[str, Any], *, plan: Optional[Dict[str, Any]] = None) -> None:
+def validate_advertising_closure_object(
+    closure: Dict[str, Any],
+    *,
+    plan: Optional[Dict[str, Any]] = None,
+    structural_only: bool = False,
+) -> None:
     normalized = normalize_advertising_closure(closure)
     if not normalized.get("required"):
         _raise("builder2_advertising_closure_invalid", field="required")
@@ -187,6 +215,7 @@ def validate_advertising_closure_object(closure: Dict[str, Any], *, plan: Option
         product_name=_clean(normalized.get("productNameText")),
         relative_advantage=relative_advantage,
         core_mechanism=core_mechanism,
+        quality_checks=not structural_only,
     )
 
 
@@ -201,12 +230,12 @@ def validate_advertising_closure_methodology(
             if require_present:
                 _raise("builder2_winner_validation_failed", field="advertisingClosure")
             return
-        validate_advertising_closure_object(closure, plan=winner_plan)
+        validate_advertising_closure_object(closure, plan=winner_plan, structural_only=True)
         winner_plan["advertisingClosure"] = normalize_advertising_closure(closure)
         return
     closure = winner_plan.get("advertisingClosure")
     if isinstance(closure, dict):
-        validate_advertising_closure_object(closure, plan=winner_plan)
+        validate_advertising_closure_object(closure, plan=winner_plan, structural_only=True)
         winner_plan["advertisingClosure"] = normalize_advertising_closure(closure)
     elif require_present:
         built = build_closure_from_winner_plan(winner_plan)

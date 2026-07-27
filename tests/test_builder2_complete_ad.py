@@ -37,11 +37,21 @@ class TestCompleteAdCreator(unittest.TestCase):
         self.assertTrue(str(candidate["advertisingClosure"]["sloganText"]))
         validate_creator_complete_ad_fields(candidate, strategy_foundation=_strategy(), assigned_prototype_id="closest")
 
-    def test_generic_slogan_rejected(self) -> None:
+    def test_generic_slogan_structurally_accepted(self) -> None:
         candidate = _candidate("closest")
         candidate["advertisingClosure"]["sloganText"] = "חלק מהדרך"
+        validate_creator_complete_ad_fields(
+            candidate,
+            strategy_foundation=_strategy(),
+            assigned_prototype_id="closest",
+            product_name="ACE Product",
+        )
+
+    def test_generic_slogan_quality_rejected_at_judge_layer(self) -> None:
+        from engine.builder2_advertising_closure_contract import validate_slogan_text_quality
+
         with self.assertRaises(Builder2TournamentError):
-            validate_creator_complete_ad_fields(candidate, strategy_foundation=_strategy(), assigned_prototype_id="closest")
+            validate_slogan_text_quality(slogan="חלק מהדרך", product_name="ACE Product")
 
 
 class TestSemanticAlignment(unittest.TestCase):
