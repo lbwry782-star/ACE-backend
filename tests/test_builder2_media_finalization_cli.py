@@ -43,6 +43,7 @@ from tests.test_builder2_media_finalization_failure_inspect import (
     _false_completion_state,
     _job_raw,
 )
+from tests.builder2_preflight_test_helpers import patch_accepted_web_storage_capability
 
 
 def _success_closure_result(**overrides: Any) -> ClosureRenderResult:
@@ -367,6 +368,7 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
         self.assertNotIn("sys.exit(", library_source)
         self.assertNotIn("os._exit(", library_source)
 
+    @patch_accepted_web_storage_capability()
     @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
     @patch("engine.builder2_media_finalization_resume.resolve_finalization_source_decision")
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
@@ -381,6 +383,7 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
         build_config: Any,
         source_decision: Any,
         closure_render: Any,
+        _capability: Any,
     ) -> None:
         from engine.builder2_media_finalization_source import FinalizationSourceDecision
 
@@ -415,6 +418,7 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
             places=3,
         )
 
+    @patch_accepted_web_storage_capability()
     @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
     @patch("engine.builder2_media_finalization_resume.resolve_finalization_source_decision")
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
@@ -429,6 +433,7 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
         build_config: Any,
         source_decision: Any,
         closure_render: Any,
+        _capability: Any,
     ) -> None:
         from engine.builder2_media_finalization_source import FinalizationSourceDecision
 

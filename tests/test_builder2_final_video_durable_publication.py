@@ -148,21 +148,41 @@ class TestVerification(unittest.TestCase):
         self.assertEqual(result.failure_code, "final_publication_size_mismatch")
 
 
+def _upload_json_response(
+    *,
+    byte_count: int = 128,
+    token: str = "abcd1234567890123456789012345678",
+    durable: bool = True,
+    backend: str = "persistent_disk",
+    fingerprint_ok: bool = True,
+) -> MagicMock:
+    response = MagicMock(ok=True, status_code=200)
+    response.json.return_value = {
+        "ok": True,
+        "durableStorageConfirmed": durable,
+        "publicationBackendKind": backend,
+        "storageConfigured": durable,
+        "storageWritable": durable,
+        "uploadedByteCount": byte_count,
+        "storedByteCount": byte_count if durable else 0,
+        "artifactFingerprintVerified": fingerprint_ok,
+        "finalPublicUrl": f"https://ace.example.com/api/builder2-final-video/{token}",
+        "outputToken": token,
+    }
+    return response
+
+
 class TestPublication(unittest.TestCase):
     @patch("engine.builder2_final_video_publication.os.environ.get", side_effect=_env_get)
-    @patch("engine.builder2_final_video_publication.is_durable_publication_backend", return_value=True)
-    @patch("engine.builder2_final_video_publication.classify_publication_backend_kind", return_value="persistent_disk")
     @patch("engine.builder2_final_video_publication.verify_published_final_video_artifact")
     @patch("engine.builder2_final_video_publication.requests.post")
     def test_upload_success_without_accessibility_rejected(
         self,
         post: Any,
         verify: Any,
-        _backend: Any,
-        _durable: Any,
         _env: Any,
     ) -> None:
-        post.return_value = MagicMock(ok=True, status_code=200)
+        post.return_value = _upload_json_response(byte_count=128)
         verify.return_value = FinalVideoArtifactVerification(
             final_url_accessible=False,
             final_url_http_status_code=404,
@@ -183,19 +203,16 @@ class TestPublication(unittest.TestCase):
         self.assertEqual(ctx.exception.args[0], "final_publication_artifact_missing")
 
     @patch("engine.builder2_final_video_publication.os.environ.get", side_effect=_env_get)
-    @patch("engine.builder2_final_video_publication.is_durable_publication_backend", return_value=True)
-    @patch("engine.builder2_final_video_publication.classify_publication_backend_kind", return_value="persistent_disk")
     @patch("engine.builder2_final_video_publication.verify_published_final_video_artifact")
     @patch("engine.builder2_final_video_publication.requests.post")
     def test_successful_publication_uses_builder2_route(
         self,
         post: Any,
         verify: Any,
-        _backend: Any,
-        _durable: Any,
         _env: Any,
     ) -> None:
-        post.return_value = MagicMock(ok=True, status_code=200)
+        token = "abcd1234567890123456789012345678"
+        post.return_value = _upload_json_response(byte_count=128, token=token)
         verify.return_value = FinalVideoArtifactVerification(
             final_url_accessible=True,
             final_url_http_status_code=200,
@@ -213,7 +230,7 @@ class TestPublication(unittest.TestCase):
             result = publish_builder2_final_video(
                 local_final,
                 "https://ace.example.com",
-                output_token="abcd1234567890123456789012345678",
+                output_token=token,
             )
         self.assertIn("/api/builder2-final-video/", result.public_url)
         self.assertTrue(result.publication_accepted)
@@ -221,14 +238,44 @@ class TestPublication(unittest.TestCase):
         post.assert_called_once()
         self.assertIn("/api/builder2-final-video-artifact", post.call_args.args[0])
 
-    @patch.dict({"ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret"}, clear=True)
-    def test_rejects_ephemeral_backend(self) -> None:
+    @patch("engine.builder2_final_video_publication.os.environ.get", side_effect=_env_get)
+    @patch("engine.builder2_final_video_publication.requests.post")
+    def test_rejects_non_durable_web_upload_response(self, post: Any, _env: Any) -> None:
+        response = MagicMock(ok=True, status_code=200)
+        response.json.return_value = {
+            "ok": True,
+            "durableStorageConfirmed": False,
+            "publicationBackendKind": "ephemeral_tmp",
+        }
+        post.return_value = response
         with tempfile.TemporaryDirectory() as td:
             local_final = Path(td) / "builder2_final.mp4"
             local_final.write_bytes(b"x" * 128)
             with self.assertRaises(Builder2FinalPublicationError) as ctx:
                 publish_builder2_final_video(local_final, "https://ace.example.com")
         self.assertEqual(ctx.exception.args[0], "final_publication_not_durable")
+
+    @patch("engine.builder2_final_video_publication.os.environ.get", side_effect=_env_get)
+    @patch("engine.builder2_final_video_publication.requests.post")
+    def test_rejects_contradictory_byte_counts(self, post: Any, _env: Any) -> None:
+        response = MagicMock(ok=True, status_code=200)
+        response.json.return_value = {
+            "ok": True,
+            "durableStorageConfirmed": True,
+            "publicationBackendKind": "persistent_disk",
+            "uploadedByteCount": 128,
+            "storedByteCount": 64,
+            "artifactFingerprintVerified": True,
+            "finalPublicUrl": "https://ace.example.com/api/builder2-final-video/abcd1234567890123456789012345678",
+            "outputToken": "abcd1234567890123456789012345678",
+        }
+        post.return_value = response
+        with tempfile.TemporaryDirectory() as td:
+            local_final = Path(td) / "builder2_final.mp4"
+            local_final.write_bytes(b"x" * 128)
+            with self.assertRaises(Builder2FinalPublicationError) as ctx:
+                publish_builder2_final_video(local_final, "https://ace.example.com")
+        self.assertEqual(ctx.exception.args[0], "final_publication_size_mismatch")
 
 
 class TestCompletionContract(unittest.TestCase):

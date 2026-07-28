@@ -306,6 +306,19 @@ def main() -> None:
                 pass
         except RunwayVideoMVPError as e:
             _reason = e.args[0] if getattr(e, "args", None) else "runway_mvp"
+            if _reason == "builder2_media_finalization_recoverable":
+                logger.warning(
+                    "VIDEO_JOB_RECOVERABLE_FINALIZATION jobId=%s reason=%s",
+                    job_id,
+                    _reason,
+                )
+                try:
+                    register_recoverable_job(job_id)
+                    video_job_touch_progress(job_id)
+                except Exception:
+                    pass
+                logger.info("VIDEO_JOB_DONE jobId=%s outcome=recoverable_finalization", job_id)
+                continue
             logger.warning("VIDEO_JOB_FAILED jobId=%s reason=%s", job_id, _reason)
             logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)
             try:

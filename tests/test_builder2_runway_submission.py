@@ -32,7 +32,8 @@ from engine.runway_prompt_budget import (
     count_utf16_code_units,
     normalize_runway_prompt_to_budget,
 )
-from tests.test_builder2_media_resume import _media_ready_state, _mock_render_advertising_closure, _mock_start_image_data_uri
+from tests.builder2_durable_finalization_test_helpers import patch_media_pipeline_durable_finalization
+from tests.test_builder2_media_resume import _media_ready_state, _mock_start_image_data_uri
 
 
 class TestRunwayApiUrls(unittest.TestCase):
@@ -133,16 +134,19 @@ class TestRunwaySubmissionAccounting(unittest.TestCase):
         MediaResumeIsolationGuard.enable_start_image()
         MediaResumeIsolationGuard.enable_runway()
         MediaResumeIsolationGuard.enable_ffmpeg()
-        self.render_patch = patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_mock_render_advertising_closure,
+        self.capability_patch, self.closure_patch, self.publish_patch, self.publish_mock = (
+            patch_media_pipeline_durable_finalization()
         )
-        self.render_patch.start()
+        self.capability_patch.start()
+        self.closure_patch.start()
+        self.publish_patch.start()
 
     def tearDown(self) -> None:
         from engine.builder2_tournament_store import disable_memory_store
 
-        self.render_patch.stop()
+        self.publish_patch.stop()
+        self.closure_patch.stop()
+        self.capability_patch.stop()
         MediaResumeIsolationGuard.end()
         disable_memory_store()
 

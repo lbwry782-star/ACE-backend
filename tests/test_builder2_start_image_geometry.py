@@ -29,7 +29,8 @@ from engine.builder2_start_image_pipeline import (
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_winner_downstream import build_builder2_start_frame_image_prompt
 from engine.video_start_image import build_ace_start_frame_image_prompt, generate_video_start_image_data_uri
-from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_deps, _mock_render_advertising_closure
+from tests.builder2_durable_finalization_test_helpers import patch_media_pipeline_durable_finalization
+from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_deps
 
 
 def _png_data_uri(width: int, height: int, *, color: str = "red") -> str:
@@ -204,17 +205,20 @@ class TestBuilder2StartImageMediaPipeline(unittest.TestCase):
         MediaResumeIsolationGuard.enable_start_image()
         MediaResumeIsolationGuard.enable_runway()
         MediaResumeIsolationGuard.enable_ffmpeg()
-        self.render_patch = patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_mock_render_advertising_closure,
+        self.capability_patch, self.closure_patch, self.publish_patch, self.publish_mock = (
+            patch_media_pipeline_durable_finalization()
         )
-        self.render_patch.start()
+        self.capability_patch.start()
+        self.closure_patch.start()
+        self.publish_patch.start()
 
     def tearDown(self) -> None:
         from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
         from engine.builder2_tournament_store import disable_memory_store
 
-        self.render_patch.stop()
+        self.publish_patch.stop()
+        self.closure_patch.stop()
+        self.capability_patch.stop()
         MediaResumeIsolationGuard.end()
         disable_memory_store()
 

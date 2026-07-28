@@ -345,6 +345,8 @@ class TestProductionRegression(unittest.TestCase):
             "BUILDER2_TOURNAMENT_ENABLED": "true",
             "BUILDER2_TOURNAMENT_ACTIVE_PROTOTYPES": "closest,winning_card,forgot",
             "BUILDER2_TOURNAMENT_MAX_ROUNDS": "1",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
         },
         clear=True,
     )
@@ -406,8 +408,10 @@ class TestProductionRegression(unittest.TestCase):
 
         with patch("engine.runway_video.run_builder2_tournament", side_effect=_run_tournament):
             from engine.runway_video import _generate_one_video_mvp_body
+            from tests.builder2_fresh_generate_test_helpers import patch_fresh_generate_media_mocks
 
-            _generate_one_video_mvp_body("Product", "desc", job_id="job-regression")
+            with patch_fresh_generate_media_mocks() as runway_calls:
+                _generate_one_video_mvp_body("Product", "desc", job_id="job-regression")
 
         state = load_tournament_state("job-regression")
         assert state is not None
@@ -416,7 +420,7 @@ class TestProductionRegression(unittest.TestCase):
         self.assertEqual(len(rejected), 1)
         self.assertGreaterEqual(len(judged), 2)
         self.assertTrue(state.get("winnerDevelopmentPlan") or state.get("winnerCandidateId"))
-        _image_task.assert_called_once()
+        self.assertEqual(len(runway_calls), 1)
 
 
 class TestBuilder1Isolation(unittest.TestCase):

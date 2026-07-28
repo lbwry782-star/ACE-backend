@@ -304,6 +304,8 @@ class Builder2PreRunwayValidationTests(unittest.TestCase):
             "RUNWAY_API_KEY": "rk-test",
             "OPENAI_API_KEY": "sk-test",
             "BUILDER2_TOURNAMENT_ENABLED": "true",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
         },
         clear=False,
     )
@@ -368,7 +370,8 @@ class Builder2StartImageTests(unittest.TestCase):
 
 
 class Builder2ProductionRegressionTests(unittest.TestCase):
-    @patch("engine.runway_video.load_tournament_state", return_value=None)
+    @patch("engine.builder2_tournament_store.load_tournament_state")
+    @patch("engine.builder2_media_resume.run_one_media_resume")
     @patch("engine.runway_video.video_job_set_resolved_product_name")
     @patch("engine.runway_video.video_job_set_phase")
     @patch.dict(
@@ -377,6 +380,8 @@ class Builder2ProductionRegressionTests(unittest.TestCase):
             "RUNWAY_API_KEY": "rk-test",
             "OPENAI_API_KEY": "sk-test",
             "BUILDER2_TOURNAMENT_ENABLED": "true",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
         },
         clear=False,
     )
@@ -402,7 +407,8 @@ class Builder2ProductionRegressionTests(unittest.TestCase):
         _overlay,
         _phase,
         _redis_name,
-        _load_state,
+        media_resume,
+        load_state,
     ) -> None:
         plan = validate_and_normalize_builder2_winner_plan(
             _canonical_continuous_plan(headline="מכירים את הקבוע שלכם."),
@@ -411,12 +417,23 @@ class Builder2ProductionRegressionTests(unittest.TestCase):
             content_language="he",
         )
         tournament.return_value = plan
-        url = _generate_one_video_mvp_body("קופי", "desc", job_id="job-greenpeace-include")
-        self.assertTrue(url)
-        self.assertEqual(plan["headlineText"].count("קופי"), 1)
-        image_task.assert_called_once()
+        from tests.test_builder2_media_finalization_failure_inspect import CLOSURE_URL
 
-    @patch("engine.runway_video.load_tournament_state", return_value=None)
+        media_resume.return_value = {"ok": True}
+        load_state.return_value = {
+            "mediaResume": {"finalPublicUrl": CLOSURE_URL, "marketingText": "copy"},
+            "winnerDevelopmentPlan": plan,
+        }
+        final_url, _marketing, _overlay = _generate_one_video_mvp_body(
+            "קופי", "desc", job_id="job-greenpeace-include", public_base_url="https://example.com"
+        )
+        self.assertTrue(final_url)
+        self.assertEqual(plan["headlineText"].count("קופי"), 1)
+        media_resume.assert_called_once_with(job_id="job-greenpeace-include")
+        image_task.assert_not_called()
+
+    @patch("engine.builder2_tournament_store.load_tournament_state")
+    @patch("engine.builder2_media_resume.run_one_media_resume")
     @patch("engine.runway_video.video_job_set_resolved_product_name")
     @patch("engine.runway_video.video_job_set_phase")
     @patch.dict(
@@ -425,6 +442,8 @@ class Builder2ProductionRegressionTests(unittest.TestCase):
             "RUNWAY_API_KEY": "rk-test",
             "OPENAI_API_KEY": "sk-test",
             "BUILDER2_TOURNAMENT_ENABLED": "true",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
         },
         clear=False,
     )
@@ -450,7 +469,8 @@ class Builder2ProductionRegressionTests(unittest.TestCase):
         overlay_mock,
         _phase,
         _redis_name,
-        _load_state,
+        media_resume,
+        load_state,
     ) -> None:
         plan = validate_and_normalize_builder2_winner_plan(
             _canonical_continuous_plan(headline_decision="omit"),
@@ -459,10 +479,20 @@ class Builder2ProductionRegressionTests(unittest.TestCase):
             content_language="he",
         )
         tournament.return_value = plan
-        url = _generate_one_video_mvp_body("קופי", "desc", job_id="job-greenpeace-omit")
-        self.assertTrue(url)
+        from tests.test_builder2_media_finalization_failure_inspect import CLOSURE_URL
+
+        media_resume.return_value = {"ok": True}
+        load_state.return_value = {
+            "mediaResume": {"finalPublicUrl": CLOSURE_URL, "marketingText": "copy"},
+            "winnerDevelopmentPlan": plan,
+        }
+        final_url, _marketing, _overlay = _generate_one_video_mvp_body(
+            "קופי", "desc", job_id="job-greenpeace-omit", public_base_url="https://example.com"
+        )
+        self.assertTrue(final_url)
         overlay_mock.assert_not_called()
-        image_task.assert_called_once()
+        media_resume.assert_called_once_with(job_id="job-greenpeace-omit")
+        image_task.assert_not_called()
 
 
 if __name__ == "__main__":

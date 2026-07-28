@@ -46,6 +46,7 @@ from tests.test_builder2_media_finalization_failure_inspect import (
     _job_raw,
     verified_final_publication_media_fields,
 )
+from tests.builder2_preflight_test_helpers import patch_accepted_web_storage_capability
 from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_deps, _mock_start_image_data_uri
 from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store
@@ -292,6 +293,12 @@ class TestMediaPipelineOrdering(unittest.TestCase):
 
     @patch("engine.builder2_media_pipeline.patch_tournament_state", side_effect=lambda job_id, fn: None)
     def test_headline_runs_before_closure(self, _patch: Any) -> None:
+        from tests.builder2_durable_finalization_test_helpers import (
+            accepted_web_storage_capability_result,
+            durable_publication_result,
+            mock_closure_render_result,
+        )
+
         calls: list[str] = []
         state = _media_ready_state(job_id=JOB_ID)
         plan = state["winnerDevelopmentPlan"]
@@ -316,29 +323,29 @@ class TestMediaPipelineOrdering(unittest.TestCase):
             calls.append("headline")
             return HEADLINE_URL
 
-        def _fake_closure_render(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
-            source = kwargs["source_video_url"]
-            calls.append(f"closure:{source}")
-            state_obj = kwargs["state"]
-            media_obj = state_obj.setdefault("mediaResume", {})
-            media_obj.update(
-                {
-                    "finalVideoWithClosureUrl": CLOSURE_URL,
-                    "finalPublicUrl": CLOSURE_URL,
-                    "advertisingClosureRendered": True,
-                    "actualFinalVideoDurationSeconds": 12.01,
-                    "advertisingClosureStatus": "completed",
-                }
-            )
-            from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+        def _capability(*_args: Any, **_kwargs: Any) -> Any:
+            calls.append("capability")
+            return accepted_web_storage_capability_result()
 
-            return state_obj, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
+        def _render(source: str, **kwargs: Any) -> Any:
+            calls.append(f"closure:{source}")
+            return mock_closure_render_result(source, **kwargs)
+
+        def _publish(*_args: Any, **_kwargs: Any) -> Any:
+            calls.append("publish")
+            return durable_publication_result(CLOSURE_URL)
 
         deps = _mock_pipeline_deps()
         deps.postprocess_video = lambda **kwargs: postprocess(**kwargs)
         with patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_fake_closure_render,
+            "engine.builder2_durable_finalization.require_builder2_web_storage_capability",
+            side_effect=_capability,
+        ), patch(
+            "engine.builder2_closure_render.render_builder2_advertising_closure_endcard",
+            side_effect=_render,
+        ), patch(
+            "engine.builder2_durable_finalization.publish_builder2_durable_final_video",
+            side_effect=_publish,
         ):
             execute_builder2_media_pipeline(
                 job_id=JOB_ID,
@@ -349,8 +356,10 @@ class TestMediaPipelineOrdering(unittest.TestCase):
                 deps=deps,
             )
         self.assertEqual(calls[0], "headline")
-        self.assertTrue(calls[1].startswith("closure:"))
-        self.assertIn(HEADLINE_URL, calls[1])
+        self.assertEqual(calls[1], "capability")
+        self.assertTrue(calls[2].startswith("closure:"))
+        self.assertIn(HEADLINE_URL, calls[2])
+        self.assertEqual(calls[3], "publish")
 
 
 class TestCompletionGate(unittest.TestCase):
@@ -431,9 +440,10 @@ class TestLegacyHeadlineBackfill(unittest.TestCase):
 
 
 class TestFinalizationPreflight(unittest.TestCase):
+    @patch_accepted_web_storage_capability()
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume._execute_finalization_render_pipeline")
-    def test_preflight_no_redis_writes(self, pipeline: Any, build_config: Any) -> None:
+    def test_preflight_no_redis_writes(self, pipeline: Any, build_config: Any, _capability: Any) -> None:
         def _ok(**kwargs: Any) -> None:
             kwargs["report"]["ok"] = True
             kwargs["report"]["readyForFinalizationRecovery"] = True
@@ -483,6 +493,12 @@ class TestNoHeadlinePipelineOrdering(unittest.TestCase):
 
     @patch("engine.builder2_media_pipeline.patch_tournament_state", side_effect=lambda job_id, fn: None)
     def test_raw_runs_before_closure_without_headline(self, _patch: Any) -> None:
+        from tests.builder2_durable_finalization_test_helpers import (
+            accepted_web_storage_capability_result,
+            durable_publication_result,
+            mock_closure_render_result,
+        )
+
         calls: list[str] = []
         state = _media_ready_state(job_id=JOB_ID)
         plan = state["winnerDevelopmentPlan"]
@@ -499,28 +515,29 @@ class TestNoHeadlinePipelineOrdering(unittest.TestCase):
             }
         )
 
-        def _fake_closure_render(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
-            calls.append(f"closure:{kwargs['source_video_url']}")
-            state_obj = kwargs["state"]
-            media_obj = state_obj.setdefault("mediaResume", {})
-            media_obj.update(
-                {
-                    "finalVideoWithClosureUrl": CLOSURE_URL,
-                    "finalPublicUrl": CLOSURE_URL,
-                    "advertisingClosureRendered": True,
-                    "actualFinalVideoDurationSeconds": 12.01,
-                    "advertisingClosureStatus": "completed",
-                }
-            )
-            from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+        def _capability(*_args: Any, **_kwargs: Any) -> Any:
+            calls.append("capability")
+            return accepted_web_storage_capability_result()
 
-            return state_obj, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
+        def _render(source: str, **kwargs: Any) -> Any:
+            calls.append(f"closure:{source}")
+            return mock_closure_render_result(source, **kwargs)
+
+        def _publish(*_args: Any, **_kwargs: Any) -> Any:
+            calls.append("publish")
+            return durable_publication_result(CLOSURE_URL)
 
         deps = _mock_pipeline_deps()
         deps.postprocess_video = lambda **kwargs: (_ for _ in ()).throw(AssertionError("headline must not run"))
         with patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_fake_closure_render,
+            "engine.builder2_durable_finalization.require_builder2_web_storage_capability",
+            side_effect=_capability,
+        ), patch(
+            "engine.builder2_closure_render.render_builder2_advertising_closure_endcard",
+            side_effect=_render,
+        ), patch(
+            "engine.builder2_durable_finalization.publish_builder2_durable_final_video",
+            side_effect=_publish,
         ):
             execute_builder2_media_pipeline(
                 job_id=JOB_ID,
@@ -530,8 +547,9 @@ class TestNoHeadlinePipelineOrdering(unittest.TestCase):
                 product_description="desc",
                 deps=deps,
             )
-        self.assertEqual(len(calls), 1)
-        self.assertIn(RAW_RUNWAY, calls[0])
+        self.assertEqual(calls[0], "capability")
+        self.assertIn(RAW_RUNWAY, calls[1])
+        self.assertEqual(calls[2], "publish")
 
 
 class TestClosureDiagnosticsSafety(unittest.TestCase):
@@ -723,6 +741,7 @@ class TestFinalizationRecovery(unittest.TestCase):
 
 
 class TestPreflightSynthetic(unittest.TestCase):
+    @patch_accepted_web_storage_capability()
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
     @patch("engine.builder2_media_finalization_resume.render_builder2_accepted_headline_overlay")
@@ -733,6 +752,7 @@ class TestPreflightSynthetic(unittest.TestCase):
         headline_render: Any,
         closure_render: Any,
         build_config: Any,
+        _capability: Any,
     ) -> None:
         raw_path = Path(tempfile.gettempdir()) / "raw_preflight.mp4"
         headline_path = Path(tempfile.gettempdir()) / "headline_preflight.mp4"
@@ -827,6 +847,7 @@ class TestHeadlineDownloadFallback(unittest.TestCase):
         self.assertTrue(decision.local_headline_render_required)
         self.assertTrue(decision.legacy_headline_download_failed)
 
+    @patch_accepted_web_storage_capability()
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
     @patch("engine.builder2_media_finalization_resume.render_builder2_accepted_headline_overlay")
@@ -837,6 +858,7 @@ class TestHeadlineDownloadFallback(unittest.TestCase):
         headline_render: Any,
         closure_render: Any,
         build_config: Any,
+        _capability: Any,
     ) -> None:
         raw_path = Path(tempfile.gettempdir()) / "raw_fallback.mp4"
         headline_path = Path(tempfile.gettempdir()) / "headline_fallback.mp4"
@@ -938,6 +960,7 @@ class TestAcceptedHeadlineResolution(unittest.TestCase):
         self.assertGreater(result.headline_resolution.canonical_headline_character_count, 0)
         self.assertNotEqual(local_render.call_args.kwargs["headline"], "")
 
+    @patch_accepted_web_storage_capability()
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
     @patch("engine.builder2_media_finalization_resume.render_builder2_accepted_headline_overlay")
@@ -948,6 +971,7 @@ class TestAcceptedHeadlineResolution(unittest.TestCase):
         headline_render: Any,
         closure_render: Any,
         build_config: Any,
+        _capability: Any,
     ) -> None:
         raw_path = Path(tempfile.gettempdir()) / "raw_runner.mp4"
         source_decision.return_value = FinalizationSourceDecision(

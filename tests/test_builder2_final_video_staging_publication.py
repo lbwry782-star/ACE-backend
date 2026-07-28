@@ -109,14 +109,14 @@ class TestLocalStaging(unittest.TestCase):
 
 class TestPublication(unittest.TestCase):
     @patch("engine.builder2_final_video_publication.os.environ.get", side_effect=_env_get)
-    @patch("engine.builder2_final_video_publication.is_durable_publication_backend", return_value=True)
-    @patch("engine.builder2_final_video_publication.classify_publication_backend_kind", return_value="persistent_disk")
     @patch("engine.builder2_final_video_publication.verify_published_final_video_artifact")
     @patch("engine.builder2_final_video_publication.requests.post")
-    def test_publish_once_after_verified_render(self, post: Any, verify: Any, _durable: Any, _backend: Any, _env: Any) -> None:
+    def test_publish_once_after_verified_render(self, post: Any, verify: Any, _env: Any) -> None:
         from engine.builder2_final_video_verification import FinalVideoArtifactVerification
+        from tests.test_builder2_final_video_durable_publication import _upload_json_response
 
-        post.return_value = MagicMock(ok=True, status_code=200)
+        token = "tok12345678901234567890123456789012"
+        post.return_value = _upload_json_response(byte_count=128, token=token)
         verify.return_value = FinalVideoArtifactVerification(
             final_url_accessible=True,
             final_url_http_status_code=200,
@@ -135,7 +135,7 @@ class TestPublication(unittest.TestCase):
                 local_final,
                 "https://ace.example.com",
                 job_id=JOB_ID,
-                output_token="tok12345678901234567890123456789012",
+                output_token=token,
             )
         self.assertTrue(result.upload_accepted)
         self.assertEqual(result.publisher_kind, resolve_durable_final_video_publisher_kind())
@@ -284,6 +284,7 @@ class TestRecoveryPipelineRegression(unittest.TestCase):
 
 class TestPreflightStaging(unittest.TestCase):
     @patch("engine.builder2_media_finalization_resume._execute_finalization_render_pipeline")
+    @patch("engine.builder2_media_finalization_resume.probe_builder2_final_video_web_storage_capability")
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume.video_job_get")
     @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
@@ -292,8 +293,20 @@ class TestPreflightStaging(unittest.TestCase):
         job_get_raw: Any,
         job_get: Any,
         build_config: Any,
+        probe: Any,
         pipeline: Any,
     ) -> None:
+        from engine.builder2_final_video_publication import WebStorageCapabilityProbeResult
+
+        probe.return_value = WebStorageCapabilityProbeResult(
+            accepted=True,
+            durable_storage_confirmed=True,
+            publication_backend_kind="persistent_disk",
+            storage_configured=True,
+            storage_directory_exists=True,
+            storage_writable=True,
+        )
+
         def _ok(**kwargs: Any) -> FinalizationPipelineOutcome:
             kwargs["report"].update(
                 {

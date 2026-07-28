@@ -253,14 +253,17 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
         MediaResumeIsolationGuard.enable_start_image()
         MediaResumeIsolationGuard.enable_runway()
         MediaResumeIsolationGuard.enable_ffmpeg()
-        self.render_patch = patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_mock_render_advertising_closure,
-        )
-        self.render_patch.start()
+        from tests.builder2_durable_finalization_test_helpers import patch_media_pipeline_durable_finalization
+
+        self.capability_patch, self.closure_patch, self.publish_patch, self.publish_mock = patch_media_pipeline_durable_finalization()
+        self.capability_patch.start()
+        self.closure_patch.start()
+        self.publish_patch.start()
 
     def tearDown(self) -> None:
-        self.render_patch.stop()
+        self.publish_patch.stop()
+        self.closure_patch.stop()
+        self.capability_patch.stop()
         MediaResumeIsolationGuard.end()
         disable_memory_store()
 
@@ -303,15 +306,25 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
         self.assertTrue(counters.runway_polling_resumed)
 
     def test_completed_runway_output_is_reused(self) -> None:
+        from tests.test_builder2_media_finalization_failure_inspect import (
+            CLOSURE_URL,
+            verified_final_publication_media_fields,
+        )
+
         state = _media_ready_state(job_id="job-media-output-reuse")
         state["mediaResume"] = {
             "startImageArtifact": _mock_start_image_data_uri(),
             "runwayTaskId": "task-existing",
             "runwayVideoUrl": "https://runway/existing.mp4",
             "downloadedVideoPath": "https://runway/existing.mp4",
-            "finalPublicUrl": "https://example.com/final-with-closure.mp4",
-            "finalVideoWithClosureUrl": "https://example.com/final-with-closure.mp4",
+            "rawRunwayVideoUrl": "https://runway/existing.mp4",
+            "finalPublicUrl": CLOSURE_URL,
+            "finalVideoWithClosureUrl": CLOSURE_URL,
             "mediaResumeStatus": "completed",
+            "advertisingClosureRendered": True,
+            "advertisingClosureStatus": "completed",
+            "actualFinalVideoDurationSeconds": 12.034,
+            **verified_final_publication_media_fields(),
         }
         _, counters = execute_builder2_media_pipeline(
             job_id="job-media-output-reuse",
@@ -336,14 +349,17 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
 class TestMediaResumeExecution(unittest.TestCase):
     def setUp(self) -> None:
         enable_memory_store()
-        self.render_patch = patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_mock_render_advertising_closure,
-        )
-        self.render_patch.start()
+        from tests.builder2_durable_finalization_test_helpers import patch_media_pipeline_durable_finalization
+
+        self.capability_patch, self.closure_patch, self.publish_patch, self.publish_mock = patch_media_pipeline_durable_finalization()
+        self.capability_patch.start()
+        self.closure_patch.start()
+        self.publish_patch.start()
 
     def tearDown(self) -> None:
-        self.render_patch.stop()
+        self.publish_patch.stop()
+        self.closure_patch.stop()
+        self.capability_patch.stop()
         disable_memory_store()
 
     @patch("engine.builder2_media_resume.video_job_mark_done")
@@ -451,23 +467,31 @@ class TestPublicBaseUrlDryRunParity(unittest.TestCase):
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
     def test_valid_url_enters_start_image_stage(self, _redis_cfg: Any) -> None:
+        from tests.builder2_durable_finalization_test_helpers import patch_media_pipeline_durable_finalization
+
         state = _media_ready_state(job_id="job-media-start-stage")
         deps = _mock_pipeline_deps()
-        with patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_mock_render_advertising_closure,
-        ):
+        capability_patch, closure_patch, publish_patch, publish_mock = patch_media_pipeline_durable_finalization()
+        capability_patch.start()
+        closure_patch.start()
+        publish_patch.start()
+        try:
             report = run_one_media_resume(
                 job_id="job-media-start-stage",
                 tournament_state=deepcopy(state),
                 dry_run=False,
                 pipeline_deps=deps,
             )
+        finally:
+            publish_patch.stop()
+            closure_patch.stop()
+            capability_patch.stop()
         self.assertTrue(report["ok"])
         self.assertEqual(report["startImageCalls"], 1)
         self.assertEqual(report["startImageNormalCalls"], 1)
         self.assertEqual(report["startImageGeneratedCount"], 1)
         self.assertEqual(report["ffmpegCalls"], 1)
+        publish_mock.assert_called_once()
 
 
 class TestBuilder1Isolation(unittest.TestCase):

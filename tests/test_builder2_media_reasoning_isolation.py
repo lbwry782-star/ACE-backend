@@ -25,11 +25,11 @@ from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
 from engine.builder2_reasoning_config import log_builder2_model_selected
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store
+from tests.builder2_durable_finalization_test_helpers import patch_media_pipeline_durable_finalization
 from tests.test_builder2_media_resume import (
     HISTORICAL_JOB_ID,
     _media_ready_state,
     _mock_pipeline_deps,
-    _mock_render_advertising_closure,
     _mock_start_image_data_uri,
 )
 
@@ -139,14 +139,17 @@ class TestMediaPipelineMarketingIsolation(unittest.TestCase):
         MediaResumeIsolationGuard.enable_start_image()
         MediaResumeIsolationGuard.enable_runway()
         MediaResumeIsolationGuard.enable_ffmpeg()
-        self.render_patch = patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_mock_render_advertising_closure,
+        self.capability_patch, self.closure_patch, self.publish_patch, self.publish_mock = (
+            patch_media_pipeline_durable_finalization()
         )
-        self.render_patch.start()
+        self.capability_patch.start()
+        self.closure_patch.start()
+        self.publish_patch.start()
 
     def tearDown(self) -> None:
-        self.render_patch.stop()
+        self.publish_patch.stop()
+        self.closure_patch.stop()
+        self.capability_patch.stop()
         MediaResumeIsolationGuard.end()
         disable_memory_store()
 
@@ -189,14 +192,17 @@ class TestMediaPipelineMarketingIsolation(unittest.TestCase):
 class TestMediaResumeReporting(unittest.TestCase):
     def setUp(self) -> None:
         enable_memory_store()
-        self.render_patch = patch(
-            "engine.builder2_advertising_closure_pipeline.render_advertising_closure_for_state",
-            side_effect=_mock_render_advertising_closure,
+        self.capability_patch, self.closure_patch, self.publish_patch, self.publish_mock = (
+            patch_media_pipeline_durable_finalization()
         )
-        self.render_patch.start()
+        self.capability_patch.start()
+        self.closure_patch.start()
+        self.publish_patch.start()
 
     def tearDown(self) -> None:
-        self.render_patch.stop()
+        self.publish_patch.stop()
+        self.closure_patch.stop()
+        self.capability_patch.stop()
         disable_memory_store()
 
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)

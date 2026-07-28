@@ -29,6 +29,7 @@ from engine.builder2_final_video_publication import (
     Builder2FinalPublicationError,
     FinalVideoPublicationResult,
     durable_publication_required,
+    probe_builder2_final_video_web_storage_capability,
     publish_builder2_final_video,
     resolve_durable_final_video_publisher_kind,
 )
@@ -194,6 +195,12 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "localRenderAccepted": False,
         "publicationAccepted": False,
         "persistedCompletionAccepted": False,
+        "storageCapabilityCalls": 0,
+        "storageCapabilityAccepted": False,
+        "webDurableStorageConfirmed": False,
+        "webPublicationBackendKind": None,
+        "webStorageWritable": False,
+        "webStorageFailureCode": None,
     }
 
 
@@ -469,6 +476,38 @@ def _preserve_render_diagnostics_after_render_success(
     _sync_ffmpeg_counters(report)
 
 
+def _apply_web_storage_capability_to_report(
+    report: Dict[str, Any],
+    capability: Any,
+    *,
+    increment_calls: bool = True,
+) -> bool:
+    if increment_calls:
+        report["storageCapabilityCalls"] = int(report.get("storageCapabilityCalls") or 0) + 1
+    report.update(capability.to_report_dict())
+    report["storageCapabilityAccepted"] = bool(capability.accepted)
+    if capability.accepted:
+        report["webDurableStorageConfirmed"] = True
+        report["webPublicationBackendKind"] = capability.publication_backend_kind
+        report["webStorageWritable"] = capability.storage_writable
+        report["durablePublisherResolved"] = resolve_durable_final_video_publisher_kind()
+    return bool(capability.accepted)
+
+
+def _probe_web_storage_capability_or_fail(
+    report: Dict[str, Any],
+    *,
+    public_base_url: str,
+) -> bool:
+    capability = probe_builder2_final_video_web_storage_capability(public_base_url)
+    accepted = _apply_web_storage_capability_to_report(report, capability)
+    if not accepted:
+        report["failureStage"] = "publication_capability"
+        report["failureReason"] = _safe_failure_code(capability.failure_code or "builder2_web_storage_not_persistent")
+        report["webStorageFailureCode"] = capability.failure_code or None
+    return accepted
+
+
 def _apply_publication_failure(
     report: Dict[str, Any],
     exc: BaseException,
@@ -483,7 +522,12 @@ def _apply_publication_failure(
     report["publicationAccepted"] = False
     report["persistedCompletionAccepted"] = False
     if isinstance(exc, Builder2FinalPublicationError):
-        report["finalLocalHandoffFailureCode"] = str(exc.args[0] if exc.args else "")
+        server_code = getattr(exc, "server_failure_code", "") or ""
+        report["finalLocalHandoffFailureCode"] = _safe_failure_code(
+            server_code or str(exc.args[0] if exc.args else "")
+        )
+        if server_code:
+            report["webStorageFailureCode"] = server_code
         partial = getattr(exc, "verification", None)
         if partial is not None:
             report["postUploadVerificationAttempted"] = partial.post_upload_verification_attempted
@@ -651,6 +695,9 @@ def _execute_finalization_render_pipeline(
         report["postUploadVerificationAccepted"] = publication_result.post_upload_verification_accepted
         report["postUploadHttpStatusCode"] = publication_result.post_upload_http_status_code
         report["uploadedByteCount"] = publication_result.uploaded_byte_count
+        report["webDurableStorageConfirmed"] = publication_result.durable_storage_confirmed
+        report["webPublicationBackendKind"] = publication_result.publication_backend_kind
+        report["webStorageWritable"] = publication_result.web_storage_writable
         MediaFinalizationIsolationGuard.record_publication()
 
         media = state.setdefault("mediaResume", {})
@@ -733,6 +780,8 @@ def run_finalization_preflight(
             start_image_required=False,
             ffmpeg_required=True,
         )
+        if not _probe_web_storage_capability_or_fail(report, public_base_url=media_config.publicBaseUrl):
+            return report
         _execute_finalization_render_pipeline(
             job_id=job_id,
             state=state,

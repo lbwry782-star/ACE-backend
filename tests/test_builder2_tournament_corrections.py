@@ -47,6 +47,7 @@ from engine.builder2_winner_plan import (
     validate_and_normalize_builder2_winner_plan,
     validate_builder2_winner_plan,
 )
+from engine.builder2_media_resume import run_one_media_resume
 from engine.runway_video import RunwayVideoMVPError, _generate_one_video_mvp_body
 from engine.video_planning import build_runway_prompt_from_plan, validate_and_normalize_plan
 from engine.video_start_image import build_ace_start_frame_image_prompt
@@ -644,7 +645,13 @@ class TestRunwayRecovery(unittest.TestCase):
     @patch("engine.runway_video.video_job_set_phase")
     @patch.dict(
         os.environ,
-        {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "BUILDER2_TOURNAMENT_ENABLED": "true"},
+        {
+            "RUNWAY_API_KEY": "rk-test",
+            "OPENAI_API_KEY": "sk-test",
+            "BUILDER2_TOURNAMENT_ENABLED": "true",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
+        },
         clear=False,
     )
     @patch("engine.runway_video.postprocess_video_headline", return_value="https://final/video.mp4")
@@ -672,20 +679,42 @@ class TestRunwayRecovery(unittest.TestCase):
         _phase,
         _redis_name,
     ) -> None:
+        from copy import deepcopy
+
+        from tests.builder2_durable_finalization_test_helpers import patch_media_pipeline_durable_finalization
+        from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_deps, _mock_start_image_data_uri
+
         tournament_mock.return_value = self.PLAN
         poll_mock.return_value = {"status": "SUCCEEDED", "output": ["https://runway/video.mp4"]}
         job_id = "job-runway-resume"
-        state = new_tournament_state(
-            job_id=job_id,
-            language="en",
-            active_prototype_ids=["closest"],
-            random_seed="seed",
-        )
+        state = _media_ready_state(job_id=job_id)
         state["runway"] = {"taskId": "task-existing", "submissionState": "submitted", "startImageCompleted": True}
-        save_tournament_state(job_id, state)
-        _generate_one_video_mvp_body("Product", "desc", job_id=job_id)
+        media = state.setdefault("mediaResume", {})
+        media.update(
+            {
+                "startImageArtifact": _mock_start_image_data_uri(),
+                "startImageStatus": "completed",
+                "runwayTaskId": "task-existing",
+                "runwayVideoUrl": "https://runway/video.mp4",
+                "downloadedVideoPath": "https://runway/video.mp4",
+                "rawRunwayVideoUrl": "https://runway/video.mp4",
+            }
+        )
+        submit_mock = MagicMock(return_value="should-not-run")
+        deps = _mock_pipeline_deps()
+        deps.submit_runway_task = submit_mock
+        capability_patch, closure_patch, publish_patch, _publish_mock = patch_media_pipeline_durable_finalization()
+        with capability_patch, closure_patch, publish_patch:
+            report = run_one_media_resume(
+                job_id=job_id,
+                tournament_state=deepcopy(state),
+                dry_run=False,
+                pipeline_deps=deps,
+            )
+        submit_mock.assert_not_called()
         image_task_mock.assert_not_called()
         text_task_mock.assert_not_called()
+        self.assertTrue(report["ok"])
 
     @patch("engine.runway_video.run_builder2_tournament")
     @patch("engine.runway_video.resolve_video_product_name", return_value=("user", "Product"))
@@ -693,7 +722,13 @@ class TestRunwayRecovery(unittest.TestCase):
     @patch("engine.runway_video.video_job_set_resolved_product_name")
     @patch.dict(
         os.environ,
-        {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "BUILDER2_TOURNAMENT_ENABLED": "true"},
+        {
+            "RUNWAY_API_KEY": "rk-test",
+            "OPENAI_API_KEY": "sk-test",
+            "BUILDER2_TOURNAMENT_ENABLED": "true",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
+        },
         clear=False,
     )
     def test_ambiguous_runway_submission_raises(
@@ -703,24 +738,34 @@ class TestRunwayRecovery(unittest.TestCase):
         _product_name,
         tournament_mock,
     ) -> None:
+        from copy import deepcopy
+
+        from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_deps, _mock_start_image_data_uri
+
         tournament_mock.return_value = self.PLAN
         job_id = "job-runway-ambiguous"
-        state = new_tournament_state(
-            job_id=job_id,
-            language="en",
-            active_prototype_ids=["closest"],
-            random_seed="seed",
-        )
+        state = _media_ready_state(job_id=job_id)
         state["runway"] = {
             "taskId": None,
             "submissionState": "pending",
             "startImageCompleted": True,
             "startImageDataUri": "data:image/png;base64,x",
         }
-        save_tournament_state(job_id, state)
-        with self.assertRaises(RunwayVideoMVPError) as ctx:
-            _generate_one_video_mvp_body("Product", "desc", job_id=job_id)
-        self.assertEqual(ctx.exception.args[0], "builder2_runway_resume_ambiguous")
+        media = state.setdefault("mediaResume", {})
+        media.update(
+            {
+                "startImageArtifact": _mock_start_image_data_uri(),
+                "startImageStatus": "completed",
+            }
+        )
+        report = run_one_media_resume(
+            job_id=job_id,
+            tournament_state=deepcopy(state),
+            dry_run=False,
+            pipeline_deps=_mock_pipeline_deps(),
+        )
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["failureReason"], "builder2_media_runway_resume_ambiguous")
 
 
 class TestIsolation(unittest.TestCase):
@@ -781,6 +826,8 @@ class TestOneRoundEndToEndPipeline(unittest.TestCase):
             "BUILDER2_TOURNAMENT_ENABLED": "true",
             "BUILDER2_TOURNAMENT_ACTIVE_PROTOTYPES": "closest,winning_card,forgot",
             "BUILDER2_TOURNAMENT_MAX_ROUNDS": "1",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
         },
         clear=True,
     )
@@ -815,16 +862,19 @@ class TestOneRoundEndToEndPipeline(unittest.TestCase):
             return run_builder2_tournament(**kwargs)
 
         with patch("engine.runway_video.run_builder2_tournament", side_effect=_run_tournament):
-            _generate_one_video_mvp_body("Product", "desc", job_id="job-e2e-one-round")
+            from tests.builder2_fresh_generate_test_helpers import patch_fresh_generate_media_mocks
+
+            with patch_fresh_generate_media_mocks() as runway_calls:
+                _generate_one_video_mvp_body("Product", "desc", job_id="job-e2e-one-round")
         state = load_tournament_state("job-e2e-one-round")
         assert state is not None
         self.assertEqual(state.get("completionReason"), "max_rounds_reached")
         self.assertEqual(state["metrics"]["totalReasoningCalls"], 8)
-        image_task_mock.assert_called_once()
+        self.assertEqual(len(runway_calls), 1)
         text_task_mock.assert_not_called()
         stored = load_tournament_state("job-e2e-one-round")
         assert stored is not None
-        self.assertEqual((stored.get("runway") or {}).get("taskId"), "task-e2e")
+        self.assertEqual((stored.get("mediaResume") or {}).get("runwayTaskId"), "task-mock-1")
 
 
 class TestRestartRecoveryFlow(unittest.TestCase):

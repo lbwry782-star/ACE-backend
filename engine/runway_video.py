@@ -967,6 +967,42 @@ def _generate_one_video_mvp_body(
             _maybe_log_ad_promise_skip_after_failed_generation(plan, promise_saved)
             raise RunwayVideoMVPError(exc.code)
 
+    if str(plan.get("planInferenceMode") or "").startswith("builder2_tournament") and job_id:
+        from engine.builder2_headline_decision_contract import (
+            get_normalized_headline_decision,
+            headline_decision_requires_headline,
+        )
+        from engine.builder2_media_resume import run_one_media_resume
+        from engine.builder2_tournament_store import load_tournament_state
+
+        logger.info("BUILDER2_FRESH_MEDIA_PHASE_START jobId=%s", job_id)
+        media_report = run_one_media_resume(job_id=job_id)
+        if not media_report.get("ok"):
+            refreshed = load_tournament_state(job_id) or {}
+            if refreshed.get("status") == "media_finalization_incomplete":
+                raise RunwayVideoMVPError("builder2_media_finalization_recoverable")
+            reason = str(media_report.get("failureReason") or "builder2_media_failed")
+            raise RunwayVideoMVPError(reason)
+        refreshed = load_tournament_state(job_id) or {}
+        media = refreshed.get("mediaResume") if isinstance(refreshed.get("mediaResume"), dict) else {}
+        winner_plan = (
+            refreshed.get("winnerDevelopmentPlan")
+            if isinstance(refreshed.get("winnerDevelopmentPlan"), dict)
+            else plan
+        )
+        final_url = str(media.get("finalPublicUrl") or "")
+        if not final_url:
+            raise RunwayVideoMVPError("builder2_media_missing_final_public_url")
+        marketing_text = str(media.get("marketingText") or "")
+        headline_decision = get_normalized_headline_decision(winner_plan)
+        overlay_headline = ""
+        if headline_decision_requires_headline(headline_decision):
+            overlay_headline = str(winner_plan.get("headlineText") or "")
+        total_ms = (time.monotonic() - t_job0) * 1000.0
+        logger.info("VIDEO_TIMING_TOTAL_MS=%.1f", total_ms)
+        logger.info("BUILDER2_FRESH_MEDIA_PHASE_DONE jobId=%s", job_id)
+        return final_url, marketing_text, overlay_headline
+
     video_job_set_phase("runway")
     prompt = build_runway_prompt_from_plan(plan)
 

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
@@ -555,7 +557,15 @@ def execute_builder2_media_pipeline(
         raise Builder2TournamentError("builder2_media_missing_winner_advertising_closure")
 
     from engine.builder2_media_finalization_contract import closure_inclusive_artifact_valid, resolve_legacy_headline_artifact_url
-    from engine.builder2_closure_render import render_builder2_advertising_closure_endcard
+    from engine.builder2_closure_render import Builder2ClosureRenderError, render_builder2_advertising_closure_endcard
+    from engine.builder2_durable_finalization import (
+        apply_builder2_durable_publication_fields,
+        mark_builder2_finalization_infrastructure_failure,
+        publish_builder2_durable_final_video,
+        require_builder2_web_storage_capability,
+    )
+    from engine.builder2_final_video_publication import Builder2FinalPublicationError
+    from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 
     pipeline_deps = deps or default_media_pipeline_deps()
     visual_source_url = downloaded_path
@@ -593,37 +603,57 @@ def execute_builder2_media_pipeline(
         counters.media_reused = True
         final_url = closure_url
     else:
-        from engine.builder2_advertising_closure_pipeline import render_advertising_closure_for_state
-
+        require_builder2_web_storage_capability(public_base_url)
         _update_media_progress(state, "rendering_advertising_closure")
         MediaResumeIsolationGuard.assert_safe_before_ffmpeg()
+        tmp = Path(tempfile.mkdtemp(prefix="ace_media_final_"))
+        output_path = tmp / "builder2_final.mp4"
         try:
-            state, closure_counters = render_advertising_closure_for_state(
+            render_result = render_builder2_advertising_closure_endcard(
+                closure_input_url,
+                product_name=str(closure.get("productNameText") or ""),
+                slogan=str(closure.get("sloganText") or ""),
+                output_path=output_path,
+                language=str(closure.get("language") or "en"),
+                duration_seconds=resolve_builder2_effective_closure_segment_duration_seconds(
+                    float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None
+                ),
                 job_id=job_id,
-                state=state,
-                plan=plan,
-                closure=closure,
-                public_base_url=public_base_url,
-                source_video_url=closure_input_url,
-                render_endcard=render_builder2_advertising_closure_endcard,
             )
-        except Builder2TournamentError:
-            raise
-        except Exception as exc:
-            from engine.builder2_closure_render import Builder2ClosureRenderError
-
-            if isinstance(exc, Builder2ClosureRenderError):
-                raise Builder2TournamentError(str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")) from exc
-            raise
-        counters.ffmpeg_calls += closure_counters.closure_ffmpeg_calls
-        media = _media_bucket(state)
-        final_url = str(media.get("finalVideoWithClosureUrl") or "").strip()
-        if not final_url:
-            raise Builder2TournamentError("builder2_media_missing_final_closure_url")
-        media["endCardDurationSeconds"] = resolve_builder2_end_card_duration_seconds()
-        media["expectedFinalVideoDurationSeconds"] = resolve_builder2_final_video_duration_seconds()
-        media["advertisingClosureSource"] = state.get("advertisingClosureSource") or "winner_creator_candidate"
-        state["advertisingClosureStatus"] = "completed"
+            counters.ffmpeg_calls += 1
+            media = _media_bucket(state)
+            media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
+            media["endCardDurationSeconds"] = resolve_builder2_end_card_duration_seconds()
+            media["expectedFinalVideoDurationSeconds"] = resolve_builder2_final_video_duration_seconds()
+            media["advertisingClosureSource"] = state.get("advertisingClosureSource") or "winner_creator_candidate"
+            _update_media_progress(state, "publishing_final_video")
+            publication = publish_builder2_durable_final_video(
+                output_path,
+                public_base_url,
+                job_id=job_id,
+                output_token=render_result.output_token,
+            )
+            final_url = apply_builder2_durable_publication_fields(state, publication)
+        except Builder2FinalPublicationError as exc:
+            mark_builder2_finalization_infrastructure_failure(
+                state,
+                failure_stage=getattr(exc, "stage", "publication"),
+                failure_code=str(exc.args[0] if exc.args else "builder2_final_publication_failed"),
+                failure_class="Builder2FinalPublicationError",
+            )
+            raise Builder2TournamentError(str(exc.args[0] if exc.args else "builder2_final_publication_failed")) from exc
+        except Builder2ClosureRenderError as exc:
+            media = _media_bucket(state)
+            media["advertisingClosureStatus"] = "failed"
+            state["advertisingClosureStatus"] = "failed"
+            raise Builder2TournamentError(str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")) from exc
+        finally:
+            try:
+                for path in tmp.iterdir():
+                    path.unlink(missing_ok=True)
+                tmp.rmdir()
+            except OSError:
+                pass
 
     if headline_decision_requires_headline(headline_decision) and not headline_url:
         headline_url = resolve_legacy_headline_artifact_url(state=state, headline_required=True)
@@ -644,11 +674,15 @@ def execute_builder2_media_pipeline(
         media["marketingCopySource"] = marketing_source
 
     _update_media_progress(state, "publishing_final_video")
+    if not final_url:
+        raise Builder2TournamentError("builder2_media_missing_final_closure_url")
     media["finalPublicUrl"] = final_url
     media["finalVideoPath"] = final_url
     media["finalVideoWithClosureUrl"] = final_url
-    media["finalArtifactPublishedAt"] = _utc_now_iso()
-    media["deliveryArtifactPaths"] = [final_url]
+    if not media.get("finalArtifactPublishedAt"):
+        media["finalArtifactPublishedAt"] = _utc_now_iso()
+    if not media.get("deliveryArtifactPaths"):
+        media["deliveryArtifactPaths"] = [final_url]
 
     _update_media_progress(
         state,

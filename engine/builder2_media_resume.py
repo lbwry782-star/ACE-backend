@@ -147,6 +147,7 @@ def run_one_media_resume(
     dry = _truthy("BUILDER2_MEDIA_RESUME_DRY_RUN") if dry_run is None else dry_run
     report = _initial_report(job_id=job_id, dry_run=dry)
     MediaResumeIsolationGuard.begin()
+    state: Optional[Dict[str, Any]] = None
     try:
         state = tournament_state if tournament_state is not None else load_tournament_state(job_id)
         if state is None:
@@ -338,12 +339,25 @@ def run_one_media_resume(
     except Builder2WinnerDownstreamError as exc:
         report["failureStage"] = "downstream_normalization"
         report["failureReason"] = exc.code
+        if state is None:
+            state = {}
         _persist_media_failure(state, stage="downstream_normalization", reason=exc.code)
         if tournament_state is None:
             save_tournament_state(job_id, state)
     except Builder2TournamentError as exc:
         reason = str(exc.args[0] if exc.args else MEDIA_RESUME_ISOLATION_ERROR)
         report["failureReason"] = reason
+        if state is None:
+            state = {}
+        if state.get("status") == "media_finalization_incomplete":
+            report["failureStage"] = (
+                (state.get("mediaResume") or {}).get("finalizationFailureStage") or "publication"
+            )
+            report["recoverableFinalizationFailure"] = True
+            if tournament_state is None:
+                save_tournament_state(job_id, state)
+            report["ok"] = False
+            return report
         if reason.startswith(MEDIA_RESUME_ISOLATION_ERROR):
             report["failureStage"] = "isolation"
         elif reason.startswith(MEDIA_RESUME_REASONING_BLOCKED):
@@ -402,6 +416,8 @@ def run_one_media_resume(
     except Exception as exc:
         report["failureStage"] = "media"
         report["failureReason"] = str(getattr(exc, "args", [str(exc)])[0])
+        if state is None:
+            state = {}
         _persist_media_failure(
             state,
             stage="media",

@@ -286,44 +286,63 @@ def internal_video_headline_artifact():
     return jsonify({"ok": True}), 200
 
 
+@app.route("/api/builder2-final-video-storage-capability", methods=["GET", "POST"], strict_slashes=False)
+@app.route("/builder2-final-video-storage-capability", methods=["GET", "POST"], strict_slashes=False)
+@app.route("/api/internal/builder2-final-video-storage-capability", methods=["GET", "POST"], strict_slashes=False)
+def builder2_final_video_storage_capability():
+    """Authenticated probe of Web Service durable final-video storage (no upload)."""
+    from engine.builder2_final_video_web_storage import assess_builder2_final_video_web_storage_capability
+
+    secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
+    if not secret:
+        return jsonify({"ok": False, "failureCode": "builder2_web_storage_not_configured"}), 503
+    if (request.headers.get("X-ACE-Video-Headline-Upload-Secret") or "").strip() != secret:
+        return jsonify({"ok": False, "failureCode": "unauthorized"}), 401
+    capability = assess_builder2_final_video_web_storage_capability()
+    payload = capability.to_report_dict()
+    if capability.failure_code:
+        payload["failureCode"] = capability.failure_code
+    status = 200 if capability.ok else 503
+    return jsonify(payload), status
+
+
 @app.route("/api/builder2-final-video-artifact", methods=["POST"], strict_slashes=False)
 @app.route("/builder2-final-video-artifact", methods=["POST"], strict_slashes=False)
 @app.route("/api/internal/builder2-final-video-artifact", methods=["POST"], strict_slashes=False)
 @app.route("/internal/builder2-final-video-artifact", methods=["POST"], strict_slashes=False)
 def internal_builder2_final_video_artifact():
     """Background worker POSTs Builder2 closure-inclusive final MP4 for durable disk-backed serving."""
-    from engine.builder2_final_video_store import write_builder2_final_video_bytes
+    from engine.builder2_final_video_web_storage import persist_builder2_final_video_artifact
 
     logger.info("BUILDER2_FINAL_VIDEO_UPLOAD_ENDPOINT_HIT path=%s", request.path)
     secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
     if not secret:
-        return jsonify({"ok": False, "error": "not_configured"}), 503
+        return jsonify({"ok": False, "failureCode": "builder2_web_storage_not_configured"}), 503
     if (request.headers.get("X-ACE-Video-Headline-Upload-Secret") or "").strip() != secret:
         logger.warning("BUILDER2_FINAL_VIDEO_UPLOAD_REJECT reason=bad_secret")
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+        return jsonify({"ok": False, "failureCode": "unauthorized"}), 401
     _max_raw = (os.environ.get("VIDEO_HEADLINE_MAX_UPLOAD_BYTES") or "").strip()
     max_bytes = int(_max_raw) if _max_raw else 250 * 1024 * 1024
     if request.content_length is not None and request.content_length > max_bytes:
-        return jsonify({"ok": False, "error": "too_large"}), 413
+        return jsonify({"ok": False, "failureCode": "too_large"}), 413
     token = (request.form.get("token") or "").strip()
     upload = request.files.get("file")
     if not upload or not upload.filename:
-        return jsonify({"ok": False, "error": "missing_file"}), 400
+        return jsonify({"ok": False, "failureCode": "missing_file"}), 400
     data = upload.stream.read(max_bytes + 1)
     if len(data) > max_bytes:
-        return jsonify({"ok": False, "error": "too_large"}), 413
-    if not write_builder2_final_video_bytes(token, data):
+        return jsonify({"ok": False, "failureCode": "too_large"}), 413
+    source_fingerprint = (request.form.get("sourceFingerprint") or "").strip()
+    result = persist_builder2_final_video_artifact(token, data, source_fingerprint=source_fingerprint)
+    payload = result.to_upload_response_dict()
+    if not result.ok:
         logger.warning(
-            "BUILDER2_FINAL_VIDEO_UPLOAD_REJECT reason=invalid_token_or_write token_prefix=%s",
+            "BUILDER2_FINAL_VIDEO_UPLOAD_REJECT reason=%s token_prefix=%s",
+            result.failure_code,
             (token[:8] if len(token) >= 8 else ""),
         )
-        return jsonify({"ok": False, "error": "invalid_token_or_write"}), 400
-    logger.info(
-        "BUILDER2_FINAL_VIDEO_UPLOAD_STORED bytes=%s token_prefix=%s",
-        len(data),
-        token[:8] if len(token) >= 8 else token,
-    )
-    return jsonify({"ok": True}), 200
+        return jsonify(payload), 400
+    return jsonify(payload), 200
 
 
 @app.route("/api/builder2-final-video/<token>", methods=["GET"], strict_slashes=False)
@@ -334,8 +353,15 @@ def serve_builder2_final_video(token):
 
     path = get_builder2_final_video_path((token or "").strip())
     if not path or not path.is_file():
+        from engine.builder2_final_video_web_storage import log_builder2_final_video_served
+
+        log_builder2_final_video_served(stored_byte_count=0, request_accepted=False)
         logger.info("BUILDER2_FINAL_VIDEO_SERVE miss lookup=disk")
         return jsonify({"ok": False, "error": "not_found"}), 404
+    from engine.builder2_final_video_web_storage import log_builder2_final_video_served
+
+    stored_byte_count = int(path.stat().st_size)
+    log_builder2_final_video_served(stored_byte_count=stored_byte_count, request_accepted=True)
     logger.info("BUILDER2_FINAL_VIDEO_SERVE hit lookup=disk")
     return send_file(
         str(path),

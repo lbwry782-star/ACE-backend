@@ -39,7 +39,7 @@ from engine.builder2_tournament_manager import (
     run_builder2_tournament,
     select_global_winner,
 )
-from engine.builder2_tournament_store import disable_memory_store, enable_memory_store, load_tournament_state
+from engine.builder2_tournament_store import disable_memory_store, enable_memory_store, load_tournament_state, save_tournament_state
 from engine.builder2_winner_development import normalize_winner_plan_for_runway, validate_winner_plan
 from engine.runway_video import RunwayVideoMVPError, _generate_one_video_mvp_body
 from tests.builder2_methodology_fixtures import (
@@ -455,6 +455,12 @@ class TestBuilder2TournamentEndToEnd(unittest.TestCase):
 class TestBuilder2TournamentWorkerIntegration(unittest.TestCase):
     PLAN = _winner_plan()
 
+    def setUp(self) -> None:
+        enable_memory_store()
+
+    def tearDown(self) -> None:
+        disable_memory_store()
+
     @patch("engine.runway_video.load_tournament_state", return_value=None)
     @patch("engine.runway_video.video_job_set_resolved_product_name")
     @patch("engine.runway_video.video_job_set_phase")
@@ -464,6 +470,8 @@ class TestBuilder2TournamentWorkerIntegration(unittest.TestCase):
             "RUNWAY_API_KEY": "rk-test",
             "OPENAI_API_KEY": "sk-test",
             "BUILDER2_TOURNAMENT_ENABLED": "true",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
         },
         clear=False,
     )
@@ -501,11 +509,18 @@ class TestBuilder2TournamentWorkerIntegration(unittest.TestCase):
         )
         tournament_mock.return_value = normalized
         poll_mock.return_value = {"status": "SUCCEEDED", "output": ["https://runway/video.mp4"]}
-        _generate_one_video_mvp_body("Product", "A useful product.", job_id="job-runway-once")
+        from tests.test_builder2_media_resume import _media_ready_state
+
+        state = _media_ready_state(job_id="job-runway-once")
+        save_tournament_state("job-runway-once", state)
+        from tests.builder2_fresh_generate_test_helpers import patch_fresh_generate_media_mocks
+
+        with patch_fresh_generate_media_mocks() as runway_calls:
+            _generate_one_video_mvp_body("Product", "A useful product.", job_id="job-runway-once")
         tournament_mock.assert_called_once()
-        image_task_mock.assert_called_once()
+        self.assertEqual(len(runway_calls), 1)
         text_task_mock.assert_not_called()
-        _start_image.assert_called_once()
+        _start_image.assert_not_called()
 
     @patch.dict(
         os.environ,

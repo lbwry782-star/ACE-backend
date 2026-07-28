@@ -139,6 +139,15 @@ MEDIA_FINALIZATION_REPORT_SAFE_KEYS: tuple[str, ...] = (
     "localRenderAccepted",
     "publicationAccepted",
     "persistedCompletionAccepted",
+    "storageCapabilityCalls",
+    "storageCapabilityAccepted",
+    "webDurableStorageConfirmed",
+    "webPublicationBackendKind",
+    "webStorageWritable",
+    "webStorageFailureCode",
+    "webStorageConfigured",
+    "webStorageDirectoryExists",
+    "webStorageHttpStatusCode",
 )
 
 

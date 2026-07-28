@@ -620,6 +620,8 @@ class TestProductionJudgeRegression(unittest.TestCase):
             "BUILDER2_TOURNAMENT_ENABLED": "true",
             "BUILDER2_TOURNAMENT_ACTIVE_PROTOTYPES": ",".join(DEFAULT_ACTIVE_PROTOTYPE_IDS),
             "BUILDER2_TOURNAMENT_MAX_ROUNDS": "1",
+            "ACE_PUBLIC_BASE_URL": "https://example.com",
+            "ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret",
         },
         clear=True,
     )
@@ -687,8 +689,10 @@ class TestProductionJudgeRegression(unittest.TestCase):
 
         with patch("engine.runway_video.run_builder2_tournament", side_effect=_run_tournament):
             from engine.runway_video import _generate_one_video_mvp_body
+            from tests.builder2_fresh_generate_test_helpers import patch_fresh_generate_media_mocks
 
-            _generate_one_video_mvp_body("Product", "desc", job_id="job-judge-regression")
+            with patch_fresh_generate_media_mocks() as runway_calls:
+                _generate_one_video_mvp_body("Product", "desc", job_id="job-judge-regression")
 
         state = load_tournament_state("job-judge-regression")
         assert state is not None
@@ -703,7 +707,7 @@ class TestProductionJudgeRegression(unittest.TestCase):
         self.assertGreaterEqual(len(judged), 1)
         self.assertTrue(state.get("winnerCandidateId"))
         self.assertGreaterEqual(len(state.get("initialActivePrototypeIds") or []), 6)
-        _image_task.assert_called_once()
+        self.assertEqual(len(runway_calls), 1)
 
 
 class TestJudgeNormalization(unittest.TestCase):
