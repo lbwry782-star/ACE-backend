@@ -20,6 +20,7 @@ import requests
 
 from engine.builder2_new_format_config import (
     FINAL_DURATION_TOLERANCE_SECONDS,
+    resolve_builder2_effective_closure_segment_duration_seconds,
     resolve_builder2_end_card_duration_seconds,
     resolve_builder2_final_video_duration_seconds,
     resolve_builder2_video_duration_seconds,
@@ -51,8 +52,11 @@ class FinalDurationVerificationDiagnostics:
     measured_closure_source_duration_seconds: float
     configured_visual_duration_seconds: float
     configured_end_card_duration_seconds: float
+    effective_closure_segment_duration_seconds: float
     configured_final_duration_seconds: float
     calculated_expected_final_duration_seconds: float
+    actual_closure_gain_seconds: float
+    closure_gain_accepted: bool
     accepted_final_duration_lower_bound_seconds: float
     accepted_final_duration_upper_bound_seconds: float
     final_duration_delta_seconds: float
@@ -65,8 +69,11 @@ class FinalDurationVerificationDiagnostics:
             "measuredClosureSourceDurationSeconds": self.measured_closure_source_duration_seconds,
             "configuredVisualDurationSeconds": self.configured_visual_duration_seconds,
             "configuredEndCardDurationSeconds": self.configured_end_card_duration_seconds,
+            "effectiveClosureSegmentDurationSeconds": self.effective_closure_segment_duration_seconds,
             "configuredFinalDurationSeconds": self.configured_final_duration_seconds,
             "calculatedExpectedFinalDurationSeconds": self.calculated_expected_final_duration_seconds,
+            "actualClosureGainSeconds": self.actual_closure_gain_seconds,
+            "closureGainAccepted": self.closure_gain_accepted,
             "acceptedFinalDurationLowerBoundSeconds": self.accepted_final_duration_lower_bound_seconds,
             "acceptedFinalDurationUpperBoundSeconds": self.accepted_final_duration_upper_bound_seconds,
             "finalDurationDeltaSeconds": self.final_duration_delta_seconds,
@@ -160,24 +167,38 @@ def build_final_duration_verification_diagnostics(
     measured_seconds: float,
     *,
     visual_duration_seconds: float,
-    end_card_duration_seconds: float,
+    effective_closure_segment_duration_seconds: float | None = None,
     failure_code: str = "",
 ) -> FinalDurationVerificationDiagnostics:
     configured_visual = float(resolve_builder2_video_duration_seconds())
     configured_end_card = float(resolve_builder2_end_card_duration_seconds())
     configured_final = float(resolve_builder2_final_video_duration_seconds())
-    calculated_expected = float(visual_duration_seconds) + float(end_card_duration_seconds)
+    effective_segment = float(
+        effective_closure_segment_duration_seconds
+        if effective_closure_segment_duration_seconds is not None
+        else resolve_builder2_effective_closure_segment_duration_seconds()
+    )
+    calculated_expected = float(visual_duration_seconds) + effective_segment
     tolerance = max(FINAL_DURATION_TOLERANCE_SECONDS, 0.2)
+    actual_gain = float(measured_seconds) - float(visual_duration_seconds)
+    closure_gain_accepted = (
+        not failure_code
+        and actual_gain >= effective_segment - tolerance
+        and actual_gain <= effective_segment + tolerance
+    )
     return FinalDurationVerificationDiagnostics(
         measured_closure_output_duration_seconds=float(measured_seconds),
         measured_closure_source_duration_seconds=float(visual_duration_seconds),
         configured_visual_duration_seconds=configured_visual,
         configured_end_card_duration_seconds=configured_end_card,
+        effective_closure_segment_duration_seconds=effective_segment,
         configured_final_duration_seconds=configured_final,
         calculated_expected_final_duration_seconds=calculated_expected,
         accepted_final_duration_lower_bound_seconds=calculated_expected - tolerance,
         accepted_final_duration_upper_bound_seconds=calculated_expected + tolerance,
         final_duration_delta_seconds=float(measured_seconds) - calculated_expected,
+        actual_closure_gain_seconds=actual_gain,
+        closure_gain_accepted=closure_gain_accepted,
         final_duration_verification_failure_code=failure_code,
     )
 
@@ -192,17 +213,17 @@ def verify_builder2_final_video_duration(
     visual = float(
         visual_duration_seconds if visual_duration_seconds is not None else resolve_builder2_video_duration_seconds()
     )
-    end_card = float(
-        end_card_duration_seconds if end_card_duration_seconds is not None else resolve_builder2_end_card_duration_seconds()
+    effective_segment = resolve_builder2_effective_closure_segment_duration_seconds(
+        end_card_duration_seconds,
     )
     tolerance = max(FINAL_DURATION_TOLERANCE_SECONDS, 0.2)
-    calculated_expected = visual + end_card
+    calculated_expected = visual + effective_segment
 
     def _fail(code: str) -> None:
         diagnostics = build_final_duration_verification_diagnostics(
             measured_seconds,
             visual_duration_seconds=visual,
-            end_card_duration_seconds=end_card,
+            effective_closure_segment_duration_seconds=effective_segment,
             failure_code=code,
         )
         raise Builder2ClosureRenderError(
@@ -216,10 +237,13 @@ def verify_builder2_final_video_duration(
         _fail("builder2_media_final_duration_not_longer_than_visual")
 
     gained = measured_seconds - visual
-    if gained < end_card - tolerance:
+    if gained < effective_segment - tolerance:
         _fail("builder2_media_final_duration_missing_end_card")
 
-    if measured_seconds > visual + end_card + tolerance + max(visual * 0.75, 7.0):
+    if gained > effective_segment + tolerance:
+        _fail("builder2_media_final_duration_excessive_closure_gain")
+
+    if measured_seconds > visual + effective_segment + tolerance + max(visual * 0.75, 7.0):
         _fail("builder2_media_final_duration_duplicated_visual")
 
     if abs(measured_seconds - calculated_expected) > tolerance:
@@ -235,7 +259,7 @@ def verify_builder2_final_video_duration(
     return build_final_duration_verification_diagnostics(
         measured_seconds,
         visual_duration_seconds=visual,
-        end_card_duration_seconds=end_card,
+        effective_closure_segment_duration_seconds=effective_segment,
     )
 
 
@@ -334,7 +358,8 @@ def render_builder2_advertising_closure_endcard(
             command_category="validation",
         )
 
-    hold = max(0.5, float(duration_seconds if duration_seconds is not None else resolve_builder2_end_card_duration_seconds()))
+    effective_segment = resolve_builder2_effective_closure_segment_duration_seconds(duration_seconds)
+    hold = effective_segment
     token = _closure_storage_token(job_id)
     published_path = output_path or _path_for_token(token)
     if published_path is None:
@@ -409,6 +434,8 @@ def render_builder2_advertising_closure_endcard(
             card_filter,
             "-r",
             str(_TARGET_FPS),
+            "-t",
+            f"{hold:.6f}",
             "-c:v",
             "libx264",
             "-pix_fmt",
@@ -422,7 +449,8 @@ def render_builder2_advertising_closure_endcard(
                 f"[0:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"force_original_aspect_ratio=decrease,pad={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0];"
-                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},setsar=1,setpts=PTS-STARTPTS[v1];"
+                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},trim=duration={hold:.6f},"
+                f"setsar=1,setpts=PTS-STARTPTS[v1];"
                 f"[v0][v1]concat=n=2:v=1:a=0[vout];"
                 f"[0:a]apad,atrim=0:{source_duration + hold}[aout]"
             )
@@ -452,7 +480,8 @@ def render_builder2_advertising_closure_endcard(
                 f"[0:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"force_original_aspect_ratio=decrease,pad={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0];"
-                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},setsar=1,setpts=PTS-STARTPTS[v1];"
+                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},trim=duration={hold:.6f},"
+                f"setsar=1,setpts=PTS-STARTPTS[v1];"
                 f"[v0][v1]concat=n=2:v=1:a=0[vout]"
             )
             concat_cmd = [
@@ -487,7 +516,7 @@ def render_builder2_advertising_closure_endcard(
             duration_diagnostics = verify_builder2_final_video_duration(
                 measured,
                 visual_duration_seconds=source_duration,
-                end_card_duration_seconds=hold,
+                end_card_duration_seconds=effective_segment,
             )
         except Builder2ClosureRenderError as exc:
             if exc.stage == "duration_verification":

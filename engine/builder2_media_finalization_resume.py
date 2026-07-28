@@ -22,6 +22,7 @@ from engine.builder2_closure_render import (
     classify_url_route_family,
     render_builder2_advertising_closure_endcard,
 )
+from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_headline_decision_contract import (
     get_normalized_headline_decision,
@@ -117,8 +118,11 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "measuredClosureSourceDurationSeconds": None,
         "configuredVisualDurationSeconds": None,
         "configuredEndCardDurationSeconds": None,
+        "effectiveClosureSegmentDurationSeconds": None,
         "configuredFinalDurationSeconds": None,
         "calculatedExpectedFinalDurationSeconds": None,
+        "actualClosureGainSeconds": None,
+        "closureGainAccepted": False,
         "acceptedFinalDurationLowerBoundSeconds": None,
         "acceptedFinalDurationUpperBoundSeconds": None,
         "finalDurationDeltaSeconds": None,
@@ -208,6 +212,8 @@ def _apply_closure_success_diagnostics(
     report["measuredFinalDurationSeconds"] = render_result.measured_duration_seconds
     if render_result.duration_diagnostics is not None:
         report.update(render_result.duration_diagnostics.to_report_dict())
+        report["finalDurationAccepted"] = True
+        report["closureGainAccepted"] = bool(render_result.duration_diagnostics.closure_gain_accepted)
     if render_result.closure_ffprobe_calls:
         report["finalClosureFfprobeCalls"] = int(report.get("finalClosureFfprobeCalls") or 0) + int(
             render_result.closure_ffprobe_calls
@@ -351,7 +357,9 @@ def _execute_finalization_render_pipeline(
                 product_name=str(closure.get("productNameText") or ""),
                 slogan=str(closure.get("sloganText") or ""),
                 language=str(closure.get("language") or "en"),
-                duration_seconds=float(closure.get("durationSeconds") or 2.0),
+                duration_seconds=resolve_builder2_effective_closure_segment_duration_seconds(
+                    float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None
+                ),
                 job_id=job_id,
                 publish=not preflight,
                 output_path=output_path if preflight else None,
@@ -672,8 +680,11 @@ def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
         "measuredClosureSourceDurationSeconds",
         "configuredVisualDurationSeconds",
         "configuredEndCardDurationSeconds",
+        "effectiveClosureSegmentDurationSeconds",
         "configuredFinalDurationSeconds",
         "calculatedExpectedFinalDurationSeconds",
+        "actualClosureGainSeconds",
+        "closureGainAccepted",
         "acceptedFinalDurationLowerBoundSeconds",
         "acceptedFinalDurationUpperBoundSeconds",
         "finalDurationDeltaSeconds",

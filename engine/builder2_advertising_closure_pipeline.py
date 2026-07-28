@@ -10,7 +10,10 @@ from typing import Any, Callable, Dict, Optional, Union
 from engine.builder2_advertising_closure_contract import normalize_advertising_closure, validate_advertising_closure_object
 from engine.builder2_advertising_closure_resume_guard import AdvertisingClosureResumeGuard
 from engine.builder2_closure_render import Builder2ClosureRenderError, ClosureRenderResult, url_fingerprint
-from engine.builder2_new_format_config import resolve_builder2_end_card_duration_seconds
+from engine.builder2_new_format_config import (
+    resolve_builder2_effective_closure_segment_duration_seconds,
+    resolve_builder2_end_card_duration_seconds,
+)
 
 
 @dataclass
@@ -102,7 +105,9 @@ def render_advertising_closure_for_state(
             product_name=str(normalized.get("productNameText") or ""),
             slogan=str(normalized.get("sloganText") or ""),
             language=str(normalized.get("language") or "en"),
-            duration_seconds=float(normalized.get("durationSeconds") or resolve_builder2_end_card_duration_seconds()),
+            duration_seconds=resolve_builder2_effective_closure_segment_duration_seconds(
+                float(normalized.get("durationSeconds")) if normalized.get("durationSeconds") is not None else None
+            ),
             job_id=job_id,
         )
         result = _render_result_public_url(rendered)

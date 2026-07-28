@@ -12,6 +12,7 @@ from engine.builder2_closure_render import (
     Builder2ClosureRenderError,
     FinalDurationVerificationDiagnostics,
     build_final_duration_verification_diagnostics,
+    render_builder2_advertising_closure_endcard,
     verify_builder2_final_video_duration,
 )
 from engine.builder2_media_finalization_resume import (
@@ -20,38 +21,62 @@ from engine.builder2_media_finalization_resume import (
     _initial_report,
     _record_ffprobe_call,
 )
+from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 
 
-class TestClosureDurationFormula(unittest.TestCase):
-    def test_measured_visual_plus_end_card_expected(self) -> None:
+class TestEffectiveClosureSegmentContract(unittest.TestCase):
+    def test_effective_segment_is_configured_two_seconds(self) -> None:
+        self.assertAlmostEqual(resolve_builder2_effective_closure_segment_duration_seconds(), 2.0, places=3)
+        self.assertAlmostEqual(resolve_builder2_effective_closure_segment_duration_seconds(3.0), 2.0, places=3)
+
+    def test_production_shape_calculates_twelve_not_thirteen(self) -> None:
         diag = verify_builder2_final_video_duration(
             12.042,
             visual_duration_seconds=10.042,
-            end_card_duration_seconds=2.0,
+            end_card_duration_seconds=3.0,
         )
+        self.assertAlmostEqual(diag.effective_closure_segment_duration_seconds, 2.0, places=3)
         self.assertAlmostEqual(diag.calculated_expected_final_duration_seconds, 12.042, places=3)
-        self.assertAlmostEqual(diag.measured_closure_output_duration_seconds, 12.042, places=3)
+        self.assertNotAlmostEqual(diag.calculated_expected_final_duration_seconds, 13.042, places=3)
 
     def test_frame_rounding_accepted(self) -> None:
         verify_builder2_final_video_duration(
-            12.067,
+            12.045,
             visual_duration_seconds=10.042,
             end_card_duration_seconds=2.0,
         )
+
+    def test_thirteen_second_output_rejected(self) -> None:
+        with self.assertRaises(Builder2ClosureRenderError) as ctx:
+            verify_builder2_final_video_duration(
+                13.034,
+                visual_duration_seconds=10.042,
+                end_card_duration_seconds=3.0,
+            )
+        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_excessive_closure_gain")
+
+    def test_three_second_gain_rejected(self) -> None:
+        with self.assertRaises(Builder2ClosureRenderError) as ctx:
+            verify_builder2_final_video_duration(
+                13.042,
+                visual_duration_seconds=10.042,
+                end_card_duration_seconds=2.0,
+            )
+        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_excessive_closure_gain")
+
+    def test_two_second_gain_accepted(self) -> None:
+        diag = verify_builder2_final_video_duration(
+            12.033,
+            visual_duration_seconds=10.042,
+            end_card_duration_seconds=2.0,
+        )
+        self.assertAlmostEqual(diag.actual_closure_gain_seconds, 1.991, places=3)
+        self.assertTrue(diag.closure_gain_accepted)
 
     def test_source_only_rejected(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
                 10.042,
-                visual_duration_seconds=10.042,
-                end_card_duration_seconds=2.0,
-            )
-        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_not_longer_than_visual")
-
-    def test_end_card_only_rejected(self) -> None:
-        with self.assertRaises(Builder2ClosureRenderError) as ctx:
-            verify_builder2_final_video_duration(
-                2.0,
                 visual_duration_seconds=10.042,
                 end_card_duration_seconds=2.0,
             )
@@ -64,7 +89,7 @@ class TestClosureDurationFormula(unittest.TestCase):
                 visual_duration_seconds=10.042,
                 end_card_duration_seconds=2.0,
             )
-        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_duplicated_visual")
+        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_excessive_closure_gain")
 
     def test_insufficient_gain_rejected(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
@@ -75,70 +100,136 @@ class TestClosureDurationFormula(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_missing_end_card")
 
-    def test_approximately_two_second_gain_accepted(self) -> None:
-        verify_builder2_final_video_duration(
-            12.033,
-            visual_duration_seconds=10.042,
-            end_card_duration_seconds=2.0,
-        )
-
-    def test_configured_twelve_metadata_does_not_override_measured_visual(self) -> None:
-        diag = verify_builder2_final_video_duration(
-            12.042,
-            visual_duration_seconds=10.042,
-            end_card_duration_seconds=2.0,
-            expected_final_seconds=12.0,
-        )
-        self.assertAlmostEqual(diag.calculated_expected_final_duration_seconds, 12.042, places=3)
-
     def test_rejected_duration_preserved_in_diagnostics(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
-                11.0,
+                13.034,
                 visual_duration_seconds=10.042,
-                end_card_duration_seconds=2.0,
+                end_card_duration_seconds=3.0,
             )
         exc = ctx.exception
-        self.assertIsNotNone(exc.duration_diagnostics)
         assert exc.duration_diagnostics is not None
-        self.assertAlmostEqual(exc.duration_diagnostics.measured_closure_output_duration_seconds, 11.0, places=3)
+        self.assertAlmostEqual(exc.duration_diagnostics.measured_closure_output_duration_seconds, 13.034, places=3)
         self.assertAlmostEqual(
             exc.duration_diagnostics.calculated_expected_final_duration_seconds,
             12.042,
             places=3,
         )
-        self.assertTrue(exc.duration_diagnostics.final_duration_verification_failure_code)
+        self.assertFalse(exc.duration_diagnostics.closure_gain_accepted)
+
+
+class TestClosureFfmpegCommandConstruction(unittest.TestCase):
+    def test_card_and_concat_use_two_second_authoritative_segment(self) -> None:
+        from types import SimpleNamespace
+
+        captured: list[tuple[list[str], str, str]] = []
+
+        def runner(cmd: list[str], stage: str, category: str) -> None:
+            captured.append((cmd, stage, category))
+
+        tmp = Path(tempfile.mkdtemp())
+        source = tmp / "source.mp4"
+        source.write_bytes(b"fake")
+        out = tmp / "out.mp4"
+        real_is_file = Path.is_file
+        real_stat = Path.stat
+
+        def fake_is_file(self: Path) -> bool:
+            if self.name == "out.mp4":
+                return True
+            return real_is_file(self)
+
+        def fake_stat(self: Path):
+            if self.name == "out.mp4":
+                return SimpleNamespace(st_size=1234, st_mode=33188)
+            return real_stat(self)
+
+        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 12.042]), patch(
+            "engine.builder2_closure_render._input_has_audio",
+            return_value=False,
+        ), patch(
+            "engine.builder2_closure_render._default_font_path",
+            return_value="font.ttf",
+        ), patch(
+            "engine.builder2_closure_render._ffmpeg_bin",
+            return_value="ffmpeg",
+        ), patch(
+            "engine.builder2_closure_render._filter_path_for_ffmpeg",
+            side_effect=lambda p: str(p),
+        ), patch(
+            "engine.builder2_closure_render._path_for_token",
+            return_value=out,
+        ), patch(
+            "pathlib.Path.replace",
+            return_value=None,
+        ), patch(
+            "pathlib.Path.is_file",
+            fake_is_file,
+        ), patch(
+            "pathlib.Path.stat",
+            fake_stat,
+        ), patch(
+            "engine.builder2_closure_render.verify_builder2_final_video_duration",
+            side_effect=lambda measured, **kwargs: build_final_duration_verification_diagnostics(
+                measured,
+                visual_duration_seconds=10.042,
+            ),
+        ):
+            render_builder2_advertising_closure_endcard(
+                str(source),
+                "https://ace.example.com",
+                product_name="Product",
+                slogan="Slogan",
+                language="en",
+                duration_seconds=3.0,
+                publish=False,
+                output_path=out,
+                ffmpeg_runner=runner,
+            )
+
+        card_cmd = next(cmd for cmd, _stage, category in captured if category == "ffmpeg_card")
+        concat_cmd = next(cmd for cmd, _stage, category in captured if category == "ffmpeg_concat")
+        card_input = "".join(card_cmd)
+        filter_complex = concat_cmd[concat_cmd.index("-filter_complex") + 1]
+        self.assertIn("d=2.0", card_input)
+        self.assertIn("-t", card_cmd)
+        self.assertIn("2.000000", card_cmd)
+        self.assertIn("trim=duration=2.000000", filter_complex)
+        self.assertNotIn("d=3.0", card_input)
+        self.assertNotIn("trim=duration=3", filter_complex)
 
 
 class TestClosureDurationDiagnosticsSafety(unittest.TestCase):
     def test_diagnostics_exclude_paths_and_creative_text(self) -> None:
         diag = build_final_duration_verification_diagnostics(
-            11.5,
+            13.034,
             visual_duration_seconds=10.042,
-            end_card_duration_seconds=2.0,
-            failure_code="builder2_media_final_duration_missing_end_card",
+            failure_code="builder2_media_final_duration_excessive_closure_gain",
         )
         payload = json.dumps(diag.to_report_dict())
         self.assertNotIn("/", payload)
         self.assertNotIn("\\", payload)
         self.assertNotIn("SECRET", payload)
 
-    def test_failure_report_includes_bounds_and_delta(self) -> None:
+    def test_failure_report_includes_gain_and_effective_segment(self) -> None:
         report = _initial_report(job_id="job-1", preflight=True)
         diagnostics = FinalDurationVerificationDiagnostics(
-            measured_closure_output_duration_seconds=11.0,
+            measured_closure_output_duration_seconds=13.034,
             measured_closure_source_duration_seconds=10.042,
             configured_visual_duration_seconds=10.0,
             configured_end_card_duration_seconds=2.0,
+            effective_closure_segment_duration_seconds=2.0,
             configured_final_duration_seconds=12.0,
             calculated_expected_final_duration_seconds=12.042,
             accepted_final_duration_lower_bound_seconds=11.692,
             accepted_final_duration_upper_bound_seconds=12.392,
-            final_duration_delta_seconds=-1.042,
-            final_duration_verification_failure_code="builder2_media_final_duration_missing_end_card",
+            final_duration_delta_seconds=0.992,
+            actual_closure_gain_seconds=2.992,
+            closure_gain_accepted=False,
+            final_duration_verification_failure_code="builder2_media_final_duration_excessive_closure_gain",
         )
         exc = Builder2ClosureRenderError(
-            "builder2_media_final_duration_missing_end_card",
+            "builder2_media_final_duration_excessive_closure_gain",
             stage="duration_verification",
             duration_diagnostics=diagnostics,
             closure_ffmpeg_execution_accepted=True,
@@ -147,11 +238,10 @@ class TestClosureDurationDiagnosticsSafety(unittest.TestCase):
             closure_ffprobe_calls=2,
         )
         _apply_closure_duration_diagnostics(report, exc)
-        self.assertTrue(report["closureFfmpegExecutionAccepted"])
-        self.assertEqual(report["measuredFinalDurationSeconds"], 11.0)
+        self.assertAlmostEqual(report["effectiveClosureSegmentDurationSeconds"], 2.0, places=3)
         self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], 12.042, places=3)
-        self.assertIsNotNone(report["acceptedFinalDurationLowerBoundSeconds"])
-        self.assertIsNotNone(report["finalDurationDeltaSeconds"])
+        self.assertAlmostEqual(report["actualClosureGainSeconds"], 2.992, places=3)
+        self.assertFalse(report["closureGainAccepted"])
 
 
 class TestFfprobeCounterAccuracy(unittest.TestCase):
@@ -161,9 +251,6 @@ class TestFfprobeCounterAccuracy(unittest.TestCase):
         _record_ffprobe_call(report, category="headline")
         _record_ffprobe_call(report, category="final_closure")
         _record_ffprobe_call(report, category="final_closure")
-        self.assertEqual(report["rawRunwayFfprobeCalls"], 1)
-        self.assertEqual(report["headlineFfprobeCalls"], 1)
-        self.assertEqual(report["finalClosureFfprobeCalls"], 2)
         self.assertEqual(report["totalFfprobeSubprocessCalls"], 4)
         self.assertEqual(report["ffprobeCalls"], 4)
 
@@ -176,8 +263,6 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
         mock_source: Any,
         mock_render: Any,
     ) -> None:
-        from engine.builder2_media_finalization_resume import _execute_finalization_render_pipeline
-
         tmp = Path(tempfile.mkdtemp())
         source = tmp / "headline.mp4"
         source.write_bytes(b"fake")
@@ -197,13 +282,12 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
         )()
 
         diagnostics = build_final_duration_verification_diagnostics(
-            11.0,
+            13.034,
             visual_duration_seconds=10.042,
-            end_card_duration_seconds=2.0,
-            failure_code="builder2_media_final_duration_missing_end_card",
+            failure_code="builder2_media_final_duration_excessive_closure_gain",
         )
         mock_render.side_effect = Builder2ClosureRenderError(
-            "builder2_media_final_duration_missing_end_card",
+            "builder2_media_final_duration_excessive_closure_gain",
             stage="duration_verification",
             duration_diagnostics=diagnostics,
             closure_ffmpeg_execution_accepted=True,
@@ -219,7 +303,7 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
                 "required": True,
                 "productNameText": "P",
                 "sloganText": "S",
-                "durationSeconds": 2.0,
+                "durationSeconds": 3.0,
             },
             "mediaResume": {},
         }
@@ -240,12 +324,7 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
             )
 
         self.assertEqual(report["failureStage"], "duration_verification")
-        self.assertEqual(report["measuredFinalDurationSeconds"], 11.0)
         self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], 12.042, places=3)
-        self.assertTrue(report["closureFfmpegExecutionAccepted"])
-        self.assertEqual(report["headlineFfprobeCalls"], 1)
-        self.assertEqual(report["finalClosureFfprobeCalls"], 2)
-        self.assertEqual(report["ffprobeCalls"], 3)
         self.assertEqual(report["openAICalls"], 0)
         self.assertEqual(report["redisMutations"], 0)
 

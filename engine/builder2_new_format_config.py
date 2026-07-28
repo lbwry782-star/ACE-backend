@@ -43,6 +43,26 @@ def resolve_builder2_end_card_duration_seconds() -> float:
     return value
 
 
+def resolve_builder2_effective_closure_segment_duration_seconds(
+    requested_duration_seconds: float | None = None,
+) -> float:
+    """
+    Authoritative Builder2 closure segment duration.
+
+    Fades/transitions must fit inside this segment; nothing may be appended outside it.
+    """
+    effective = float(resolve_builder2_end_card_duration_seconds())
+    if requested_duration_seconds is not None:
+        requested = float(requested_duration_seconds)
+        if abs(requested - effective) > 0.01:
+            logger.info(
+                "BUILDER2_CLOSURE_SEGMENT_DURATION_COERCED requested=%.3f effective=%.3f",
+                requested,
+                effective,
+            )
+    return effective
+
+
 def resolve_builder2_final_video_duration_seconds() -> float:
     raw = (os.environ.get("BUILDER2_FINAL_VIDEO_DURATION_SECONDS") or "").strip()
     if not raw:
