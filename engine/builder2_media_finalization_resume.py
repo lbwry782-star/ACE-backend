@@ -104,6 +104,26 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "closureRenderAttempts": 0,
         "closureFfmpegSubprocessCalls": 0,
         "ffprobeCalls": 0,
+        "rawRunwayFfprobeCalls": 0,
+        "headlineFfprobeCalls": 0,
+        "finalClosureFfprobeCalls": 0,
+        "totalFfprobeSubprocessCalls": 0,
+        "closureFfmpegExecutionAccepted": False,
+        "closureOutputFileCreated": False,
+        "closureOutputFileSizeBytes": None,
+        "closureDurationProbeAttempted": False,
+        "closureDurationProbeAccepted": False,
+        "measuredClosureOutputDurationSeconds": None,
+        "measuredClosureSourceDurationSeconds": None,
+        "configuredVisualDurationSeconds": None,
+        "configuredEndCardDurationSeconds": None,
+        "configuredFinalDurationSeconds": None,
+        "calculatedExpectedFinalDurationSeconds": None,
+        "acceptedFinalDurationLowerBoundSeconds": None,
+        "acceptedFinalDurationUpperBoundSeconds": None,
+        "finalDurationDeltaSeconds": None,
+        "finalDurationVerificationFailureCode": None,
+        "closureFailureSubstage": None,
         "ffmpegCalls": 0,
         "totalFfmpegCalls": 0,
         "publicationCalls": 0,
@@ -130,6 +150,75 @@ def _probe_duration(path: Path) -> float:
     from engine.builder2_closure_render import _ffprobe_duration_seconds, _FFPROBE_TIMEOUT
 
     return _ffprobe_duration_seconds(path, _FFPROBE_TIMEOUT)
+
+
+def _record_ffprobe_call(report: Dict[str, Any], *, category: str) -> None:
+    key = {
+        "raw_runway": "rawRunwayFfprobeCalls",
+        "headline": "headlineFfprobeCalls",
+        "final_closure": "finalClosureFfprobeCalls",
+    }.get(category)
+    if key is None:
+        raise ValueError(f"unknown ffprobe category: {category}")
+    report[key] = int(report.get(key) or 0) + 1
+    total = (
+        int(report.get("rawRunwayFfprobeCalls") or 0)
+        + int(report.get("headlineFfprobeCalls") or 0)
+        + int(report.get("finalClosureFfprobeCalls") or 0)
+    )
+    report["totalFfprobeSubprocessCalls"] = total
+    report["ffprobeCalls"] = total
+
+
+def _apply_closure_duration_diagnostics(
+    report: Dict[str, Any],
+    exc: Builder2ClosureRenderError,
+) -> None:
+    if exc.closure_ffmpeg_execution_accepted is not None:
+        report["closureFfmpegExecutionAccepted"] = bool(exc.closure_ffmpeg_execution_accepted)
+    if exc.closure_output_file_created is not None:
+        report["closureOutputFileCreated"] = bool(exc.closure_output_file_created)
+    if exc.closure_output_file_size_bytes is not None:
+        report["closureOutputFileSizeBytes"] = int(exc.closure_output_file_size_bytes)
+    if exc.duration_diagnostics is not None:
+        report.update(exc.duration_diagnostics.to_report_dict())
+        measured = exc.duration_diagnostics.measured_closure_output_duration_seconds
+        report["measuredFinalDurationSeconds"] = measured
+        report["measuredClosureOutputDurationSeconds"] = measured
+    if exc.closure_ffprobe_calls:
+        report["finalClosureFfprobeCalls"] = int(report.get("finalClosureFfprobeCalls") or 0) + int(
+            exc.closure_ffprobe_calls
+        )
+        total = (
+            int(report.get("rawRunwayFfprobeCalls") or 0)
+            + int(report.get("headlineFfprobeCalls") or 0)
+            + int(report.get("finalClosureFfprobeCalls") or 0)
+        )
+        report["totalFfprobeSubprocessCalls"] = total
+        report["ffprobeCalls"] = total
+
+
+def _apply_closure_success_diagnostics(
+    report: Dict[str, Any],
+    render_result: Any,
+) -> None:
+    report["closureFfmpegExecutionAccepted"] = True
+    report["closureDurationProbeAttempted"] = True
+    report["closureDurationProbeAccepted"] = True
+    report["measuredFinalDurationSeconds"] = render_result.measured_duration_seconds
+    if render_result.duration_diagnostics is not None:
+        report.update(render_result.duration_diagnostics.to_report_dict())
+    if render_result.closure_ffprobe_calls:
+        report["finalClosureFfprobeCalls"] = int(report.get("finalClosureFfprobeCalls") or 0) + int(
+            render_result.closure_ffprobe_calls
+        )
+        total = (
+            int(report.get("rawRunwayFfprobeCalls") or 0)
+            + int(report.get("headlineFfprobeCalls") or 0)
+            + int(report.get("finalClosureFfprobeCalls") or 0)
+        )
+        report["totalFfprobeSubprocessCalls"] = total
+        report["ffprobeCalls"] = total
 
 
 def _apply_download_diagnostics(report: Dict[str, Any], diagnostics: Optional[SafeDownloadDiagnostics]) -> None:
@@ -217,7 +306,7 @@ def _execute_finalization_render_pipeline(
         closure_input = decision.closure_input_path
         if decision.raw_runway_diagnostics and decision.raw_runway_diagnostics.download_accepted:
             report["measuredRawRunwayDurationSeconds"] = _probe_duration(closure_input)
-            report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
+            _record_ffprobe_call(report, category="raw_runway")
 
         if decision.local_headline_render_required:
             headline_out = tmp / "headline_local.mp4"
@@ -244,12 +333,12 @@ def _execute_finalization_render_pipeline(
             report["localHeadlineRenderAccepted"] = True
             report["headlineFfmpegSubprocessCalls"] = 1
             report["measuredHeadlineDurationSeconds"] = headline_result.measured_duration_seconds
-            report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
+            _record_ffprobe_call(report, category="headline")
             closure_input = headline_result.output_path
             _sync_ffmpeg_counters(report)
         elif decision.source_kind in {"persisted_headline_artifact", "legacy_headline_artifact"}:
             report["measuredHeadlineDurationSeconds"] = _probe_duration(closure_input)
-            report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
+            _record_ffprobe_call(report, category="headline")
 
         output_path = tmp / "closure_out.mp4"
         source_for_closure = str(closure_input)
@@ -274,14 +363,14 @@ def _execute_finalization_render_pipeline(
             report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
             if _closure_subprocess_ran(exc.stage):
                 report["closureFfmpegSubprocessCalls"] = 1
+            _apply_closure_duration_diagnostics(report, exc)
             _sync_ffmpeg_counters(report)
             return None
 
         report["closureRenderAccepted"] = True
         report["closureFfmpegSubprocessCalls"] = 1
-        report["measuredFinalDurationSeconds"] = render_result.measured_duration_seconds
+        _apply_closure_success_diagnostics(report, render_result)
         report["finalDurationAccepted"] = True
-        report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
         _sync_ffmpeg_counters(report)
 
         if preflight:
@@ -570,6 +659,26 @@ def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
         "closureRenderAttempts",
         "closureFfmpegSubprocessCalls",
         "ffprobeCalls",
+        "rawRunwayFfprobeCalls",
+        "headlineFfprobeCalls",
+        "finalClosureFfprobeCalls",
+        "totalFfprobeSubprocessCalls",
+        "closureFfmpegExecutionAccepted",
+        "closureOutputFileCreated",
+        "closureOutputFileSizeBytes",
+        "closureDurationProbeAttempted",
+        "closureDurationProbeAccepted",
+        "measuredClosureOutputDurationSeconds",
+        "measuredClosureSourceDurationSeconds",
+        "configuredVisualDurationSeconds",
+        "configuredEndCardDurationSeconds",
+        "configuredFinalDurationSeconds",
+        "calculatedExpectedFinalDurationSeconds",
+        "acceptedFinalDurationLowerBoundSeconds",
+        "acceptedFinalDurationUpperBoundSeconds",
+        "finalDurationDeltaSeconds",
+        "finalDurationVerificationFailureCode",
+        "closureFailureSubstage",
         "totalFfmpegCalls",
         "ffmpegCalls",
         "publicationCalls",

@@ -400,8 +400,9 @@ class TestDurationVerification(unittest.TestCase):
     def test_measured_duration_required_not_configured(self) -> None:
         from engine.builder2_closure_render import verify_builder2_final_video_duration
 
-        with self.assertRaises(Exception):
+        with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(10.042)
+        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_not_longer_than_visual")
 
 
 class TestNoHeadlinePipelineOrdering(unittest.TestCase):

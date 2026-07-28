@@ -137,8 +137,21 @@ def closure_inclusive_artifact_valid(
         return False
     measured = _duration_value(media, "actualFinalVideoDurationSeconds")
     if measured is not None:
+        verify_kwargs: dict[str, float] = {}
+        for media_key, param in (
+            ("headlineReconstructionDurationSeconds", "visual_duration_seconds"),
+            ("actualVisualDurationSeconds", "visual_duration_seconds"),
+        ):
+            visual = _duration_value(media, media_key)
+            if visual is not None:
+                verify_kwargs["visual_duration_seconds"] = visual
+                break
+        closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
+        end_card = _duration_value(closure, "durationSeconds")
+        if end_card is not None:
+            verify_kwargs["end_card_duration_seconds"] = end_card
         try:
-            verify_builder2_final_video_duration(measured)
+            verify_builder2_final_video_duration(measured, **verify_kwargs)
             return True
         except Exception:
             return False
@@ -247,8 +260,21 @@ def validate_builder2_media_completion_contract(
     if measured is None:
         failures.append("actual_final_duration_missing")
     else:
+        verify_kwargs: dict[str, float] = {}
+        for media_key, _param in (
+            ("headlineReconstructionDurationSeconds", "visual_duration_seconds"),
+            ("actualVisualDurationSeconds", "visual_duration_seconds"),
+        ):
+            visual = _duration_value(media, media_key)
+            if visual is not None:
+                verify_kwargs["visual_duration_seconds"] = visual
+                break
+        closure_obj = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
+        end_card = _duration_value(closure_obj, "durationSeconds")
+        if end_card is not None:
+            verify_kwargs["end_card_duration_seconds"] = end_card
         try:
-            verify_builder2_final_video_duration(measured)
+            verify_builder2_final_video_duration(measured, **verify_kwargs)
         except Exception as exc:
             failures.append(str(getattr(exc, "args", ["builder2_media_final_duration_invalid"])[0]))
     if not closure_inclusive_artifact_valid(

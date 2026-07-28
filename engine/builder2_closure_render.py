@@ -45,6 +45,38 @@ _TARGET_HEIGHT = 720
 _TARGET_FPS = 30
 
 
+@dataclass(frozen=True)
+class FinalDurationVerificationDiagnostics:
+    measured_closure_output_duration_seconds: float
+    measured_closure_source_duration_seconds: float
+    configured_visual_duration_seconds: float
+    configured_end_card_duration_seconds: float
+    configured_final_duration_seconds: float
+    calculated_expected_final_duration_seconds: float
+    accepted_final_duration_lower_bound_seconds: float
+    accepted_final_duration_upper_bound_seconds: float
+    final_duration_delta_seconds: float
+    final_duration_verification_failure_code: str = ""
+    closure_failure_substage: str = "duration_verification"
+
+    def to_report_dict(self) -> dict[str, float | str | bool | None]:
+        return {
+            "measuredClosureOutputDurationSeconds": self.measured_closure_output_duration_seconds,
+            "measuredClosureSourceDurationSeconds": self.measured_closure_source_duration_seconds,
+            "configuredVisualDurationSeconds": self.configured_visual_duration_seconds,
+            "configuredEndCardDurationSeconds": self.configured_end_card_duration_seconds,
+            "configuredFinalDurationSeconds": self.configured_final_duration_seconds,
+            "calculatedExpectedFinalDurationSeconds": self.calculated_expected_final_duration_seconds,
+            "acceptedFinalDurationLowerBoundSeconds": self.accepted_final_duration_lower_bound_seconds,
+            "acceptedFinalDurationUpperBoundSeconds": self.accepted_final_duration_upper_bound_seconds,
+            "finalDurationDeltaSeconds": self.final_duration_delta_seconds,
+            "finalDurationVerificationFailureCode": self.final_duration_verification_failure_code or None,
+            "closureFailureSubstage": self.closure_failure_substage,
+            "closureDurationProbeAttempted": True,
+            "closureDurationProbeAccepted": not bool(self.final_duration_verification_failure_code),
+        }
+
+
 class Builder2ClosureRenderError(Builder2TournamentError):
     def __init__(
         self,
@@ -54,12 +86,22 @@ class Builder2ClosureRenderError(Builder2TournamentError):
         return_code: Optional[int] = None,
         stderr_tail: str = "",
         command_category: str = "",
+        duration_diagnostics: Optional[FinalDurationVerificationDiagnostics] = None,
+        closure_ffmpeg_execution_accepted: Optional[bool] = None,
+        closure_output_file_created: Optional[bool] = None,
+        closure_output_file_size_bytes: Optional[int] = None,
+        closure_ffprobe_calls: int = 0,
     ) -> None:
         super().__init__(code)
         self.stage = stage
         self.return_code = return_code
         self.stderr_tail = stderr_tail
         self.command_category = command_category
+        self.duration_diagnostics = duration_diagnostics
+        self.closure_ffmpeg_execution_accepted = closure_ffmpeg_execution_accepted
+        self.closure_output_file_created = closure_output_file_created
+        self.closure_output_file_size_bytes = closure_output_file_size_bytes
+        self.closure_ffprobe_calls = closure_ffprobe_calls
 
 
 @dataclass(frozen=True)
@@ -69,6 +111,8 @@ class ClosureRenderResult:
     measured_duration_seconds: float
     output_token: str
     input_fingerprint: str
+    closure_ffprobe_calls: int = 0
+    duration_diagnostics: Optional[FinalDurationVerificationDiagnostics] = None
 
 
 def _sanitize_line(text: str) -> str:
@@ -112,37 +156,87 @@ def classify_url_route_family(url: str) -> str:
     return "other"
 
 
+def build_final_duration_verification_diagnostics(
+    measured_seconds: float,
+    *,
+    visual_duration_seconds: float,
+    end_card_duration_seconds: float,
+    failure_code: str = "",
+) -> FinalDurationVerificationDiagnostics:
+    configured_visual = float(resolve_builder2_video_duration_seconds())
+    configured_end_card = float(resolve_builder2_end_card_duration_seconds())
+    configured_final = float(resolve_builder2_final_video_duration_seconds())
+    calculated_expected = float(visual_duration_seconds) + float(end_card_duration_seconds)
+    tolerance = max(FINAL_DURATION_TOLERANCE_SECONDS, 0.2)
+    return FinalDurationVerificationDiagnostics(
+        measured_closure_output_duration_seconds=float(measured_seconds),
+        measured_closure_source_duration_seconds=float(visual_duration_seconds),
+        configured_visual_duration_seconds=configured_visual,
+        configured_end_card_duration_seconds=configured_end_card,
+        configured_final_duration_seconds=configured_final,
+        calculated_expected_final_duration_seconds=calculated_expected,
+        accepted_final_duration_lower_bound_seconds=calculated_expected - tolerance,
+        accepted_final_duration_upper_bound_seconds=calculated_expected + tolerance,
+        final_duration_delta_seconds=float(measured_seconds) - calculated_expected,
+        final_duration_verification_failure_code=failure_code,
+    )
+
+
 def verify_builder2_final_video_duration(
     measured_seconds: float,
     *,
     visual_duration_seconds: Optional[float] = None,
     end_card_duration_seconds: Optional[float] = None,
     expected_final_seconds: Optional[float] = None,
-) -> None:
-    visual = float(visual_duration_seconds if visual_duration_seconds is not None else resolve_builder2_video_duration_seconds())
+) -> FinalDurationVerificationDiagnostics:
+    visual = float(
+        visual_duration_seconds if visual_duration_seconds is not None else resolve_builder2_video_duration_seconds()
+    )
     end_card = float(
         end_card_duration_seconds if end_card_duration_seconds is not None else resolve_builder2_end_card_duration_seconds()
     )
-    expected = float(expected_final_seconds if expected_final_seconds is not None else resolve_builder2_final_video_duration_seconds())
     tolerance = max(FINAL_DURATION_TOLERANCE_SECONDS, 0.2)
+    calculated_expected = visual + end_card
+
+    def _fail(code: str) -> None:
+        diagnostics = build_final_duration_verification_diagnostics(
+            measured_seconds,
+            visual_duration_seconds=visual,
+            end_card_duration_seconds=end_card,
+            failure_code=code,
+        )
+        raise Builder2ClosureRenderError(
+            code,
+            stage="duration_verification",
+            command_category="ffprobe",
+            duration_diagnostics=diagnostics,
+        )
+
     if measured_seconds <= visual + 0.05:
-        raise Builder2ClosureRenderError(
-            "builder2_media_final_duration_not_longer_than_visual",
-            stage="duration_verification",
-            command_category="ffprobe",
-        )
-    if abs(measured_seconds - expected) > tolerance:
-        raise Builder2ClosureRenderError(
-            "builder2_media_final_duration_out_of_tolerance",
-            stage="duration_verification",
-            command_category="ffprobe",
-        )
-    if measured_seconds < visual + end_card - tolerance:
-        raise Builder2ClosureRenderError(
-            "builder2_media_final_duration_missing_end_card",
-            stage="duration_verification",
-            command_category="ffprobe",
-        )
+        _fail("builder2_media_final_duration_not_longer_than_visual")
+
+    gained = measured_seconds - visual
+    if gained < end_card - tolerance:
+        _fail("builder2_media_final_duration_missing_end_card")
+
+    if measured_seconds > visual + end_card + tolerance + max(visual * 0.75, 7.0):
+        _fail("builder2_media_final_duration_duplicated_visual")
+
+    if abs(measured_seconds - calculated_expected) > tolerance:
+        _fail("builder2_media_final_duration_out_of_tolerance")
+
+    configured_final = float(resolve_builder2_final_video_duration_seconds())
+    configured_visual = float(resolve_builder2_video_duration_seconds())
+    if abs(visual - configured_visual) <= tolerance:
+        product_expected = configured_final + (visual - configured_visual)
+        if abs(measured_seconds - product_expected) > tolerance:
+            _fail("builder2_media_final_duration_outside_product_contract")
+
+    return build_final_duration_verification_diagnostics(
+        measured_seconds,
+        visual_duration_seconds=visual,
+        end_card_duration_seconds=end_card,
+    )
 
 
 def _run_checked(cmd: list[str], *, stage: str, category: str) -> None:
@@ -292,6 +386,7 @@ def render_builder2_advertising_closure_endcard(
             inp.write_bytes(local.read_bytes())
 
         source_duration = _ffprobe_duration_seconds(inp, _FFPROBE_TIMEOUT)
+        closure_ffprobe_calls = 1
         has_audio = _input_has_audio(inp, _FFPROBE_TIMEOUT)
         font_path = _filter_path_for_ffmpeg(Path(font))
         product_file.write_text(product, encoding="utf-8")
@@ -383,12 +478,30 @@ def render_builder2_advertising_closure_endcard(
         t0 = time.monotonic()
         _runner(card_cmd, "card_generation", "ffmpeg_card")
         _runner(concat_cmd, "concatenation", "ffmpeg_concat")
+        closure_ffmpeg_execution_accepted = True
+        closure_output_file_created = out_tmp.is_file()
+        closure_output_file_size_bytes = out_tmp.stat().st_size if closure_output_file_created else 0
         measured = _ffprobe_duration_seconds(out_tmp, _FFPROBE_TIMEOUT)
-        verify_builder2_final_video_duration(
-            measured,
-            visual_duration_seconds=source_duration,
-            end_card_duration_seconds=hold,
-        )
+        closure_ffprobe_calls += 1
+        try:
+            duration_diagnostics = verify_builder2_final_video_duration(
+                measured,
+                visual_duration_seconds=source_duration,
+                end_card_duration_seconds=hold,
+            )
+        except Builder2ClosureRenderError as exc:
+            if exc.stage == "duration_verification":
+                raise Builder2ClosureRenderError(
+                    str(exc.args[0] if exc.args else "builder2_media_final_duration_invalid"),
+                    stage=exc.stage,
+                    command_category=exc.command_category,
+                    duration_diagnostics=exc.duration_diagnostics,
+                    closure_ffmpeg_execution_accepted=closure_ffmpeg_execution_accepted,
+                    closure_output_file_created=closure_output_file_created,
+                    closure_output_file_size_bytes=closure_output_file_size_bytes,
+                    closure_ffprobe_calls=closure_ffprobe_calls,
+                ) from exc
+            raise
         out_tmp.replace(published_path)
 
         public_url = ""
@@ -433,6 +546,8 @@ def render_builder2_advertising_closure_endcard(
             measured_duration_seconds=measured,
             output_token=token,
             input_fingerprint=input_fingerprint,
+            closure_ffprobe_calls=closure_ffprobe_calls,
+            duration_diagnostics=duration_diagnostics,
         )
     finally:
         try:
