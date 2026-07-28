@@ -22,6 +22,7 @@ import tempfile
 import time
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -394,6 +395,188 @@ def _split_overlay_product_remainder(
             return None
         return (cn, tail)
     return None
+
+
+@dataclass
+class LocalHeadlineOverlayResult:
+    output_path: Path
+    measured_duration_seconds: float
+
+
+class VideoHeadlineRenderError(RuntimeError):
+    def __init__(
+        self,
+        reason: str,
+        *,
+        stage: str = "headline_overlay",
+        return_code: Optional[int] = None,
+        stderr_tail: str = "",
+    ) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.stage = stage
+        self.return_code = return_code
+        self.stderr_tail = stderr_tail
+
+
+def render_local_video_headline_overlay(
+    *,
+    source_video_path: Path,
+    output_path: Path,
+    headline: str = "",
+    overlay_language: str = "he",
+    overlay_render_mode: str = "plain_text",
+    overlay_dual_latin: str = "",
+    overlay_dual_hebrew: str = "",
+    overlay_canonical_name: str = "",
+) -> LocalHeadlineOverlayResult:
+    """
+    Apply the canonical headline overlay to a local MP4 without download or publication.
+    """
+    olang = normalize_video_content_language(overlay_language)
+    headline_clean = _sanitize_headline_line(headline)
+    headline_clean = normalize_video_overlay_text(headline_clean, olang)
+    if not headline_clean:
+        raise VideoHeadlineRenderError("empty_headline", stage="input_validation")
+
+    ffmpeg = _ffmpeg_bin()
+    font = _default_font_path(olang)
+    if not ffmpeg or not font:
+        raise VideoHeadlineRenderError("missing_ffmpeg_or_font", stage="input_validation")
+
+    if not source_video_path.is_file():
+        raise VideoHeadlineRenderError("source_not_found", stage="input_validation")
+
+    tmp = Path(tempfile.mkdtemp(prefix="ace_vid_headline_local_"))
+    text_file = tmp / "headline.txt"
+    text_file_latin = tmp / "overlay_latin.txt"
+    text_file_hebrew = tmp / "overlay_hebrew.txt"
+    try:
+        try:
+            duration_sec = _ffprobe_duration_seconds(source_video_path, _FFPROBE_TIMEOUT)
+        except subprocess.TimeoutExpired as exc:
+            raise VideoHeadlineRenderError("ffprobe_timeout", stage="duration_probe") from exc
+        except Exception as exc:
+            raise VideoHeadlineRenderError("ffprobe_error", stage="duration_probe") from exc
+
+        if duration_sec <= 0:
+            raise VideoHeadlineRenderError("invalid_duration", stage="duration_probe")
+
+        has_audio = _input_has_audio(source_video_path, _FFPROBE_TIMEOUT)
+        fs = _fontsize_for_headline(headline_clean)
+        font_e = _filter_path_for_ffmpeg(Path(font))
+
+        cn = (overlay_canonical_name or "").strip()
+        lat_s = (overlay_dual_latin or "").strip()
+        he_s = (overlay_dual_hebrew or "").strip()
+        if olang == "he" and (not lat_s or not he_s):
+            sp = _split_overlay_product_remainder(headline_clean, cn)
+            if sp:
+                lat_s, he_s = sp
+
+        use_dual = olang == "he" and bool(lat_s and he_s)
+        if olang == "he" and _mixed_hebrew_latin_headline(headline_clean) and not use_dual:
+            raise VideoHeadlineRenderError("mixed_headline_requires_dual_drawtext", stage="input_validation")
+
+        if use_dual:
+            fs_rem, fs_prod = _overlay_product_remainder_fontsizes(fs)
+            text_file_latin.write_text(lat_s, encoding="utf-8")
+            text_file_hebrew.write_text(he_s, encoding="utf-8")
+        else:
+            text_file.write_text(headline_clean, encoding="utf-8")
+
+        tf_e = _filter_path_for_ffmpeg(text_file)
+        tf_lat_e = _filter_path_for_ffmpeg(text_file_latin)
+        tf_he_e = _filter_path_for_ffmpeg(text_file_hebrew)
+
+        overlay_s = min(max(0.4, _HOLD_SECONDS), duration_sec)
+        t_overlay_start = duration_sec - overlay_s
+        t0_str = f"{t_overlay_start:.4f}"
+        fade_s = max(0.05, min(_TEXT_FADE_SECONDS, max(overlay_s - 0.05, 0.05)))
+        fade_end = t_overlay_start + fade_s
+        fade_end_str = f"{fade_end:.4f}"
+        alpha_expr = (
+            f"if(lt(t\\,{t0_str})\\,0\\,if(lt(t\\,{fade_end_str})\\,(t-{t0_str})/{fade_s}\\,1))"
+        )
+        shaping = ":text_shaping=1" if olang == "he" else ""
+        if use_dual:
+            fs_rem, fs_prod = _overlay_product_remainder_fontsizes(fs)
+            vf = _build_dual_drawtext_vf(
+                font_e,
+                tf_he_e,
+                tf_lat_e,
+                fs_rem,
+                fs_prod,
+                alpha_expr,
+                t0_str,
+                remainder_text_shaping=_has_hebrew_letter(he_s),
+                product_text_shaping=_has_hebrew_letter(lat_s),
+            )
+        else:
+            dt = (
+                f"fontfile='{font_e}':textfile='{tf_e}':fontsize={fs}:fontcolor=white{shaping}:"
+                f"alpha='{alpha_expr}':enable='gte(t\\,{t0_str})'"
+            )
+            vf = (
+                f"drawtext={dt}:x=(w-text_w)/2+1:y=(h-text_h)/2,"
+                f"drawtext={dt}:x=(w-text_w)/2:y=(h-text_h)/2+1,"
+                f"drawtext={dt}:shadowcolor=black@0.5:shadowx=2:shadowy=2:"
+                f"x=(w-text_w)/2:y=(h-text_h)/2"
+            )
+
+        cmd: list[str] = [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(source_video_path),
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
+        ]
+        if has_audio:
+            cmd.extend(["-c:a", "copy"])
+        else:
+            cmd.append("-an")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd.extend(["-movflags", "+faststart", str(output_path)])
+
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=_FFMPEG_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise VideoHeadlineRenderError("ffmpeg_timeout", stage="headline_overlay") from exc
+
+        if proc.returncode != 0:
+            stderr = (proc.stderr or "")[:512]
+            raise VideoHeadlineRenderError(
+                "ffmpeg_failed",
+                stage="headline_overlay",
+                return_code=proc.returncode,
+                stderr_tail=stderr,
+            )
+
+        if not output_path.is_file():
+            raise VideoHeadlineRenderError("missing_output", stage="headline_overlay")
+
+        measured = _ffprobe_duration_seconds(output_path, _FFPROBE_TIMEOUT)
+        return LocalHeadlineOverlayResult(output_path=output_path, measured_duration_seconds=measured)
+    finally:
+        try:
+            shutil.rmtree(tmp, ignore_errors=True)
+        except OSError:
+            pass
 
 
 def postprocess_video_headline(

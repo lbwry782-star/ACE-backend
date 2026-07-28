@@ -3,6 +3,7 @@ Builder2 media finalization correction and recovery tests.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
@@ -22,12 +23,17 @@ from engine.builder2_media_finalization_contract import (
     backfill_legacy_headline_reference,
     validate_builder2_media_completion_contract,
 )
+from engine.builder2_media_finalization_download import SafeDownloadDiagnostics, safe_download_to_path
+from engine.builder2_media_finalization_source import (
+    SOURCE_RAW_RUNWAY_LOCAL_HEADLINE,
+    FinalizationSourceDecision,
+    resolve_finalization_source_decision,
+)
 from engine.builder2_media_finalization_failure_inspect import inspect_builder2_media_finalization_failure
 from engine.builder2_media_finalization_resume import run_finalization_preflight, run_one_media_finalization_resume
 from engine.builder2_media_pipeline import execute_builder2_media_pipeline
 from engine.builder2_media_resume import run_one_media_resume
 from engine.builder2_tournament_contracts import WINNER_PLAN_SCHEMA_VERSION
-from engine.builder2_winner_preservation_contract import SERVER_OWNED_WINNER_SOURCE_KEY
 from tests.test_builder2_media_finalization_failure_inspect import (
     CLOSURE_URL,
     HEADLINE_URL,
@@ -334,17 +340,13 @@ class TestLegacyHeadlineBackfill(unittest.TestCase):
 
 class TestFinalizationPreflight(unittest.TestCase):
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
-    @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
-    @patch("engine.builder2_media_finalization_resume._download_to_path")
-    @patch("engine.builder2_media_finalization_resume._probe_duration", return_value=10.042)
-    def test_preflight_no_redis_writes(
-        self,
-        _probe: Any,
-        _download: Any,
-        render: Any,
-        build_config: Any,
-    ) -> None:
-        render.return_value = _valid_closure_result()
+    @patch("engine.builder2_media_finalization_resume._execute_finalization_render_pipeline")
+    def test_preflight_no_redis_writes(self, pipeline: Any, build_config: Any) -> None:
+        def _ok(**kwargs: Any) -> None:
+            kwargs["report"]["ok"] = True
+            kwargs["report"]["readyForFinalizationRecovery"] = True
+
+        pipeline.side_effect = _ok
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
         state = _false_completion_state(with_valid_closure=False)
         report = run_finalization_preflight(job_id=JOB_ID, state=state, job_video_url=HEADLINE_URL)
@@ -489,7 +491,7 @@ class TestFinalizationRecovery(unittest.TestCase):
 
     @patch("engine.builder2_media_finalization_resume.video_job_mark_done")
     @patch("engine.builder2_media_finalization_resume.save_tournament_state")
-    @patch("engine.builder2_media_finalization_resume.render_advertising_closure_for_state")
+    @patch("engine.builder2_media_finalization_resume._execute_finalization_render_pipeline")
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume.video_job_get")
     @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
@@ -506,7 +508,7 @@ class TestFinalizationRecovery(unittest.TestCase):
         job_get_raw: Any,
         job_get: Any,
         build_config: Any,
-        render_closure: Any,
+        pipeline: Any,
         save_state: Any,
         mark_done: Any,
     ) -> None:
@@ -516,12 +518,13 @@ class TestFinalizationRecovery(unittest.TestCase):
         job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
 
-        def _render(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
+        def _render(**kwargs: Any) -> ClosureRenderResult:
             st = kwargs["state"]
             media = st.setdefault("mediaResume", {})
             media.update(
                 {
-                    "headlineArtifactUrl": HEADLINE_URL,
+                    "headlineReconstructionCompleted": True,
+                    "headlineArtifactSource": "deterministic_local_reconstruction_from_raw_runway",
                     "finalVideoWithClosureUrl": CLOSURE_URL,
                     "finalPublicUrl": CLOSURE_URL,
                     "finalVideoPath": CLOSURE_URL,
@@ -530,18 +533,20 @@ class TestFinalizationRecovery(unittest.TestCase):
                     "advertisingClosureStatus": "completed",
                 }
             )
-            from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+            kwargs["report"]["headlineFfmpegCalls"] = 1
+            kwargs["report"]["closureFfmpegCalls"] = 1
+            kwargs["report"]["totalFfmpegCalls"] = 2
+            kwargs["report"]["ffmpegCalls"] = 2
+            return _valid_closure_result()
 
-            return st, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
-
-        render_closure.side_effect = _render
+        pipeline.side_effect = _render
         report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
         self.assertTrue(report["ok"])
         self.assertEqual(report["openAICalls"], 0)
         self.assertEqual(report["imageCalls"], 0)
         self.assertEqual(report["runwaySubmissionCalls"], 0)
         self.assertEqual(report["runwayPollingCalls"], 0)
-        self.assertEqual(report["ffmpegCalls"], 1)
+        self.assertEqual(report["totalFfmpegCalls"], 2)
         self.assertEqual(report["publicationCalls"], 1)
         mark_done.assert_called_once()
         save_state.assert_called()
@@ -589,7 +594,7 @@ class TestFinalizationRecovery(unittest.TestCase):
         self.assertEqual(report["failureStage"], "lease")
 
     @patch("engine.builder2_media_finalization_resume.save_tournament_state")
-    @patch("engine.builder2_media_finalization_resume.render_advertising_closure_for_state")
+    @patch("engine.builder2_media_finalization_resume._execute_finalization_render_pipeline")
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume.video_job_get")
     @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
@@ -608,7 +613,7 @@ class TestFinalizationRecovery(unittest.TestCase):
         job_get_raw: Any,
         job_get: Any,
         build_config: Any,
-        render_closure: Any,
+        pipeline: Any,
         save_state: Any,
     ) -> None:
         state = deepcopy(_false_completion_state(with_valid_closure=False))
@@ -616,13 +621,12 @@ class TestFinalizationRecovery(unittest.TestCase):
         job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
         job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
-        render_closure.side_effect = Builder2ClosureRenderError(
-            "builder2_closure_ffmpeg_failed",
-            stage="concatenation",
-            return_code=1,
-            stderr_tail="safe stderr",
-            command_category="ffmpeg_concat",
-        )
+
+        def _fail(**kwargs: Any) -> None:
+            kwargs["report"]["failureStage"] = "concatenation"
+            kwargs["report"]["failureReason"] = "builder2_closure_ffmpeg_failed"
+
+        pipeline.side_effect = _fail
         report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
         self.assertFalse(report["ok"])
         self.assertEqual(report["failureStage"], "concatenation")
@@ -635,23 +639,154 @@ class TestFinalizationRecovery(unittest.TestCase):
 class TestPreflightSynthetic(unittest.TestCase):
     @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
     @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
-    @patch("engine.builder2_media_finalization_resume._download_to_path")
-    @patch("engine.builder2_media_finalization_resume._probe_duration", side_effect=[10.042, 12.01])
+    @patch("engine.builder2_media_finalization_resume.render_builder2_accepted_headline_overlay")
+    @patch("engine.builder2_media_finalization_resume.resolve_finalization_source_decision")
     def test_preflight_validates_10s_headline_to_12s_final(
         self,
-        _probe: Any,
-        _download: Any,
-        render: Any,
+        source_decision: Any,
+        headline_render: Any,
+        closure_render: Any,
         build_config: Any,
     ) -> None:
-        render.return_value = _valid_closure_result(measured_duration_seconds=12.01)
+        raw_path = Path(tempfile.gettempdir()) / "raw_preflight.mp4"
+        headline_path = Path(tempfile.gettempdir()) / "headline_preflight.mp4"
+        source_decision.return_value = FinalizationSourceDecision(
+            source_kind=SOURCE_RAW_RUNWAY_LOCAL_HEADLINE,
+            closure_input_path=raw_path,
+            local_headline_render_required=True,
+            legacy_headline_download_failed=True,
+            legacy_headline_diagnostics=SafeDownloadDiagnostics(
+                request_attempted=True,
+                http_status_code=404,
+                download_failure_class="HTTPError",
+                download_failure_category="not_found",
+                legacy_headline_artifact_unavailable=True,
+            ),
+            raw_runway_diagnostics=SafeDownloadDiagnostics(request_attempted=True, download_accepted=True),
+        )
+        headline_render.return_value = MagicMock(
+            output_path=headline_path,
+            measured_duration_seconds=10.042,
+        )
+        closure_render.return_value = _valid_closure_result(measured_duration_seconds=12.01)
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
         state = _false_completion_state(with_valid_closure=False)
-        report = run_finalization_preflight(job_id=JOB_ID, state=state, job_video_url=HEADLINE_URL)
+        with patch("engine.builder2_media_finalization_resume._probe_duration", side_effect=[10.042, 10.042, 12.01]):
+            report = run_finalization_preflight(job_id=JOB_ID, state=state, job_video_url=HEADLINE_URL)
         self.assertTrue(report["ok"])
+        self.assertEqual(report["legacyHeadlineDownloadFailureCategory"], "not_found")
+        self.assertTrue(report["rawRunwayFallbackAccepted"])
+        self.assertTrue(report["localHeadlineRenderAccepted"])
         self.assertAlmostEqual(report["measuredHeadlineDurationSeconds"], 10.042, places=3)
         self.assertAlmostEqual(report["measuredFinalDurationSeconds"], 12.01, places=2)
         self.assertTrue(report["finalDurationAccepted"])
+        self.assertEqual(report["headlineFfmpegCalls"], 1)
+        self.assertEqual(report["closureFfmpegCalls"], 1)
+
+
+class TestHeadlineDownloadFallback(unittest.TestCase):
+    @patch("engine.builder2_media_finalization_download.requests.get")
+    def test_404_classified_as_not_found(self, get_req: Any) -> None:
+        response = MagicMock(status_code=404, history=[], url=HEADLINE_URL, headers={"Content-Type": "application/json"})
+        response.raise_for_status.side_effect = __import__("requests").HTTPError(response=response)
+        get_req.return_value = response
+        path = Path(tempfile.gettempdir()) / "headline_404_test.mp4"
+        diag = safe_download_to_path(HEADLINE_URL, path, validate_video=False)
+        self.assertEqual(diag.download_failure_category, "not_found")
+        self.assertTrue(diag.legacy_headline_artifact_unavailable)
+        self.assertNotIn("abc123", json.dumps(diag.to_report_dict()))
+
+    @patch("engine.builder2_media_finalization_download.requests.get")
+    def test_410_classified_as_expired_or_gone(self, get_req: Any) -> None:
+        response = MagicMock(status_code=410, history=[], url=HEADLINE_URL, headers={})
+        response.raise_for_status.side_effect = __import__("requests").HTTPError(response=response)
+        get_req.return_value = response
+        path = Path(tempfile.gettempdir()) / "headline_410_test.mp4"
+        diag = safe_download_to_path(HEADLINE_URL, path, validate_video=False)
+        self.assertEqual(diag.download_failure_category, "expired_or_gone")
+
+    @patch("engine.builder2_media_finalization_download.requests.get")
+    def test_403_classified_as_forbidden(self, get_req: Any) -> None:
+        response = MagicMock(status_code=403, history=[], url=HEADLINE_URL, headers={})
+        response.raise_for_status.side_effect = __import__("requests").HTTPError(response=response)
+        get_req.return_value = response
+        path = Path(tempfile.gettempdir()) / "headline_403_test.mp4"
+        diag = safe_download_to_path(HEADLINE_URL, path, validate_video=False)
+        self.assertEqual(diag.download_failure_category, "forbidden")
+
+    @patch("engine.builder2_media_finalization_source.safe_download_to_path")
+    def test_source_selection_falls_back_to_raw_runway(self, download: Any) -> None:
+        state = _false_completion_state(with_valid_closure=False)
+        plan = state["winnerDevelopmentPlan"]
+        work = Path(tempfile.mkdtemp())
+
+        def _side_effect(url: str, path: Path, **kwargs: Any) -> SafeDownloadDiagnostics:
+            if HEADLINE_URL in url:
+                return SafeDownloadDiagnostics(
+                    request_attempted=True,
+                    http_status_code=404,
+                    download_failure_category="not_found",
+                    legacy_headline_artifact_unavailable=True,
+                )
+            return SafeDownloadDiagnostics(request_attempted=True, download_accepted=True)
+
+        download.side_effect = _side_effect
+        decision = resolve_finalization_source_decision(
+            state=state,
+            plan=plan,
+            job_video_url=HEADLINE_URL,
+            work_dir=work,
+        )
+        self.assertEqual(decision.source_kind, SOURCE_RAW_RUNWAY_LOCAL_HEADLINE)
+        self.assertTrue(decision.local_headline_render_required)
+        self.assertTrue(decision.legacy_headline_download_failed)
+
+    @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
+    @patch("engine.builder2_media_finalization_resume.render_builder2_accepted_headline_overlay")
+    @patch("engine.builder2_media_finalization_resume.resolve_finalization_source_decision")
+    def test_preflight_succeeds_when_legacy_headline_download_fails(
+        self,
+        source_decision: Any,
+        headline_render: Any,
+        closure_render: Any,
+        build_config: Any,
+    ) -> None:
+        raw_path = Path(tempfile.gettempdir()) / "raw_fallback.mp4"
+        headline_path = Path(tempfile.gettempdir()) / "headline_fallback.mp4"
+        source_decision.return_value = FinalizationSourceDecision(
+            source_kind=SOURCE_RAW_RUNWAY_LOCAL_HEADLINE,
+            closure_input_path=raw_path,
+            local_headline_render_required=True,
+            legacy_headline_download_failed=True,
+            legacy_headline_diagnostics=SafeDownloadDiagnostics(
+                request_attempted=True,
+                http_status_code=404,
+                download_failure_category="not_found",
+                legacy_headline_artifact_unavailable=True,
+            ),
+            raw_runway_diagnostics=SafeDownloadDiagnostics(request_attempted=True, download_accepted=True),
+        )
+        headline_render.return_value = MagicMock(output_path=headline_path, measured_duration_seconds=10.042)
+        closure_render.return_value = _valid_closure_result(measured_duration_seconds=12.01)
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
+        state = _false_completion_state(with_valid_closure=False)
+        with patch("engine.builder2_media_finalization_resume._probe_duration", side_effect=[10.042, 10.042, 12.01]):
+            report = run_finalization_preflight(job_id=JOB_ID, state=state, job_video_url=HEADLINE_URL)
+        self.assertTrue(report["ok"])
+        self.assertTrue(report["readyForFinalizationRecovery"])
+        self.assertEqual(report["redisMutations"], 0)
+        self.assertEqual(report["publicationCalls"], 0)
+
+    def test_completion_gate_rejects_inaccessible_headline_only_url(self) -> None:
+        state = _false_completion_state(with_valid_closure=False)
+        ok, _, failures = validate_builder2_media_completion_contract(
+            state=state,
+            plan=state["winnerDevelopmentPlan"],
+            job_video_url=HEADLINE_URL,
+        )
+        self.assertFalse(ok)
+        self.assertIn("final_url_is_headline_only", failures)
 
 
 if __name__ == "__main__":

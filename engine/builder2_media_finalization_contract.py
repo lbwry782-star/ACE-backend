@@ -241,7 +241,7 @@ def validate_builder2_media_completion_contract(
         failures.append("final_url_is_headline_only")
     if require_job_video_url_match and job_video_url and closure_url and not _compare_urls(job_video_url, closure_url):
         failures.append("job_video_url_not_closure_inclusive")
-    if headline_required and not headline_url:
+    if headline_required and not headline_url and not media.get("headlineReconstructionCompleted"):
         failures.append("headline_artifact_missing")
     measured = _duration_value(media, "actualFinalVideoDurationSeconds")
     if measured is None:

@@ -17,9 +17,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import requests
-
-from engine.builder2_advertising_closure_pipeline import render_advertising_closure_for_state
 from engine.builder2_closure_render import (
     Builder2ClosureRenderError,
     classify_url_route_family,
@@ -30,23 +27,28 @@ from engine.builder2_headline_decision_contract import (
     get_normalized_headline_decision,
     headline_decision_requires_headline,
 )
+from engine.builder2_local_headline_render import (
+    VideoHeadlineRenderError,
+    render_builder2_accepted_headline_overlay,
+)
 from engine.builder2_media_finalization_contract import (
     backfill_legacy_headline_reference,
-    closure_inclusive_artifact_valid,
     finalization_recovery_eligible,
-    resolve_legacy_headline_artifact_url,
-    resolve_raw_runway_artifact_url,
     validate_builder2_media_completion_contract,
 )
+from engine.builder2_media_finalization_download import SafeDownloadDiagnostics
 from engine.builder2_media_finalization_guard import MediaFinalizationIsolationGuard
+from engine.builder2_media_finalization_source import (
+    SOURCE_RAW_RUNWAY_LOCAL_HEADLINE,
+    FinalizationSourceDecision,
+    resolve_finalization_source_decision,
+)
 from engine.builder2_media_resume_config import build_media_resume_configuration
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_store import _read_raw, save_tournament_state
 from engine.video_jobs_redis import redis_configured, video_job_get, video_job_get_raw, video_job_mark_done
 
 logger = logging.getLogger(__name__)
-
-_HTTP_DOWNLOAD_TIMEOUT = 180.0
 
 
 def _env(name: str) -> str:
@@ -67,12 +69,25 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "legacyHeadlineArtifactIdentified": False,
         "legacyHeadlineArtifactRouteFamily": None,
         "headlineArtifactDownloadAccepted": False,
+        "legacyHeadlineDownloadAttempted": False,
+        "legacyHeadlineDownloadAccepted": False,
+        "legacyHeadlineHttpStatusCode": None,
+        "legacyHeadlineDownloadFailureCategory": None,
+        "legacyHeadlineArtifactUnavailable": False,
+        "rawRunwayFallbackAttempted": False,
+        "rawRunwayFallbackAccepted": False,
+        "rawRunwayDownloadAccepted": False,
+        "localHeadlineRenderRequired": False,
+        "localHeadlineRenderAttempted": False,
+        "localHeadlineRenderAccepted": False,
+        "measuredRawRunwayDurationSeconds": None,
         "measuredHeadlineDurationSeconds": None,
         "closureRenderAttempted": False,
         "closureRenderAccepted": False,
         "measuredFinalDurationSeconds": None,
         "finalDurationAccepted": False,
         "exactProductAndSloganReused": False,
+        "selectedFinalizationSourceKind": None,
         "readyForFinalizationRecovery": False,
         "failureStage": None,
         "failureReason": None,
@@ -82,7 +97,11 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "imageCalls": 0,
         "runwaySubmissionCalls": 0,
         "runwayPollingCalls": 0,
+        "headlineFfmpegCalls": 0,
+        "closureFfmpegCalls": 0,
+        "ffprobeCalls": 0,
         "ffmpegCalls": 0,
+        "totalFfmpegCalls": 0,
         "publicationCalls": 0,
         "redisMutations": 0,
         "finalizationReused": False,
@@ -91,37 +110,181 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
     }
 
 
-def _download_to_path(url: str, path: Path) -> None:
-    response = requests.get(url, timeout=_HTTP_DOWNLOAD_TIMEOUT, stream=True)
-    response.raise_for_status()
-    with open(path, "wb") as handle:
-        for chunk in response.iter_content(chunk_size=1024 * 256):
-            if chunk:
-                handle.write(chunk)
-
-
 def _probe_duration(path: Path) -> float:
     from engine.builder2_closure_render import _ffprobe_duration_seconds, _FFPROBE_TIMEOUT
 
     return _ffprobe_duration_seconds(path, _FFPROBE_TIMEOUT)
 
 
-def _closure_source_for_recovery(
+def _apply_download_diagnostics(report: Dict[str, Any], diagnostics: Optional[SafeDownloadDiagnostics]) -> None:
+    if diagnostics is None:
+        return
+    diag = diagnostics.to_report_dict()
+    report["legacyHeadlineDownloadAttempted"] = diag.get("requestAttempted", False)
+    report["legacyHeadlineDownloadAccepted"] = diag.get("downloadAccepted", False)
+    report["legacyHeadlineHttpStatusCode"] = diag.get("httpStatusCode")
+    report["legacyHeadlineDownloadFailureCategory"] = diag.get("downloadFailureCategory")
+    report["legacyHeadlineArtifactUnavailable"] = diag.get("legacyHeadlineArtifactUnavailable", False)
+    report["requestAttempted"] = diag.get("requestAttempted")
+    report["requestMethod"] = diag.get("requestMethod")
+    report["originalRouteFamily"] = diag.get("originalRouteFamily")
+    report["redirectCount"] = diag.get("redirectCount")
+    report["finalRouteFamily"] = diag.get("finalRouteFamily")
+    report["httpStatusCode"] = diag.get("httpStatusCode")
+    report["responseContentType"] = diag.get("responseContentType")
+    report["responseContentLength"] = diag.get("responseContentLength")
+    report["downloadFailureClass"] = diag.get("downloadFailureClass")
+    report["downloadFailureCategory"] = diag.get("downloadFailureCategory")
+
+
+def _apply_source_decision(report: Dict[str, Any], decision: FinalizationSourceDecision) -> None:
+    report.update(decision.to_report_dict())
+    report["headlineArtifactDownloadAccepted"] = bool(
+        decision.source_kind in {"persisted_headline_artifact", "legacy_headline_artifact"}
+        and decision.closure_input_path is not None
+    )
+    if decision.legacy_headline_diagnostics is not None:
+        _apply_download_diagnostics(report, decision.legacy_headline_diagnostics)
+
+
+def _sync_ffmpeg_counters(report: Dict[str, Any]) -> None:
+    report["totalFfmpegCalls"] = int(report.get("headlineFfmpegCalls") or 0) + int(
+        report.get("closureFfmpegCalls") or 0
+    )
+    report["ffmpegCalls"] = report["totalFfmpegCalls"]
+
+
+def _execute_finalization_render_pipeline(
     *,
+    job_id: str,
     state: Dict[str, Any],
     plan: Dict[str, Any],
     job_video_url: str,
-) -> tuple[str, str]:
-    headline_required = headline_decision_requires_headline(get_normalized_headline_decision(plan))
+    report: Dict[str, Any],
+    preflight: bool,
+    public_base_url: str,
+) -> Optional[Dict[str, Any]]:
+    closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
+    report["exactProductAndSloganReused"] = bool(
+        str(closure.get("productNameText") or "").strip() and str(closure.get("sloganText") or "").strip()
+    )
+
     headline_url = backfill_legacy_headline_reference(state, job_video_url=job_video_url)
-    if headline_required:
-        if not headline_url or classify_url_route_family(headline_url) != "api/video-headline":
-            raise Builder2TournamentError("builder2_media_finalization_headline_artifact_unrecognized")
-        return headline_url, headline_url
-    raw_url = resolve_raw_runway_artifact_url(state)
-    if not raw_url:
-        raise Builder2TournamentError("builder2_media_finalization_raw_runway_missing")
-    return raw_url, ""
+    report["legacyHeadlineArtifactIdentified"] = bool(headline_url)
+    report["legacyHeadlineArtifactRouteFamily"] = classify_url_route_family(headline_url) if headline_url else None
+
+    tmp = Path(tempfile.mkdtemp(prefix="ace_finalization_"))
+    try:
+        decision = resolve_finalization_source_decision(
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
+            work_dir=tmp,
+            download_headline=True,
+        )
+        _apply_source_decision(report, decision)
+        if decision.failure_reason:
+            report["failureStage"] = decision.failure_stage or "source_selection"
+            report["failureReason"] = decision.failure_reason
+            return None
+        if decision.closure_input_path is None:
+            report["failureStage"] = "source_selection"
+            report["failureReason"] = "builder2_media_finalization_closure_input_missing"
+            return None
+
+        closure_input = decision.closure_input_path
+        if decision.raw_runway_diagnostics and decision.raw_runway_diagnostics.download_accepted:
+            report["measuredRawRunwayDurationSeconds"] = _probe_duration(closure_input)
+            report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
+
+        if decision.local_headline_render_required:
+            headline_out = tmp / "headline_local.mp4"
+            report["localHeadlineRenderAttempted"] = True
+            try:
+                headline_result = render_builder2_accepted_headline_overlay(
+                    source_video_path=closure_input,
+                    output_path=headline_out,
+                    plan=plan,
+                )
+            except VideoHeadlineRenderError as exc:
+                report["failureStage"] = exc.stage
+                report["failureReason"] = str(exc.args[0] if exc.args else "builder2_local_headline_render_failed")
+                report["safeFfmpegReturnCode"] = exc.return_code
+                report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
+                report["headlineFfmpegCalls"] = 1
+                _sync_ffmpeg_counters(report)
+                return None
+            report["localHeadlineRenderAccepted"] = True
+            report["headlineFfmpegCalls"] = 1
+            report["measuredHeadlineDurationSeconds"] = headline_result.measured_duration_seconds
+            report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
+            closure_input = headline_result.output_path
+        elif decision.source_kind in {"persisted_headline_artifact", "legacy_headline_artifact"}:
+            report["measuredHeadlineDurationSeconds"] = _probe_duration(closure_input)
+            report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
+
+        output_path = tmp / "closure_out.mp4"
+        source_for_closure = str(closure_input)
+        report["closureRenderAttempted"] = True
+        try:
+            render_result = render_builder2_advertising_closure_endcard(
+                source_for_closure,
+                public_base_url,
+                product_name=str(closure.get("productNameText") or ""),
+                slogan=str(closure.get("sloganText") or ""),
+                language=str(closure.get("language") or "en"),
+                duration_seconds=float(closure.get("durationSeconds") or 2.0),
+                job_id=job_id,
+                publish=not preflight,
+                output_path=output_path if preflight else None,
+            )
+        except Builder2ClosureRenderError as exc:
+            report["failureStage"] = exc.stage
+            report["failureReason"] = str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")
+            report["safeFfmpegReturnCode"] = exc.return_code
+            report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
+            report["closureFfmpegCalls"] = 1
+            _sync_ffmpeg_counters(report)
+            return None
+
+        report["closureRenderAccepted"] = True
+        report["closureFfmpegCalls"] = 1
+        report["measuredFinalDurationSeconds"] = render_result.measured_duration_seconds
+        report["finalDurationAccepted"] = True
+        report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
+        _sync_ffmpeg_counters(report)
+
+        if preflight:
+            report["readyForFinalizationRecovery"] = True
+            report["ok"] = True
+            return None
+
+        media = state.setdefault("mediaResume", {})
+        if decision.local_headline_render_required:
+            media["headlineArtifactSource"] = "deterministic_local_reconstruction_from_raw_runway"
+            media["headlineReconstructionCompleted"] = True
+            media["headlineReconstructionDurationSeconds"] = report["measuredHeadlineDurationSeconds"]
+            media["headlinePostprocessStatus"] = "reconstructed"
+            media.pop("headlineArtifactUrl", None)
+        elif decision.source_kind in {"persisted_headline_artifact", "legacy_headline_artifact"}:
+            media["headlineArtifactUrl"] = headline_url or decision.legacy_headline_url or decision.persisted_headline_url
+            media["headlinePostprocessStatus"] = "completed"
+
+        media["finalVideoWithClosureUrl"] = render_result.public_url
+        media["finalPublicUrl"] = render_result.public_url
+        media["finalVideoPath"] = render_result.public_url
+        media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
+        media["advertisingClosureRendered"] = True
+        media["advertisingClosureStatus"] = "completed"
+        state["advertisingClosureStatus"] = "completed"
+        return render_result
+    finally:
+        try:
+            for path in tmp.iterdir():
+                path.unlink(missing_ok=True)
+            tmp.rmdir()
+        except OSError:
+            pass
 
 
 def run_finalization_preflight(
@@ -151,20 +314,6 @@ def run_finalization_preflight(
         report["failureStage"] = "eligibility"
         return report
 
-    closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
-    try:
-        source_url, headline_url = _closure_source_for_recovery(state=state, plan=plan, job_video_url=job_video_url)
-    except Builder2TournamentError as exc:
-        report["failureReason"] = str(exc.args[0] if exc.args else "builder2_media_finalization_source_missing")
-        report["failureStage"] = "legacy_headline"
-        return report
-
-    report["legacyHeadlineArtifactIdentified"] = bool(headline_url)
-    report["legacyHeadlineArtifactRouteFamily"] = classify_url_route_family(headline_url) if headline_url else None
-    report["exactProductAndSloganReused"] = bool(
-        str(closure.get("productNameText") or "").strip() and str(closure.get("sloganText") or "").strip()
-    )
-
     job_data = video_job_get(job_id) if redis_configured() else None
     media_config = build_media_resume_configuration(
         job_id=job_id,
@@ -173,51 +322,15 @@ def run_finalization_preflight(
         start_image_required=False,
         ffmpeg_required=True,
     )
-
-    tmp = Path(tempfile.mkdtemp(prefix="ace_finalization_preflight_"))
-    try:
-        source_path = tmp / "source.mp4"
-        _download_to_path(source_url, source_path)
-        report["headlineArtifactDownloadAccepted"] = True
-        if headline_url:
-            report["measuredHeadlineDurationSeconds"] = _probe_duration(source_path)
-
-        output_path = tmp / "closure_out.mp4"
-        render_result = render_builder2_advertising_closure_endcard(
-            source_url,
-            media_config.publicBaseUrl,
-            product_name=str(closure.get("productNameText") or ""),
-            slogan=str(closure.get("sloganText") or ""),
-            language=str(closure.get("language") or "en"),
-            duration_seconds=float(closure.get("durationSeconds") or 2.0),
-            job_id=job_id,
-            publish=False,
-            output_path=output_path,
-        )
-        report["closureRenderAttempted"] = True
-        report["closureRenderAccepted"] = True
-        report["measuredFinalDurationSeconds"] = render_result.measured_duration_seconds
-        report["finalDurationAccepted"] = True
-        report["ffmpegCalls"] = 1
-        report["readyForFinalizationRecovery"] = True
-        report["ok"] = True
-    except Builder2ClosureRenderError as exc:
-        report["closureRenderAttempted"] = True
-        report["failureStage"] = exc.stage
-        report["failureReason"] = str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")
-        report["safeFfmpegReturnCode"] = exc.return_code
-        report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
-        report["ffmpegCalls"] = 1
-    except Exception as exc:
-        report["failureStage"] = "preflight"
-        report["failureReason"] = type(exc).__name__
-    finally:
-        try:
-            for path in tmp.iterdir():
-                path.unlink(missing_ok=True)
-            tmp.rmdir()
-        except OSError:
-            pass
+    _execute_finalization_render_pipeline(
+        job_id=job_id,
+        state=state,
+        plan=plan,
+        job_video_url=job_video_url,
+        report=report,
+        preflight=True,
+        public_base_url=media_config.publicBaseUrl,
+    )
     return report
 
 
@@ -281,13 +394,6 @@ def run_one_media_finalization_resume(
                 state = deepcopy(refreshed)
                 plan = state.get("winnerDevelopmentPlan") if isinstance(state.get("winnerDevelopmentPlan"), dict) else {}
 
-        headline_url = backfill_legacy_headline_reference(state, job_video_url=job_video_url)
-        report["legacyHeadlineArtifactIdentified"] = bool(headline_url)
-        report["legacyHeadlineArtifactRouteFamily"] = classify_url_route_family(headline_url) if headline_url else None
-
-        closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
-        source_url, _ = _closure_source_for_recovery(state=state, plan=plan, job_video_url=job_video_url)
-
         job_data = video_job_get(job_id)
         media_config = build_media_resume_configuration(
             job_id=job_id,
@@ -300,21 +406,44 @@ def run_one_media_finalization_resume(
         MediaFinalizationIsolationGuard.enable_closure()
         MediaFinalizationIsolationGuard.enable_publication()
         MediaFinalizationIsolationGuard.assert_safe_before_closure()
-        state, counters = render_advertising_closure_for_state(
+
+        render_result = _execute_finalization_render_pipeline(
             job_id=job_id,
             state=state,
             plan=plan,
-            closure=closure,
+            job_video_url=job_video_url,
+            report=report,
+            preflight=False,
             public_base_url=media_config.publicBaseUrl,
-            source_video_url=source_url,
-            render_endcard=render_builder2_advertising_closure_endcard,
         )
-        report["ffmpegCalls"] = counters.closure_ffmpeg_calls
+        if not report.get("ok") and render_result is None:
+            if report.get("failureStage") in {"headline_overlay", "duration_probe", "input_validation"}:
+                media = state.setdefault("mediaResume", {})
+                if isinstance(media, dict):
+                    media["mediaResumeStatus"] = "finalization_failed"
+                    media["headlinePostprocessStatus"] = "failed"
+                    state["status"] = "media_finalization_incomplete"
+                    state["mediaContinuationRequired"] = True
+                    save_tournament_state(job_id, state)
+                    report["redisMutations"] = 1
+            elif report.get("failureStage") not in {None, "lease", "eligibility", "load", "configuration"}:
+                media = state.setdefault("mediaResume", {})
+                if isinstance(media, dict):
+                    media["mediaResumeStatus"] = "finalization_failed"
+                    media["advertisingClosureStatus"] = "failed"
+                    state["status"] = "media_finalization_incomplete"
+                    state["mediaContinuationRequired"] = True
+                    save_tournament_state(job_id, state)
+                    report["redisMutations"] = 1
+            return report
+
+        if render_result is None:
+            return report
+
         report["publicationCalls"] = 1
         MediaFinalizationIsolationGuard.record_closure_ffmpeg()
         MediaFinalizationIsolationGuard.record_publication()
 
-        final_url = str((state.get("mediaResume") or {}).get("finalVideoWithClosureUrl") or "")
         contract_ok, contract_failure, _ = validate_builder2_media_completion_contract(
             state=state,
             plan=plan,
@@ -337,29 +466,9 @@ def run_one_media_finalization_resume(
         overlay_headline = "" if not headline_decision_requires_headline(get_normalized_headline_decision(plan)) else str(
             plan.get("headlineText") or ""
         )
-        video_job_mark_done(job_id, final_url, marketing_text, overlay_headline=overlay_headline)
+        video_job_mark_done(job_id, render_result.public_url, marketing_text, overlay_headline=overlay_headline)
         report["jobCompleted"] = True
         report["ok"] = True
-    except Builder2ClosureRenderError as exc:
-        report["failureStage"] = exc.stage
-        report["failureReason"] = str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")
-        report["safeFfmpegReturnCode"] = exc.return_code
-        report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
-        media = state.setdefault("mediaResume", {})
-        if isinstance(media, dict):
-            media["mediaResumeStatus"] = "finalization_failed"
-            media["advertisingClosureStatus"] = "failed"
-            media["advertisingClosureFailure"] = {
-                "stage": exc.stage,
-                "reason": report["failureReason"],
-                "returnCode": exc.return_code,
-                "stderrTail": exc.stderr_tail,
-                "commandCategory": exc.command_category,
-            }
-            state["status"] = "media_finalization_incomplete"
-            state["mediaContinuationRequired"] = True
-            save_tournament_state(job_id, state)
-            report["redisMutations"] = 1
     except Builder2TournamentError as exc:
         report["failureReason"] = str(exc.args[0] if exc.args else "builder2_media_finalization_failed")
         report["failureStage"] = report.get("failureStage") or "finalization"
@@ -386,12 +495,35 @@ def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
         "legacyHeadlineArtifactIdentified",
         "legacyHeadlineArtifactRouteFamily",
         "headlineArtifactDownloadAccepted",
+        "legacyHeadlineDownloadAttempted",
+        "legacyHeadlineDownloadAccepted",
+        "legacyHeadlineHttpStatusCode",
+        "legacyHeadlineDownloadFailureCategory",
+        "legacyHeadlineArtifactUnavailable",
+        "requestAttempted",
+        "requestMethod",
+        "originalRouteFamily",
+        "redirectCount",
+        "finalRouteFamily",
+        "httpStatusCode",
+        "responseContentType",
+        "responseContentLength",
+        "downloadFailureClass",
+        "downloadFailureCategory",
+        "rawRunwayFallbackAttempted",
+        "rawRunwayFallbackAccepted",
+        "rawRunwayDownloadAccepted",
+        "localHeadlineRenderRequired",
+        "localHeadlineRenderAttempted",
+        "localHeadlineRenderAccepted",
+        "measuredRawRunwayDurationSeconds",
         "measuredHeadlineDurationSeconds",
         "closureRenderAttempted",
         "closureRenderAccepted",
         "measuredFinalDurationSeconds",
         "finalDurationAccepted",
         "exactProductAndSloganReused",
+        "selectedFinalizationSourceKind",
         "readyForFinalizationRecovery",
         "failureStage",
         "failureReason",
@@ -401,6 +533,10 @@ def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
         "imageCalls",
         "runwaySubmissionCalls",
         "runwayPollingCalls",
+        "headlineFfmpegCalls",
+        "closureFfmpegCalls",
+        "ffprobeCalls",
+        "totalFfmpegCalls",
         "ffmpegCalls",
         "publicationCalls",
         "redisMutations",
