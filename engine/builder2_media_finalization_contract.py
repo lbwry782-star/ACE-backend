@@ -3,6 +3,7 @@ Builder2 media finalization contract — completion gate and legacy artifact rec
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -290,12 +291,226 @@ def validate_builder2_media_completion_contract(
     return True, "", []
 
 
-def finalization_recovery_eligible(
+def _completed_final_publication_present(
+    *,
+    state: Dict[str, Any],
+    closure_url: str,
+    raw_url: str,
+    headline_url: str,
+    job_video_url: str = "",
+) -> bool:
+    return closure_inclusive_artifact_valid(
+        state=state,
+        closure_url=closure_url,
+        raw_url=raw_url,
+        headline_url=headline_url,
+        job_video_url=job_video_url,
+    )
+
+
+def _conflicting_publication_evidence(
+    *,
+    media: Dict[str, Any],
+    closure_url: str,
+    final_public: str,
+    headline_url: str,
+    raw_url: str,
+    valid_closure: bool,
+) -> bool:
+    if valid_closure:
+        return False
+    if media.get("advertisingClosureRendered") is True and _clean(media.get("advertisingClosureStatus")) == "completed":
+        return True
+    if (
+        closure_url
+        and final_public
+        and not _compare_urls(closure_url, final_public)
+        and not _compare_urls(closure_url, headline_url)
+        and not _compare_urls(closure_url, raw_url)
+        and not is_recognized_headline_route(closure_url)
+    ):
+        return True
+    measured = _duration_value(media, "actualFinalVideoDurationSeconds")
+    if measured is not None and not valid_closure and media.get("advertisingClosureRendered") is True:
+        return True
+    return False
+
+
+_UNRECOVERABLE_STATUSES = frozenset({"canceled", "cancelled", "unrecoverable", "abandoned"})
+
+
+@dataclass(frozen=True)
+class RecoverableFailedFinalizationAssessment:
+    recoverable: bool
+    reasons: List[str] = field(default_factory=list)
+    condition_results: Dict[str, bool] = field(default_factory=dict)
+    recovery_basis: str = ""
+    blocking_conditions: List[str] = field(default_factory=list)
+
+
+def assess_recoverable_failed_finalization_state(
     *,
     state: Dict[str, Any],
     plan: Dict[str, Any],
     job_video_url: str = "",
-) -> Tuple[bool, List[str]]:
+    active_finalization_lease: bool = False,
+) -> RecoverableFailedFinalizationAssessment:
+    media = _media_bucket(state)
+    headline_decision = get_normalized_headline_decision(plan)
+    headline_required = headline_decision_requires_headline(headline_decision)
+    raw_url = resolve_raw_runway_artifact_url(state)
+    headline_url = resolve_legacy_headline_artifact_url(
+        state=state,
+        job_video_url=job_video_url,
+        headline_required=headline_required,
+    )
+    closure_url = _first_url(media.get("finalVideoWithClosureUrl"))
+    final_public = _first_url(media.get("finalPublicUrl"))
+    valid_closure = closure_inclusive_artifact_valid(
+        state=state,
+        closure_url=closure_url,
+        raw_url=raw_url,
+        headline_url=headline_url,
+        job_video_url=job_video_url,
+    )
+    completed_publication = _completed_final_publication_present(
+        state=state,
+        closure_url=closure_url,
+        raw_url=raw_url,
+        headline_url=headline_url,
+        job_video_url=job_video_url,
+    )
+    closure_status = _clean(media.get("advertisingClosureStatus"))
+    tournament_status = _clean(state.get("status"))
+    intermediate_present = bool(raw_url or headline_url)
+    winner_valid = is_valid_persisted_winner_development(state)
+    closure_obj = state.get("advertisingClosure")
+    closure_present = isinstance(closure_obj, dict) and bool(_clean(closure_obj.get("sloganText")))
+    conflicting_publication = _conflicting_publication_evidence(
+        media=media,
+        closure_url=closure_url,
+        final_public=final_public,
+        headline_url=headline_url,
+        raw_url=raw_url,
+        valid_closure=valid_closure,
+    )
+
+    condition_results = {
+        "persistedStatusMediaFinalizationIncomplete": tournament_status == "media_finalization_incomplete",
+        "mediaContinuationRequired": bool(state.get("mediaContinuationRequired")),
+        "mediaResumeStatusFinalizationFailed": _clean(media.get("mediaResumeStatus")) == "finalization_failed",
+        "advertisingClosureStatusFailedOrIncomplete": closure_status in {"failed", "incomplete"}
+        or (closure_status != "completed" and not media.get("advertisingClosureRendered")),
+        "rawOrHeadlineIntermediatePresent": intermediate_present,
+        "validClosureInclusiveFinalAbsent": not valid_closure,
+        "finalPublicationCompletedAbsent": not completed_publication,
+        "acceptedWinnerStillValid": winner_valid,
+        "reasoningComplete": bool(state.get("reasoningComplete")),
+        "advertisingClosurePresent": closure_present,
+        "recoverableFailedFinalizationProven": False,
+    }
+
+    blocking: List[str] = []
+    if valid_closure:
+        blocking.append("validClosureInclusiveFinalPresent")
+    if completed_publication:
+        blocking.append("completedFinalPublicationPresent")
+    if not intermediate_present:
+        blocking.append("missingRawOrHeadlineIntermediate")
+    if not winner_valid:
+        blocking.append("acceptedWinnerInvalid")
+    if not closure_present:
+        blocking.append("advertisingClosureMissing")
+    if not state.get("reasoningComplete"):
+        blocking.append("reasoningIncomplete")
+    if conflicting_publication:
+        blocking.append("conflictingPublicationEvidence")
+    if tournament_status in _UNRECOVERABLE_STATUSES:
+        blocking.append("stateMarkedUnrecoverable")
+    if active_finalization_lease:
+        blocking.append("activeFinalizationLeasePresent")
+
+    positive = (
+        condition_results["persistedStatusMediaFinalizationIncomplete"]
+        and condition_results["mediaContinuationRequired"]
+        and condition_results["mediaResumeStatusFinalizationFailed"]
+        and condition_results["advertisingClosureStatusFailedOrIncomplete"]
+        and condition_results["validClosureInclusiveFinalAbsent"]
+        and condition_results["finalPublicationCompletedAbsent"]
+        and condition_results["rawOrHeadlineIntermediatePresent"]
+        and condition_results["acceptedWinnerStillValid"]
+        and condition_results["reasoningComplete"]
+        and condition_results["advertisingClosurePresent"]
+    )
+    recoverable = positive and not blocking
+    reasons: List[str] = []
+    if recoverable:
+        reasons.append("recoverable_failed_finalization_state")
+    else:
+        if not condition_results["persistedStatusMediaFinalizationIncomplete"]:
+            reasons.append("status_not_media_finalization_incomplete")
+        if not condition_results["mediaContinuationRequired"]:
+            reasons.append("media_continuation_not_required")
+        if not condition_results["mediaResumeStatusFinalizationFailed"]:
+            reasons.append("media_resume_status_not_finalization_failed")
+        if not condition_results["advertisingClosureStatusFailedOrIncomplete"]:
+            reasons.append("advertising_closure_status_not_failed_or_incomplete")
+        reasons.extend(blocking)
+
+    condition_results["recoverableFailedFinalizationProven"] = recoverable
+    return RecoverableFailedFinalizationAssessment(
+        recoverable=recoverable,
+        reasons=reasons,
+        condition_results=condition_results,
+        recovery_basis="failed_finalization_state" if recoverable else "",
+        blocking_conditions=blocking,
+    )
+
+
+def evaluate_finalization_recovery_eligibility(
+    *,
+    state: Dict[str, Any],
+    plan: Dict[str, Any],
+    job_video_url: str = "",
+    active_finalization_lease: bool = False,
+) -> Dict[str, Any]:
+    media = _media_bucket(state)
+    headline_decision = get_normalized_headline_decision(plan)
+    headline_required = headline_decision_requires_headline(headline_decision)
+    raw_url = resolve_raw_runway_artifact_url(state)
+    headline_url = resolve_legacy_headline_artifact_url(
+        state=state,
+        job_video_url=job_video_url,
+        headline_required=headline_required,
+    )
+    closure_url = _first_url(media.get("finalVideoWithClosureUrl"))
+    valid_closure = closure_inclusive_artifact_valid(
+        state=state,
+        closure_url=closure_url,
+        raw_url=raw_url,
+        headline_url=headline_url,
+        job_video_url=job_video_url,
+    )
+    completed_publication = _completed_final_publication_present(
+        state=state,
+        closure_url=closure_url,
+        raw_url=raw_url,
+        headline_url=headline_url,
+        job_video_url=job_video_url,
+    )
+    false_completion, false_reasons = assess_false_completion(
+        state=state,
+        plan=plan,
+        job_video_url=job_video_url,
+    )
+    failed_recovery = assess_recoverable_failed_finalization_state(
+        state=state,
+        plan=plan,
+        job_video_url=job_video_url,
+        active_finalization_lease=active_finalization_lease,
+    )
+    recovery_basis_proven = false_completion or failed_recovery.recoverable
+
     missing: List[str] = []
     if not state.get("reasoningComplete"):
         missing.append("reasoningComplete")
@@ -304,28 +519,53 @@ def finalization_recovery_eligible(
     closure = state.get("advertisingClosure")
     if not isinstance(closure, dict) or not _clean(closure.get("sloganText")):
         missing.append("advertisingClosure")
-    headline_decision = get_normalized_headline_decision(plan)
-    headline_required = headline_decision_requires_headline(headline_decision)
-    false_completion, _reasons = assess_false_completion(state=state, plan=plan, job_video_url=job_video_url)
-    if not false_completion:
-        missing.append("falseCompletionNotProven")
-    raw_url = resolve_raw_runway_artifact_url(state)
-    headline_url = resolve_legacy_headline_artifact_url(
-        state=state,
-        job_video_url=job_video_url,
-        headline_required=headline_required,
-    )
+    if not recovery_basis_proven:
+        missing.append("recoveryBasisNotProven")
     if not raw_url and not headline_url:
         missing.append("visualOrHeadlineIntermediate")
-    if closure_inclusive_artifact_valid(
-        state=state,
-        closure_url=_first_url(_media_bucket(state).get("finalVideoWithClosureUrl")),
-        raw_url=raw_url,
-        headline_url=headline_url,
-        job_video_url=job_video_url,
-    ):
+    if valid_closure:
         missing.append("validClosureAlreadyPresent")
-    return not missing, missing
+    if completed_publication and not valid_closure:
+        missing.append("completedFinalPublicationPresent")
+
+    if false_completion:
+        recovery_basis = "legacy_false_completion"
+    elif failed_recovery.recoverable:
+        recovery_basis = "failed_finalization_state"
+    else:
+        recovery_basis = None
+
+    return {
+        "eligible": not missing,
+        "missing": missing,
+        "legacyFalseCompletionConfirmed": false_completion,
+        "legacyFalseCompletionReasons": false_reasons,
+        "recoverableFailedFinalizationConfirmed": failed_recovery.recoverable,
+        "recoverableFailedFinalizationReasons": failed_recovery.reasons,
+        "recoverableFailedFinalizationConditionResults": failed_recovery.condition_results,
+        "recoverableFailedFinalizationBlockingConditions": failed_recovery.blocking_conditions,
+        "recoveryEligibilityBasis": recovery_basis,
+        "recoveryBlockedByValidFinal": valid_closure,
+        "recoveryBlockedByCompletedPublication": completed_publication,
+        "recoveryBlockedByMissingIntermediate": not bool(raw_url or headline_url),
+        "falseCompletionConfirmed": false_completion,
+    }
+
+
+def finalization_recovery_eligible(
+    *,
+    state: Dict[str, Any],
+    plan: Dict[str, Any],
+    job_video_url: str = "",
+    active_finalization_lease: bool = False,
+) -> Tuple[bool, List[str]]:
+    evaluation = evaluate_finalization_recovery_eligibility(
+        state=state,
+        plan=plan,
+        job_video_url=job_video_url,
+        active_finalization_lease=active_finalization_lease,
+    )
+    return bool(evaluation["eligible"]), list(evaluation["missing"])
 
 
 def backfill_legacy_headline_reference(state: Dict[str, Any], *, job_video_url: str = "") -> str:

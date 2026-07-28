@@ -33,6 +33,7 @@ from engine.builder2_local_headline_render import (
 )
 from engine.builder2_media_finalization_contract import (
     backfill_legacy_headline_reference,
+    evaluate_finalization_recovery_eligibility,
     finalization_recovery_eligible,
     validate_builder2_media_completion_contract,
 )
@@ -72,6 +73,14 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "preflight": preflight,
         "eligibleForFinalizationRecovery": False,
         "falseCompletionConfirmed": False,
+        "legacyFalseCompletionConfirmed": False,
+        "recoverableFailedFinalizationConfirmed": False,
+        "recoveryEligibilityBasis": None,
+        "recoverableFailedFinalizationConditionResults": None,
+        "recoverableFailedFinalizationReasons": None,
+        "recoveryBlockedByValidFinal": False,
+        "recoveryBlockedByCompletedPublication": False,
+        "recoveryBlockedByMissingIntermediate": False,
         "legacyHeadlineArtifactIdentified": False,
         "legacyHeadlineArtifactRouteFamily": None,
         "headlineArtifactDownloadAccepted": False,
@@ -163,6 +172,89 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "cliJsonSerializationAccepted": False,
         "cliStdoutWriteAttempted": False,
     }
+
+
+def _safe_failure_code(code: str) -> str:
+    token = (code or "").strip()
+    if not token:
+        return "builder2_media_finalization_failed"
+    lowered = token.lower()
+    if "http://" in lowered or "https://" in lowered or "/" in token or "\\" in token:
+        return "builder2_media_finalization_failed"
+    return token[:128]
+
+
+def _apply_recovery_eligibility_to_report(
+    report: Dict[str, Any],
+    *,
+    state: Dict[str, Any],
+    plan: Dict[str, Any],
+    job_video_url: str,
+    active_finalization_lease: bool = False,
+) -> Dict[str, Any]:
+    evaluation = evaluate_finalization_recovery_eligibility(
+        state=state,
+        plan=plan,
+        job_video_url=job_video_url,
+        active_finalization_lease=active_finalization_lease,
+    )
+    report["eligibleForFinalizationRecovery"] = bool(evaluation["eligible"])
+    report["legacyFalseCompletionConfirmed"] = bool(evaluation["legacyFalseCompletionConfirmed"])
+    report["recoverableFailedFinalizationConfirmed"] = bool(evaluation["recoverableFailedFinalizationConfirmed"])
+    report["falseCompletionConfirmed"] = bool(evaluation["falseCompletionConfirmed"])
+    report["recoveryEligibilityBasis"] = evaluation.get("recoveryEligibilityBasis")
+    report["recoverableFailedFinalizationConditionResults"] = evaluation.get(
+        "recoverableFailedFinalizationConditionResults"
+    )
+    report["recoverableFailedFinalizationReasons"] = evaluation.get("recoverableFailedFinalizationReasons")
+    report["recoveryBlockedByValidFinal"] = bool(evaluation.get("recoveryBlockedByValidFinal"))
+    report["recoveryBlockedByCompletedPublication"] = bool(evaluation.get("recoveryBlockedByCompletedPublication"))
+    report["recoveryBlockedByMissingIntermediate"] = bool(evaluation.get("recoveryBlockedByMissingIntermediate"))
+    return evaluation
+
+
+def _persist_finalization_failure_state(
+    state: Dict[str, Any],
+    *,
+    report: Dict[str, Any],
+    headline_failure: bool = False,
+) -> None:
+    media = state.setdefault("mediaResume", {})
+    if not isinstance(media, dict):
+        return
+    media["mediaResumeStatus"] = "finalization_failed"
+    if headline_failure:
+        media["headlinePostprocessStatus"] = "failed"
+    else:
+        media["advertisingClosureStatus"] = "failed"
+    state["status"] = "media_finalization_incomplete"
+    state["mediaContinuationRequired"] = True
+    stage = report.get("originalFailureStage") or report.get("failureStage")
+    code = report.get("originalFailureCode") or report.get("failureReason")
+    failure_class = report.get("originalFailureClass")
+    if stage:
+        media["finalizationFailureStage"] = str(stage)[:64]
+    if code:
+        media["finalizationFailureCode"] = _safe_failure_code(str(code))
+    if failure_class:
+        media["finalizationFailureClass"] = str(failure_class)[:64]
+
+
+def _archive_finalization_failure_state(media: Dict[str, Any]) -> None:
+    if not isinstance(media, dict):
+        return
+    stage = media.get("finalizationFailureStage")
+    code = media.get("finalizationFailureCode")
+    failure_class = media.get("finalizationFailureClass")
+    if stage or code or failure_class:
+        media["lastFinalizationFailure"] = {
+            "stage": stage,
+            "code": code,
+            "class": failure_class,
+        }
+    media.pop("finalizationFailureStage", None)
+    media.pop("finalizationFailureCode", None)
+    media.pop("finalizationFailureClass", None)
 
 
 def _probe_duration(path: Path) -> float:
@@ -491,11 +583,14 @@ def run_finalization_preflight(
             job_raw = video_job_get_raw(job_id) or {}
             job_video_url = str(job_raw.get("video_url") or job_raw.get("videoUrl") or "")
 
-        eligible, missing = finalization_recovery_eligible(state=state, plan=plan, job_video_url=job_video_url)
-        report["eligibleForFinalizationRecovery"] = eligible
-        report["falseCompletionConfirmed"] = "falseCompletionNotProven" not in missing
-        if not eligible:
-            report["failureReason"] = f"builder2_media_finalization_not_eligible:{','.join(missing)}"
+        eligible_eval = _apply_recovery_eligibility_to_report(
+            report,
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
+        )
+        if not eligible_eval["eligible"]:
+            report["failureReason"] = f"builder2_media_finalization_not_eligible:{','.join(eligible_eval['missing'])}"
             report["failureStage"] = "eligibility"
             return report
 
@@ -552,10 +647,13 @@ def run_one_media_finalization_resume(
         job_raw = video_job_get_raw(job_id) or {}
         job_video_url = str(job_raw.get("video_url") or job_raw.get("videoUrl") or "")
 
-        eligible, missing = finalization_recovery_eligible(state=state, plan=plan, job_video_url=job_video_url)
-        report["eligibleForFinalizationRecovery"] = eligible
-        report["falseCompletionConfirmed"] = "falseCompletionNotProven" not in missing
-        if not eligible and "validClosureAlreadyPresent" in missing:
+        eligible_eval = _apply_recovery_eligibility_to_report(
+            report,
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
+        )
+        if not eligible_eval["eligible"] and "validClosureAlreadyPresent" in eligible_eval["missing"]:
             contract_ok, _, _ = validate_builder2_media_completion_contract(
                 state=state,
                 plan=plan,
@@ -566,8 +664,8 @@ def run_one_media_finalization_resume(
                 report["jobCompleted"] = True
                 report["ok"] = True
                 return report
-        if not eligible:
-            report["failureReason"] = f"builder2_media_finalization_not_eligible:{','.join(missing)}"
+        if not eligible_eval["eligible"]:
+            report["failureReason"] = f"builder2_media_finalization_not_eligible:{','.join(eligible_eval['missing'])}"
             report["failureStage"] = "eligibility"
             return report
 
@@ -606,23 +704,13 @@ def run_one_media_finalization_resume(
         )
         if not report.get("ok") and render_result is None:
             if report.get("failureStage") in {"headline_overlay", "duration_probe", "input_validation"}:
-                media = state.setdefault("mediaResume", {})
-                if isinstance(media, dict):
-                    media["mediaResumeStatus"] = "finalization_failed"
-                    media["headlinePostprocessStatus"] = "failed"
-                    state["status"] = "media_finalization_incomplete"
-                    state["mediaContinuationRequired"] = True
-                    save_tournament_state(job_id, state)
-                    report["redisMutations"] = 1
+                _persist_finalization_failure_state(state, report=report, headline_failure=True)
+                save_tournament_state(job_id, state)
+                report["redisMutations"] = 1
             elif report.get("failureStage") not in {None, "lease", "eligibility", "load", "configuration"}:
-                media = state.setdefault("mediaResume", {})
-                if isinstance(media, dict):
-                    media["mediaResumeStatus"] = "finalization_failed"
-                    media["advertisingClosureStatus"] = "failed"
-                    state["status"] = "media_finalization_incomplete"
-                    state["mediaContinuationRequired"] = True
-                    save_tournament_state(job_id, state)
-                    report["redisMutations"] = 1
+                _persist_finalization_failure_state(state, report=report, headline_failure=False)
+                save_tournament_state(job_id, state)
+                report["redisMutations"] = 1
             return report
 
         if render_result is None:
@@ -642,8 +730,12 @@ def run_one_media_finalization_resume(
             raise Builder2TournamentError(contract_failure or "builder2_media_completion_contract_failed")
 
         media = state.setdefault("mediaResume", {})
+        _archive_finalization_failure_state(media)
         media["mediaResumeStatus"] = "completed"
         media["progressStage"] = "completed"
+        media["advertisingClosureStatus"] = "completed"
+        media["advertisingClosureRendered"] = True
+        state["advertisingClosureStatus"] = "completed"
         state["mediaContinuationRequired"] = False
         state["status"] = "completed"
         state["lastCompletedStep"] = "done"

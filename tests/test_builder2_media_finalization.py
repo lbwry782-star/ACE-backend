@@ -22,6 +22,7 @@ from engine.builder2_closure_render import (
 )
 from engine.builder2_media_finalization_contract import (
     backfill_legacy_headline_reference,
+    finalization_recovery_eligible,
     validate_builder2_media_completion_contract,
 )
 from engine.builder2_media_finalization_download import SafeDownloadDiagnostics, safe_download_to_path
@@ -655,6 +656,9 @@ class TestFinalizationRecovery(unittest.TestCase):
         def _fail(**kwargs: Any) -> None:
             kwargs["report"]["failureStage"] = "concatenation"
             kwargs["report"]["failureReason"] = "builder2_closure_ffmpeg_failed"
+            kwargs["report"]["originalFailureStage"] = "concatenation"
+            kwargs["report"]["originalFailureCode"] = "builder2_closure_ffmpeg_failed"
+            kwargs["report"]["originalFailureClass"] = "Builder2ClosureRenderError"
 
         pipeline.side_effect = _fail
         report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
@@ -664,6 +668,14 @@ class TestFinalizationRecovery(unittest.TestCase):
         saved_state = save_state.call_args[0][1]
         self.assertTrue(saved_state.get("mediaContinuationRequired"))
         self.assertEqual(saved_state["mediaResume"]["advertisingClosureStatus"], "failed")
+        self.assertEqual(saved_state["status"], "media_finalization_incomplete")
+        eligible, missing = finalization_recovery_eligible(
+            state=saved_state,
+            plan=saved_state["winnerDevelopmentPlan"],
+            job_video_url=HEADLINE_URL,
+        )
+        self.assertTrue(eligible, msg=f"expected eligible after failure, missing={missing}")
+        self.assertEqual(saved_state["mediaResume"].get("finalizationFailureStage"), "concatenation")
 
 
 class TestPreflightSynthetic(unittest.TestCase):

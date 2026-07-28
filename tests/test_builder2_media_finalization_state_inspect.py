@@ -27,8 +27,12 @@ def _post_failed_recovery_state() -> Dict[str, Any]:
     state = deepcopy(_false_completion_state(with_valid_closure=False))
     state["status"] = "media_finalization_incomplete"
     state["mediaContinuationRequired"] = True
+    state["advertisingClosureStatus"] = "failed"
     state["mediaResume"]["mediaResumeStatus"] = "finalization_failed"
     state["mediaResume"]["advertisingClosureStatus"] = "failed"
+    state["mediaResume"]["advertisingClosureRendered"] = False
+    state["mediaResume"]["actualFinalVideoDurationSeconds"] = None
+    state["mediaResume"].pop("headlineArtifactUrl", None)
     return state
 
 
@@ -68,13 +72,15 @@ class TestBuilder2MediaFinalizationStateInspect(unittest.TestCase):
     @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
     @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")
     @patch("engine.builder2_media_finalization_state_inspect._read_raw")
-    def test_failed_recovery_metadata_makes_ineligible(self, read_raw: Any, job_get_raw: Any, _redis: Any) -> None:
+    def test_failed_recovery_state_is_eligible(self, read_raw: Any, job_get_raw: Any, _redis: Any) -> None:
         read_raw.return_value = _post_failed_recovery_state()
         job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
         report = inspect_builder2_media_finalization_state(JOB_ID)
-        self.assertFalse(report["currentEligibility"])
+        self.assertTrue(report["currentEligibility"])
         self.assertFalse(report["falseCompletionConfirmed"])
-        self.assertIn("falseCompletionNotProven", report["currentEligibilityReason"])
+        self.assertTrue(report["recoverableFailedFinalizationConfirmed"])
+        self.assertEqual(report["currentEligibilityReason"], "recoverable_failed_finalization_state")
+        self.assertEqual(report["recoveryEligibilityBasis"], "failed_finalization_state")
         self.assertFalse(report["falseCompletionConditionResults"]["persistedStatusCompleted"])
         self.assertTrue(report["stateChangedFromKnownLegacyPattern"])
         self.assertIn("persistedTournamentStatus", report["changedConditionNames"])
@@ -106,11 +112,11 @@ class TestBuilder2MediaFinalizationStateInspect(unittest.TestCase):
     @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
     @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")
     @patch("engine.builder2_media_finalization_state_inspect._read_raw")
-    def test_recommends_allow_recovery_from_failed_state(self, read_raw: Any, job_get_raw: Any, _redis: Any) -> None:
+    def test_recommends_preflight_from_failed_state(self, read_raw: Any, job_get_raw: Any, _redis: Any) -> None:
         read_raw.return_value = _post_failed_recovery_state()
         job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
         report = inspect_builder2_media_finalization_state(JOB_ID)
-        self.assertEqual(report["recommendedNextAction"], "allow_recovery_from_failed_finalization_state")
+        self.assertEqual(report["recommendedNextAction"], "run_finalization_preflight")
 
     @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
     @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")
@@ -128,12 +134,12 @@ class TestBuilder2MediaFinalizationStateInspect(unittest.TestCase):
     @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
     @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")
     @patch("engine.builder2_media_finalization_state_inspect._read_raw")
-    def test_precise_ineligibility_reason(self, read_raw: Any, job_get_raw: Any, _redis: Any) -> None:
+    def test_precise_eligibility_after_failed_recovery(self, read_raw: Any, job_get_raw: Any, _redis: Any) -> None:
         read_raw.return_value = _post_failed_recovery_state()
         job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
         report = inspect_builder2_media_finalization_state(JOB_ID)
         self.assertEqual(report["likelyMutationSourceFunction"], "run_one_media_finalization_resume.save_tournament_state_on_render_failure")
-        self.assertTrue(report["minimalFutureStateRepairFields"])
+        self.assertEqual(report["minimalFutureStateRepairFields"], [])
 
     @patch.dict("os.environ", {"BUILDER2_MEDIA_FINALIZATION_STATE_INSPECT_JOB_ID": JOB_ID}, clear=False)
     @patch("engine.builder2_media_finalization_state_inspect.inspect_builder2_media_finalization_state")

@@ -22,8 +22,9 @@ from engine.builder2_headline_decision_contract import (
 )
 from engine.builder2_media_finalization_contract import (
     assess_false_completion,
+    assess_recoverable_failed_finalization_state,
     closure_inclusive_artifact_valid,
-    finalization_recovery_eligible,
+    evaluate_finalization_recovery_eligibility,
     resolve_legacy_headline_artifact_url,
     resolve_raw_runway_artifact_url,
     validate_builder2_media_completion_contract,
@@ -154,30 +155,30 @@ def _evaluate_eligibility_conditions(
     plan: Dict[str, Any],
     job_video_url: str,
 ) -> Dict[str, bool]:
-    false_completion, _ = assess_false_completion(state=state, plan=plan, job_video_url=job_video_url)
-    headline_required = headline_decision_requires_headline(get_normalized_headline_decision(plan))
-    raw_url = resolve_raw_runway_artifact_url(state)
-    headline_url = resolve_legacy_headline_artifact_url(
+    evaluation = evaluate_finalization_recovery_eligibility(
         state=state,
+        plan=plan,
         job_video_url=job_video_url,
-        headline_required=headline_required,
     )
-    media = _media_bucket(state)
-    closure = state.get("advertisingClosure")
-    closure_url = _first_url(media.get("finalVideoWithClosureUrl"))
+    failed_recovery = assess_recoverable_failed_finalization_state(
+        state=state,
+        plan=plan,
+        job_video_url=job_video_url,
+    )
     return {
         "reasoningComplete": bool(state.get("reasoningComplete")),
         "winnerDevelopmentAccepted": is_valid_persisted_winner_development(state),
-        "advertisingClosurePresent": isinstance(closure, dict) and bool(_clean(closure.get("sloganText"))),
-        "falseCompletionProven": false_completion,
-        "visualOrHeadlineIntermediatePresent": bool(raw_url or headline_url),
-        "validClosureAlreadyPresent": closure_inclusive_artifact_valid(
-            state=state,
-            closure_url=closure_url,
-            raw_url=raw_url,
-            headline_url=headline_url,
-            job_video_url=job_video_url,
+        "advertisingClosurePresent": bool(
+            evaluation.get("recoverableFailedFinalizationConditionResults", {}).get("advertisingClosurePresent")
+            or isinstance(state.get("advertisingClosure"), dict)
         ),
+        "falseCompletionProven": bool(evaluation.get("legacyFalseCompletionConfirmed")),
+        "recoverableFailedFinalizationProven": bool(evaluation.get("recoverableFailedFinalizationConfirmed")),
+        "recoveryBasisProven": bool(evaluation.get("recoveryEligibilityBasis")),
+        "visualOrHeadlineIntermediatePresent": not bool(evaluation.get("recoveryBlockedByMissingIntermediate")),
+        "validClosureAlreadyPresent": bool(evaluation.get("recoveryBlockedByValidFinal")),
+        "completedFinalPublicationPresent": bool(evaluation.get("recoveryBlockedByCompletedPublication")),
+        **failed_recovery.condition_results,
     }
 
 
@@ -215,6 +216,7 @@ def _recommend_next_action(
     *,
     eligible: bool,
     false_completion: bool,
+    recoverable_failed_finalization: bool,
     raw_url: str,
     contract_ok: bool,
     publication_evidence: str,
@@ -223,9 +225,11 @@ def _recommend_next_action(
 ) -> str:
     if contract_ok and publication_evidence == "final_publication_persisted":
         return "use_existing_verified_final"
+    if eligible and recoverable_failed_finalization:
+        return "run_finalization_preflight"
     if eligible and false_completion:
-        return "restore_legacy_false_completion_eligibility"
-    if raw_url and recovery_failure_present and not contract_ok:
+        return "run_finalization_preflight"
+    if raw_url and recovery_failure_present and not contract_ok and not eligible:
         return "allow_recovery_from_failed_finalization_state"
     if state_changed and raw_url and not eligible and recovery_failure_present:
         return "allow_recovery_from_failed_finalization_state"
@@ -314,12 +318,21 @@ def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
         closure_url = _first_url(media.get("finalVideoWithClosureUrl"))
         final_public = _first_url(media.get("finalPublicUrl"))
 
-        eligible, missing = finalization_recovery_eligible(state=state, plan=plan, job_video_url=job_video_url)
-        false_completion, false_reasons = assess_false_completion(
+        eligible_eval = evaluate_finalization_recovery_eligibility(
             state=state,
             plan=plan,
             job_video_url=job_video_url,
         )
+        eligible = bool(eligible_eval["eligible"])
+        missing = list(eligible_eval["missing"])
+        false_completion = bool(eligible_eval["legacyFalseCompletionConfirmed"])
+        recoverable_failed_finalization = bool(eligible_eval["recoverableFailedFinalizationConfirmed"])
+        false_completion_legacy, false_reasons = assess_false_completion(
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
+        )
+        _ = false_completion_legacy
         contract_ok, contract_failure, contract_failures = validate_builder2_media_completion_contract(
             state=state,
             plan=plan,
@@ -373,6 +386,13 @@ def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
             or _clean(media.get("advertisingClosureStatus")) == "failed"
             or _clean(state.get("status")) == "media_finalization_incomplete"
         )
+        eligibility_reason = None
+        if not eligible:
+            eligibility_reason = ",".join(missing) if missing else None
+        elif recoverable_failed_finalization:
+            eligibility_reason = "recoverable_failed_finalization_state"
+        elif false_completion:
+            eligibility_reason = "legacy_false_completion"
 
         report.update(
             {
@@ -383,8 +403,21 @@ def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
                 "persistedCompletionStatus": _clean(media.get("mediaResumeStatus")) or None,
                 "effectiveCompletionStatus": "completed" if contract_ok else "incomplete",
                 "currentEligibility": eligible,
-                "currentEligibilityReason": ",".join(missing) if missing else None,
+                "currentEligibilityReason": eligibility_reason,
                 "falseCompletionConfirmed": false_completion,
+                "recoverableFailedFinalizationConfirmed": recoverable_failed_finalization,
+                "recoveryEligibilityBasis": eligible_eval.get("recoveryEligibilityBasis"),
+                "recoverableFailedFinalizationConditionResults": eligible_eval.get(
+                    "recoverableFailedFinalizationConditionResults"
+                ),
+                "recoverableFailedFinalizationReasons": eligible_eval.get("recoverableFailedFinalizationReasons"),
+                "recoveryBlockedByValidFinal": bool(eligible_eval.get("recoveryBlockedByValidFinal")),
+                "recoveryBlockedByCompletedPublication": bool(
+                    eligible_eval.get("recoveryBlockedByCompletedPublication")
+                ),
+                "recoveryBlockedByMissingIntermediate": bool(
+                    eligible_eval.get("recoveryBlockedByMissingIntermediate")
+                ),
                 "falseCompletionConditionResults": false_conditions,
                 "eligibilityConditionResults": eligibility_conditions,
                 "falseCompletionReasons": false_reasons,
@@ -426,6 +459,7 @@ def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
                 "recoveryFailureMetadataPresent": recovery_failure_present,
                 "recoveryFailureStage": _clean(media.get("finalizationFailureStage")) or None,
                 "recoveryFailureCode": _clean(media.get("finalizationFailureCode")) or None,
+                "recoveryFailureClass": _clean(media.get("finalizationFailureClass")) or None,
                 "recoveryStartedAtPresent": bool(media.get("finalizationRecoveryStartedAt")),
                 "recoveryCompletedAtPresent": bool(media.get("finalizationRecoveryCompletedAt")),
                 "publicationReferencePresent": publication_evidence
@@ -448,6 +482,7 @@ def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
                 "recommendedNextAction": _recommend_next_action(
                     eligible=eligible,
                     false_completion=false_completion,
+                    recoverable_failed_finalization=recoverable_failed_finalization,
                     raw_url=raw_url,
                     contract_ok=contract_ok,
                     publication_evidence=publication_evidence,
@@ -455,9 +490,13 @@ def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
                     recovery_failure_present=recovery_failure_present,
                 ),
                 "minimalFutureStateRepairFields": (
-                    ["status", "mediaContinuationRequired", "mediaResume.mediaResumeStatus", "mediaResume.advertisingClosureStatus"]
-                    if recovery_failure_present and not eligible and "falseCompletionNotProven" in missing
-                    else []
+                    []
+                    if eligible
+                    else (
+                        ["status", "mediaContinuationRequired", "mediaResume.mediaResumeStatus", "mediaResume.advertisingClosureStatus"]
+                        if recovery_failure_present and "recoveryBasisNotProven" in missing
+                        else []
+                    )
                 ),
                 "rawRunwayRecoverable": bool(raw_url),
                 "unlinkedFinalArtifactPossible": publication_evidence == "unknown" and bool(raw_url),
@@ -493,11 +532,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     report = inspect_builder2_media_finalization_state(job_id)
     print_builder2_media_finalization_state_report(report)
     logger.info(
-        "BUILDER2_MEDIA_FINALIZATION_STATE_INSPECT_DONE jobId=%s ok=%s eligible=%s falseCompletion=%s",
+        "BUILDER2_MEDIA_FINALIZATION_STATE_INSPECT_DONE jobId=%s ok=%s eligible=%s falseCompletion=%s recoverableFailedFinalization=%s",
         job_id,
         report.get("ok"),
         report.get("currentEligibility"),
         report.get("falseCompletionConfirmed"),
+        report.get("recoverableFailedFinalizationConfirmed"),
     )
     return 0 if report.get("inspectionCompleted") else 1
 
