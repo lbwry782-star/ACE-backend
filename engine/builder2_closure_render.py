@@ -286,6 +286,12 @@ def _run_checked(cmd: list[str], *, stage: str, category: str) -> int:
             command_category=category,
             stderr_tail=sanitize_ffmpeg_stderr(getattr(exc, "stderr", b"")),
         ) from exc
+    except OSError as exc:
+        raise Builder2ClosureRenderError(
+            "builder2_closure_ffmpeg_os_error",
+            stage=stage,
+            command_category=category,
+        ) from exc
     if completed.stderr:
         logger.debug(
             "BUILDER2_CLOSURE_FFMPEG stage=%s category=%s stderr_len=%s",

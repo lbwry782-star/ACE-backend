@@ -37,6 +37,12 @@ from engine.builder2_media_finalization_contract import (
     validate_builder2_media_completion_contract,
 )
 from engine.builder2_media_finalization_download import SafeDownloadDiagnostics
+from engine.builder2_media_finalization_reporting import (
+    build_minimal_fallback_report,
+    emit_fail_safe_media_finalization_report,
+    preserve_original_failure,
+    sanitize_media_finalization_report,
+)
 from engine.builder2_media_finalization_guard import MediaFinalizationIsolationGuard
 from engine.builder2_media_finalization_source import (
     SOURCE_RAW_RUNWAY_LOCAL_HEADLINE,
@@ -146,6 +152,17 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "localHeadlineInputPresent": False,
         "localHeadlineFailureStage": None,
         "localHeadlineFailureCode": None,
+        "originalFailureClass": None,
+        "originalFailureStage": None,
+        "originalFailureCode": None,
+        "reportingFailureClass": None,
+        "reportingFailureOccurred": False,
+        "leaseReleaseAttempted": False,
+        "leaseReleaseAccepted": False,
+        "cliReportConstructionAccepted": False,
+        "cliJsonSerializationAccepted": False,
+        "cliStdoutWriteAccepted": False,
+        "cliDoneLogAttempted": False,
     }
 
 
@@ -267,6 +284,7 @@ def _sync_ffmpeg_counters(report: Dict[str, Any]) -> None:
 
 
 def _apply_unexpected_failure(report: Dict[str, Any], exc: BaseException) -> None:
+    preserve_original_failure(report, exc)
     if report.get("failureReason"):
         return
     report["failureStage"] = report.get("failureStage") or "internal"
@@ -275,6 +293,33 @@ def _apply_unexpected_failure(report: Dict[str, Any], exc: BaseException) -> Non
     else:
         report["failureReason"] = "builder2_media_finalization_unexpected_internal_error"
     logger.exception("BUILDER2_MEDIA_FINALIZATION_UNEXPECTED_FAILURE")
+
+
+def _release_execution_lease_safely(
+    report: Dict[str, Any],
+    *,
+    job_id: str,
+    worker_token: str,
+    lease_acquired: bool,
+) -> None:
+    if not lease_acquired:
+        report["leaseReleaseAttempted"] = False
+        report["leaseReleaseAccepted"] = False
+        return
+    report["leaseReleaseAttempted"] = True
+    try:
+        release_job_lease(job_id, worker_token)
+        report["leaseReleaseAccepted"] = True
+    except Exception:
+        report["leaseReleaseAccepted"] = False
+        logger.exception("BUILDER2_MEDIA_FINALIZATION_LEASE_RELEASE_FAILED jobId=%s", job_id)
+
+
+def _finalize_isolation_guard_safely() -> None:
+    try:
+        MediaFinalizationIsolationGuard.end()
+    except Exception:
+        logger.exception("BUILDER2_MEDIA_FINALIZATION_ISOLATION_GUARD_END_FAILED")
 
 
 def _closure_subprocess_ran(stage: str) -> bool:
@@ -373,6 +418,7 @@ def _execute_finalization_render_pipeline(
                 output_path=output_path if preflight else None,
             )
         except Builder2ClosureRenderError as exc:
+            preserve_original_failure(report, exc)
             report["failureStage"] = exc.stage
             report["failureReason"] = str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")
             report["safeFfmpegReturnCode"] = exc.return_code
@@ -613,6 +659,7 @@ def run_one_media_finalization_resume(
         report["jobCompleted"] = True
         report["ok"] = True
     except Builder2TournamentError as exc:
+        preserve_original_failure(report, exc)
         report["failureReason"] = str(exc.args[0] if exc.args else "builder2_media_finalization_failed")
         report["failureStage"] = report.get("failureStage") or "finalization"
     except Exception as exc:
@@ -624,112 +671,19 @@ def run_one_media_finalization_resume(
                 for key in ("totalReasoningCalls",)
             }
         )
-        if lease_acquired:
-            release_job_lease(job_id, worker_token)
-        MediaFinalizationIsolationGuard.end()
+        _release_execution_lease_safely(
+            report,
+            job_id=job_id,
+            worker_token=worker_token,
+            lease_acquired=lease_acquired,
+        )
+        _finalize_isolation_guard_safely()
     return report
 
 
 def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
-    safe_keys = (
-        "jobId",
-        "ok",
-        "preflight",
-        "eligibleForFinalizationRecovery",
-        "falseCompletionConfirmed",
-        "legacyHeadlineArtifactIdentified",
-        "legacyHeadlineArtifactRouteFamily",
-        "headlineArtifactDownloadAccepted",
-        "legacyHeadlineDownloadAttempted",
-        "legacyHeadlineDownloadAccepted",
-        "legacyHeadlineHttpStatusCode",
-        "legacyHeadlineDownloadFailureCategory",
-        "legacyHeadlineArtifactUnavailable",
-        "requestAttempted",
-        "requestMethod",
-        "originalRouteFamily",
-        "redirectCount",
-        "finalRouteFamily",
-        "httpStatusCode",
-        "responseContentType",
-        "responseContentLength",
-        "downloadFailureClass",
-        "downloadFailureCategory",
-        "rawRunwayFallbackAttempted",
-        "rawRunwayFallbackAccepted",
-        "rawRunwayDownloadAccepted",
-        "localHeadlineRenderRequired",
-        "localHeadlineRenderAttempted",
-        "localHeadlineRenderAccepted",
-        "measuredRawRunwayDurationSeconds",
-        "measuredHeadlineDurationSeconds",
-        "closureRenderAttempted",
-        "closureRenderAccepted",
-        "measuredFinalDurationSeconds",
-        "finalDurationAccepted",
-        "exactProductAndSloganReused",
-        "selectedFinalizationSourceKind",
-        "readyForFinalizationRecovery",
-        "failureStage",
-        "failureReason",
-        "safeFfmpegReturnCode",
-        "safeFfmpegStderrAvailable",
-        "openAICalls",
-        "imageCalls",
-        "runwaySubmissionCalls",
-        "runwayPollingCalls",
-        "headlineFfmpegCalls",
-        "closureFfmpegCalls",
-        "headlineRenderAttempts",
-        "headlineFfmpegSubprocessCalls",
-        "closureRenderAttempts",
-        "closureFfmpegSubprocessCalls",
-        "ffprobeCalls",
-        "rawRunwayFfprobeCalls",
-        "headlineFfprobeCalls",
-        "finalClosureFfprobeCalls",
-        "totalFfprobeSubprocessCalls",
-        "closureFfmpegExecutionAccepted",
-        "closureOutputFileCreated",
-        "closureOutputFileSizeBytes",
-        "closureDurationProbeAttempted",
-        "closureDurationProbeAccepted",
-        "measuredClosureOutputDurationSeconds",
-        "measuredClosureSourceDurationSeconds",
-        "configuredVisualDurationSeconds",
-        "configuredEndCardDurationSeconds",
-        "effectiveClosureSegmentDurationSeconds",
-        "configuredFinalDurationSeconds",
-        "calculatedExpectedFinalDurationSeconds",
-        "actualClosureGainSeconds",
-        "closureGainAccepted",
-        "acceptedFinalDurationLowerBoundSeconds",
-        "acceptedFinalDurationUpperBoundSeconds",
-        "finalDurationDeltaSeconds",
-        "finalDurationVerificationFailureCode",
-        "closureFailureSubstage",
-        "totalFfmpegCalls",
-        "ffmpegCalls",
-        "publicationCalls",
-        "redisMutations",
-        "finalizationReused",
-        "jobCompleted",
-        "totalReasoningCalls",
-        "acceptedHeadlineDecision",
-        "acceptedHeadlineFieldPresent",
-        "acceptedHeadlineKeywordPresent",
-        "persistedHeadlineTextPresent",
-        "canonicalHeadlineResolutionAttempted",
-        "canonicalHeadlineResolutionAccepted",
-        "canonicalHeadlineSource",
-        "canonicalHeadlineCharacterCount",
-        "canonicalHeadlineWordCount",
-        "localHeadlineInputPresent",
-        "localHeadlineFailureStage",
-        "localHeadlineFailureCode",
-    )
-    safe = {key: report.get(key) for key in safe_keys if key in report}
-    print(json.dumps(safe, ensure_ascii=False, indent=2), flush=True)
+    safe = sanitize_media_finalization_report(report)
+    print(json.dumps(safe, ensure_ascii=False, indent=2, allow_nan=False), flush=True)
 
 
 def emit_media_finalization_resume_report(
@@ -737,15 +691,8 @@ def emit_media_finalization_resume_report(
     *,
     job_id: str,
     preflight: bool,
-) -> None:
-    print_media_finalization_resume_report(report)
-    sys.stdout.flush()
-    logger.info(
-        "BUILDER2_MEDIA_FINALIZATION_RESUME_DONE jobId=%s ok=%s preflight=%s",
-        job_id,
-        report.get("ok"),
-        preflight,
-    )
+) -> Dict[str, Any]:
+    return emit_fail_safe_media_finalization_report(report, job_id=job_id, preflight=preflight)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -773,7 +720,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         _apply_unexpected_failure(report, exc)
         exit_code = 1
     finally:
-        emit_media_finalization_resume_report(report, job_id=job_id, preflight=preflight)
+        try:
+            emit_media_finalization_resume_report(report, job_id=job_id, preflight=preflight)
+        except Exception:
+            emit_fail_safe_media_finalization_report(
+                build_minimal_fallback_report(job_id=job_id, preflight=preflight),
+                job_id=job_id,
+                preflight=preflight,
+            )
     return exit_code
 
 

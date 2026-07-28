@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -16,14 +17,23 @@ from typing import Any, Dict
 from unittest.mock import MagicMock, patch
 
 from engine.builder2_closure_render import (
+    Builder2ClosureRenderError,
     ClosureRenderResult,
     build_final_duration_verification_diagnostics,
     render_builder2_advertising_closure_endcard,
+)
+from engine.builder2_media_finalization_reporting import (
+    build_minimal_fallback_report,
+    emit_fail_safe_media_finalization_report,
+    json_safe_value,
+    preserve_original_failure,
+    sanitize_media_finalization_report,
 )
 from engine.builder2_media_finalization_resume import (
     emit_media_finalization_resume_report,
     main,
     run_finalization_preflight,
+    run_one_media_finalization_resume,
 )
 from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 from tests.test_builder2_media_finalization_failure_inspect import (
@@ -225,11 +235,10 @@ class TestBuilder2MediaFinalizationCliContract(unittest.TestCase):
     )
     def test_stdout_is_explicitly_flushed(self, run_one: Any) -> None:
         run_one.return_value = {"jobId": JOB_ID, "ok": True, "preflight": True}
-        with patch("builtins.print") as print_mock:
+        with patch("sys.stdout.write") as write_mock:
             with patch("sys.stdout.flush") as flush_mock:
                 main()
-        print_mock.assert_called()
-        self.assertTrue(print_mock.call_args.kwargs.get("flush"))
+        write_mock.assert_called()
         flush_mock.assert_called()
 
     @patch("engine.builder2_media_finalization_resume.run_one_media_finalization_resume")
@@ -483,6 +492,276 @@ class TestBuilder2ClosureRenderReturnsNormally(unittest.TestCase):
                                             )
         self.assertIsInstance(result, ClosureRenderResult)
         self.assertAlmostEqual(result.measured_duration_seconds, 12.042, places=3)
+
+
+def _concat_failure_report(*, failure_reason: str = "builder2_closure_ffmpeg_failed") -> Dict[str, Any]:
+    return {
+        "jobId": JOB_ID,
+        "ok": False,
+        "preflight": False,
+        "failureStage": "concatenation",
+        "failureReason": failure_reason,
+        "originalFailureClass": "Builder2ClosureRenderError",
+        "originalFailureStage": "concatenation",
+        "originalFailureCode": failure_reason,
+        "closureRenderAttempted": True,
+        "closureFfmpegExecutionAccepted": True,
+        "safeFfmpegReturnCode": 1,
+        "leaseReleaseAttempted": True,
+        "leaseReleaseAccepted": True,
+        "openAICalls": 0,
+        "imageCalls": 0,
+        "runwaySubmissionCalls": 0,
+    }
+
+
+class TestBuilder2RecoveryFailSafeReporting(unittest.TestCase):
+    @patch("engine.builder2_media_finalization_resume.run_one_media_finalization_resume")
+    @patch.dict(
+        os.environ,
+        {"BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID": JOB_ID},
+        clear=False,
+    )
+    def test_concat_builder2_error_emits_json_done_and_exit_one(self, run_one: Any) -> None:
+        run_one.return_value = _concat_failure_report()
+        buffer = io.StringIO()
+
+        def _write(data: str) -> int:
+            buffer.write(data)
+            return len(data)
+
+        with patch("sys.stdout.write", side_effect=_write):
+            with patch("sys.stdout.flush"):
+                with self.assertLogs("engine.builder2_media_finalization_resume", level="INFO") as captured:
+                    code = main()
+        self.assertEqual(code, 1)
+        payload = json.loads(buffer.getvalue().strip())
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["failureStage"], "concatenation")
+        self.assertEqual(payload["originalFailureCode"], "builder2_closure_ffmpeg_failed")
+        self.assertIn("BUILDER2_MEDIA_FINALIZATION_RESUME_DONE", "\n".join(captured.output))
+
+    @patch("engine.builder2_media_finalization_resume.render_builder2_advertising_closure_endcard")
+    @patch("engine.builder2_media_finalization_resume._execute_finalization_render_pipeline")
+    @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_finalization_resume.video_job_get")
+    @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_resume._read_raw")
+    @patch("engine.builder2_media_finalization_resume.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.acquire_job_lease", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.release_job_lease")
+    @patch.dict(os.environ, {"BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID": JOB_ID}, clear=False)
+    def test_real_main_recovery_concat_error(
+        self,
+        release_lease: Any,
+        acquire_lease: Any,
+        _redis: Any,
+        read_raw: Any,
+        job_get_raw: Any,
+        job_get: Any,
+        build_config: Any,
+        pipeline: Any,
+        closure_render: Any,
+    ) -> None:
+        read_raw.return_value = _false_completion_state(with_valid_closure=False)
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com")
+
+        def _fail_pipeline(**kwargs: Any) -> None:
+            report = kwargs["report"]
+            report["failureStage"] = "concatenation"
+            report["failureReason"] = "builder2_closure_ffmpeg_failed"
+            report["originalFailureStage"] = "concatenation"
+            report["originalFailureCode"] = "builder2_closure_ffmpeg_failed"
+            report["originalFailureClass"] = "Builder2ClosureRenderError"
+            report["closureRenderAttempted"] = True
+
+        pipeline.side_effect = _fail_pipeline
+        buffer = io.StringIO()
+
+        def _write(data: str) -> int:
+            buffer.write(data)
+            return len(data)
+
+        with patch("sys.stdout.write", side_effect=_write):
+            with patch("sys.stdout.flush"):
+                with self.assertLogs("engine.builder2_media_finalization_resume", level="INFO") as captured:
+                    code = main()
+        self.assertEqual(code, 1)
+        payload = json.loads(buffer.getvalue().strip())
+        self.assertEqual(payload["failureStage"], "concatenation")
+        release_lease.assert_called_once()
+        self.assertTrue(payload.get("leaseReleaseAttempted"))
+        self.assertIn("BUILDER2_MEDIA_FINALIZATION_RESUME_DONE", "\n".join(captured.output))
+        closure_render.assert_not_called()
+
+    def test_path_values_are_json_safe(self) -> None:
+        converted = json_safe_value(Path("/tmp/secret/out.mp4"))
+        self.assertEqual(converted, "Path")
+        payload = sanitize_media_finalization_report({"jobId": JOB_ID, "failureStage": Path("concatenation")})
+        self.assertEqual(payload["failureStage"], "Path")
+        json.dumps(payload, allow_nan=False)
+
+    def test_exception_values_are_json_safe(self) -> None:
+        converted = json_safe_value(RuntimeError("secret"))
+        self.assertEqual(converted, "RuntimeError")
+        payload = sanitize_media_finalization_report(
+            {"jobId": JOB_ID, "failureReason": RuntimeError("builder2_closure_ffmpeg_failed")}
+        )
+        self.assertEqual(payload["failureReason"], "RuntimeError")
+        json.dumps(payload, allow_nan=False)
+
+    @patch("engine.builder2_media_finalization_resume.run_one_media_finalization_resume")
+    @patch.dict(os.environ, {"BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID": JOB_ID}, clear=False)
+    def test_forced_serialization_failure_emits_minimal_fallback(self, run_one: Any) -> None:
+        run_one.return_value = _concat_failure_report()
+        real_dumps = json.dumps
+        attempts = {"count": 0}
+
+        def _dumps_side_effect(*args: Any, **kwargs: Any) -> str:
+            attempts["count"] += 1
+            if attempts["count"] == 1:
+                raise TypeError("boom")
+            return real_dumps(*args, **kwargs)
+
+        buffer = io.StringIO()
+
+        def _write(data: str) -> int:
+            buffer.write(data)
+            return len(data)
+
+        with patch("engine.builder2_media_finalization_reporting.json.dumps", side_effect=_dumps_side_effect):
+            with patch("sys.stdout.write", side_effect=_write):
+                with patch("sys.stdout.flush"):
+                    with self.assertLogs("engine.builder2_media_finalization_resume", level="INFO") as captured:
+                        code = main()
+        self.assertEqual(code, 1)
+        payload = json.loads(buffer.getvalue().strip())
+        self.assertEqual(payload["failureReason"], "final_report_serialization_failed")
+        self.assertTrue(payload["reportingFailureOccurred"])
+        self.assertIn("BUILDER2_MEDIA_FINALIZATION_RESUME_DONE", "\n".join(captured.output))
+
+    @patch("engine.builder2_media_finalization_resume._execute_finalization_render_pipeline")
+    @patch("engine.builder2_media_finalization_resume.build_media_resume_configuration")
+    @patch("engine.builder2_media_finalization_resume.video_job_get")
+    @patch("engine.builder2_media_finalization_resume.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_resume._read_raw")
+    @patch("engine.builder2_media_finalization_resume.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.acquire_job_lease", return_value=True)
+    @patch("engine.builder2_media_finalization_resume.release_job_lease", side_effect=RuntimeError("lease boom"))
+    @patch("engine.builder2_media_finalization_resume.save_tournament_state")
+    def test_lease_release_failure_preserves_original_failure_and_reports(
+        self,
+        save_state: Any,
+        release_lease: Any,
+        _acquire: Any,
+        _redis: Any,
+        read_raw: Any,
+        job_get_raw: Any,
+        job_get: Any,
+        build_config: Any,
+        pipeline: Any,
+    ) -> None:
+        read_raw.return_value = _false_completion_state(with_valid_closure=False)
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
+        build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com")
+
+        def _fail_pipeline(**kwargs: Any) -> None:
+            exc = Builder2ClosureRenderError(
+                "builder2_closure_ffmpeg_failed",
+                stage="concatenation",
+                return_code=1,
+            )
+            preserve_original_failure(kwargs["report"], exc)
+            kwargs["report"]["failureStage"] = exc.stage
+            kwargs["report"]["failureReason"] = str(exc.args[0])
+
+        pipeline.side_effect = _fail_pipeline
+        report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
+        self.assertEqual(report["originalFailureStage"], "concatenation")
+        self.assertTrue(report["leaseReleaseAttempted"])
+        self.assertFalse(report["leaseReleaseAccepted"])
+        save_state.assert_called_once()
+
+    @patch("engine.builder2_media_finalization_resume.run_one_media_finalization_resume")
+    @patch.dict(os.environ, {"BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID": JOB_ID}, clear=False)
+    def test_system_exit_one_after_card_still_reports(self, run_one: Any) -> None:
+        run_one.side_effect = SystemExit(1)
+        buffer = io.StringIO()
+
+        def _write(data: str) -> int:
+            buffer.write(data)
+            return len(data)
+
+        with patch("sys.stdout.write", side_effect=_write):
+            with patch("sys.stdout.flush"):
+                with self.assertLogs("engine.builder2_media_finalization_resume", level="INFO") as captured:
+                    code = main()
+        self.assertEqual(code, 1)
+        self.assertTrue(buffer.getvalue().strip().startswith("{"))
+        self.assertIn("BUILDER2_MEDIA_FINALIZATION_RESUME_DONE", "\n".join(captured.output))
+
+    @patch("engine.builder2_media_finalization_resume.run_one_media_finalization_resume")
+    @patch.dict(os.environ, {"BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID": JOB_ID}, clear=False)
+    def test_main_fallback_when_emit_raises(self, run_one: Any) -> None:
+        run_one.return_value = _concat_failure_report()
+        fallback = build_minimal_fallback_report(job_id=JOB_ID, preflight=False)
+        with patch(
+            "engine.builder2_media_finalization_resume.emit_media_finalization_resume_report",
+            side_effect=[RuntimeError("emit boom"), fallback],
+        ):
+            with patch(
+                "engine.builder2_media_finalization_resume.emit_fail_safe_media_finalization_report",
+                return_value=fallback,
+            ) as fallback_emit:
+                buffer = io.StringIO()
+
+                def _write(data: str) -> int:
+                    buffer.write(data)
+                    return len(data)
+
+                with patch("sys.stdout.write", side_effect=_write):
+                    with patch("sys.stdout.flush"):
+                        code = main()
+        self.assertEqual(code, 1)
+        fallback_emit.assert_called_once()
+
+    def test_emit_fail_safe_never_uses_os_exit(self) -> None:
+        source = Path("engine/builder2_media_finalization_reporting.py").read_text(encoding="utf-8")
+        self.assertNotIn("os._exit", source)
+
+    @patch("engine.builder2_media_finalization_resume.run_finalization_preflight")
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID": JOB_ID,
+            "BUILDER2_MEDIA_FINALIZATION_RESUME_PREFLIGHT": "true",
+        },
+        clear=False,
+    )
+    def test_successful_preflight_behavior_unchanged(self, preflight_fn: Any) -> None:
+        preflight_fn.return_value = {
+            "jobId": JOB_ID,
+            "ok": True,
+            "preflight": True,
+            "readyForFinalizationRecovery": True,
+            "measuredFinalDurationSeconds": 12.034,
+        }
+        buffer = io.StringIO()
+
+        def _write(data: str) -> int:
+            buffer.write(data)
+            return len(data)
+
+        with patch("sys.stdout.write", side_effect=_write):
+            with patch("sys.stdout.flush"):
+                code = main()
+        self.assertEqual(code, 0)
+        payload = json.loads(buffer.getvalue().strip())
+        self.assertTrue(payload["readyForFinalizationRecovery"])
+        self.assertAlmostEqual(payload["measuredFinalDurationSeconds"], 12.034, places=3)
 
 
 if __name__ == "__main__":
