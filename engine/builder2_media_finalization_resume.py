@@ -787,6 +787,9 @@ def emit_media_finalization_resume_report(
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    from engine.builder2_media_finalization_child_diagnostics import register_child_lifecycle_diagnostics
+
+    register_child_lifecycle_diagnostics()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     job_id = _env("BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID")
     preflight = _truthy("BUILDER2_MEDIA_FINALIZATION_RESUME_PREFLIGHT")

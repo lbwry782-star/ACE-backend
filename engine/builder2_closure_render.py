@@ -132,6 +132,24 @@ def _ffprobe_duration_seconds(path: Path, timeout: float) -> float:
     return probe(path, timeout)
 
 
+def _emit_closure_low_level_marker(
+    marker: str,
+    *,
+    stage: str,
+    elapsed_ms: float,
+    **flags: bool,
+) -> None:
+    flag_text = " ".join(f"{name}={str(value).lower()}" for name, value in sorted(flags.items()))
+    message = f"{marker} stage={stage} elapsedMs={elapsed_ms:.1f}"
+    if flag_text:
+        message = f"{message} {flag_text}"
+    logger.info(message)
+    try:
+        os.write(2, (message + "\n").encode("utf-8", errors="replace"))
+    except Exception:
+        pass
+
+
 def sanitize_ffmpeg_stderr(raw: bytes | str | None) -> str:
     text = (raw or b"").decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else str(raw or "")
     text = re.sub(r"/[^\s'\"]+", "<path>", text)
@@ -522,7 +540,19 @@ def render_builder2_advertising_closure_endcard(
             card_size,
             hold,
         )
+        _emit_closure_low_level_marker(
+            "BUILDER2_CLOSURE_CONCAT_INVOKE",
+            stage="concatenation",
+            elapsed_ms=(time.monotonic() - t0) * 1000.0,
+            cardOutputCreated=card_created,
+        )
         concat_rc = _runner(concat_cmd, "concatenation", "ffmpeg_concat")
+        _emit_closure_low_level_marker(
+            "BUILDER2_CLOSURE_CONCAT_RETURNED",
+            stage="concatenation",
+            elapsed_ms=(time.monotonic() - t0) * 1000.0,
+            concatReturnAccepted=True,
+        )
         closure_ffmpeg_execution_accepted = True
         closure_output_file_created = out_tmp.is_file()
         closure_output_file_size_bytes = out_tmp.stat().st_size if closure_output_file_created else 0
@@ -619,6 +649,12 @@ def render_builder2_advertising_closure_endcard(
             concat_rc,
             closure_output_file_created,
             closure_output_file_size_bytes,
+        )
+        _emit_closure_low_level_marker(
+            "BUILDER2_CLOSURE_RESULT_RETURNING",
+            stage="completion",
+            elapsed_ms=(time.monotonic() - t0) * 1000.0,
+            durationAccepted=duration_accepted,
         )
         return ClosureRenderResult(
             public_url=public_url,
