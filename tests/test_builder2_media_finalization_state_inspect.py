@@ -15,6 +15,7 @@ from engine.builder2_media_finalization_state_inspect import (
     main,
 )
 from tests.test_builder2_media_finalization_failure_inspect import (
+    CLOSURE_URL,
     HEADLINE_URL,
     JOB_ID,
     RAW_RUNWAY,
@@ -130,6 +131,71 @@ class TestBuilder2MediaFinalizationStateInspect(unittest.TestCase):
         self.assertNotIn(RAW_RUNWAY, blob)
         self.assertNotIn("SECRET", blob)
         self.assertNotIn("Forgot Product", blob)
+        self.assertNotIn("finalPublicUrl", report)
+        self.assertNotIn("finalVideoWithClosureUrl", report)
+        self.assertNotIn("jobVideoUrl", report)
+
+    @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_state_inspect._read_raw")
+    def test_include_final_url_flag_adds_only_requested_fields(
+        self,
+        read_raw: Any,
+        job_get_raw: Any,
+        _redis: Any,
+    ) -> None:
+        state = deepcopy(_false_completion_state(with_valid_closure=True))
+        read_raw.return_value = state
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        report = inspect_builder2_media_finalization_state(JOB_ID, include_final_url=True)
+        self.assertEqual(report["finalPublicUrl"], CLOSURE_URL)
+        self.assertEqual(report["finalVideoWithClosureUrl"], CLOSURE_URL)
+        self.assertEqual(report["jobVideoUrl"], HEADLINE_URL)
+        self.assertEqual(report["redisMutations"], 0)
+        self.assertEqual(report["leaseOperations"], 0)
+        self.assertEqual(report["publicationCalls"], 0)
+        blob = json.dumps(report)
+        self.assertNotIn(RAW_RUNWAY, blob)
+        self.assertNotIn("SECRET", blob)
+        self.assertNotIn("Forgot Product", blob)
+
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER2_MEDIA_FINALIZATION_STATE_INSPECT_INCLUDE_FINAL_URL": "true",
+        },
+        clear=False,
+    )
+    @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_state_inspect._read_raw")
+    def test_include_final_url_env_flag(
+        self,
+        read_raw: Any,
+        job_get_raw: Any,
+        _redis: Any,
+    ) -> None:
+        read_raw.return_value = deepcopy(_false_completion_state(with_valid_closure=False))
+        job_get_raw.return_value = _job_raw(video_url=HEADLINE_URL)
+        report = inspect_builder2_media_finalization_state(JOB_ID)
+        self.assertEqual(report["jobVideoUrl"], HEADLINE_URL)
+        self.assertEqual(report["finalVideoWithClosureUrl"], HEADLINE_URL)
+        self.assertEqual(report["finalPublicUrl"], HEADLINE_URL)
+
+    @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
+    @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")
+    @patch("engine.builder2_media_finalization_state_inspect._read_raw")
+    def test_include_final_url_omits_raw_runway_job_video_url(
+        self,
+        read_raw: Any,
+        job_get_raw: Any,
+        _redis: Any,
+    ) -> None:
+        read_raw.return_value = deepcopy(_false_completion_state(with_valid_closure=False))
+        job_get_raw.return_value = _job_raw(video_url=RAW_RUNWAY)
+        report = inspect_builder2_media_finalization_state(JOB_ID, include_final_url=True)
+        self.assertIsNone(report["jobVideoUrl"])
+        self.assertNotIn(RAW_RUNWAY, json.dumps(report))
 
     @patch("engine.builder2_media_finalization_state_inspect.redis_configured", return_value=True)
     @patch("engine.builder2_media_finalization_state_inspect.video_job_get_raw")

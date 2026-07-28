@@ -4,6 +4,9 @@ Builder2 media finalization state inspector — read-only eligibility and persis
 Run:
   BUILDER2_MEDIA_FINALIZATION_STATE_INSPECT_JOB_ID=<jobId> \\
     python -m engine.builder2_media_finalization_state_inspect
+
+Optional final URL fields (read-only; default off):
+  BUILDER2_MEDIA_FINALIZATION_STATE_INSPECT_INCLUDE_FINAL_URL=true
 """
 from __future__ import annotations
 
@@ -58,6 +61,10 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _truthy(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _media_bucket(state: Dict[str, Any]) -> Dict[str, Any]:
     media = state.get("mediaResume")
     return media if isinstance(media, dict) else {}
@@ -73,6 +80,32 @@ def _first_url(*values: Any) -> str:
 
 def _compare_urls(left: str, right: str) -> bool:
     return bool(left and right and left == right)
+
+
+def _url_excludes_raw_runway(url: str, raw_url: str) -> Optional[str]:
+    token = _clean(url)
+    if not token:
+        return None
+    if raw_url and _compare_urls(token, raw_url):
+        return None
+    return token
+
+
+def _optional_final_url_fields(
+    *,
+    final_public: str,
+    closure_url: str,
+    job_video_url: str,
+    raw_url: str,
+    include_final_url: bool,
+) -> Dict[str, Optional[str]]:
+    if not include_final_url:
+        return {}
+    return {
+        "finalPublicUrl": _url_excludes_raw_runway(final_public, raw_url),
+        "finalVideoWithClosureUrl": _url_excludes_raw_runway(closure_url, raw_url),
+        "jobVideoUrl": _url_excludes_raw_runway(job_video_url, raw_url),
+    }
 
 
 def _duration_value(media: Dict[str, Any], key: str) -> Optional[float]:
@@ -275,7 +308,13 @@ def _compare_signature(
     }
 
 
-def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
+def inspect_builder2_media_finalization_state(
+    job_id: str,
+    *,
+    include_final_url: Optional[bool] = None,
+) -> Dict[str, Any]:
+    if include_final_url is None:
+        include_final_url = _truthy("BUILDER2_MEDIA_FINALIZATION_STATE_INSPECT_INCLUDE_FINAL_URL")
     report: Dict[str, Any] = {
         "jobId": job_id,
         "ok": False,
@@ -506,6 +545,13 @@ def inspect_builder2_media_finalization_state(job_id: str) -> Dict[str, Any]:
                 ),
                 "inspectionCompleted": True,
                 "ok": True,
+                **_optional_final_url_fields(
+                    final_public=final_public,
+                    closure_url=closure_url,
+                    job_video_url=job_video_url,
+                    raw_url=raw_url,
+                    include_final_url=include_final_url,
+                ),
             }
         )
         return report
