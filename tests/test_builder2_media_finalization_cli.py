@@ -53,12 +53,23 @@ def _success_closure_result(**overrides: Any) -> ClosureRenderResult:
         effective_closure_segment_duration_seconds=2.0,
     )
     return ClosureRenderResult(
-        public_url=overrides.get("public_url", CLOSURE_URL),
+        public_url=overrides.get("public_url", ""),
         local_path=overrides.get("local_path", "/tmp/out.mp4"),
         measured_duration_seconds=measured,
         output_token=overrides.get("output_token", "tok" * 8),
         input_fingerprint=overrides.get("input_fingerprint", "abc"),
         duration_diagnostics=diagnostics,
+    )
+
+
+def _mock_closure_render_writes_output(*_args: Any, **kwargs: Any) -> ClosureRenderResult:
+    output_path = kwargs["output_path"]
+    output_path.write_bytes(b"video")
+    measured = kwargs.get("measured_duration_seconds", 12.042)
+    return _success_closure_result(
+        local_path=str(output_path),
+        public_url="",
+        measured_duration_seconds=measured,
     )
 
 
@@ -381,7 +392,7 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
             source_kind="legacy_headline_artifact",
             closure_input_path=headline_path,
         )
-        closure_render.return_value = _success_closure_result()
+        closure_render.side_effect = _mock_closure_render_writes_output
         state = _false_completion_state(with_valid_closure=False)
         state["advertisingClosure"]["durationSeconds"] = 3.0
         with patch("engine.builder2_media_finalization_resume._probe_duration", return_value=10.042):
@@ -428,7 +439,11 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
             source_kind="legacy_headline_artifact",
             closure_input_path=Path("headline.mp4"),
         )
-        closure_render.return_value = _success_closure_result(measured_duration_seconds=12.042)
+        closure_render.side_effect = lambda *args, **kwargs: _mock_closure_render_writes_output(
+            *args,
+            measured_duration_seconds=12.042,
+            **kwargs,
+        )
         state = _false_completion_state(with_valid_closure=False)
         state["advertisingClosure"]["durationSeconds"] = 3.0
         with patch("engine.builder2_media_finalization_resume._probe_duration", return_value=10.042):
@@ -481,16 +496,15 @@ class TestBuilder2ClosureRenderReturnsNormally(unittest.TestCase):
                                     with patch("pathlib.Path.replace"):
                                         result = render_builder2_advertising_closure_endcard(
                                                 "file:///tmp/in.mp4",
-                                                "https://ace.example.com",
                                                 product_name="Product",
                                                 slogan="Slogan",
                                                 duration_seconds=3.0,
                                                 job_id=JOB_ID,
-                                                publish=False,
                                                 output_path=Path(tempfile.gettempdir()) / "builder2_closure_cli_out.mp4",
                                                 ffmpeg_runner=_fake_runner,
                                             )
         self.assertIsInstance(result, ClosureRenderResult)
+        self.assertEqual(result.public_url, "")
         self.assertAlmostEqual(result.measured_duration_seconds, 12.042, places=3)
 
 

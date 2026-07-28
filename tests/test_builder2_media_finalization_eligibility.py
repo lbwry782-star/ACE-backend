@@ -14,7 +14,9 @@ from engine.builder2_media_finalization_contract import (
     evaluate_finalization_recovery_eligibility,
     finalization_recovery_eligible,
 )
+from engine.builder2_final_video_publication import FinalVideoPublicationResult
 from engine.builder2_media_finalization_resume import (
+    FinalizationPipelineOutcome,
     _persist_finalization_failure_state,
     run_finalization_preflight,
     run_one_media_finalization_resume,
@@ -28,7 +30,7 @@ from tests.test_builder2_media_finalization_failure_inspect import (
     _false_completion_state,
     _job_raw,
 )
-from tests.test_builder2_media_finalization import _valid_closure_result
+from tests.test_builder2_media_finalization import _pipeline_outcome_from_render, _valid_closure_result
 
 
 def _production_stranded_state() -> Dict[str, Any]:
@@ -296,21 +298,16 @@ class TestSuccessfulRecoveryPersistence(unittest.TestCase):
         job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
 
-        def _render(**kwargs: Any) -> ClosureRenderResult:
+        def _render(**kwargs: Any) -> FinalizationPipelineOutcome:
             st = kwargs["state"]
             media = st.setdefault("mediaResume", {})
             media.update(
                 {
                     "headlineReconstructionCompleted": True,
                     "headlineArtifactSource": "deterministic_local_reconstruction_from_raw_runway",
-                    "finalVideoWithClosureUrl": CLOSURE_URL,
-                    "finalPublicUrl": CLOSURE_URL,
-                    "advertisingClosureRendered": True,
-                    "actualFinalVideoDurationSeconds": 12.01,
-                    "advertisingClosureStatus": "completed",
                 }
             )
-            return _valid_closure_result()
+            return _pipeline_outcome_from_render(**kwargs)
 
         pipeline.side_effect = _render
         report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
@@ -352,19 +349,11 @@ class TestSuccessfulRecoveryPersistence(unittest.TestCase):
         job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
 
-        def _render(**kwargs: Any) -> ClosureRenderResult:
-            st = kwargs["state"]
-            media = st.setdefault("mediaResume", {})
-            media.update(
-                {
-                    "finalVideoWithClosureUrl": HEADLINE_URL,
-                    "finalPublicUrl": HEADLINE_URL,
-                    "advertisingClosureRendered": False,
-                    "actualFinalVideoDurationSeconds": None,
-                    "advertisingClosureStatus": "failed",
-                }
-            )
-            return _valid_closure_result(public_url=HEADLINE_URL, measured_duration_seconds=10.042)
+        def _render(**kwargs: Any) -> None:
+            kwargs["report"]["failureStage"] = "publication"
+            kwargs["report"]["failureReason"] = "builder2_final_publication_failed"
+            kwargs["report"]["publicationAccepted"] = False
+            return None
 
         pipeline.side_effect = _render
         report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)

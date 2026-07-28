@@ -126,6 +126,7 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
 
         def runner(cmd: list[str], stage: str, category: str) -> None:
             captured.append((cmd, stage, category))
+            Path(cmd[-1]).write_bytes(b"fake")
 
         tmp = Path(tempfile.mkdtemp())
         source = tmp / "source.mp4"
@@ -157,18 +158,6 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
             "engine.builder2_closure_render._filter_path_for_ffmpeg",
             side_effect=lambda p: str(p),
         ), patch(
-            "engine.builder2_closure_render._path_for_token",
-            return_value=out,
-        ), patch(
-            "pathlib.Path.replace",
-            return_value=None,
-        ), patch(
-            "pathlib.Path.is_file",
-            fake_is_file,
-        ), patch(
-            "pathlib.Path.stat",
-            fake_stat,
-        ), patch(
             "engine.builder2_closure_render.verify_builder2_final_video_duration",
             side_effect=lambda measured, **kwargs: build_final_duration_verification_diagnostics(
                 measured,
@@ -177,12 +166,10 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
         ):
             render_builder2_advertising_closure_endcard(
                 str(source),
-                "https://ace.example.com",
                 product_name="Product",
                 slogan="Slogan",
                 language="en",
                 duration_seconds=3.0,
-                publish=False,
                 output_path=out,
                 ffmpeg_runner=runner,
             )

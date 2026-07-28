@@ -328,10 +328,8 @@ class TestClosureLowLevelMarkers(unittest.TestCase):
     @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
     @patch("engine.builder2_closure_render._default_font_path", return_value="/fonts/default.ttf")
     @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/usr/bin/ffmpeg")
-    @patch("engine.builder2_closure_render._path_for_token")
     def test_concat_invoke_before_runner_and_returned_after(
         self,
-        path_for_token: Any,
         _ffmpeg: Any,
         _font: Any,
         _audio: Any,
@@ -342,14 +340,12 @@ class TestClosureLowLevelMarkers(unittest.TestCase):
 
         marker_lines: List[bytes] = []
         original_write = os.write
+        caller_output = Path(os.environ.get("TEMP", "/tmp")) / "closure_marker_caller_out.mp4"
 
         def _capture_write(fd: int, data: bytes) -> int:
             if fd == 2:
                 marker_lines.append(data)
             return original_write(fd, data)
-
-        tmp = Path(os.environ.get("TEMP", "/tmp")) / "closure_marker_test.mp4"
-        path_for_token.return_value = tmp
 
         def _run(cmd: Any, stage: str, category: str) -> int:
             Path(str(cmd[-1])).write_bytes(b"fake-video")
@@ -362,12 +358,11 @@ class TestClosureLowLevelMarkers(unittest.TestCase):
         with patch("engine.builder2_closure_render.os.write", side_effect=_capture_write):
             result = render_builder2_advertising_closure_endcard(
                 str(source),
-                "https://ace.example.com",
                 product_name="Product",
                 slogan="Slogan",
                 language="en",
                 duration_seconds=3.0,
-                publish=False,
+                output_path=caller_output,
             )
 
         joined = b"".join(marker_lines).decode("utf-8", errors="replace")

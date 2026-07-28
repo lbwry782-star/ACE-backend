@@ -14,13 +14,23 @@ import sys
 import tempfile
 import uuid
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from engine.builder2_closure_render import (
     Builder2ClosureRenderError,
+    ClosureRenderResult,
     classify_url_route_family,
     render_builder2_advertising_closure_endcard,
+)
+from engine.builder2_final_local_staging import Builder2FinalLocalStagingError, prepare_publication_staging
+from engine.builder2_final_video_publication import (
+    Builder2FinalPublicationError,
+    FinalVideoPublicationResult,
+    durable_publication_required,
+    publish_builder2_final_video,
+    resolve_durable_final_video_publisher_kind,
 )
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_headline_decision_contract import (
@@ -171,7 +181,27 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "cliReportConstructionAccepted": False,
         "cliJsonSerializationAccepted": False,
         "cliStdoutWriteAttempted": False,
+        "localFinalRenderCompleted": False,
+        "localFinalArtifactPresentAfterRender": False,
+        "localFinalArtifactSizeBytes": None,
+        "localFinalOwnership": None,
+        "publicationStagingPreparationAttempted": False,
+        "publicationStagingPreparationAccepted": False,
+        "durablePublisherResolved": None,
+        "durablePublicationRequired": False,
+        "legacyHeadlineStoreRejectedAsFinalDestination": False,
+        "finalLocalHandoffFailureCode": None,
+        "localRenderAccepted": False,
+        "publicationAccepted": False,
+        "persistedCompletionAccepted": False,
     }
+
+
+@dataclass(frozen=True)
+class FinalizationPipelineOutcome:
+    render_result: ClosureRenderResult
+    publication_result: Optional[FinalVideoPublicationResult]
+    public_url: str
 
 
 def _safe_failure_code(code: str) -> str:
@@ -417,6 +447,48 @@ def _closure_subprocess_ran(stage: str) -> bool:
     return stage in {"card_generation", "concatenation", "duration_probe", "duration_verification", "publication"}
 
 
+def _preserve_render_diagnostics_after_render_success(
+    report: Dict[str, Any],
+    render_result: ClosureRenderResult,
+    *,
+    local_final_path: Path,
+) -> None:
+    report["localRenderAccepted"] = True
+    report["closureRenderAccepted"] = True
+    report["localFinalRenderCompleted"] = True
+    report["localFinalOwnership"] = "caller_owned"
+    report["legacyHeadlineStoreRejectedAsFinalDestination"] = True
+    report["durablePublisherResolved"] = resolve_durable_final_video_publisher_kind()
+    report["durablePublicationRequired"] = durable_publication_required()
+    if local_final_path.is_file():
+        report["localFinalArtifactPresentAfterRender"] = True
+        report["localFinalArtifactSizeBytes"] = int(local_final_path.stat().st_size)
+    report["closureFfmpegSubprocessCalls"] = int(report.get("closureFfmpegSubprocessCalls") or 0) or 1
+    _apply_closure_success_diagnostics(report, render_result)
+    report["finalDurationAccepted"] = True
+    _sync_ffmpeg_counters(report)
+
+
+def _apply_publication_failure(
+    report: Dict[str, Any],
+    exc: BaseException,
+    *,
+    render_result: ClosureRenderResult,
+    local_final_path: Path,
+) -> None:
+    _preserve_render_diagnostics_after_render_success(report, render_result, local_final_path=local_final_path)
+    preserve_original_failure(report, exc)
+    report["failureStage"] = getattr(exc, "stage", None) or "publication"
+    report["failureReason"] = str(exc.args[0] if exc.args else "builder2_final_publication_failed")
+    report["publicationAccepted"] = False
+    report["persistedCompletionAccepted"] = False
+    if isinstance(exc, Builder2FinalPublicationError):
+        report["finalLocalHandoffFailureCode"] = str(exc.args[0] if exc.args else "")
+    elif isinstance(exc, Builder2FinalLocalStagingError):
+        report["failureStage"] = exc.stage
+        report["finalLocalHandoffFailureCode"] = str(exc.args[0] if exc.args else "")
+
+
 def _execute_finalization_render_pipeline(
     *,
     job_id: str,
@@ -426,7 +498,7 @@ def _execute_finalization_render_pipeline(
     report: Dict[str, Any],
     preflight: bool,
     public_base_url: str,
-) -> Optional[Dict[str, Any]]:
+) -> Optional[FinalizationPipelineOutcome]:
     closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
     report["exactProductAndSloganReused"] = bool(
         str(closure.get("productNameText") or "").strip() and str(closure.get("sloganText") or "").strip()
@@ -492,21 +564,20 @@ def _execute_finalization_render_pipeline(
             report["measuredHeadlineDurationSeconds"] = _probe_duration(closure_input)
             _record_ffprobe_call(report, category="headline")
 
-        output_path = tmp / "closure_out.mp4"
+        output_path = tmp / "builder2_final.mp4"
         source_for_closure = str(closure_input)
         report["closureRenderAttempted"] = True
         report["closureRenderAttempts"] = 1
+        render_result: Optional[ClosureRenderResult] = None
         try:
             render_result = render_builder2_advertising_closure_endcard(
                 source_for_closure,
-                public_base_url,
                 product_name=str(closure.get("productNameText") or ""),
                 slogan=str(closure.get("sloganText") or ""),
+                output_path=output_path,
                 language=str(closure.get("language") or "en"),
                 duration_seconds=float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None,
                 job_id=job_id,
-                publish=not preflight,
-                output_path=output_path if preflight else None,
             )
         except Builder2ClosureRenderError as exc:
             preserve_original_failure(report, exc)
@@ -514,9 +585,14 @@ def _execute_finalization_render_pipeline(
             report["failureReason"] = str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")
             report["safeFfmpegReturnCode"] = exc.return_code
             report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
+            if exc.duration_diagnostics is not None or exc.closure_ffmpeg_execution_accepted:
+                _apply_closure_duration_diagnostics(report, exc)
+                if exc.duration_diagnostics is not None:
+                    report["localRenderAccepted"] = True
+                    report["localFinalRenderCompleted"] = True
             if _closure_subprocess_ran(exc.stage):
                 report["closureFfmpegSubprocessCalls"] = 1
-            _apply_closure_duration_diagnostics(report, exc)
+            report["finalLocalHandoffFailureCode"] = str(exc.args[0] if exc.args else "") if exc.stage == "local_staging" else None
             _sync_ffmpeg_counters(report)
             return None
         except Exception as exc:
@@ -524,16 +600,45 @@ def _execute_finalization_render_pipeline(
             report["failureStage"] = report.get("failureStage") or "closure_render"
             return None
 
-        report["closureRenderAccepted"] = True
-        report["closureFfmpegSubprocessCalls"] = 1
-        _apply_closure_success_diagnostics(report, render_result)
-        report["finalDurationAccepted"] = True
-        _sync_ffmpeg_counters(report)
+        _preserve_render_diagnostics_after_render_success(
+            report,
+            render_result,
+            local_final_path=output_path,
+        )
+
+        staging = prepare_publication_staging(local_final_path=output_path)
+        report.update(staging)
 
         if preflight:
+            if not staging.get("publicationStagingPreparationAccepted"):
+                report["failureStage"] = "local_staging"
+                report["failureReason"] = "builder2_final_local_artifact_missing_after_render"
+                return None
             report["readyForFinalizationRecovery"] = True
             report["ok"] = True
+            return FinalizationPipelineOutcome(
+                render_result=render_result,
+                publication_result=None,
+                public_url="",
+            )
+
+        try:
+            publication_result = publish_builder2_final_video(
+                output_path,
+                public_base_url,
+                job_id=job_id,
+                output_token=render_result.output_token,
+            )
+        except (Builder2FinalPublicationError, Builder2FinalLocalStagingError) as exc:
+            _apply_publication_failure(report, exc, render_result=render_result, local_final_path=output_path)
             return None
+        except Exception as exc:
+            _apply_publication_failure(report, exc, render_result=render_result, local_final_path=output_path)
+            return None
+
+        report["publicationCalls"] = 1
+        report["publicationAccepted"] = True
+        MediaFinalizationIsolationGuard.record_publication()
 
         media = state.setdefault("mediaResume", {})
         if decision.local_headline_render_required:
@@ -546,14 +651,19 @@ def _execute_finalization_render_pipeline(
             media["headlineArtifactUrl"] = headline_url or decision.legacy_headline_url or decision.persisted_headline_url
             media["headlinePostprocessStatus"] = "completed"
 
-        media["finalVideoWithClosureUrl"] = render_result.public_url
-        media["finalPublicUrl"] = render_result.public_url
-        media["finalVideoPath"] = render_result.public_url
+        public_url = publication_result.public_url
+        media["finalVideoWithClosureUrl"] = public_url
+        media["finalPublicUrl"] = public_url
+        media["finalVideoPath"] = public_url
         media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
         media["advertisingClosureRendered"] = True
         media["advertisingClosureStatus"] = "completed"
         state["advertisingClosureStatus"] = "completed"
-        return render_result
+        return FinalizationPipelineOutcome(
+            render_result=render_result,
+            publication_result=publication_result,
+            public_url=public_url,
+        )
     finally:
         try:
             for path in tmp.iterdir():
@@ -693,7 +803,7 @@ def run_one_media_finalization_resume(
         MediaFinalizationIsolationGuard.enable_publication()
         MediaFinalizationIsolationGuard.assert_safe_before_closure()
 
-        render_result = _execute_finalization_render_pipeline(
+        render_outcome = _execute_finalization_render_pipeline(
             job_id=job_id,
             state=state,
             plan=plan,
@@ -702,7 +812,7 @@ def run_one_media_finalization_resume(
             preflight=False,
             public_base_url=media_config.publicBaseUrl,
         )
-        if not report.get("ok") and render_result is None:
+        if not report.get("ok") and render_outcome is None:
             if report.get("failureStage") in {"headline_overlay", "duration_probe", "input_validation"}:
                 _persist_finalization_failure_state(state, report=report, headline_failure=True)
                 save_tournament_state(job_id, state)
@@ -713,10 +823,11 @@ def run_one_media_finalization_resume(
                 report["redisMutations"] = 1
             return report
 
-        if render_result is None:
+        if render_outcome is None:
             return report
 
-        report["publicationCalls"] = 1
+        render_result = render_outcome.render_result
+        report["publicationCalls"] = int(report.get("publicationCalls") or 0)
         MediaFinalizationIsolationGuard.record_closure_ffmpeg()
         MediaFinalizationIsolationGuard.record_publication()
 
@@ -746,7 +857,8 @@ def run_one_media_finalization_resume(
         overlay_headline = "" if not headline_decision_requires_headline(get_normalized_headline_decision(plan)) else str(
             plan.get("headlineText") or ""
         )
-        video_job_mark_done(job_id, render_result.public_url, marketing_text, overlay_headline=overlay_headline)
+        video_job_mark_done(job_id, render_outcome.public_url, marketing_text, overlay_headline=overlay_headline)
+        report["persistedCompletionAccepted"] = True
         report["jobCompleted"] = True
         report["ok"] = True
     except Builder2TournamentError as exc:

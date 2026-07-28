@@ -60,6 +60,52 @@ def _valid_closure_result(**overrides: Any) -> ClosureRenderResult:
     )
 
 
+def _mock_closure_render_write_output(*args: Any, **kwargs: Any) -> ClosureRenderResult:
+    output_path = kwargs.get("output_path")
+    measured = 12.01
+    if output_path is not None:
+        Path(output_path).write_bytes(b"x" * 128)
+        return _valid_closure_result(local_path=str(output_path), public_url="", measured_duration_seconds=measured)
+    return _valid_closure_result(public_url="", measured_duration_seconds=measured)
+
+
+def _pipeline_outcome_from_render(**kwargs: Any) -> "FinalizationPipelineOutcome":
+    from engine.builder2_final_video_publication import FinalVideoPublicationResult
+    from engine.builder2_media_finalization_resume import FinalizationPipelineOutcome
+
+    render_result = _valid_closure_result()
+    if "state" in kwargs:
+        media = kwargs["state"].setdefault("mediaResume", {})
+        media.update(
+            {
+                "finalVideoWithClosureUrl": CLOSURE_URL,
+                "finalPublicUrl": CLOSURE_URL,
+                "finalVideoPath": CLOSURE_URL,
+                "advertisingClosureRendered": True,
+                "actualFinalVideoDurationSeconds": 12.01,
+                "advertisingClosureStatus": "completed",
+                "headlineReconstructionCompleted": True,
+                "headlineArtifactSource": "deterministic_local_reconstruction_from_raw_runway",
+            }
+        )
+    if "report" in kwargs:
+        kwargs["report"]["headlineFfmpegSubprocessCalls"] = 1
+        kwargs["report"]["closureFfmpegSubprocessCalls"] = 1
+        kwargs["report"]["totalFfmpegCalls"] = 2
+        kwargs["report"]["ffmpegCalls"] = 2
+        kwargs["report"]["publicationCalls"] = 1
+    return FinalizationPipelineOutcome(
+        render_result=render_result,
+        publication_result=FinalVideoPublicationResult(
+            public_url=CLOSURE_URL,
+            output_token="tok" * 8,
+            route_family="api/video-headline",
+            upload_accepted=True,
+        ),
+        public_url=CLOSURE_URL,
+    )
+
+
 def _production_shaped_plan_without_headline_text() -> Dict[str, Any]:
     return {
         "schemaVersion": WINNER_PLAN_SCHEMA_VERSION,
@@ -91,20 +137,19 @@ class TestClosureRenderErrors(unittest.TestCase):
     @patch("engine.builder2_closure_render.requests.get")
     @patch("engine.builder2_closure_render._default_font_path", return_value="/font.ttf")
     @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/ffmpeg")
-    @patch("engine.builder2_closure_render._path_for_token", return_value=Path("/tmp/out.mp4"))
     @patch("engine.builder2_closure_render._ffprobe_duration_seconds", return_value=10.0)
     @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
     def test_called_process_error_raises_not_source_fallback(
         self,
         _audio: Any,
         _probe: Any,
-        _token: Any,
         _ffmpeg: Any,
         _font: Any,
         get_req: Any,
     ) -> None:
         get_req.return_value = MagicMock(status_code=200, iter_content=lambda **k: [b"x"])
         get_req.return_value.raise_for_status = MagicMock()
+        out = Path(tempfile.gettempdir()) / "closure_error_out.mp4"
 
         def runner(cmd: list[str], stage: str, category: str) -> None:
             raise subprocess.CalledProcessError(1, cmd, stderr=b"Invalid filter graph")
@@ -112,9 +157,9 @@ class TestClosureRenderErrors(unittest.TestCase):
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             render_builder2_advertising_closure_endcard(
                 "https://example.com/in.mp4",
-                "https://ace.example.com",
                 product_name="Product",
                 slogan="Slogan",
+                output_path=out,
                 ffmpeg_runner=runner,
             )
         self.assertEqual(ctx.exception.stage, "card_generation")
@@ -126,7 +171,6 @@ class TestClosureRenderErrors(unittest.TestCase):
         self.assertNotIn("/tmp/secret/in.mp4", text)
         self.assertIn("<path>", text)
 
-    @patch("engine.builder2_closure_render._path_for_token")
     @patch("engine.builder2_closure_render.requests.get")
     @patch("engine.builder2_closure_render._default_font_path", return_value="/font.ttf")
     @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/ffmpeg")
@@ -139,10 +183,8 @@ class TestClosureRenderErrors(unittest.TestCase):
         _ffmpeg: Any,
         _font: Any,
         get_req: Any,
-        token_path: Any,
     ) -> None:
         out = Path(tempfile.gettempdir()) / "closure_success_out.mp4"
-        token_path.return_value = out
         get_req.return_value = MagicMock(status_code=200, iter_content=lambda **k: [b"x"])
         get_req.return_value.raise_for_status = MagicMock()
 
@@ -152,13 +194,13 @@ class TestClosureRenderErrors(unittest.TestCase):
 
         result = render_builder2_advertising_closure_endcard(
             "https://example.com/in.mp4",
-            "https://ace.example.com",
             product_name="Product",
             slogan="Slogan",
-            publish=False,
+            output_path=out,
             ffmpeg_runner=runner,
         )
-        self.assertNotEqual(result.public_url, "https://example.com/in.mp4")
+        self.assertEqual(result.public_url, "")
+        self.assertEqual(result.local_path, str(out))
         self.assertAlmostEqual(result.measured_duration_seconds, 12.01, places=2)
 
 
@@ -549,26 +591,8 @@ class TestFinalizationRecovery(unittest.TestCase):
         job_get.return_value = {"publicBaseUrl": "https://ace.example.com"}
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
 
-        def _render(**kwargs: Any) -> ClosureRenderResult:
-            st = kwargs["state"]
-            media = st.setdefault("mediaResume", {})
-            media.update(
-                {
-                    "headlineReconstructionCompleted": True,
-                    "headlineArtifactSource": "deterministic_local_reconstruction_from_raw_runway",
-                    "finalVideoWithClosureUrl": CLOSURE_URL,
-                    "finalPublicUrl": CLOSURE_URL,
-                    "finalVideoPath": CLOSURE_URL,
-                    "advertisingClosureRendered": True,
-                    "actualFinalVideoDurationSeconds": 12.01,
-                    "advertisingClosureStatus": "completed",
-                }
-            )
-            kwargs["report"]["headlineFfmpegSubprocessCalls"] = 1
-            kwargs["report"]["closureFfmpegSubprocessCalls"] = 1
-            kwargs["report"]["totalFfmpegCalls"] = 2
-            kwargs["report"]["ffmpegCalls"] = 2
-            return _valid_closure_result()
+        def _render(**kwargs: Any):
+            return _pipeline_outcome_from_render(**kwargs)
 
         pipeline.side_effect = _render
         report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
@@ -710,7 +734,7 @@ class TestPreflightSynthetic(unittest.TestCase):
             output_path=headline_path,
             measured_duration_seconds=10.042,
         )
-        closure_render.return_value = _valid_closure_result(measured_duration_seconds=12.01)
+        closure_render.side_effect = _mock_closure_render_write_output
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
         state = _false_completion_state(with_valid_closure=False)
         with patch("engine.builder2_media_finalization_resume._probe_duration", side_effect=[10.042, 10.042, 12.01]):
@@ -810,7 +834,7 @@ class TestHeadlineDownloadFallback(unittest.TestCase):
             raw_runway_diagnostics=SafeDownloadDiagnostics(request_attempted=True, download_accepted=True),
         )
         headline_render.return_value = MagicMock(output_path=headline_path, measured_duration_seconds=10.042)
-        closure_render.return_value = _valid_closure_result(measured_duration_seconds=12.01)
+        closure_render.side_effect = _mock_closure_render_write_output
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
         state = _false_completion_state(with_valid_closure=False)
         with patch("engine.builder2_media_finalization_resume._probe_duration", side_effect=[10.042, 10.042, 12.01]):
@@ -916,7 +940,7 @@ class TestAcceptedHeadlineResolution(unittest.TestCase):
             measured_duration_seconds=10.042,
             headline_resolution=MagicMock(canonical_headline_resolution_accepted=True),
         )
-        closure_render.return_value = _valid_closure_result()
+        closure_render.side_effect = _mock_closure_render_write_output
         build_config.return_value = MagicMock(publicBaseUrl="https://ace.example.com", public_base_url=MagicMock(source="env"))
         state = _production_shaped_state_without_headline_text()
         with patch("engine.builder2_media_finalization_resume._probe_duration", side_effect=[10.042, 10.042, 12.01]):

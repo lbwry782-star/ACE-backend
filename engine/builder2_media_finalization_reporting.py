@@ -126,6 +126,19 @@ MEDIA_FINALIZATION_REPORT_SAFE_KEYS: tuple[str, ...] = (
     "localHeadlineInputPresent",
     "localHeadlineFailureStage",
     "localHeadlineFailureCode",
+    "localFinalRenderCompleted",
+    "localFinalArtifactPresentAfterRender",
+    "localFinalArtifactSizeBytes",
+    "localFinalOwnership",
+    "publicationStagingPreparationAttempted",
+    "publicationStagingPreparationAccepted",
+    "durablePublisherResolved",
+    "durablePublicationRequired",
+    "legacyHeadlineStoreRejectedAsFinalDestination",
+    "finalLocalHandoffFailureCode",
+    "localRenderAccepted",
+    "publicationAccepted",
+    "persistedCompletionAccepted",
 )
 
 

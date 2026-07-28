@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 import requests
 
+from engine.builder2_final_local_staging import handoff_local_final_artifact
 from engine.builder2_new_format_config import (
     FINAL_DURATION_TOLERANCE_SECONDS,
     resolve_builder2_effective_closure_segment_duration_seconds,
@@ -30,8 +31,6 @@ from engine.video_headline_postprocess import (
     _ffmpeg_bin,
     _filter_path_for_ffmpeg,
     _input_has_audio,
-    _path_for_token,
-    _storage_root,
 )
 from engine.video_language import normalize_video_content_language
 
@@ -333,21 +332,34 @@ def _closure_storage_token(job_id: str) -> str:
 
 def render_builder2_advertising_closure_endcard(
     source_video_url: str,
-    public_base_url: str,
     *,
     product_name: str,
     slogan: str,
+    output_path: Path,
     language: str = "he",
     duration_seconds: float | None = None,
     job_id: str = "",
-    publish: bool = True,
-    output_path: Optional[Path] = None,
+    public_base_url: str = "",
+    publish: bool = False,
     ffmpeg_runner: Optional[Callable[[list[str], str, str], None]] = None,
 ) -> ClosureRenderResult:
+    _ = public_base_url
+    if publish:
+        raise Builder2ClosureRenderError(
+            "builder2_closure_renderer_publish_not_supported",
+            stage="input_validation",
+            command_category="validation",
+        )
     source = (source_video_url or "").strip()
     if not source:
         raise Builder2ClosureRenderError(
             "builder2_closure_missing_source_video",
+            stage="input_validation",
+            command_category="validation",
+        )
+    if output_path is None:
+        raise Builder2ClosureRenderError(
+            "builder2_closure_output_path_required",
             stage="input_validation",
             command_category="validation",
         )
@@ -356,19 +368,6 @@ def render_builder2_advertising_closure_endcard(
     if not product or not slogan_text:
         raise Builder2ClosureRenderError(
             "builder2_closure_missing_text",
-            stage="input_validation",
-            command_category="validation",
-        )
-    base = (public_base_url or "").strip().rstrip("/")
-    if publish and not base:
-        from engine.public_base_url import resolve_public_base_url
-
-        resolution = resolve_public_base_url()
-        if resolution.configured:
-            base = resolution.value
-    if publish and not base:
-        raise Builder2ClosureRenderError(
-            "builder2_closure_missing_public_base_url",
             stage="input_validation",
             command_category="validation",
         )
@@ -386,13 +385,8 @@ def render_builder2_advertising_closure_endcard(
     effective_segment = resolve_builder2_effective_closure_segment_duration_seconds(duration_seconds)
     hold = effective_segment
     token = _closure_storage_token(job_id)
-    published_path = output_path or _path_for_token(token)
-    if published_path is None:
-        raise Builder2ClosureRenderError(
-            "builder2_closure_output_path_unavailable",
-            stage="input_validation",
-            command_category="validation",
-        )
+    caller_output_path = Path(output_path)
+    input_fingerprint = url_fingerprint(source)
 
     tmp = Path(tempfile.mkdtemp(prefix="ace_closure_endcard_"))
     inp = tmp / "in.mp4"
@@ -400,7 +394,6 @@ def render_builder2_advertising_closure_endcard(
     out_tmp = tmp / "out.mp4"
     product_file = tmp / "product.txt"
     slogan_file = tmp / "slogan.txt"
-    input_fingerprint = url_fingerprint(source)
 
     def _runner(cmd: list[str], stage: str, category: str) -> int:
         if ffmpeg_runner is not None:
@@ -609,37 +602,32 @@ def render_builder2_advertising_closure_endcard(
             hold,
             duration_accepted,
         )
-        out_tmp.replace(published_path)
+        try:
+            handoff_local_final_artifact(out_tmp, caller_output_path)
+        except Exception as exc:
+            from engine.builder2_final_local_staging import Builder2FinalLocalStagingError
 
-        public_url = ""
-        if publish:
-            upload_secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
-            if upload_secret:
-                upload_endpoint = f"{base}/api/video-headline-artifact"
-                with open(published_path, "rb") as handle:
-                    upload = requests.post(
-                        upload_endpoint,
-                        headers={"X-ACE-Video-Headline-Upload-Secret": upload_secret},
-                        files={"file": ("closure.mp4", handle, "video/mp4")},
-                        data={"token": token},
-                        timeout=_FFMPEG_TIMEOUT,
-                    )
-                if not upload.ok:
-                    raise Builder2ClosureRenderError(
-                        "builder2_closure_publication_failed",
-                        stage="publication",
-                        return_code=upload.status_code,
-                        command_category="http_upload",
-                    )
-            public_url = f"{base}/api/video-headline/{token}"
-            if public_url == source:
+            if isinstance(exc, Builder2FinalLocalStagingError):
                 raise Builder2ClosureRenderError(
-                    "builder2_closure_output_same_as_input",
-                    stage="publication",
-                    command_category="validation",
-                )
-        else:
-            public_url = published_path.as_uri()
+                    str(exc.args[0] if exc.args else "builder2_final_local_handoff_failed"),
+                    stage=exc.stage,
+                    command_category="local_staging",
+                    closure_ffmpeg_execution_accepted=closure_ffmpeg_execution_accepted,
+                    closure_output_file_created=closure_output_file_created,
+                    closure_output_file_size_bytes=closure_output_file_size_bytes,
+                    closure_ffprobe_calls=closure_ffprobe_calls,
+                    duration_diagnostics=duration_diagnostics,
+                ) from exc
+            raise Builder2ClosureRenderError(
+                "builder2_final_local_handoff_failed",
+                stage="local_staging",
+                command_category="local_staging",
+                closure_ffmpeg_execution_accepted=closure_ffmpeg_execution_accepted,
+                closure_output_file_created=closure_output_file_created,
+                closure_output_file_size_bytes=closure_output_file_size_bytes,
+                closure_ffprobe_calls=closure_ffprobe_calls,
+                duration_diagnostics=duration_diagnostics,
+            ) from exc
 
         logger.info(
             "BUILDER2_CLOSURE_ENDCARD_DONE elapsedMs=%.1f measuredFinalDurationSeconds=%.3f durationAccepted=%s ffmpegReturnCode=%s outputCreated=%s outputSizeBytes=%s",
@@ -657,8 +645,8 @@ def render_builder2_advertising_closure_endcard(
             durationAccepted=duration_accepted,
         )
         return ClosureRenderResult(
-            public_url=public_url,
-            local_path=str(published_path),
+            public_url="",
+            local_path=str(caller_output_path),
             measured_duration_seconds=measured,
             output_token=token,
             input_fingerprint=input_fingerprint,
