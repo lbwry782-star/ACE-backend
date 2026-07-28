@@ -331,7 +331,10 @@ def normalize_builder2_winner_downstream(
     try:
         get_visual_anchor_description(out)
         logger.info("BUILDER2_VISUAL_ANCHOR_NORMALIZED structureType=%s", out.get("structureType"))
-        apply_builder2_headline_composition(out)
+        from engine.builder2_single_slogan_contract import single_slogan_forces_headline_omit
+
+        if not single_slogan_forces_headline_omit(plan=out):
+            apply_builder2_headline_composition(out)
         ensure_builder2_schema_metadata(out, compatibility_mode=compatibility_mode)
         out["sceneVariations"] = get_scene_variation_descriptions(out)
         structure = (out.get("structureType") or "").strip()
@@ -566,7 +569,9 @@ def validate_builder2_pre_runway(plan: Dict[str, Any]) -> None:
         if _remainder_starts_with_product_name(pn, rem):
             _pre_runway_invalid("headlineTextRemainder")
     elif decision == "omit":
-        if _optional_text(plan.get("headlineText")) or _optional_text(plan.get("headline")):
+        if plan.get("headlineCompatibilityAlias") is True:
+            pass
+        elif _optional_text(plan.get("headlineText")) or _optional_text(plan.get("headline")):
             _pre_runway_invalid("headlineDecision.omit_with_headline")
     else:
         _pre_runway_invalid("headlineDecision")

@@ -187,6 +187,8 @@ def new_tournament_state(
         "updatedAt": now,
         "lastCompletedStep": "created",
         "error": None,
+        "copyContractVersion": "builder2_single_slogan_v1",
+        "builder2NewFormatVersion": "builder2_complete_ad_v1",
     }
 
 

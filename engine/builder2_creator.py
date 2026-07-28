@@ -248,6 +248,7 @@ def validate_creator_candidate(
     job_id: str = "",
     tournament_id: str = "",
     candidate_id: str = "",
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from engine.builder2_creator_normalization import normalize_creator_candidate
 
@@ -395,6 +396,7 @@ def validate_creator_candidate(
         assigned_prototype_id=assigned_prototype_id,
         strategy_foundation=strategy_foundation,
         compatibility_mode=compatibility_mode,
+        tournament_state=tournament_state,
     )
     from engine.builder2_creative_order_contract import finalize_creator_order_metadata
     from engine.builder2_prototype_method_contract import finalize_prototype_method_metadata
@@ -928,6 +930,7 @@ def generate_creator_candidate(
                 job_id=job_id,
                 tournament_id=tournament_id,
                 candidate_id=candidate_id,
+                tournament_state=state,
             )
             _write_creator_diagnostics(
                 diagnostics,

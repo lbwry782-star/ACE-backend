@@ -192,7 +192,7 @@ def validate_headline_decision_methodology(
     if headline_decision_is_omit(decision):
         headline = str(winner_plan.get("headline") or "").strip()
         headline_text = str(winner_plan.get("headlineText") or "").strip()
-        if headline or headline_text:
+        if winner_plan.get("headlineCompatibilityAlias") is not True and (headline or headline_text):
             _raise("builder2_winner_validation_failed", field="headlineDecision.omit_with_headline")
         video_prompt = str(winner_plan.get("videoPrompt") or winner_plan.get("videoPromptCore") or "")
         if _TEXTUAL_HEADLINE_DEPENDENCY.search(video_prompt):

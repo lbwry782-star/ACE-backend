@@ -100,6 +100,11 @@ def assess_winner_headline_repair_eligibility(
     if not winner_candidate_id:
         report["reason"] = "builder2_winner_headline_repair_ineligible:winner_missing"
         return report
+    from engine.builder2_single_slogan_contract import is_single_slogan_contract
+
+    if is_single_slogan_contract(state=state):
+        report["reason"] = "builder2_winner_headline_repair_ineligible:single_slogan_contract"
+        return report
     if is_valid_persisted_winner_development(state):
         report["reason"] = "builder2_winner_headline_repair_ineligible:winner_already_accepted"
         return report

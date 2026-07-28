@@ -118,13 +118,31 @@ def _has_valid_judgment(cand: Dict[str, Any]) -> bool:
     return False
 
 
+def _resolve_judgment_for_candidate(state: Dict[str, Any], candidate_id: str) -> Dict[str, Any]:
+    cand = (state.get("candidates") or {}).get(candidate_id) or {}
+    judgment_id = cand.get("judgmentId")
+    if not judgment_id:
+        snapshot = cand.get("judgmentSnapshot")
+        return snapshot if isinstance(snapshot, dict) else {}
+    record = (state.get("judgments") or {}).get(judgment_id) or {}
+    judgment = record.get("judgment")
+    return judgment if isinstance(judgment, dict) else {}
+
+
 def select_global_winner(state: Dict[str, Any]) -> str:
+    from engine.builder2_metaphorical_embodiment_contract import judgment_rejects_literal_execution
+
+    def _literal_winner_blocked(candidate_id: str) -> bool:
+        judgment = _resolve_judgment_for_candidate(state, candidate_id)
+        return judgment_rejects_literal_execution(judgment) if isinstance(judgment, dict) else False
+
     eligible_ids = [
         cid
         for cid, cand in state["candidates"].items()
         if cand.get("eligible")
         and _creator_was_accepted(cand, state=state)
         and _has_valid_judgment(cand)
+        and not _literal_winner_blocked(cid)
     ]
     if eligible_ids:
         best_id = eligible_ids[0]

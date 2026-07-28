@@ -38,6 +38,7 @@ from engine.builder2_headline_decision_contract import (
     get_normalized_headline_decision,
     headline_decision_requires_headline,
 )
+from engine.builder2_single_slogan_contract import builder2_requires_headline_overlay
 from engine.builder2_local_headline_render import (
     VideoHeadlineRenderError,
     render_builder2_accepted_headline_overlay,
@@ -924,7 +925,7 @@ def run_one_media_finalization_resume(
         report["redisMutations"] = 1
 
         marketing_text = str(media.get("marketingText") or "")
-        overlay_headline = "" if not headline_decision_requires_headline(get_normalized_headline_decision(plan)) else str(
+        overlay_headline = "" if not builder2_requires_headline_overlay(plan=plan, state=state) else str(
             plan.get("headlineText") or ""
         )
         video_job_mark_done(job_id, render_outcome.public_url, marketing_text, overlay_headline=overlay_headline)

@@ -96,7 +96,7 @@ def _six_six_missing_headline_state(*, repair_calls: int = 0) -> Dict[str, Any]:
     state["jobId"] = "job-headline-repair"
     state["tournamentId"] = "tournament-headline-repair"
     state["builder2ResumeContractVersion"] = BUILDER2_RESUME_CONTRACT_VERSION
-    state["builder2NewFormatVersion"] = BUILDER2_NEW_FORMAT_VERSION
+    state.pop("copyContractVersion", None)
     state["schemaVersion"] = TOURNAMENT_STATE_SCHEMA_VERSION
     state["productDescription"] = "Repair product"
     state["contentLanguage"] = "he"

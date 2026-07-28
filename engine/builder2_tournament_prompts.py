@@ -176,7 +176,16 @@ def build_creator_prompt(
         f"creatorReport.goldPrototypeUsed must be {prototype.prototype_id!r} or {prototype.display_name!r}.\n"
         "Hebrew free-text fields are allowed. Enum fields must use the exact canonical English tokens above.\n"
         "For think_small identify a real weakness. For essential_pairing avoid appearance-only pairing.\n"
-        "For context_collision include a meaningful bridge explanation in creatorReport."
+        "For context_collision include a meaningful bridge explanation in creatorReport.\n"
+        "Metaphorical embodiment is mandatory: do not illustrate the strategic perception with literal domain symbols "
+        "(graphs, dashboards, printed reports, CRM screens, forms, counters, growth arrows) unless they undergo a "
+        "strong conceptual transformation. Create a physical visual embodiment through which the viewer experiences "
+        "or discovers the strategic perception silently before advertisingClosure.sloganText appears. "
+        "The product, medium, or business context may remain visible when scale, composition, context, motion, "
+        "absence, collision, or medium transformation does the conceptual work — as in Think Small. "
+        "Do not default to quantity-versus-quality, external worlds, or repeated-object comparisons unless that "
+        "relationship is genuinely the candidate's strategic perception. "
+        "dependsOnEarlierCopy must be false in visualBridgeAssessment."
     )
 
 
@@ -289,6 +298,10 @@ def build_judge_prompt(
         "prototypeQualityComparison, confidence, problemAdvantageAssessment, mechanismDepthAssessment, "
         "prototypeMethodAssessment, visualMechanismAssessment, participationAssessment, visualFamilyAssessment, "
         "silentMovieAssessment, verbalLayerAssessment, headlineNecessityAssessment, advertisingCompletionAssessment.\n"
+        "Independently test creative embodiment: reject literal graph/report/dashboard/interface execution unless "
+        "meaningfully transformed; require metaphoricalEmbodimentAssessment and visualBridgeAssessment with "
+        "dependsOnEarlierCopy=false. Do not require leaving the business domain. "
+        "Clarity without creative embodiment is insufficient.\n"
         "If eligible=false, include at least one disqualifier explaining why."
     )
 
@@ -370,6 +383,9 @@ def build_winner_development_prompt(
         "Generate the headline ONLY now when headlineDecision.decision=use (alias include). Headline remainder max seven words excluding product name.\n"
         "When headlineDecision.decision=omit, leave headline, headlineText, and headlineCoreKeyword empty and set headlineForm=none. "
         "Do not invent a separate in-scene headline; the authoritative end-card slogan is server-owned from the winning Creator candidate.\n"
+        "Single-slogan contract (new jobs): set headlineDecision.decision=omit and headlineForm=none. "
+        "Do not generate a separate in-video headline. advertisingClosure.sloganText from the winning candidate is the "
+        "only advertising sentence and must bridge the finished visual mechanism.\n"
         "Required advertisingClosure object: required=true, productNameText, sloganText, language, "
         "presentationMode=end_card, durationSeconds=2, headlineSource, noLogo=true.\n"
         f"Video duration seconds: {duration}\n"

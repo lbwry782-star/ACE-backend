@@ -109,6 +109,9 @@ def _historical_resume_state(
     state["productDescription"] = "Resume description"
     state["contentLanguage"] = "he"
     state["strategyFoundation"] = strategy
+    # Historical resume fixtures represent jobs created before single-slogan contract.
+    state.pop("copyContractVersion", None)
+    state.pop("builder2NewFormatVersion", None)
     state["currentRound"] = 1
     state["status"] = "round_complete"
 

@@ -10,6 +10,7 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from engine.builder2_headline_decision_contract import get_normalized_headline_decision, headline_decision_requires_headline
+from engine.builder2_single_slogan_contract import builder2_requires_headline_overlay
 from engine.builder2_media_pipeline import MediaPipelineDeps, execute_builder2_media_pipeline
 from engine.builder2_media_resume_config import build_media_resume_configuration
 from engine.builder2_media_reasoning_guard import MEDIA_RESUME_MODEL_DEPENDENT_DELIVERY, MEDIA_RESUME_REASONING_BLOCKED
@@ -206,7 +207,7 @@ def run_one_media_resume(
         start_image_required = builder2_runway_requires_start_image(runway_model)
         from engine.builder2_new_format_config import builder2_media_requires_closure_ffmpeg
 
-        ffmpeg_required = headline_decision_requires_headline(headline_decision) or builder2_media_requires_closure_ffmpeg(
+        ffmpeg_required = builder2_requires_headline_overlay(plan=plan, state=state) or builder2_media_requires_closure_ffmpeg(
             state=state,
             plan=plan,
         )
@@ -301,7 +302,7 @@ def run_one_media_resume(
 
         final_url = str((state.get("mediaResume") or {}).get("finalPublicUrl") or "")
         marketing_text = str((state.get("mediaResume") or {}).get("marketingText") or "")
-        overlay_headline = "" if not headline_decision_requires_headline(headline_decision) else (plan.get("headlineText") or "")
+        overlay_headline = "" if not builder2_requires_headline_overlay(plan=plan, state=state) else (plan.get("headlineText") or "")
         job_video_url = ""
         if redis_configured():
             job_record = video_job_get(job_id)

@@ -302,6 +302,10 @@ class TestMediaPipelineOrdering(unittest.TestCase):
         calls: list[str] = []
         state = _media_ready_state(job_id=JOB_ID)
         plan = state["winnerDevelopmentPlan"]
+        state.pop("copyContractVersion", None)
+        state.pop("builder2NewFormatVersion", None)
+        plan.pop("copyContractVersion", None)
+        plan.pop("builder2NewFormatVersion", None)
         plan["headlineDecision"] = {"decision": "use", "reasonSource": "judge", "reason": "Required."}
         plan["headlineText"] = "Headline text"
         plan["headlineTextRemainder"] = "remainder"

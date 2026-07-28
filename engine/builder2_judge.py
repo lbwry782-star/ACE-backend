@@ -278,6 +278,9 @@ def validate_judge_response(
     from engine.builder2_complete_ad_contract import apply_semantic_eligibility_rules
 
     out = apply_semantic_eligibility_rules(out)
+    from engine.builder2_metaphorical_embodiment_contract import apply_metaphorical_eligibility_rules
+
+    out = apply_metaphorical_eligibility_rules(out)
     return out, total, scores
 
 

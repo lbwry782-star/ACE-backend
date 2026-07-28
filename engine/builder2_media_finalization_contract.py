@@ -17,6 +17,7 @@ from engine.builder2_headline_decision_contract import (
     get_normalized_headline_decision,
     headline_decision_requires_headline,
 )
+from engine.builder2_single_slogan_contract import builder2_requires_headline_overlay
 from engine.builder2_new_format_config import (
     FINAL_DURATION_TOLERANCE_SECONDS,
     resolve_builder2_end_card_duration_seconds,
@@ -196,7 +197,7 @@ def assess_false_completion(
 ) -> Tuple[bool, List[str]]:
     media = _media_bucket(state)
     headline_decision = get_normalized_headline_decision(plan)
-    headline_required = headline_decision_requires_headline(headline_decision)
+    headline_required = builder2_requires_headline_overlay(plan=plan, state=state)
     closure_required = advertising_closure_is_required(plan) or bool(
         _clean((state.get("advertisingClosure") or {}).get("sloganText"))
     )
@@ -253,7 +254,7 @@ def validate_builder2_media_completion_contract(
 ) -> Tuple[bool, str, List[str]]:
     media = _media_bucket(state)
     headline_decision = get_normalized_headline_decision(plan)
-    headline_required = headline_decision_requires_headline(headline_decision)
+    headline_required = builder2_requires_headline_overlay(plan=plan, state=state)
     closure_required = advertising_closure_is_required(plan) or bool(
         _clean((state.get("advertisingClosure") or {}).get("sloganText"))
     )
@@ -317,6 +318,16 @@ def validate_builder2_media_completion_contract(
         job_video_url=job_video_url,
     ):
         failures.append("closure_inclusive_artifact_invalid")
+
+    from engine.builder2_single_slogan_contract import validate_single_slogan_completion
+
+    failures.extend(
+        validate_single_slogan_completion(
+            state=state,
+            plan=plan,
+            media=media,
+        )
+    )
     if failures:
         return False, failures[0], failures
     return True, "", []
@@ -388,7 +399,7 @@ def assess_recoverable_failed_finalization_state(
 ) -> RecoverableFailedFinalizationAssessment:
     media = _media_bucket(state)
     headline_decision = get_normalized_headline_decision(plan)
-    headline_required = headline_decision_requires_headline(headline_decision)
+    headline_required = builder2_requires_headline_overlay(plan=plan, state=state)
     raw_url = resolve_raw_runway_artifact_url(state)
     headline_url = resolve_legacy_headline_artifact_url(
         state=state,
@@ -507,7 +518,7 @@ def evaluate_finalization_recovery_eligibility(
 ) -> Dict[str, Any]:
     media = _media_bucket(state)
     headline_decision = get_normalized_headline_decision(plan)
-    headline_required = headline_decision_requires_headline(headline_decision)
+    headline_required = builder2_requires_headline_overlay(plan=plan, state=state)
     raw_url = resolve_raw_runway_artifact_url(state)
     headline_url = resolve_legacy_headline_artifact_url(
         state=state,
@@ -602,7 +613,7 @@ def finalization_recovery_eligible(
 def backfill_legacy_headline_reference(state: Dict[str, Any], *, job_video_url: str = "") -> str:
     media = _media_bucket(state)
     plan = state.get("winnerDevelopmentPlan") if isinstance(state.get("winnerDevelopmentPlan"), dict) else {}
-    headline_required = headline_decision_requires_headline(get_normalized_headline_decision(plan))
+    headline_required = builder2_requires_headline_overlay(plan=plan, state=state)
     existing = _clean(media.get("headlineArtifactUrl"))
     if existing:
         return existing

@@ -996,7 +996,9 @@ def _generate_one_video_mvp_body(
         marketing_text = str(media.get("marketingText") or "")
         headline_decision = get_normalized_headline_decision(winner_plan)
         overlay_headline = ""
-        if headline_decision_requires_headline(headline_decision):
+        from engine.builder2_single_slogan_contract import builder2_requires_headline_overlay
+
+        if builder2_requires_headline_overlay(plan=winner_plan, state=refreshed):
             overlay_headline = str(winner_plan.get("headlineText") or "")
         total_ms = (time.monotonic() - t_job0) * 1000.0
         logger.info("VIDEO_TIMING_TOTAL_MS=%.1f", total_ms)

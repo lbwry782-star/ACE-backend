@@ -230,6 +230,7 @@ def validate_creator_methodology(
     assigned_prototype_id: str,
     strategy_foundation: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     if compatibility_mode and not uses_full_methodology(candidate):
         logger.info(
@@ -277,6 +278,16 @@ def validate_creator_methodology(
             assigned_prototype_id=assigned_prototype_id,
             product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
         )
+        from engine.builder2_metaphorical_embodiment_contract import validate_creator_metaphorical_embodiment
+        from engine.builder2_single_slogan_contract import BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION
+
+        requires_metaphor = str((tournament_state or {}).get("copyContractVersion") or "").strip() == BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION
+        if requires_metaphor or isinstance(candidate.get("metaphoricalEmbodiment"), dict):
+            validate_creator_metaphorical_embodiment(
+                candidate,
+                assigned_prototype_id=assigned_prototype_id,
+                single_slogan_required=requires_metaphor,
+            )
 
     anchor = _require_dict(candidate.get("visualAnchor"), field="visualAnchor", code="builder2_creator_schema_invalid")
     if anchor.get("appearsBeforeOrDuringResolution") is not True and not _normalize_text(anchor.get("visualAnchorTiming")):
@@ -789,6 +800,10 @@ def validate_judge_methodology(
     from engine.builder2_advertising_closure_contract import validate_judge_advertising_completion_assessment
 
     validate_judge_advertising_completion_assessment(judgment)
+    from engine.builder2_metaphorical_embodiment_contract import validate_judge_metaphorical_embodiment
+
+    if isinstance(judgment.get("metaphoricalEmbodimentAssessment"), dict):
+        validate_judge_metaphorical_embodiment(judgment, candidate=candidate)
     logger.info("BUILDER2_JUDGE_METHODOLOGY_VALIDATED")
 
 
@@ -851,6 +866,12 @@ def validate_winner_methodology(
     from engine.builder2_advertising_closure_contract import validate_advertising_closure_methodology
 
     validate_advertising_closure_methodology(winner_plan, require_present=False)
+    from engine.builder2_single_slogan_contract import is_single_slogan_contract, validate_single_slogan_plan_contract
+
+    if is_single_slogan_contract(plan=winner_plan):
+        ok, failures = validate_single_slogan_plan_contract(winner_plan)
+        if not ok and failures:
+            _raise("builder2_winner_validation_failed", field=failures[0])
     decision = str((winner_plan.get("headlineDecision") or {}).get("decision") or "")
 
     _validate_winner_preservation_deterministic(

@@ -343,6 +343,10 @@ class TestFreshProductionDoesNotInvokeRecoveryClis(unittest.TestCase):
                         "advertisingClosureRendered": True,
                         "advertisingClosureStatus": "completed",
                         "actualFinalVideoDurationSeconds": 12.034,
+                        "headlineOverlaySkipped": True,
+                        "sloganRenderedExactlyOnce": True,
+                        "advertisingCopyRenderStages": 1,
+                        "copyContractVersion": "builder2_single_slogan_v1",
                     }
                 )
                 kwargs["state"]["status"] = "completed"

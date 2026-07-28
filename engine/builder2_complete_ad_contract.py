@@ -84,6 +84,27 @@ def apply_complete_ad_winner_plan_normalization(
     if headline_decision_is_omit(normalized_decision.get("decision")):
         winner_plan["headlineForm"] = "none"
 
+    from engine.builder2_single_slogan_contract import (
+        apply_single_slogan_winner_normalization,
+        is_single_slogan_contract,
+        normalize_legacy_dual_copy,
+        sync_closure_slogan_from_canonical,
+    )
+
+    if is_single_slogan_contract(plan=winner_plan):
+        apply_single_slogan_winner_normalization(
+            winner_plan,
+            winning_candidate=winning_candidate,
+            winning_judgment=winning_judgment,
+        )
+        sync_closure_slogan_from_canonical(plan=winner_plan)
+    else:
+        legacy = normalize_legacy_dual_copy(plan=winner_plan)
+        if legacy.get("legacyCopyNormalized"):
+            winner_plan["legacyCopyNormalized"] = True
+            winner_plan["legacyCopySource"] = legacy.get("legacyCopySource")
+            sync_closure_slogan_from_canonical(plan=winner_plan)
+
 
 def _clean(value: Any) -> str:
     return str(value or "").strip()

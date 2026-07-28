@@ -138,6 +138,25 @@ def _media_ready_state(*, job_id: str = HISTORICAL_JOB_ID) -> Dict[str, Any]:
     state["productName"] = "ACE Product"
     state["productDescription"] = "Product description"
     state["contentLanguage"] = "he"
+    from engine.builder2_single_slogan_contract import (
+        BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION,
+        apply_single_slogan_winner_normalization,
+    )
+    from tests.builder2_methodology_fixtures import complete_ad_creator_extras, metaphorical_embodiment_creator_extras, single_slogan_contract_extras
+
+    state.update(single_slogan_contract_extras())
+    winner_plan = state.get("winnerDevelopmentPlan") or {}
+    if isinstance(winner_plan, dict):
+        winner_plan.update(single_slogan_contract_extras())
+        candidate_with_closure = dict(winning_candidate)
+        candidate_with_closure.update(complete_ad_creator_extras())
+        candidate_with_closure.update(metaphorical_embodiment_creator_extras())
+        apply_single_slogan_winner_normalization(
+            winner_plan,
+            winning_candidate=candidate_with_closure,
+        )
+        state["winnerDevelopmentPlan"] = winner_plan
+        state["copyContractVersion"] = BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION
     closure = (state.get("winnerDevelopmentPlan") or {}).get("advertisingClosure")
     if isinstance(closure, dict):
         state["advertisingClosure"] = dict(closure)

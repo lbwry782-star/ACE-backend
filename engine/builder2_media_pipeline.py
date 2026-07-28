@@ -553,8 +553,26 @@ def execute_builder2_media_pipeline(
         raise Builder2TournamentError(config_failures[0] if config_failures else "builder2_new_format_config_mismatch")
 
     closure = state.get("advertisingClosure") or plan.get("advertisingClosure") or {}
-    if not isinstance(closure, dict) or not str(closure.get("sloganText") or "").strip():
+    if not isinstance(closure, dict):
+        closure = {}
+    from engine.builder2_single_slogan_contract import (
+        builder2_requires_headline_overlay,
+        is_single_slogan_contract,
+        log_single_slogan_safe_metadata,
+        mark_single_slogan_media_fields,
+        resolve_canonical_slogan_text,
+        sync_closure_slogan_from_canonical,
+    )
+
+    if is_single_slogan_contract(state=state, plan=plan):
+        sync_closure_slogan_from_canonical(plan=plan, state=state)
+        closure = plan.get("advertisingClosure") or closure
+    canonical_slogan = resolve_canonical_slogan_text(plan=plan, state=state)
+    if not str(closure.get("sloganText") or "").strip() and not canonical_slogan:
         raise Builder2TournamentError("builder2_media_missing_winner_advertising_closure")
+    if canonical_slogan and isinstance(closure, dict):
+        closure = dict(closure)
+        closure["sloganText"] = canonical_slogan
 
     from engine.builder2_media_finalization_contract import closure_inclusive_artifact_valid, resolve_legacy_headline_artifact_url
     from engine.builder2_closure_render import Builder2ClosureRenderError, render_builder2_advertising_closure_endcard
@@ -571,8 +589,9 @@ def execute_builder2_media_pipeline(
     visual_source_url = downloaded_path
     headline_url = str(media.get("headlineArtifactUrl") or "").strip()
     closure_input_url = visual_source_url
+    headline_overlay_required = builder2_requires_headline_overlay(plan=plan, state=state)
 
-    if headline_decision_requires_headline(headline_decision):
+    if headline_overlay_required:
         if headline_url:
             media["headlinePostprocessStatus"] = media.get("headlinePostprocessStatus") or "reused"
         else:
@@ -591,6 +610,10 @@ def execute_builder2_media_pipeline(
             counters.ffmpeg_calls += 1
             media["ffmpegStatus"] = "completed"
         closure_input_url = headline_url
+    elif is_single_slogan_contract(state=state, plan=plan):
+        media["headlineOverlaySkipped"] = True
+        media["headlinePostprocessStatus"] = "skipped_single_slogan_contract"
+        plan["headlineOverlaySkipped"] = True
 
     closure_url = str(media.get("finalVideoWithClosureUrl") or "").strip()
     valid_existing_closure = closure_inclusive_artifact_valid(
@@ -655,9 +678,9 @@ def execute_builder2_media_pipeline(
             except OSError:
                 pass
 
-    if headline_decision_requires_headline(headline_decision) and not headline_url:
+    if headline_overlay_required and not headline_url:
         headline_url = resolve_legacy_headline_artifact_url(state=state, headline_required=True)
-    if headline_url:
+    if headline_url and headline_overlay_required:
         media["headlineArtifactUrl"] = headline_url
 
     marketing_text = str(media.get("marketingText") or "")
@@ -694,6 +717,14 @@ def execute_builder2_media_pipeline(
         marketingText=marketing_text,
         advertisingClosureRendered=True,
     )
+    if is_single_slogan_contract(state=state, plan=plan):
+        mark_single_slogan_media_fields(
+            state=state,
+            plan=plan,
+            headline_overlay_skipped=not headline_overlay_required,
+            closure_render_completed=True,
+        )
+        log_single_slogan_safe_metadata(plan=plan, state=state, media=media, job_id=job_id)
     state["mediaContinuationRequired"] = False
     state["status"] = "completed"
     state["lastCompletedStep"] = "done"

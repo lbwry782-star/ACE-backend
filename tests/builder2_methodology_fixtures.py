@@ -106,6 +106,214 @@ def _prototype_application(prototype_id: str) -> Dict[str, Any]:
     return apps.get(prototype_id, {})
 
 
+def complete_ad_creator_extras(
+    *,
+    product_name: str = "ACE Product",
+    slogan_text: str = "קרוב יותר ממה שחשבת",
+    language: str = "he",
+    key_word: str = "closer",
+) -> Dict[str, Any]:
+    return {
+        "advertisingClosure": build_default_creator_advertising_closure(
+            product_name=product_name,
+            slogan_text=slogan_text,
+            language=language,
+        ),
+        "semanticBridge": build_default_creator_semantic_bridge(
+            key_word=key_word,
+            visual_meaning="Physical closing of distance between two people",
+            slogan_meaning="Strategic closeness to the buyer's need",
+            strategic_meaning="Closeness becomes the advantage",
+            how_they_meet="The visible gesture proves the same strategic promise the slogan closes",
+        ),
+    }
+
+
+def metaphorical_embodiment_creator_extras(
+    *,
+    strategic_perception: str = "Physical closeness can express strategic fit better than generic scale.",
+    creative_embodiment_mode: str = "transformed_action_or_motion",
+) -> Dict[str, Any]:
+    return {
+        "metaphoricalEmbodiment": {
+            "strategicPerception": strategic_perception,
+            "obviousLiteralVisualSymbols": ["agency office proximity map", "location pin dashboard"],
+            "literalSymbolsRejectedOrTransformed": "Reject map pins; show closeness through human distance closing.",
+            "creativeEmbodimentMode": creative_embodiment_mode,
+            "embodimentSubjectOrWorld": "Two people in a neutral room",
+            "physicalEmbodiment": "One person closes the visible distance to another",
+            "embodiedStrategicRelationship": "Nearness in the frame expresses strategic closeness to the buyer's need",
+            "visiblePhysicalRelationship": "The shrinking gap between two people is the main visible proof",
+            "transformationMechanism": "Distance closing transforms a competitive gap into visible fit",
+            "whyTheVisualIsNotLiteralExplanation": "Closeness is shown through bodies, not a location report",
+            "understandableBeforeSlogan": True,
+            "sloganBridgeToBusinessMeaning": "The slogan names the closeness the viewer already saw",
+        },
+        "visualBridgeAssessment": {
+            "centralVisibleDetail": "The moment the distance between two people closes",
+            "sloganConnectionToVisibleDetail": "The slogan completes the visible closing gesture",
+            "sloganConnectionToRelativeAdvantage": "The slogan closes the relative advantage of fit over scale",
+            "dependsOnEarlierCopy": False,
+            "singleSloganContractSatisfied": True,
+        },
+    }
+
+
+def metaphorical_embodiment_judge_extras() -> Dict[str, Any]:
+    return {
+        "metaphoricalEmbodimentAssessment": {
+            "literalExecutionDetected": False,
+            "literalPresentationMeaningfullyTransformed": True,
+            "creativeEmbodimentModeAccepted": True,
+            "physicalEmbodimentMatchesStrategicRelationship": True,
+            "viewerDiscoveryPresent": True,
+            "sloganOnlyBridgesNotExplains": True,
+            "creativeEmbodimentAccepted": True,
+            "rejectionReason": None,
+        },
+        "visualBridgeAssessment": {
+            "centralVisibleDetail": "The visible closing of distance between two people",
+            "sloganConnectionToVisibleDetail": "The visible gesture carries the meaning before copy appears",
+            "sloganConnectionToRelativeAdvantage": "The slogan closes the strategic advantage without repeating the scene",
+            "dependsOnEarlierCopy": False,
+            "singleSloganContractSatisfied": True,
+        },
+    }
+
+
+def metaphorical_embodiment_shortening_extras() -> Dict[str, Any]:
+    return metaphorical_embodiment_creator_extras(
+        strategic_perception="The product makes a long process shorter without losing substance.",
+    ) | {
+        "metaphoricalEmbodiment": {
+            **metaphorical_embodiment_creator_extras()["metaphoricalEmbodiment"],
+            "strategicPerception": "The product makes a long process shorter without losing substance.",
+            "obviousLiteralVisualSymbols": ["timeline chart", "progress bar"],
+            "literalSymbolsRejectedOrTransformed": "Reject charts; shorten a visibly long physical line or queue.",
+            "creativeEmbodimentMode": "external_metaphor",
+            "embodimentSubjectOrWorld": "A studio table with physical measuring tools",
+            "physicalEmbodiment": "A long ribbon is cut to a shorter finished length",
+            "embodiedStrategicRelationship": "Visible shortening expresses strategic time compression",
+            "visiblePhysicalRelationship": "The cut length difference is readable without copy",
+            "transformationMechanism": "Material length is shortened instead of showing a timeline widget",
+            "whyTheVisualIsNotLiteralExplanation": "Time is shown through material length, not interface widgets",
+            "understandableBeforeSlogan": True,
+            "sloganBridgeToBusinessMeaning": "The slogan connects the shortened ribbon to faster delivery",
+        },
+        "visualBridgeAssessment": {
+            "centralVisibleDetail": "The shortened ribbon beside the uncut length",
+            "sloganConnectionToVisibleDetail": "The slogan names the shortening already visible",
+            "sloganConnectionToRelativeAdvantage": "The slogan closes the speed advantage",
+            "dependsOnEarlierCopy": False,
+            "singleSloganContractSatisfied": True,
+        },
+    }
+
+
+def metaphorical_embodiment_absence_extras() -> Dict[str, Any]:
+    return {
+        "metaphoricalEmbodiment": {
+            "strategicPerception": "What is missing reveals the forgotten step.",
+            "obviousLiteralVisualSymbols": ["checklist UI", "task reminder notification"],
+            "literalSymbolsRejectedOrTransformed": "Reject UI; show absence through an incomplete physical routine.",
+            "creativeEmbodimentMode": "absence_or_planned_absurdity",
+            "embodimentSubjectOrWorld": "A dark room with visible activity continuing",
+            "physicalEmbodiment": "Someone acts normally while the room stays dark",
+            "embodiedStrategicRelationship": "The missing light reveals the forgotten action",
+            "visiblePhysicalRelationship": "Darkness persists despite movement",
+            "transformationMechanism": "The omitted switch leaves darkness as the visible proof",
+            "whyTheVisualIsNotLiteralExplanation": "Absence is shown through the scene, not a reminder app",
+            "understandableBeforeSlogan": True,
+            "sloganBridgeToBusinessMeaning": "The slogan connects the visible absence to the business insight",
+        },
+        "visualBridgeAssessment": {
+            "centralVisibleDetail": "Activity continuing in darkness",
+            "sloganConnectionToVisibleDetail": "The slogan completes the forgotten-step inference",
+            "sloganConnectionToRelativeAdvantage": "The slogan closes why noticing absence matters",
+            "dependsOnEarlierCopy": False,
+            "singleSloganContractSatisfied": True,
+        },
+    }
+
+
+def creative_embodiment_think_small_extras() -> Dict[str, Any]:
+    return {
+        "metaphoricalEmbodiment": {
+            "strategicPerception": "Smallness becomes the visible advantage when scale and space are transformed.",
+            "obviousLiteralVisualSymbols": ["vehicle spec sheet", "size comparison chart"],
+            "literalSymbolsRejectedOrTransformed": "Reject charts; show the actual product tiny in a vast white field.",
+            "creativeEmbodimentMode": "transformed_product",
+            "embodimentSubjectOrWorld": "The advertised compact car itself in a vast white field",
+            "physicalEmbodiment": "The real product sits very small while empty space dominates the frame",
+            "embodiedStrategicRelationship": "Visible scale inversion turns smallness into perceptual advantage",
+            "visiblePhysicalRelationship": "The tiny product against expansive white space is readable before copy",
+            "transformationMechanism": "Composition and scale transform the real weakness into the visible idea",
+            "whyTheVisualIsNotLiteralExplanation": "The frame does the inversion; no measurement label explains it",
+            "understandableBeforeSlogan": True,
+            "sloganBridgeToBusinessMeaning": "Think Small completes the scale inversion the viewer already felt",
+        },
+        "visualBridgeAssessment": {
+            "centralVisibleDetail": "The tiny car isolated in vast white space",
+            "sloganConnectionToVisibleDetail": "The slogan names the scale inversion already visible",
+            "sloganConnectionToRelativeAdvantage": "The slogan closes why smallness is the advantage",
+            "dependsOnEarlierCopy": False,
+            "singleSloganContractSatisfied": True,
+        },
+    }
+
+
+def creative_embodiment_media_replacement_extras() -> Dict[str, Any]:
+    return {
+        "metaphoricalEmbodiment": {
+            "strategicPerception": "The advertising medium itself can prove the strategic claim.",
+            "obviousLiteralVisualSymbols": ["generic billboard layout", "standard print ad frame"],
+            "literalSymbolsRejectedOrTransformed": "Reject generic layout; make the medium itself the proof object.",
+            "creativeEmbodimentMode": "transformed_medium",
+            "embodimentSubjectOrWorld": "The storefront window display surface",
+            "physicalEmbodiment": "The display format becomes the persuasive evidence",
+            "embodiedStrategicRelationship": "The medium transformation proves closeness to the customer",
+            "visiblePhysicalRelationship": "The format change is visible before any slogan appears",
+            "transformationMechanism": "The container stops being neutral and becomes the argument",
+            "whyTheVisualIsNotLiteralExplanation": "The medium works as proof, not as decoration",
+            "understandableBeforeSlogan": True,
+            "sloganBridgeToBusinessMeaning": "The slogan completes what the transformed medium already showed",
+        },
+        "visualBridgeAssessment": {
+            "centralVisibleDetail": "The display surface acting as proof",
+            "sloganConnectionToVisibleDetail": "The slogan bridges the visible medium transformation",
+            "sloganConnectionToRelativeAdvantage": "The slogan closes the strategic advantage",
+            "dependsOnEarlierCopy": False,
+            "singleSloganContractSatisfied": True,
+        },
+    }
+
+
+def creative_embodiment_context_collision_extras() -> Dict[str, Any]:
+    return {
+        "metaphoricalEmbodiment": {
+            "strategicPerception": "Extreme context contrast makes the product role visible.",
+            "obviousLiteralVisualSymbols": ["category comparison chart", "feature checklist"],
+            "literalSymbolsRejectedOrTransformed": "Reject charts; place the product in a sharply transformed environment.",
+            "creativeEmbodimentMode": "transformed_context",
+            "embodimentSubjectOrWorld": "The product remains visible inside a hostile or extreme setting",
+            "physicalEmbodiment": "The familiar product persists while the surrounding context collides with expectation",
+            "embodiedStrategicRelationship": "Context collision reveals the product's distinctive role",
+            "visiblePhysicalRelationship": "The contrast between product and environment is readable silently",
+            "transformationMechanism": "Environment transformation reassigns meaning to the visible product",
+            "whyTheVisualIsNotLiteralExplanation": "The collision creates meaning through placement, not annotation",
+            "understandableBeforeSlogan": True,
+            "sloganBridgeToBusinessMeaning": "The slogan completes the collision the viewer already noticed",
+        },
+        "visualBridgeAssessment": {
+            "centralVisibleDetail": "The product visible inside the colliding context",
+            "sloganConnectionToVisibleDetail": "The slogan bridges the visible contrast",
+            "sloganConnectionToRelativeAdvantage": "The slogan closes the strategic promise",
+            "dependsOnEarlierCopy": False,
+            "singleSloganContractSatisfied": True,
+        },
+    }
+
+
 def realistic_core_candidate_extras(prototype_id: str, *, strategy: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Production-like Creator core without redundant analytical duplicate objects."""
     identity = methodology_strategy_identity_for(strategy or methodology_strategy_extras())
@@ -131,6 +339,7 @@ def realistic_core_candidate_extras(prototype_id: str, *, strategy: Dict[str, An
             product_name=str((strategy or {}).get("productNameResolved") or "ACE Product"),
             language=str((strategy or {}).get("language") or "en"),
         ),
+        **metaphorical_embodiment_creator_extras(),
         **app,
     }
 
@@ -206,30 +415,8 @@ def methodology_candidate_extras(prototype_id: str, *, strategy: Dict[str, Any] 
             product_name="ACE Product",
             language=str((strategy or {}).get("language") or "en"),
         ),
+        **metaphorical_embodiment_creator_extras(),
         **_prototype_application(prototype_id),
-    }
-
-
-def complete_ad_creator_extras(
-    *,
-    product_name: str = "ACE Product",
-    slogan_text: str = "קרוב יותר ממה שחשבת",
-    language: str = "he",
-    key_word: str = "closer",
-) -> Dict[str, Any]:
-    return {
-        "advertisingClosure": build_default_creator_advertising_closure(
-            product_name=product_name,
-            slogan_text=slogan_text,
-            language=language,
-        ),
-        "semanticBridge": build_default_creator_semantic_bridge(
-            key_word=key_word,
-            visual_meaning="Physical closing of distance between two people",
-            slogan_meaning="Strategic closeness to the buyer's need",
-            strategic_meaning="Closeness becomes the advantage",
-            how_they_meet="The visible gesture proves the same strategic promise the slogan closes",
-        ),
     }
 
 
@@ -289,6 +476,7 @@ def methodology_judgment_extras(*, prototype_id: str = "closest") -> Dict[str, A
             "notes": "The Creator slogan closes the same relative advantage embodied by the film.",
         },
         **complete_ad_judgment_extras(prototype_id=prototype_id),
+        **metaphorical_embodiment_judge_extras(),
     }
 
 
@@ -329,3 +517,19 @@ def methodology_winner_extras(
             "editingOnlyStrengthens": True,
         },
     }
+
+
+def single_slogan_contract_extras(*, slogan_text: str = "קרוב יותר ממה שחשבת") -> Dict[str, Any]:
+    return {
+        "copyContractVersion": "builder2_single_slogan_v1",
+        "builder2NewFormatVersion": "builder2_complete_ad_v1",
+        "sloganDecision": "use",
+        "sloganText": slogan_text,
+        "sloganCoreKeyword": "closer",
+        "sloganSource": "creator_candidate_closure",
+        "sloganUnderstandsWithoutPriorCopy": True,
+        "sloganRenderedExactlyOnce": False,
+        "headlineOverlaySkipped": True,
+        "headlineCompatibilityAlias": True,
+    }
+
