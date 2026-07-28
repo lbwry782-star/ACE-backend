@@ -62,8 +62,7 @@ MEDIA_FINALIZATION_REPORT_SAFE_KEYS: tuple[str, ...] = (
     "leaseReleaseAccepted",
     "cliReportConstructionAccepted",
     "cliJsonSerializationAccepted",
-    "cliStdoutWriteAccepted",
-    "cliDoneLogAttempted",
+    "cliStdoutWriteAttempted",
     "safeFfmpegReturnCode",
     "safeFfmpegStderrAvailable",
     "openAICalls",
@@ -207,8 +206,7 @@ def build_minimal_fallback_report(
         "reportingFailureOccurred": True,
         "cliReportConstructionAccepted": False,
         "cliJsonSerializationAccepted": False,
-        "cliStdoutWriteAccepted": False,
-        "cliDoneLogAttempted": False,
+        "cliStdoutWriteAttempted": False,
         "leaseReleaseAttempted": False,
         "leaseReleaseAccepted": False,
     }
@@ -240,33 +238,33 @@ def emit_fail_safe_media_finalization_report(
     job_id: str,
     preflight: bool,
 ) -> Dict[str, Any]:
-    status: Dict[str, Any] = {
-        "cliReportConstructionAccepted": False,
-        "cliJsonSerializationAccepted": False,
-        "cliStdoutWriteAccepted": False,
-        "cliDoneLogAttempted": False,
-        "reportingFailureOccurred": False,
-        "reportingFailureClass": None,
-    }
-    payload = build_minimal_fallback_report(job_id=job_id, preflight=preflight)
+    payload: Dict[str, Any]
+    serialized = ""
+    stdout_write_accepted = False
+    done_logged = False
+    reporting_failure_occurred = False
+    reporting_failure_class: Optional[str] = None
     try:
         payload = sanitize_media_finalization_report(report)
         payload["jobId"] = payload.get("jobId") or job_id
         payload["preflight"] = bool(payload.get("preflight", preflight))
-        status["cliReportConstructionAccepted"] = True
+        payload["cliReportConstructionAccepted"] = True
+        payload["cliJsonSerializationAccepted"] = True
+        payload["cliStdoutWriteAttempted"] = True
         serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
-        status["cliJsonSerializationAccepted"] = True
     except Exception as exc:
-        status["reportingFailureOccurred"] = True
-        status["reportingFailureClass"] = type(exc).__name__
+        reporting_failure_occurred = True
+        reporting_failure_class = type(exc).__name__
         payload = build_minimal_fallback_report(job_id=job_id, preflight=preflight)
+        payload["cliReportConstructionAccepted"] = False
+        payload["cliJsonSerializationAccepted"] = True
+        payload["cliStdoutWriteAttempted"] = True
         serialized = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False)
-        status["cliJsonSerializationAccepted"] = True
 
-    status["cliStdoutWriteAccepted"] = _write_stdout(serialized)
-    if not status["cliStdoutWriteAccepted"]:
-        status["reportingFailureOccurred"] = True
-        status["reportingFailureClass"] = status.get("reportingFailureClass") or "stdout_write_failed"
+    stdout_write_accepted = _write_stdout(serialized)
+    if not stdout_write_accepted:
+        reporting_failure_occurred = True
+        reporting_failure_class = reporting_failure_class or "stdout_write_failed"
 
     try:
         logger.info(
@@ -275,11 +273,20 @@ def emit_fail_safe_media_finalization_report(
             payload.get("ok"),
             preflight,
         )
-        status["cliDoneLogAttempted"] = True
+        done_logged = True
     except Exception as exc:
-        status["reportingFailureOccurred"] = True
-        status["reportingFailureClass"] = type(exc).__name__
-        status["cliDoneLogAttempted"] = False
+        reporting_failure_occurred = True
+        reporting_failure_class = type(exc).__name__
 
-    payload.update(status)
+    logger.info(
+        "BUILDER2_MEDIA_FINALIZATION_REPORT_EMITTED jobId=%s jsonSerialized=%s stdoutFlushed=%s doneLogged=%s stdoutWriteAccepted=%s",
+        job_id,
+        payload.get("cliJsonSerializationAccepted"),
+        stdout_write_accepted,
+        done_logged,
+        stdout_write_accepted,
+    )
+
+    payload["reportingFailureOccurred"] = reporting_failure_occurred
+    payload["reportingFailureClass"] = reporting_failure_class
     return payload

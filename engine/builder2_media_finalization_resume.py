@@ -161,8 +161,7 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "leaseReleaseAccepted": False,
         "cliReportConstructionAccepted": False,
         "cliJsonSerializationAccepted": False,
-        "cliStdoutWriteAccepted": False,
-        "cliDoneLogAttempted": False,
+        "cliStdoutWriteAttempted": False,
     }
 
 
