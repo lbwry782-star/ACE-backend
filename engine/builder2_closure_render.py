@@ -168,6 +168,10 @@ def url_fingerprint(url: str) -> str:
 
 def classify_url_route_family(url: str) -> str:
     path = (urlparse((url or "").strip()).path or "").lower()
+    if "/api/builder2-final-video-artifact" in path:
+        return "api/builder2-final-video-artifact"
+    if "/api/builder2-final-video/" in path:
+        return "api/builder2-final-video"
     if "/api/video-headline-artifact" in path:
         return "api/video-headline-artifact"
     if "/api/video-headline/" in path:

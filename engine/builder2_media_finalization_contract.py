@@ -73,6 +73,25 @@ def is_recognized_headline_route(url: str) -> bool:
     return classify_url_route_family(url) == "api/video-headline"
 
 
+def is_builder2_durable_final_video_route(url: str) -> bool:
+    return classify_url_route_family(url) == "api/builder2-final-video"
+
+
+def final_publication_metadata_valid(*, media: Dict[str, Any], closure_url: str) -> bool:
+    if not closure_url:
+        return False
+    if not is_builder2_durable_final_video_route(closure_url):
+        return False
+    if media.get("finalPublicationVerificationAccepted") is not True:
+        return False
+    if media.get("finalPublicationDurableStorageConfirmed") is not True:
+        return False
+    backend = _clean(media.get("finalPublicationBackendKind"))
+    if backend and backend == "ephemeral_tmp":
+        return False
+    return True
+
+
 def resolve_legacy_headline_artifact_url(
     *,
     state: Dict[str, Any],
@@ -80,6 +99,8 @@ def resolve_legacy_headline_artifact_url(
     headline_required: bool = False,
 ) -> str:
     media = _media_bucket(state)
+    if media.get("headlineReconstructionCompleted"):
+        return ""
     explicit = _first_url(
         media.get("headlineArtifactUrl"),
         media.get("headlineVideoUrl"),
@@ -135,6 +156,8 @@ def closure_inclusive_artifact_valid(
     if not media.get("advertisingClosureRendered"):
         return False
     if _clean(media.get("advertisingClosureStatus")) != "completed":
+        return False
+    if not final_publication_metadata_valid(media=media, closure_url=closure_url):
         return False
     measured = _duration_value(media, "actualFinalVideoDurationSeconds")
     if measured is not None:
@@ -197,7 +220,9 @@ def assess_false_completion(
         reasons.append("closure_required_but_closure_inclusive_artifact_missing_or_invalid")
     if closure_required and media.get("advertisingClosureStatus") == "completed" and not valid_closure:
         reasons.append("advertising_closure_marked_rendered_without_distinct_closure_artifact")
-    if headline_required and not headline_url:
+    if valid_closure and final_publication_metadata_valid(media=media, closure_url=closure_url):
+        return False, []
+    if headline_required and not headline_url and not media.get("headlineReconstructionCompleted"):
         reasons.append("headline_required_but_headline_artifact_not_identified")
     if job_video_url and headline_url and _compare_urls(job_video_url, headline_url) and closure_required and not valid_closure:
         reasons.append("job_video_url_points_to_headline_artifact_not_closure_inclusive_final")
@@ -257,6 +282,12 @@ def validate_builder2_media_completion_contract(
         failures.append("job_video_url_not_closure_inclusive")
     if headline_required and not headline_url and not media.get("headlineReconstructionCompleted"):
         failures.append("headline_artifact_missing")
+    if closure_url and not is_builder2_durable_final_video_route(closure_url):
+        failures.append("final_publication_route_not_durable")
+    if not media.get("finalPublicationVerificationAccepted"):
+        failures.append("final_publication_verification_failed")
+    if not media.get("finalPublicationDurableStorageConfirmed"):
+        failures.append("final_publication_not_durable")
     measured = _duration_value(media, "actualFinalVideoDurationSeconds")
     if measured is None:
         failures.append("actual_final_duration_missing")

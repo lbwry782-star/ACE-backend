@@ -39,16 +39,20 @@ def _mock_start_image_data_uri() -> str:
 
 def _mock_render_advertising_closure(**kwargs: Any) -> tuple[Dict[str, Any], Any]:
     from engine.builder2_advertising_closure_pipeline import AdvertisingClosureRenderCounters
+    from tests.test_builder2_media_finalization_failure_inspect import (
+        CLOSURE_URL,
+        verified_final_publication_media_fields,
+    )
 
     state = kwargs["state"]
     media = state.setdefault("mediaResume", {})
-    final_url = "https://example.com/final-with-closure.mp4"
-    media["finalVideoWithClosureUrl"] = final_url
-    media["finalPublicUrl"] = final_url
-    media["finalVideoPath"] = final_url
+    media["finalVideoWithClosureUrl"] = CLOSURE_URL
+    media["finalPublicUrl"] = CLOSURE_URL
+    media["finalVideoPath"] = CLOSURE_URL
     media["advertisingClosureStatus"] = "completed"
     media["advertisingClosureRendered"] = True
     media["actualFinalVideoDurationSeconds"] = 12.0
+    media.update(verified_final_publication_media_fields())
     state["advertisingClosureStatus"] = "completed"
     return state, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
 

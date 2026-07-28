@@ -44,6 +44,7 @@ from tests.test_builder2_media_finalization_failure_inspect import (
     RAW_RUNWAY,
     _false_completion_state,
     _job_raw,
+    verified_final_publication_media_fields,
 )
 from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_deps, _mock_start_image_data_uri
 from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
@@ -69,8 +70,30 @@ def _mock_closure_render_write_output(*args: Any, **kwargs: Any) -> ClosureRende
     return _valid_closure_result(public_url="", measured_duration_seconds=measured)
 
 
-def _pipeline_outcome_from_render(**kwargs: Any) -> "FinalizationPipelineOutcome":
+def _verified_publication_result(**overrides: Any) -> "FinalVideoPublicationResult":
     from engine.builder2_final_video_publication import FinalVideoPublicationResult
+
+    public_url = overrides.pop("public_url", CLOSURE_URL)
+    return FinalVideoPublicationResult(
+        public_url=public_url,
+        output_token=overrides.pop("output_token", "tok" * 8),
+        route_family=overrides.pop("route_family", "api/builder2-final-video"),
+        publication_accepted=True,
+        durable_storage_confirmed=True,
+        publication_backend_kind="persistent_disk",
+        publication_reference_present=True,
+        uploaded_byte_count=overrides.pop("uploaded_byte_count", 1028987),
+        post_upload_verification_attempted=True,
+        post_upload_verification_accepted=True,
+        post_upload_http_status_code=200,
+        post_upload_content_type="video/mp4",
+        post_upload_content_length=1028987,
+        artifact_fingerprint_verified=True,
+        **overrides,
+    )
+
+
+def _pipeline_outcome_from_render(**kwargs: Any) -> "FinalizationPipelineOutcome":
     from engine.builder2_media_finalization_resume import FinalizationPipelineOutcome
 
     render_result = _valid_closure_result()
@@ -86,6 +109,7 @@ def _pipeline_outcome_from_render(**kwargs: Any) -> "FinalizationPipelineOutcome
                 "advertisingClosureStatus": "completed",
                 "headlineReconstructionCompleted": True,
                 "headlineArtifactSource": "deterministic_local_reconstruction_from_raw_runway",
+                **verified_final_publication_media_fields(),
             }
         )
     if "report" in kwargs:
@@ -94,14 +118,10 @@ def _pipeline_outcome_from_render(**kwargs: Any) -> "FinalizationPipelineOutcome
         kwargs["report"]["totalFfmpegCalls"] = 2
         kwargs["report"]["ffmpegCalls"] = 2
         kwargs["report"]["publicationCalls"] = 1
+        kwargs["report"]["postUploadVerificationAccepted"] = True
     return FinalizationPipelineOutcome(
         render_result=render_result,
-        publication_result=FinalVideoPublicationResult(
-            public_url=CLOSURE_URL,
-            output_token="tok" * 8,
-            route_family="api/video-headline",
-            upload_accepted=True,
-        ),
+        publication_result=_verified_publication_result(),
         public_url=CLOSURE_URL,
     )
 

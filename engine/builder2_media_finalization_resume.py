@@ -484,6 +484,14 @@ def _apply_publication_failure(
     report["persistedCompletionAccepted"] = False
     if isinstance(exc, Builder2FinalPublicationError):
         report["finalLocalHandoffFailureCode"] = str(exc.args[0] if exc.args else "")
+        partial = getattr(exc, "verification", None)
+        if partial is not None:
+            report["postUploadVerificationAttempted"] = partial.post_upload_verification_attempted
+            report["postUploadVerificationAccepted"] = partial.post_upload_verification_accepted
+            report["postUploadHttpStatusCode"] = partial.post_upload_http_status_code
+            report["durableStorageConfirmed"] = partial.durable_storage_confirmed
+            if exc.stage == "publication_verification":
+                report["failureStage"] = "publication_verification"
     elif isinstance(exc, Builder2FinalLocalStagingError):
         report["failureStage"] = exc.stage
         report["finalLocalHandoffFailureCode"] = str(exc.args[0] if exc.args else "")
@@ -637,7 +645,12 @@ def _execute_finalization_render_pipeline(
             return None
 
         report["publicationCalls"] = 1
-        report["publicationAccepted"] = True
+        report["publicationAccepted"] = publication_result.publication_accepted
+        report["durableStorageConfirmed"] = publication_result.durable_storage_confirmed
+        report["postUploadVerificationAttempted"] = publication_result.post_upload_verification_attempted
+        report["postUploadVerificationAccepted"] = publication_result.post_upload_verification_accepted
+        report["postUploadHttpStatusCode"] = publication_result.post_upload_http_status_code
+        report["uploadedByteCount"] = publication_result.uploaded_byte_count
         MediaFinalizationIsolationGuard.record_publication()
 
         media = state.setdefault("mediaResume", {})
@@ -656,9 +669,17 @@ def _execute_finalization_render_pipeline(
         media["finalPublicUrl"] = public_url
         media["finalVideoPath"] = public_url
         media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
+        media["finalDurationAccepted"] = True
+        media["finalPublicationVerificationAccepted"] = publication_result.post_upload_verification_accepted
+        media["finalPublicationDurableStorageConfirmed"] = publication_result.durable_storage_confirmed
+        media["finalPublicationBackendKind"] = publication_result.publication_backend_kind
+        media["finalPublicationReferencePresent"] = publication_result.publication_reference_present
+        media["finalPublicationUploadedByteCount"] = publication_result.uploaded_byte_count
         media["advertisingClosureRendered"] = True
         media["advertisingClosureStatus"] = "completed"
         state["advertisingClosureStatus"] = "completed"
+        media.pop("brokenFinalPublicationUrl", None)
+        media.pop("invalidFinalPublicationRouteFamily", None)
         return FinalizationPipelineOutcome(
             render_result=render_result,
             publication_result=publication_result,

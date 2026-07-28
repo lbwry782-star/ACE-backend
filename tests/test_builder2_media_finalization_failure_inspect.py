@@ -21,7 +21,23 @@ from engine.builder2_winner_preservation_contract import SERVER_OWNED_WINNER_SOU
 JOB_ID = "d6425b71-c612-4fcd-a3cf-8c30db88ca52"
 RAW_RUNWAY = "https://runway.example.com/raw-task.mp4"
 HEADLINE_URL = "https://ace.example.com/api/video-headline/abc123deadbeefcafe0123456789abcd"
-CLOSURE_URL = "https://ace.example.com/api/video-headline/closuretoken0123456789abcdef"
+CLOSURE_URL = "https://ace.example.com/api/builder2-final-video/closuretoken0123456789abcdef"
+BROKEN_HEADLINE_FINAL_URL = (
+    "https://ace-backend-k1p6.onrender.com/api/video-headline/42228511edd94fa18eccedf4d39db8e0"
+)
+
+
+def verified_final_publication_media_fields(**overrides: Any) -> Dict[str, Any]:
+    return {
+        "finalPublicationVerificationAccepted": True,
+        "finalPublicationDurableStorageConfirmed": True,
+        "finalPublicationBackendKind": "persistent_disk",
+        "finalPublicationReferencePresent": True,
+        "finalPublicationUploadedByteCount": 1028987,
+        "headlineReconstructionCompleted": True,
+        "finalDurationAccepted": True,
+        **overrides,
+    }
 
 
 def _false_completion_state(*, with_valid_closure: bool = False) -> Dict[str, Any]:
@@ -93,6 +109,7 @@ def _false_completion_state(*, with_valid_closure: bool = False) -> Dict[str, An
             "closureRenderedAt": "2026-05-20T00:00:00+00:00",
             "ffmpegStatus": "completed",
             "headlineArtifactUrl": HEADLINE_URL if with_valid_closure else None,
+            **(verified_final_publication_media_fields() if with_valid_closure else {}),
             "callCounters": {
                 "startImageCalls": 1,
                 "startImageGeneratedCount": 1,

@@ -28,6 +28,7 @@ from engine.builder2_media_finalization_contract import (
     assess_recoverable_failed_finalization_state,
     closure_inclusive_artifact_valid,
     evaluate_finalization_recovery_eligibility,
+    final_publication_metadata_valid,
     resolve_legacy_headline_artifact_url,
     resolve_raw_runway_artifact_url,
     validate_builder2_media_completion_contract,
@@ -231,9 +232,16 @@ def _classify_publication_evidence(
     job_status = _clean(job_raw.get("status"))
     measured_final = _duration_value(media, "actualFinalVideoDurationSeconds")
     final_route = _route_family(closure_url or final_public or job_video_url)
-    if closure_rendered and closure_status == "completed" and measured_final is not None:
-        if final_route != "api/video-headline" or not _compare_urls(closure_url or final_public, headline_url):
-            return "final_publication_persisted"
+    metadata_valid = final_publication_metadata_valid(media=media, closure_url=closure_url or final_public)
+    if (
+        closure_rendered
+        and closure_status == "completed"
+        and measured_final is not None
+        and metadata_valid
+    ):
+        return "final_publication_persisted"
+    if metadata_valid and final_route == "api/builder2-final-video":
+        return "final_publication_persisted"
     if closure_url and not _compare_urls(closure_url, headline_url) and final_route != "api/video-headline":
         return "publication_reference_persisted"
     if closure_status == "failed" and _clean(state.get("status")) == "media_finalization_incomplete":

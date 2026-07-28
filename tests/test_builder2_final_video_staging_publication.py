@@ -20,9 +20,11 @@ from engine.builder2_final_local_staging import (
 )
 from engine.builder2_final_video_publication import (
     Builder2FinalPublicationError,
+    FinalVideoPublicationResult,
     publish_builder2_final_video,
     resolve_durable_final_video_publisher_kind,
 )
+from tests.test_builder2_final_video_durable_publication import _env_get
 from engine.builder2_media_finalization_resume import (
     FinalizationPipelineOutcome,
     _execute_finalization_render_pipeline,
@@ -50,6 +52,25 @@ def _render_result(*, measured: float = 12.034, local_path: str = "/tmp/builder2
         output_token="tok" * 8,
         input_fingerprint="abc",
         closure_ffprobe_calls=2,
+    )
+
+
+def _verified_publication_result() -> FinalVideoPublicationResult:
+    return FinalVideoPublicationResult(
+        public_url=CLOSURE_URL,
+        output_token="tok" * 8,
+        route_family="api/builder2-final-video",
+        publication_accepted=True,
+        durable_storage_confirmed=True,
+        publication_backend_kind="persistent_disk",
+        publication_reference_present=True,
+        uploaded_byte_count=1028987,
+        post_upload_verification_attempted=True,
+        post_upload_verification_accepted=True,
+        post_upload_http_status_code=200,
+        post_upload_content_type="video/mp4",
+        post_upload_content_length=1028987,
+        artifact_fingerprint_verified=True,
     )
 
 
@@ -87,10 +108,26 @@ class TestLocalStaging(unittest.TestCase):
 
 
 class TestPublication(unittest.TestCase):
-    @patch.dict("os.environ", {"ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret"}, clear=False)
+    @patch("engine.builder2_final_video_publication.os.environ.get", side_effect=_env_get)
+    @patch("engine.builder2_final_video_publication.is_durable_publication_backend", return_value=True)
+    @patch("engine.builder2_final_video_publication.classify_publication_backend_kind", return_value="persistent_disk")
+    @patch("engine.builder2_final_video_publication.verify_published_final_video_artifact")
     @patch("engine.builder2_final_video_publication.requests.post")
-    def test_publish_once_after_verified_render(self, post: Any) -> None:
+    def test_publish_once_after_verified_render(self, post: Any, verify: Any, _durable: Any, _backend: Any, _env: Any) -> None:
+        from engine.builder2_final_video_verification import FinalVideoArtifactVerification
+
         post.return_value = MagicMock(ok=True, status_code=200)
+        verify.return_value = FinalVideoArtifactVerification(
+            final_url_accessible=True,
+            final_url_http_status_code=200,
+            final_url_content_type="video/mp4",
+            final_url_content_length=128,
+            final_artifact_looks_like_video=True,
+            durable_storage_confirmed=True,
+            post_upload_verification_attempted=True,
+            post_upload_verification_accepted=True,
+            artifact_fingerprint_verified=True,
+        )
         with tempfile.TemporaryDirectory() as td:
             local_final = Path(td) / "builder2_final.mp4"
             local_final.write_bytes(b"x" * 128)
@@ -102,7 +139,7 @@ class TestPublication(unittest.TestCase):
             )
         self.assertTrue(result.upload_accepted)
         self.assertEqual(result.publisher_kind, resolve_durable_final_video_publisher_kind())
-        self.assertIn("/api/video-headline/", result.public_url)
+        self.assertIn("/api/builder2-final-video/", result.public_url)
         post.assert_called_once()
 
     @patch.dict("os.environ", {"ACE_VIDEO_HEADLINE_UPLOAD_SECRET": "secret"}, clear=False)
@@ -143,12 +180,7 @@ class TestRecoveryPipelineRegression(unittest.TestCase):
             return _render_result(measured=12.034, local_path=str(output_path))
 
         closure_render.side_effect = _render
-        publish.return_value = FinalVideoPublicationResult(
-            public_url=CLOSURE_URL,
-            output_token="tok" * 8,
-            route_family="api/video-headline",
-            upload_accepted=True,
-        )
+        publish.return_value = _verified_publication_result()
         source_decision.return_value = MagicMock(
             source_kind="raw_runway",
             closure_input_path=raw_path,
