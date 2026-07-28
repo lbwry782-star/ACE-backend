@@ -99,6 +99,10 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "runwayPollingCalls": 0,
         "headlineFfmpegCalls": 0,
         "closureFfmpegCalls": 0,
+        "headlineRenderAttempts": 0,
+        "headlineFfmpegSubprocessCalls": 0,
+        "closureRenderAttempts": 0,
+        "closureFfmpegSubprocessCalls": 0,
         "ffprobeCalls": 0,
         "ffmpegCalls": 0,
         "totalFfmpegCalls": 0,
@@ -107,6 +111,18 @@ def _initial_report(*, job_id: str, preflight: bool) -> Dict[str, Any]:
         "finalizationReused": False,
         "jobCompleted": False,
         "totalReasoningCalls": 0,
+        "acceptedHeadlineDecision": None,
+        "acceptedHeadlineFieldPresent": False,
+        "acceptedHeadlineKeywordPresent": False,
+        "persistedHeadlineTextPresent": False,
+        "canonicalHeadlineResolutionAttempted": False,
+        "canonicalHeadlineResolutionAccepted": False,
+        "canonicalHeadlineSource": None,
+        "canonicalHeadlineCharacterCount": 0,
+        "canonicalHeadlineWordCount": 0,
+        "localHeadlineInputPresent": False,
+        "localHeadlineFailureStage": None,
+        "localHeadlineFailureCode": None,
     }
 
 
@@ -148,10 +164,16 @@ def _apply_source_decision(report: Dict[str, Any], decision: FinalizationSourceD
 
 
 def _sync_ffmpeg_counters(report: Dict[str, Any]) -> None:
-    report["totalFfmpegCalls"] = int(report.get("headlineFfmpegCalls") or 0) + int(
-        report.get("closureFfmpegCalls") or 0
-    )
+    headline_sub = int(report.get("headlineFfmpegSubprocessCalls") or 0)
+    closure_sub = int(report.get("closureFfmpegSubprocessCalls") or 0)
+    report["headlineFfmpegCalls"] = headline_sub
+    report["closureFfmpegCalls"] = closure_sub
+    report["totalFfmpegCalls"] = headline_sub + closure_sub
     report["ffmpegCalls"] = report["totalFfmpegCalls"]
+
+
+def _closure_subprocess_ran(stage: str) -> bool:
+    return stage in {"card_generation", "concatenation", "duration_verification", "publication"}
 
 
 def _execute_finalization_render_pipeline(
@@ -200,25 +222,31 @@ def _execute_finalization_render_pipeline(
         if decision.local_headline_render_required:
             headline_out = tmp / "headline_local.mp4"
             report["localHeadlineRenderAttempted"] = True
+            report["headlineRenderAttempts"] = 1
             try:
                 headline_result = render_builder2_accepted_headline_overlay(
                     source_video_path=closure_input,
                     output_path=headline_out,
                     plan=plan,
+                    report=report,
                 )
             except VideoHeadlineRenderError as exc:
                 report["failureStage"] = exc.stage
                 report["failureReason"] = str(exc.args[0] if exc.args else "builder2_local_headline_render_failed")
+                report["localHeadlineFailureStage"] = exc.stage
+                report["localHeadlineFailureCode"] = str(exc.args[0] if exc.args else "")
                 report["safeFfmpegReturnCode"] = exc.return_code
                 report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
-                report["headlineFfmpegCalls"] = 1
+                if exc.stage == "headline_overlay":
+                    report["headlineFfmpegSubprocessCalls"] = 1
                 _sync_ffmpeg_counters(report)
                 return None
             report["localHeadlineRenderAccepted"] = True
-            report["headlineFfmpegCalls"] = 1
+            report["headlineFfmpegSubprocessCalls"] = 1
             report["measuredHeadlineDurationSeconds"] = headline_result.measured_duration_seconds
             report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
             closure_input = headline_result.output_path
+            _sync_ffmpeg_counters(report)
         elif decision.source_kind in {"persisted_headline_artifact", "legacy_headline_artifact"}:
             report["measuredHeadlineDurationSeconds"] = _probe_duration(closure_input)
             report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
@@ -226,6 +254,7 @@ def _execute_finalization_render_pipeline(
         output_path = tmp / "closure_out.mp4"
         source_for_closure = str(closure_input)
         report["closureRenderAttempted"] = True
+        report["closureRenderAttempts"] = 1
         try:
             render_result = render_builder2_advertising_closure_endcard(
                 source_for_closure,
@@ -243,12 +272,13 @@ def _execute_finalization_render_pipeline(
             report["failureReason"] = str(exc.args[0] if exc.args else "builder2_closure_ffmpeg_failed")
             report["safeFfmpegReturnCode"] = exc.return_code
             report["safeFfmpegStderrAvailable"] = bool(exc.stderr_tail)
-            report["closureFfmpegCalls"] = 1
+            if _closure_subprocess_ran(exc.stage):
+                report["closureFfmpegSubprocessCalls"] = 1
             _sync_ffmpeg_counters(report)
             return None
 
         report["closureRenderAccepted"] = True
-        report["closureFfmpegCalls"] = 1
+        report["closureFfmpegSubprocessCalls"] = 1
         report["measuredFinalDurationSeconds"] = render_result.measured_duration_seconds
         report["finalDurationAccepted"] = True
         report["ffprobeCalls"] = int(report.get("ffprobeCalls") or 0) + 1
@@ -535,6 +565,10 @@ def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
         "runwayPollingCalls",
         "headlineFfmpegCalls",
         "closureFfmpegCalls",
+        "headlineRenderAttempts",
+        "headlineFfmpegSubprocessCalls",
+        "closureRenderAttempts",
+        "closureFfmpegSubprocessCalls",
         "ffprobeCalls",
         "totalFfmpegCalls",
         "ffmpegCalls",
@@ -543,6 +577,18 @@ def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
         "finalizationReused",
         "jobCompleted",
         "totalReasoningCalls",
+        "acceptedHeadlineDecision",
+        "acceptedHeadlineFieldPresent",
+        "acceptedHeadlineKeywordPresent",
+        "persistedHeadlineTextPresent",
+        "canonicalHeadlineResolutionAttempted",
+        "canonicalHeadlineResolutionAccepted",
+        "canonicalHeadlineSource",
+        "canonicalHeadlineCharacterCount",
+        "canonicalHeadlineWordCount",
+        "localHeadlineInputPresent",
+        "localHeadlineFailureStage",
+        "localHeadlineFailureCode",
     )
     safe = {key: report.get(key) for key in safe_keys if key in report}
     print(json.dumps(safe, ensure_ascii=False, indent=2))

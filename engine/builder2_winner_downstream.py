@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from engine.builder2_headline_decision_contract import (
@@ -387,6 +388,146 @@ def validate_builder2_winner_headline_composition_pure(plan: Dict[str, Any]) -> 
         _headline_invalid("phrase_dependent_keyword")
     if not _headline_contains_core_keyword(headline_rem, core_kw):
         _headline_invalid("keyword_not_in_headline")
+
+
+@dataclass(frozen=True)
+class AcceptedWinnerHeadlineResolution:
+    headline_required: bool
+    headline_text: str = ""
+    headline_text_remainder: str = ""
+    product_name_resolved: str = ""
+    language: str = "en"
+    canonical_headline_source: str = ""
+    accepted_headline_decision: str = ""
+    accepted_headline_field_present: bool = False
+    accepted_headline_keyword_present: bool = False
+    persisted_headline_text_present: bool = False
+    canonical_headline_resolution_attempted: bool = False
+    canonical_headline_resolution_accepted: bool = False
+    canonical_headline_character_count: int = 0
+    canonical_headline_word_count: int = 0
+    failure_code: str = ""
+    failure_stage: str = ""
+
+
+def apply_accepted_headline_resolution_observability(
+    report: Dict[str, Any],
+    resolution: AcceptedWinnerHeadlineResolution,
+) -> None:
+    report["acceptedHeadlineDecision"] = resolution.accepted_headline_decision or None
+    report["acceptedHeadlineFieldPresent"] = resolution.accepted_headline_field_present
+    report["acceptedHeadlineKeywordPresent"] = resolution.accepted_headline_keyword_present
+    report["persistedHeadlineTextPresent"] = resolution.persisted_headline_text_present
+    report["canonicalHeadlineResolutionAttempted"] = resolution.canonical_headline_resolution_attempted
+    report["canonicalHeadlineResolutionAccepted"] = resolution.canonical_headline_resolution_accepted
+    report["canonicalHeadlineSource"] = resolution.canonical_headline_source or None
+    report["canonicalHeadlineCharacterCount"] = resolution.canonical_headline_character_count
+    report["canonicalHeadlineWordCount"] = resolution.canonical_headline_word_count
+    report["localHeadlineInputPresent"] = bool(resolution.headline_text)
+    if resolution.failure_code:
+        report["localHeadlineFailureStage"] = resolution.failure_stage or "canonical_headline_resolution"
+        report["localHeadlineFailureCode"] = resolution.failure_code
+
+
+def resolve_accepted_winner_headline_for_media(plan: Dict[str, Any]) -> AcceptedWinnerHeadlineResolution:
+    """
+    Resolve the accepted Winner headline for media/finalization without mutating persisted state.
+    Uses the same canonical composition helpers as normalize_builder2_winner_downstream().
+    """
+    work = dict(plan)
+    decision = get_headline_decision(work)
+    field_present = bool(_optional_text(work.get("headline")))
+    keyword_present = bool(_optional_text(work.get("headlineCoreKeyword")))
+    persisted_present = bool(_optional_text(work.get("headlineText")))
+    language = str(work.get("language") or "en")
+    base = AcceptedWinnerHeadlineResolution(
+        headline_required=headline_decision_requires_headline(decision),
+        accepted_headline_decision=decision,
+        accepted_headline_field_present=field_present,
+        accepted_headline_keyword_present=keyword_present,
+        persisted_headline_text_present=persisted_present,
+        language=language,
+        product_name_resolved=str(work.get("productNameResolved") or "").strip(),
+    )
+    if not headline_decision_requires_headline(decision):
+        return replace(base, canonical_headline_source="omitted_by_decision")
+
+    attempted = replace(base, canonical_headline_resolution_attempted=True)
+    if not field_present:
+        return replace(
+            attempted,
+            failure_code="accepted_headline_missing",
+            failure_stage="canonical_headline_resolution",
+        )
+    if not keyword_present:
+        return replace(
+            attempted,
+            failure_code="accepted_keyword_missing",
+            failure_stage="canonical_headline_resolution",
+        )
+    if not str(work.get("productNameResolved") or "").strip():
+        return replace(
+            attempted,
+            failure_code="accepted_headline_missing",
+            failure_stage="canonical_headline_resolution",
+        )
+
+    try:
+        persisted_text = _optional_text(work.get("headlineText"))
+        source = "derived_from_accepted_winner"
+        if persisted_text:
+            pn = _require_non_empty_text(work.get("productNameResolved"), "productNameResolved")
+            rem_source = _optional_text(work.get("headlineTextRemainder")) or _optional_text(work.get("headline"))
+            composed, cleaned = compose_builder2_headline_text(pn, rem_source or _optional_text(work.get("headline")))
+            if composed == persisted_text:
+                verify = dict(work)
+                verify["headlineText"] = persisted_text
+                verify["headlineTextRemainder"] = cleaned or _optional_text(verify.get("headlineTextRemainder"))
+                validate_builder2_winner_headline_composition_pure(verify)
+                headline_text = persisted_text
+                headline_rem = str(verify.get("headlineTextRemainder") or cleaned or "").strip()
+                source = "persisted_verified"
+            else:
+                composed_plan = dict(work)
+                apply_builder2_headline_composition(composed_plan)
+                validate_builder2_winner_headline_composition_pure(composed_plan)
+                headline_text = str(composed_plan.get("headlineText") or "").strip()
+                headline_rem = str(composed_plan.get("headlineTextRemainder") or "").strip()
+        else:
+            composed_plan = dict(work)
+            apply_builder2_headline_composition(composed_plan)
+            validate_builder2_winner_headline_composition_pure(composed_plan)
+            headline_text = str(composed_plan.get("headlineText") or "").strip()
+            headline_rem = str(composed_plan.get("headlineTextRemainder") or "").strip()
+
+        if not headline_text:
+            return replace(
+                attempted,
+                failure_code="canonical_headline_composition_failed",
+                failure_stage="canonical_headline_resolution",
+            )
+        return AcceptedWinnerHeadlineResolution(
+            headline_required=True,
+            headline_text=headline_text,
+            headline_text_remainder=headline_rem,
+            product_name_resolved=str(work.get("productNameResolved") or "").strip(),
+            language=language,
+            canonical_headline_source=source,
+            accepted_headline_decision=decision,
+            accepted_headline_field_present=field_present,
+            accepted_headline_keyword_present=keyword_present,
+            persisted_headline_text_present=persisted_present,
+            canonical_headline_resolution_attempted=True,
+            canonical_headline_resolution_accepted=True,
+            canonical_headline_character_count=len(headline_text),
+            canonical_headline_word_count=len(headline_text.split()),
+        )
+    except Builder2WinnerDownstreamError:
+        return replace(
+            attempted,
+            failure_code="canonical_headline_composition_failed",
+            failure_stage="canonical_headline_resolution",
+        )
 
 
 def validate_builder2_pre_runway(plan: Dict[str, Any]) -> None:
