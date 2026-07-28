@@ -263,7 +263,7 @@ def verify_builder2_final_video_duration(
     )
 
 
-def _run_checked(cmd: list[str], *, stage: str, category: str) -> None:
+def _run_checked(cmd: list[str], *, stage: str, category: str) -> int:
     try:
         completed = subprocess.run(
             cmd,
@@ -293,6 +293,7 @@ def _run_checked(cmd: list[str], *, stage: str, category: str) -> None:
             category,
             len(completed.stderr or b""),
         )
+    return int(completed.returncode)
 
 
 def _default_font_path(language: str) -> str:
@@ -377,7 +378,7 @@ def render_builder2_advertising_closure_endcard(
     slogan_file = tmp / "slogan.txt"
     input_fingerprint = url_fingerprint(source)
 
-    def _runner(cmd: list[str], stage: str, category: str) -> None:
+    def _runner(cmd: list[str], stage: str, category: str) -> int:
         if ffmpeg_runner is not None:
             try:
                 ffmpeg_runner(cmd, stage, category)
@@ -389,8 +390,8 @@ def render_builder2_advertising_closure_endcard(
                     stderr_tail=sanitize_ffmpeg_stderr(exc.stderr),
                     command_category=category,
                 ) from exc
-            return
-        _run_checked(cmd, stage=stage, category=category)
+            return 0
+        return _run_checked(cmd, stage=stage, category=category)
 
     try:
         if source.startswith("http://") or source.startswith("https://"):
@@ -505,13 +506,46 @@ def render_builder2_advertising_closure_endcard(
 
         logger.info("BUILDER2_CLOSURE_ENDCARD start jobId=%s", (job_id or "").strip() or "(none)")
         t0 = time.monotonic()
-        _runner(card_cmd, "card_generation", "ffmpeg_card")
-        _runner(concat_cmd, "concatenation", "ffmpeg_concat")
+        card_rc = _runner(card_cmd, "card_generation", "ffmpeg_card")
+        card_created = card.is_file()
+        card_size = card.stat().st_size if card_created else 0
+        logger.info(
+            "BUILDER2_CLOSURE_CARD_RENDER_COMPLETED ffmpegReturnCode=%s outputCreated=%s outputSizeBytes=%s effectiveClosureDurationSeconds=%.3f",
+            card_rc,
+            card_created,
+            card_size,
+            hold,
+        )
+        concat_rc = _runner(concat_cmd, "concatenation", "ffmpeg_concat")
         closure_ffmpeg_execution_accepted = True
         closure_output_file_created = out_tmp.is_file()
         closure_output_file_size_bytes = out_tmp.stat().st_size if closure_output_file_created else 0
-        measured = _ffprobe_duration_seconds(out_tmp, _FFPROBE_TIMEOUT)
+        logger.info(
+            "BUILDER2_CLOSURE_CONCAT_COMPLETED ffmpegReturnCode=%s outputCreated=%s outputSizeBytes=%s measuredSourceDurationSeconds=%.3f effectiveClosureDurationSeconds=%.3f",
+            concat_rc,
+            closure_output_file_created,
+            closure_output_file_size_bytes,
+            source_duration,
+            hold,
+        )
+        try:
+            measured = _ffprobe_duration_seconds(out_tmp, _FFPROBE_TIMEOUT)
+        except RuntimeError as exc:
+            raise Builder2ClosureRenderError(
+                "builder2_closure_ffprobe_failed",
+                stage="duration_probe",
+                command_category="ffprobe",
+                closure_ffmpeg_execution_accepted=closure_ffmpeg_execution_accepted,
+                closure_output_file_created=closure_output_file_created,
+                closure_output_file_size_bytes=closure_output_file_size_bytes,
+            ) from exc
         closure_ffprobe_calls += 1
+        logger.info(
+            "BUILDER2_CLOSURE_OUTPUT_PROBED measuredFinalDurationSeconds=%.3f measuredSourceDurationSeconds=%.3f effectiveClosureDurationSeconds=%.3f",
+            measured,
+            source_duration,
+            hold,
+        )
         try:
             duration_diagnostics = verify_builder2_final_video_duration(
                 measured,
@@ -531,6 +565,14 @@ def render_builder2_advertising_closure_endcard(
                     closure_ffprobe_calls=closure_ffprobe_calls,
                 ) from exc
             raise
+        duration_accepted = bool(duration_diagnostics.closure_gain_accepted)
+        logger.info(
+            "BUILDER2_CLOSURE_DURATION_VERIFIED measuredFinalDurationSeconds=%.3f measuredSourceDurationSeconds=%.3f effectiveClosureDurationSeconds=%.3f durationAccepted=%s",
+            measured,
+            source_duration,
+            hold,
+            duration_accepted,
+        )
         out_tmp.replace(published_path)
 
         public_url = ""
@@ -564,10 +606,13 @@ def render_builder2_advertising_closure_endcard(
             public_url = published_path.as_uri()
 
         logger.info(
-            "BUILDER2_CLOSURE_ENDCARD done jobId=%s elapsed_ms=%.1f duration_s=%.3f",
-            (job_id or "").strip() or "(none)",
+            "BUILDER2_CLOSURE_ENDCARD_DONE elapsedMs=%.1f measuredFinalDurationSeconds=%.3f durationAccepted=%s ffmpegReturnCode=%s outputCreated=%s outputSizeBytes=%s",
             (time.monotonic() - t0) * 1000.0,
             measured,
+            duration_accepted,
+            concat_rc,
+            closure_output_file_created,
+            closure_output_file_size_bytes,
         )
         return ClosureRenderResult(
             public_url=public_url,

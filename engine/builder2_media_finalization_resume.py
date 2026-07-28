@@ -22,7 +22,6 @@ from engine.builder2_closure_render import (
     classify_url_route_family,
     render_builder2_advertising_closure_endcard,
 )
-from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_headline_decision_contract import (
     get_normalized_headline_decision,
@@ -267,8 +266,19 @@ def _sync_ffmpeg_counters(report: Dict[str, Any]) -> None:
     report["ffmpegCalls"] = report["totalFfmpegCalls"]
 
 
+def _apply_unexpected_failure(report: Dict[str, Any], exc: BaseException) -> None:
+    if report.get("failureReason"):
+        return
+    report["failureStage"] = report.get("failureStage") or "internal"
+    if isinstance(exc, Builder2TournamentError):
+        report["failureReason"] = str(exc.args[0] if exc.args else "builder2_media_finalization_failed")
+    else:
+        report["failureReason"] = "builder2_media_finalization_unexpected_internal_error"
+    logger.exception("BUILDER2_MEDIA_FINALIZATION_UNEXPECTED_FAILURE")
+
+
 def _closure_subprocess_ran(stage: str) -> bool:
-    return stage in {"card_generation", "concatenation", "duration_verification", "publication"}
+    return stage in {"card_generation", "concatenation", "duration_probe", "duration_verification", "publication"}
 
 
 def _execute_finalization_render_pipeline(
@@ -357,9 +367,7 @@ def _execute_finalization_render_pipeline(
                 product_name=str(closure.get("productNameText") or ""),
                 slogan=str(closure.get("sloganText") or ""),
                 language=str(closure.get("language") or "en"),
-                duration_seconds=resolve_builder2_effective_closure_segment_duration_seconds(
-                    float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None
-                ),
+                duration_seconds=float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None,
                 job_id=job_id,
                 publish=not preflight,
                 output_path=output_path if preflight else None,
@@ -373,6 +381,10 @@ def _execute_finalization_render_pipeline(
                 report["closureFfmpegSubprocessCalls"] = 1
             _apply_closure_duration_diagnostics(report, exc)
             _sync_ffmpeg_counters(report)
+            return None
+        except Exception as exc:
+            _apply_unexpected_failure(report, exc)
+            report["failureStage"] = report.get("failureStage") or "closure_render"
             return None
 
         report["closureRenderAccepted"] = True
@@ -421,44 +433,48 @@ def run_finalization_preflight(
     job_video_url: str = "",
 ) -> Dict[str, Any]:
     report = _initial_report(job_id=job_id, preflight=True)
-    if state is None:
-        raw = _read_raw(job_id)
-        if raw is None:
-            report["failureReason"] = "builder2_media_finalization_job_not_found"
-            report["failureStage"] = "load"
+    try:
+        if state is None:
+            raw = _read_raw(job_id)
+            if raw is None:
+                report["failureReason"] = "builder2_media_finalization_job_not_found"
+                report["failureStage"] = "load"
+                return report
+            state = deepcopy(raw)
+        plan = state.get("winnerDevelopmentPlan") if isinstance(state.get("winnerDevelopmentPlan"), dict) else {}
+        if not job_video_url:
+            job_raw = video_job_get_raw(job_id) or {}
+            job_video_url = str(job_raw.get("video_url") or job_raw.get("videoUrl") or "")
+
+        eligible, missing = finalization_recovery_eligible(state=state, plan=plan, job_video_url=job_video_url)
+        report["eligibleForFinalizationRecovery"] = eligible
+        report["falseCompletionConfirmed"] = "falseCompletionNotProven" not in missing
+        if not eligible:
+            report["failureReason"] = f"builder2_media_finalization_not_eligible:{','.join(missing)}"
+            report["failureStage"] = "eligibility"
             return report
-        state = deepcopy(raw)
-    plan = state.get("winnerDevelopmentPlan") if isinstance(state.get("winnerDevelopmentPlan"), dict) else {}
-    if not job_video_url:
-        job_raw = video_job_get_raw(job_id) or {}
-        job_video_url = str(job_raw.get("video_url") or job_raw.get("videoUrl") or "")
 
-    eligible, missing = finalization_recovery_eligible(state=state, plan=plan, job_video_url=job_video_url)
-    report["eligibleForFinalizationRecovery"] = eligible
-    report["falseCompletionConfirmed"] = "falseCompletionNotProven" not in missing
-    if not eligible:
-        report["failureReason"] = f"builder2_media_finalization_not_eligible:{','.join(missing)}"
-        report["failureStage"] = "eligibility"
+        job_data = video_job_get(job_id) if redis_configured() else None
+        media_config = build_media_resume_configuration(
+            job_id=job_id,
+            job_data=job_data,
+            tournament_state=state,
+            start_image_required=False,
+            ffmpeg_required=True,
+        )
+        _execute_finalization_render_pipeline(
+            job_id=job_id,
+            state=state,
+            plan=plan,
+            job_video_url=job_video_url,
+            report=report,
+            preflight=True,
+            public_base_url=media_config.publicBaseUrl,
+        )
         return report
-
-    job_data = video_job_get(job_id) if redis_configured() else None
-    media_config = build_media_resume_configuration(
-        job_id=job_id,
-        job_data=job_data,
-        tournament_state=state,
-        start_image_required=False,
-        ffmpeg_required=True,
-    )
-    _execute_finalization_render_pipeline(
-        job_id=job_id,
-        state=state,
-        plan=plan,
-        job_video_url=job_video_url,
-        report=report,
-        preflight=True,
-        public_base_url=media_config.publicBaseUrl,
-    )
-    return report
+    except Exception as exc:
+        _apply_unexpected_failure(report, exc)
+        return report
 
 
 def run_one_media_finalization_resume(
@@ -599,6 +615,8 @@ def run_one_media_finalization_resume(
     except Builder2TournamentError as exc:
         report["failureReason"] = str(exc.args[0] if exc.args else "builder2_media_finalization_failed")
         report["failureStage"] = report.get("failureStage") or "finalization"
+    except Exception as exc:
+        _apply_unexpected_failure(report, exc)
     finally:
         report.update(
             {
@@ -711,31 +729,53 @@ def print_media_finalization_resume_report(report: Dict[str, Any]) -> None:
         "localHeadlineFailureCode",
     )
     safe = {key: report.get(key) for key in safe_keys if key in report}
-    print(json.dumps(safe, ensure_ascii=False, indent=2))
+    print(json.dumps(safe, ensure_ascii=False, indent=2), flush=True)
 
 
-def main(argv: Optional[list[str]] = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
-    job_id = _env("BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID")
-    if not job_id:
-        print(json.dumps({"ok": False, "failureReason": "builder2_media_finalization_resume_job_id_missing"}, indent=2))
-        return 1
-    preflight = _truthy("BUILDER2_MEDIA_FINALIZATION_RESUME_PREFLIGHT")
-    logger.info(
-        "BUILDER2_MEDIA_FINALIZATION_RESUME_START jobId=%s preflight=%s",
-        job_id,
-        preflight,
-    )
-    report = run_one_media_finalization_resume(job_id=job_id, preflight=preflight)
+def emit_media_finalization_resume_report(
+    report: Dict[str, Any],
+    *,
+    job_id: str,
+    preflight: bool,
+) -> None:
     print_media_finalization_resume_report(report)
+    sys.stdout.flush()
     logger.info(
         "BUILDER2_MEDIA_FINALIZATION_RESUME_DONE jobId=%s ok=%s preflight=%s",
         job_id,
         report.get("ok"),
         preflight,
     )
-    return 0 if report.get("ok") else 1
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    job_id = _env("BUILDER2_MEDIA_FINALIZATION_RESUME_JOB_ID")
+    preflight = _truthy("BUILDER2_MEDIA_FINALIZATION_RESUME_PREFLIGHT")
+    if not job_id:
+        report = {"ok": False, "failureReason": "builder2_media_finalization_resume_job_id_missing"}
+        emit_media_finalization_resume_report(report, job_id="", preflight=preflight)
+        return 1
+
+    report: Dict[str, Any] = _initial_report(job_id=job_id, preflight=preflight)
+    exit_code = 1
+    logger.info(
+        "BUILDER2_MEDIA_FINALIZATION_RESUME_START jobId=%s preflight=%s",
+        job_id,
+        preflight,
+    )
+    try:
+        report = run_one_media_finalization_resume(job_id=job_id, preflight=preflight)
+        exit_code = 0 if report.get("ok") else 1
+    except SystemExit as exc:
+        exit_code = int(exc.code) if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        _apply_unexpected_failure(report, exc)
+        exit_code = 1
+    finally:
+        emit_media_finalization_resume_report(report, job_id=job_id, preflight=preflight)
+    return exit_code
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

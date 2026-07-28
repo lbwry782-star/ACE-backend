@@ -4,6 +4,7 @@ Builder2 media finalization correction and recovery tests.
 from __future__ import annotations
 
 import json
+import io
 import subprocess
 import tempfile
 import unittest
@@ -951,7 +952,6 @@ class TestAcceptedHeadlineResolution(unittest.TestCase):
         self.assertEqual(resolution.canonical_headline_source, "omitted_by_decision")
 
     @patch("engine.builder2_media_finalization_resume.run_finalization_preflight")
-    @patch("engine.builder2_media_finalization_resume.print_media_finalization_resume_report")
     @patch.dict(
         "os.environ",
         {
@@ -960,19 +960,17 @@ class TestAcceptedHeadlineResolution(unittest.TestCase):
         },
         clear=False,
     )
-    def test_main_cli_preflight_prints_json(self, print_report: Any, preflight: Any) -> None:
+    def test_main_cli_preflight_prints_json(self, preflight: Any) -> None:
         from engine.builder2_media_finalization_resume import main
 
-        preflight.return_value = {"jobId": JOB_ID, "ok": True, "preflight": True}
-
-        def _capture(report: Dict[str, Any]) -> None:
-            print_report.captured = report
-
-        print_report.side_effect = _capture
-        print_report.captured = {}
-        code = main([])
+        preflight.return_value = {"jobId": JOB_ID, "ok": True, "preflight": True, "readyForFinalizationRecovery": True}
+        buffer = io.StringIO()
+        with patch("sys.stdout", buffer):
+            code = main([])
         self.assertEqual(code, 0)
-        self.assertTrue(print_report.captured.get("ok"))
+        payload = json.loads(buffer.getvalue().strip())
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["readyForFinalizationRecovery"])
 
 
 if __name__ == "__main__":
