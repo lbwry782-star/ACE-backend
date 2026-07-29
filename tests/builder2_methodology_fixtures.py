@@ -129,6 +129,40 @@ def complete_ad_creator_extras(
     }
 
 
+def logo_policy_creator_extras(*, advertised_entity_name: str = "ACE Product") -> Dict[str, Any]:
+    return {
+        "logoPolicyReport": {
+            "advertisedEntityName": advertised_entity_name,
+            "logoDependentConcept": False,
+            "advertisedLogoRequested": False,
+            "thirdPartyBrandingRisk": "None; scene uses generic unbranded objects only.",
+            "inventedLogoRisk": "None; no invented mark or wordmark is planned.",
+            "brandedObjectRisk": "None; packaging, clothing, screens, and vehicles remain unmarked.",
+            "logoFreeSceneDescription": "Generic unbranded objects express the mechanism with no visible marks.",
+            "genericObjectSubstitutions": "Any potentially branded object type is replaced with a neutral generic form.",
+            "plainTextNameReservedForClosureOnly": True,
+            "logoPolicySatisfied": True,
+        }
+    }
+
+
+def logo_policy_judge_extras() -> Dict[str, Any]:
+    return {
+        "logoPolicyAssessment": {
+            "logoDetectedInPlan": False,
+            "logoDependentMeaning": False,
+            "advertisedLogoRequested": False,
+            "thirdPartyBrandingDetected": False,
+            "inventedLogoDetected": False,
+            "brandedObjectRiskAccepted": True,
+            "plainTextIdentificationOnly": True,
+            "logoFreeExecutionAccepted": True,
+            "logoPolicySatisfied": True,
+            "rejectionReason": None,
+        }
+    }
+
+
 def metaphorical_embodiment_creator_extras(
     *,
     strategic_perception: str = "Physical closeness can express strategic fit better than generic scale.",
@@ -156,6 +190,7 @@ def metaphorical_embodiment_creator_extras(
             "dependsOnEarlierCopy": False,
             "singleSloganContractSatisfied": True,
         },
+        **logo_policy_creator_extras(),
     }
 
 
@@ -178,6 +213,7 @@ def metaphorical_embodiment_judge_extras() -> Dict[str, Any]:
             "dependsOnEarlierCopy": False,
             "singleSloganContractSatisfied": True,
         },
+        **logo_policy_judge_extras(),
     }
 
 
@@ -207,6 +243,7 @@ def metaphorical_embodiment_shortening_extras() -> Dict[str, Any]:
             "dependsOnEarlierCopy": False,
             "singleSloganContractSatisfied": True,
         },
+        **logo_policy_creator_extras(),
     }
 
 
@@ -233,6 +270,7 @@ def metaphorical_embodiment_absence_extras() -> Dict[str, Any]:
             "dependsOnEarlierCopy": False,
             "singleSloganContractSatisfied": True,
         },
+        **logo_policy_creator_extras(),
     }
 
 
@@ -259,6 +297,7 @@ def creative_embodiment_think_small_extras() -> Dict[str, Any]:
             "dependsOnEarlierCopy": False,
             "singleSloganContractSatisfied": True,
         },
+        **logo_policy_creator_extras(),
     }
 
 
@@ -285,6 +324,7 @@ def creative_embodiment_media_replacement_extras() -> Dict[str, Any]:
             "dependsOnEarlierCopy": False,
             "singleSloganContractSatisfied": True,
         },
+        **logo_policy_creator_extras(),
     }
 
 
@@ -311,6 +351,7 @@ def creative_embodiment_context_collision_extras() -> Dict[str, Any]:
             "dependsOnEarlierCopy": False,
             "singleSloganContractSatisfied": True,
         },
+        **logo_policy_creator_extras(),
     }
 
 
@@ -522,6 +563,14 @@ def methodology_winner_extras(
 def single_slogan_contract_extras(*, slogan_text: str = "קרוב יותר ממה שחשבת") -> Dict[str, Any]:
     return {
         "copyContractVersion": "builder2_single_slogan_v1",
+        "logoPolicyVersion": "builder2_no_logos_v1",
+        "logosAllowed": False,
+        "advertisedLogoAllowed": False,
+        "thirdPartyLogosAllowed": False,
+        "inventedLogoAllowed": False,
+        "plainTextAdvertisedNameAllowed": True,
+        "plainTextAdvertisedNameOnly": True,
+        "inSceneBrandTextAllowed": False,
         "builder2NewFormatVersion": "builder2_complete_ad_v1",
         "sloganDecision": "use",
         "sloganText": slogan_text,

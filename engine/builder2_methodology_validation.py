@@ -288,6 +288,16 @@ def validate_creator_methodology(
                 assigned_prototype_id=assigned_prototype_id,
                 single_slogan_required=requires_metaphor,
             )
+        from engine.builder2_no_logo_contract import BUILDER2_NO_LOGO_POLICY_VERSION, validate_creator_logo_policy
+
+        requires_no_logo = str((tournament_state or {}).get("logoPolicyVersion") or "").strip() == BUILDER2_NO_LOGO_POLICY_VERSION
+        if requires_no_logo or isinstance(candidate.get("logoPolicyReport"), dict):
+            validate_creator_logo_policy(
+                candidate,
+                assigned_prototype_id=assigned_prototype_id,
+                product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
+                no_logo_required=requires_no_logo,
+            )
 
     anchor = _require_dict(candidate.get("visualAnchor"), field="visualAnchor", code="builder2_creator_schema_invalid")
     if anchor.get("appearsBeforeOrDuringResolution") is not True and not _normalize_text(anchor.get("visualAnchorTiming")):
@@ -804,6 +814,10 @@ def validate_judge_methodology(
 
     if isinstance(judgment.get("metaphoricalEmbodimentAssessment"), dict):
         validate_judge_metaphorical_embodiment(judgment, candidate=candidate)
+    from engine.builder2_no_logo_contract import validate_judge_logo_policy
+
+    if isinstance(judgment.get("logoPolicyAssessment"), dict):
+        validate_judge_logo_policy(judgment, candidate=candidate)
     logger.info("BUILDER2_JUDGE_METHODOLOGY_VALIDATED")
 
 

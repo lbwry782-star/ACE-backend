@@ -347,6 +347,11 @@ class TestFreshProductionDoesNotInvokeRecoveryClis(unittest.TestCase):
                         "sloganRenderedExactlyOnce": True,
                         "advertisingCopyRenderStages": 1,
                         "copyContractVersion": "builder2_single_slogan_v1",
+                        "logoPolicyVersion": "builder2_no_logos_v1",
+                        "brandNameRenderedAsPlainText": True,
+                        "brandGraphicRendered": False,
+                        "logoAssetUsed": False,
+                        "logoPolicySatisfied": True,
                     }
                 )
                 kwargs["state"]["status"] = "completed"

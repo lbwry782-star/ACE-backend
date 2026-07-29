@@ -584,6 +584,11 @@ def validate_builder2_pre_runway(plan: Dict[str, Any]) -> None:
 
 
 def build_continuous_event_runway_prompt(plan: Dict[str, Any], *, duration_seconds: int) -> str:
+    from engine.builder2_no_logo_contract import (
+        build_builder2_no_logo_visual_policy_block,
+        log_logo_free_prompt_applied,
+        normalize_builder2_media_prompt_text,
+    )
     from engine.video_planning import (
         RUNWAY_PHYSICS_REALISM_CONSTRAINT,
         _RUNWAY_STYLE_TAIL,
@@ -591,21 +596,22 @@ def build_continuous_event_runway_prompt(plan: Dict[str, Any], *, duration_secon
         _runway_language_visual_constraints,
     )
 
-    scene_prompt = _require_non_empty_text(plan.get("videoPrompt") or plan.get("videoPromptCore"), "videoPrompt")
+    log_logo_free_prompt_applied(prompt_kind="runway_continuous_event")
+    scene_prompt = normalize_builder2_media_prompt_text(
+        _require_non_empty_text(plan.get("videoPrompt") or plan.get("videoPromptCore"), "videoPrompt")
+    )
     lang_vis = _runway_language_visual_constraints(plan)
-    opening = get_opening_frame_description(plan)
-    beginning = get_sequence_beginning(plan)
-    development = get_sequence_development(plan)
-    resolution = get_sequence_resolution(plan)
-    anchor = get_visual_anchor_description(plan)
-    subject = get_runway_main_subject(plan)
-    action = get_runway_main_action(plan)
-    location = get_runway_location(plan)
+    opening = normalize_builder2_media_prompt_text(get_opening_frame_description(plan))
+    beginning = normalize_builder2_media_prompt_text(get_sequence_beginning(plan))
+    development = normalize_builder2_media_prompt_text(get_sequence_development(plan))
+    resolution = normalize_builder2_media_prompt_text(get_sequence_resolution(plan))
+    anchor = normalize_builder2_media_prompt_text(get_visual_anchor_description(plan))
+    subject = normalize_builder2_media_prompt_text(get_runway_main_subject(plan))
+    action = normalize_builder2_media_prompt_text(get_runway_main_action(plan))
+    location = normalize_builder2_media_prompt_text(get_runway_location(plan))
+    no_logo = build_builder2_no_logo_visual_policy_block(compact=True)
 
     body = (
-        "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
-        "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
-        f"{lang_vis} "
         f"MANDATORY: one continuous {duration_seconds}-second realistic event in a single location with one primary action. "
         "Natural pacing from opening physical state through development to a clear visual resolution; "
         "no montage, no multiple clips, no unrelated cuts, no dead seconds at the end. "
@@ -623,7 +629,12 @@ def build_continuous_event_runway_prompt(plan: Dict[str, Any], *, duration_secon
     body += (
         f"Development: {development}. "
         f"Resolution: {resolution}. "
-        f"Continuous event (follow exactly): {scene_prompt}. {_RUNWAY_STYLE_TAIL}"
+        f"Continuous event (follow exactly): {scene_prompt}. "
+        f"{no_logo} "
+        "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
+        "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
+        f"{lang_vis} "
+        f"{_RUNWAY_STYLE_TAIL}"
     )
     out, _ = _finalize_runway_prompt("", body)
     if not out.strip():
@@ -633,6 +644,11 @@ def build_continuous_event_runway_prompt(plan: Dict[str, Any], *, duration_secon
 
 
 def build_variation_montage_runway_prompt(plan: Dict[str, Any]) -> str:
+    from engine.builder2_no_logo_contract import (
+        build_builder2_no_logo_visual_policy_block,
+        log_logo_free_prompt_applied,
+        normalize_builder2_media_prompt_text,
+    )
     from engine.video_planning import (
         _RUNWAY_STYLE_TAIL,
         _finalize_runway_prompt,
@@ -640,14 +656,18 @@ def build_variation_montage_runway_prompt(plan: Dict[str, Any]) -> str:
         _runway_variation_montage_camera_focus,
     )
 
-    scene_prompt = _require_non_empty_text(plan.get("videoPrompt") or plan.get("videoPromptCore"), "videoPrompt")
+    log_logo_free_prompt_applied(prompt_kind="runway_variation_montage")
+    scene_prompt = normalize_builder2_media_prompt_text(
+        _require_non_empty_text(plan.get("videoPrompt") or plan.get("videoPromptCore"), "videoPrompt")
+    )
     motion, _ = _runway_variation_montage_camera_focus()
     lang_vis = _runway_language_visual_constraints(plan)
-    core_visual = _require_non_empty_text(plan.get("coreVisualIdea"), "coreVisualIdea")
-    variations = get_scene_variation_descriptions(plan)
-    family = get_visual_family_definition(plan)
-    motif = get_recurring_motif(plan)
+    core_visual = normalize_builder2_media_prompt_text(_require_non_empty_text(plan.get("coreVisualIdea"), "coreVisualIdea"))
+    variations = [normalize_builder2_media_prompt_text(v) for v in get_scene_variation_descriptions(plan)]
+    family = normalize_builder2_media_prompt_text(get_visual_family_definition(plan))
+    motif = normalize_builder2_media_prompt_text(get_recurring_motif(plan))
     numbered = "; ".join(f"({i + 1}) {v}" for i, v in enumerate(variations))
+    no_logo = build_builder2_no_logo_visual_policy_block(compact=True)
     montage_body = (
         f"Core visual idea: {core_visual}. "
         f"Visual family: {family}. "
@@ -656,11 +676,12 @@ def build_variation_montage_runway_prompt(plan: Dict[str, Any]) -> str:
         f"Montage direction: {scene_prompt}"
     )
     body = (
+        f"{motion} "
+        f"Montage (follow exactly): {montage_body}. "
+        f"{no_logo} "
         "VISUAL POLICY: No readable text, letters, words, captions, labels, signage, packaging typography, "
         "title cards, watermarks, or brand names in-frame; purely pictorial motion. "
         f"{lang_vis} "
-        f"{motion} "
-        f"Montage (follow exactly): {montage_body}. "
         f"{_RUNWAY_STYLE_TAIL}"
     )
     out, _ = _finalize_runway_prompt("", body)
@@ -671,13 +692,22 @@ def build_variation_montage_runway_prompt(plan: Dict[str, Any]) -> str:
 
 
 def build_builder2_start_frame_image_prompt(plan: Dict[str, Any], *, duration_seconds: int) -> str:
+    from engine.builder2_no_logo_contract import (
+        build_builder2_no_logo_visual_policy_block,
+        log_logo_free_prompt_applied,
+        normalize_builder2_media_prompt_text,
+    )
+
+    log_logo_free_prompt_applied(prompt_kind="start_image")
+    no_logo = build_builder2_no_logo_visual_policy_block(compact=True)
     no_text = (
+        f"{no_logo} "
         "No text, letters, words, numbers as graphics, captions, labels, signage, packaging typography, "
         "title cards, watermarks, headline, UI, or brand names in the image — blank/generic surfaces only."
     )
     product = _optional_text(plan.get("productNameResolved"))
-    core_visual = _require_non_empty_text(plan.get("coreVisualIdea"), "coreVisualIdea")
-    opening = get_opening_frame_description(plan)
+    core_visual = normalize_builder2_media_prompt_text(_require_non_empty_text(plan.get("coreVisualIdea"), "coreVisualIdea"))
+    opening = normalize_builder2_media_prompt_text(get_opening_frame_description(plan))
     beginning = ""
     if (plan.get("structureType") or "").strip() == "continuous_event":
         beginning = get_sequence_beginning(plan)
@@ -692,11 +722,18 @@ def build_builder2_start_frame_image_prompt(plan: Dict[str, Any], *, duration_se
     except Builder2WinnerDownstreamError:
         resolution = ""
 
+    beginning = normalize_builder2_media_prompt_text(beginning)
+    anchor = normalize_builder2_media_prompt_text(anchor)
+    resolution = normalize_builder2_media_prompt_text(resolution)
     scene_focus = opening or beginning or core_visual
     if resolution and resolution.lower() in scene_focus.lower() and beginning:
         scene_focus = beginning
 
-    product_clause = f"Product context (do not show as readable text): {product}. " if product else ""
+    product_clause = (
+        "Product context must not appear as readable text or logo in the image. "
+        if product
+        else ""
+    )
     is_continuous = (plan.get("structureType") or "").strip() == "continuous_event"
     shot_kind = "continuous event" if is_continuous else "commercial montage"
     anchor_clause = f"Visible anchor at opening when present: {anchor}. " if anchor and anchor.lower() in scene_focus.lower() else ""
@@ -711,7 +748,7 @@ def build_builder2_start_frame_image_prompt(plan: Dict[str, Any], *, duration_se
         "not the final resolution. "
         f"{product_clause}"
         f"Core visual idea: {core_visual}. "
-        f"Opening moment to animate: {scene_focus}. "
+        f"Opening moment to animate: {normalize_builder2_media_prompt_text(scene_focus)}. "
         f"{anchor_clause}"
         f"{safe_area}"
         "Realistic human scene when applicable; clear composition; soft natural lighting; realistic materials. "

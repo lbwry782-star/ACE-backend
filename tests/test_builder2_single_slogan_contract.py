@@ -53,6 +53,7 @@ from tests.test_builder2_media_resume import _media_ready_state, _mock_pipeline_
 
 class TestSingleSloganContract(unittest.TestCase):
     def test_new_tournament_state_has_copy_contract(self) -> None:
+        from engine.builder2_no_logo_contract import BUILDER2_NO_LOGO_POLICY_VERSION
         from engine.builder2_tournament_store import new_tournament_state
 
         state = new_tournament_state(
@@ -62,6 +63,7 @@ class TestSingleSloganContract(unittest.TestCase):
             random_seed="seed",
         )
         self.assertEqual(state["copyContractVersion"], BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION)
+        self.assertEqual(state["logoPolicyVersion"], BUILDER2_NO_LOGO_POLICY_VERSION)
         self.assertTrue(is_single_slogan_contract(state=state))
 
     def test_winner_normalization_forces_single_slogan(self) -> None:

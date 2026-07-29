@@ -328,6 +328,15 @@ def validate_builder2_media_completion_contract(
             media=media,
         )
     )
+    from engine.builder2_no_logo_contract import validate_no_logo_completion
+
+    failures.extend(
+        validate_no_logo_completion(
+            state=state,
+            plan=plan,
+            media=media,
+        )
+    )
     if failures:
         return False, failures[0], failures
     return True, "", []

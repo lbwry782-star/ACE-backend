@@ -131,10 +131,15 @@ def _resolve_judgment_for_candidate(state: Dict[str, Any], candidate_id: str) ->
 
 def select_global_winner(state: Dict[str, Any]) -> str:
     from engine.builder2_metaphorical_embodiment_contract import judgment_rejects_literal_execution
+    from engine.builder2_no_logo_contract import judgment_rejects_logo_policy
 
     def _literal_winner_blocked(candidate_id: str) -> bool:
         judgment = _resolve_judgment_for_candidate(state, candidate_id)
         return judgment_rejects_literal_execution(judgment) if isinstance(judgment, dict) else False
+
+    def _logo_winner_blocked(candidate_id: str) -> bool:
+        judgment = _resolve_judgment_for_candidate(state, candidate_id)
+        return judgment_rejects_logo_policy(judgment) if isinstance(judgment, dict) else False
 
     eligible_ids = [
         cid
@@ -143,6 +148,7 @@ def select_global_winner(state: Dict[str, Any]) -> str:
         and _creator_was_accepted(cand, state=state)
         and _has_valid_judgment(cand)
         and not _literal_winner_blocked(cid)
+        and not _logo_winner_blocked(cid)
     ]
     if eligible_ids:
         best_id = eligible_ids[0]

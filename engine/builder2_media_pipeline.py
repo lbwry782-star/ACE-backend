@@ -645,6 +645,9 @@ def execute_builder2_media_pipeline(
             )
             counters.ffmpeg_calls += 1
             media = _media_bucket(state)
+            from engine.builder2_no_logo_contract import mark_logo_free_closure_render
+
+            mark_logo_free_closure_render(media)
             media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
             media["endCardDurationSeconds"] = resolve_builder2_end_card_duration_seconds()
             media["expectedFinalVideoDurationSeconds"] = resolve_builder2_final_video_duration_seconds()

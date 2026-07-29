@@ -185,6 +185,9 @@ def build_creator_prompt(
         "absence, collision, or medium transformation does the conceptual work — as in Think Small. "
         "Do not default to quantity-versus-quality, external worlds, or repeated-object comparisons unless that "
         "relationship is genuinely the candidate's strategic perception. "
+        "No-logo policy: the Runway visual must be entirely unbranded; generic objects only; no logos, wordmarks, "
+        "emblems, monograms, badges, watermarks, branded packaging/clothing/screens/vehicles/signs, invented marks, "
+        "or visible commercial names in-frame. Reserve the advertised name for plain text on the closure card only. "
         "dependsOnEarlierCopy must be false in visualBridgeAssessment."
     )
 
@@ -301,7 +304,9 @@ def build_judge_prompt(
         "Independently test creative embodiment: reject literal graph/report/dashboard/interface execution unless "
         "meaningfully transformed; require metaphoricalEmbodimentAssessment and visualBridgeAssessment with "
         "dependsOnEarlierCopy=false. Do not require leaving the business domain. "
-        "Clarity without creative embodiment is insufficient.\n"
+        "Clarity without creative embodiment is insufficient. "
+        "Independently enforce the no-logo policy: reject logo-dependent concepts, real or invented logos, "
+        "third-party branding, in-scene brand text, and stylized wordmarks.\n"
         "If eligible=false, include at least one disqualifier explaining why."
     )
 

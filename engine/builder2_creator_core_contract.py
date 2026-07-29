@@ -386,7 +386,13 @@ def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
         "Do not use quantityEmbodiment, qualityEmbodiment, sameOrParallelObjectFamily, metaphoricalWorld, or "
         "metaphoricalPhysicalFamily — those belong only to teaching examples, not the universal contract.\n"
         "Required visualBridgeAssessment object with keys: centralVisibleDetail, sloganConnectionToVisibleDetail, "
-        "sloganConnectionToRelativeAdvantage, dependsOnEarlierCopy=false, singleSloganContractSatisfied=true."
+        "sloganConnectionToRelativeAdvantage, dependsOnEarlierCopy=false, singleSloganContractSatisfied=true.\n"
+        "No-logo policy (mandatory): plan a fully unbranded visual execution. Required logoPolicyReport object with keys: "
+        "advertisedEntityName, logoDependentConcept=false, advertisedLogoRequested=false, thirdPartyBrandingRisk, "
+        "inventedLogoRisk, brandedObjectRisk, logoFreeSceneDescription, genericObjectSubstitutions, "
+        "plainTextNameReservedForClosureOnly=true, logoPolicySatisfied=true. "
+        "Reserve the advertised name for plain text on the closure card only; never request a logo, wordmark, emblem, "
+        "monogram, badge, invented mark, branded packaging, branded clothing, vehicle emblem, or branded interface."
     )
 
 

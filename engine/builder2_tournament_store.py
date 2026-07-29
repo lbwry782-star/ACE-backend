@@ -188,6 +188,14 @@ def new_tournament_state(
         "lastCompletedStep": "created",
         "error": None,
         "copyContractVersion": "builder2_single_slogan_v1",
+        "logoPolicyVersion": "builder2_no_logos_v1",
+        "logosAllowed": False,
+        "advertisedLogoAllowed": False,
+        "thirdPartyLogosAllowed": False,
+        "inventedLogoAllowed": False,
+        "plainTextAdvertisedNameAllowed": True,
+        "plainTextAdvertisedNameOnly": True,
+        "inSceneBrandTextAllowed": False,
         "builder2NewFormatVersion": "builder2_complete_ad_v1",
     }
 
