@@ -205,6 +205,25 @@ def build_creator_repair_prompt(
     invalid_output: Dict[str, Any],
     validation_failures: List[str],
 ) -> str:
+    slogan_repair = any("sloganText.word_limit" in item for item in validation_failures)
+    slogan_repair_block = ""
+    if slogan_repair:
+        from engine.builder2_advertising_closure_contract import SLOGAN_MAX_WORD_COUNT, build_slogan_word_limit_prompt_text
+
+        slogan_repair_block = (
+            "\nSlogan-only repair scope:\n"
+            f"- Shorten advertisingClosure.sloganText to at most {SLOGAN_MAX_WORD_COUNT} words using the server counting rule.\n"
+            "- Do NOT truncate mechanically by deleting words at the end; rewrite a shorter slogan that preserves Hebrew meaning, "
+            "syntax, and wordplay when applicable.\n"
+            "- Preserve problemPerception, relativeAdvantage, prototype method application, visualMechanism, scene, visual anchor, "
+            "creative embodiment, no-logo plan, Runway feasibility, and all non-copy fields unchanged.\n"
+            "- You may update only slogan copy and directly dependent slogan metadata such as semanticBridge slogan fields, "
+            "metaphoricalEmbodiment.sloganBridgeToBusinessMeaning, visualBridgeAssessment slogan connections, "
+            "verbalPotential keyword/meanings when they must stay aligned, and compatible headline alias fields that must equal "
+            "the canonical slogan.\n"
+            "- Keep exactly one canonical slogan; dependsOnEarlierCopy must remain false; do not add a headline or second copy layer.\n"
+            f"{build_slogan_word_limit_prompt_text()}\n"
+        )
     return (
         "You are the Builder2 Creator repair role.\n"
         "Repair ONLY the listed structural/schema defects. Preserve the creative idea.\n"
@@ -217,6 +236,7 @@ def build_creator_repair_prompt(
         f"{json.dumps(invalid_output, ensure_ascii=False)}\n\n"
         "Exact validation failures to fix:\n"
         + "\n".join(f"- {item}" for item in validation_failures)
+        + slogan_repair_block
         + "\n\n"
         f"Return one repaired JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}."
     )

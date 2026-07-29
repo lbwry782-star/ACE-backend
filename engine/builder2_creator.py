@@ -434,12 +434,24 @@ _CREATIVE_RETRY_FIELDS = {
     "planningFailure",
 }
 
+_SLOGAN_REPAIRABLE_ADVERTISING_CLOSURE_FIELDS = frozenset(
+    {
+        "sloganText.word_limit",
+    }
+)
+
+
+def is_slogan_word_limit_failure(reason: str) -> bool:
+    return str(reason or "").strip() == "builder2_advertising_closure_invalid:sloganText.word_limit"
+
 
 def _is_structural_repairable(code: str, field: Optional[str] = None) -> bool:
     if code == "builder2_creator_schema_invalid":
         return True
     if code == "builder2_creator_validation_failed":
         return field not in _CREATIVE_RETRY_FIELDS
+    if code == "builder2_advertising_closure_invalid":
+        return field in _SLOGAN_REPAIRABLE_ADVERTISING_CLOSURE_FIELDS
     return False
 
 
@@ -565,6 +577,19 @@ def collect_creator_structural_errors(
             "whyRunwayShouldUnderstand",
         ):
             run(lambda k=key: require_non_empty_str(report.get(k), field=f"creatorReport.{k}"))
+
+    if strategy_foundation is not None and not compatibility_mode:
+        from engine.builder2_complete_ad_contract import validate_creator_complete_ad_fields
+
+        def run_complete_ad() -> None:
+            validate_creator_complete_ad_fields(
+                normalized,
+                strategy_foundation=strategy_foundation,
+                assigned_prototype_id=assigned_prototype_id,
+                product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
+            )
+
+        run(run_complete_ad)
 
     errors.extend(
         collect_creator_methodology_structural_errors(
@@ -758,6 +783,8 @@ def generate_creator_candidate(
     candidate_id: Optional[str] = None,
     compatibility_mode: bool = False,
     single_attempt_only: bool = False,
+    repair_only_from_parsed: Optional[Dict[str, Any]] = None,
+    repair_only_failure_reason: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     prototype = require_prototype(prototype_id)
     candidate_id = candidate_id or f"cand-{round_index}-{prototype_id}-{attempt_number}-{uuid.uuid4().hex[:8]}"
@@ -793,17 +820,68 @@ def generate_creator_candidate(
     response_text = ""
     collected_structural_failures: List[str] = []
 
-    for phase in (("normal",) if single_attempt_only else ("normal", "repair", "retry")):
+    if repair_only_from_parsed:
+        failure_reason = str(repair_only_failure_reason or "").strip() or "builder2_advertising_closure_invalid:sloganText.word_limit"
+        last_parsed = dict(repair_only_from_parsed)
+        last_exc = Builder2TournamentError(failure_reason)
+        if not _is_structural_repairable(_failure_code(last_exc), _failure_field(last_exc)):
+            raise Builder2TournamentError(f"builder2_creator_repair_only_ineligible:{failure_reason}")
+        collected_structural_failures = collect_creator_structural_errors(
+            last_parsed,
+            assigned_prototype_id=prototype_id,
+            prototype_display_name=prototype.display_name,
+            strategy_foundation=strategy_foundation,
+            compatibility_mode=compatibility_mode,
+            job_id=job_id,
+            tournament_id=tournament_id,
+            candidate_id=candidate_id,
+            prototype_id=prototype_id,
+        ) or [failure_reason]
+        phases: Tuple[str, ...] = ("repair",)
+    elif single_attempt_only:
+        phases = ("normal",)
+    else:
+        phases = ("normal", "repair", "retry")
+
+    for phase in phases:
         if phase == "repair":
             if last_exc is None or not _is_structural_repairable(_failure_code(last_exc), _failure_field(last_exc)):
                 continue
             repair_attempted = True
-            logger.info(
-                "BUILDER2_CREATOR_REPAIR_START candidateId=%s prototypeId=%s reason=%s",
-                candidate_id,
-                prototype_id,
-                last_exc.args[0],
-            )
+            failure_reason = str(last_exc.args[0] if last_exc.args else "")
+            if is_slogan_word_limit_failure(failure_reason):
+                from engine.builder2_advertising_closure_contract import (
+                    SLOGAN_MAX_WORD_COUNT,
+                    count_slogan_words_excluding_product,
+                )
+
+                closure = last_parsed.get("advertisingClosure") if isinstance(last_parsed.get("advertisingClosure"), dict) else {}
+                product_label = str(closure.get("productNameText") or product_name or "").strip()
+                actual_words = count_slogan_words_excluding_product(
+                    str(closure.get("sloganText") or ""),
+                    product_label,
+                )
+                logger.info(
+                    "BUILDER2_CREATOR_SLOGAN_REPAIR_ELIGIBLE candidateId=%s prototypeId=%s configuredWordLimit=%s actualWordCount=%s",
+                    candidate_id,
+                    prototype_id,
+                    SLOGAN_MAX_WORD_COUNT,
+                    actual_words,
+                )
+                logger.info(
+                    "BUILDER2_CREATOR_SLOGAN_REPAIR_START candidateId=%s prototypeId=%s configuredWordLimit=%s actualWordCount=%s",
+                    candidate_id,
+                    prototype_id,
+                    SLOGAN_MAX_WORD_COUNT,
+                    actual_words,
+                )
+            else:
+                logger.info(
+                    "BUILDER2_CREATOR_REPAIR_START candidateId=%s prototypeId=%s reason=%s",
+                    candidate_id,
+                    prototype_id,
+                    failure_reason,
+                )
             prompt = build_creator_repair_prompt(
                 product_name=product_name,
                 product_description=product_description,
@@ -950,6 +1028,14 @@ def generate_creator_candidate(
             )
             diagnostics["normalizationResolvedFields"] = normalization_resolved
             if repair_attempted and phase == "repair":
+                if collected_structural_failures and any(
+                    is_slogan_word_limit_failure(item) for item in collected_structural_failures
+                ):
+                    logger.info(
+                        "BUILDER2_CREATOR_SLOGAN_REPAIR_ACCEPTED candidateId=%s prototypeId=%s repairAttempted=true",
+                        candidate_id,
+                        prototype_id,
+                    )
                 logger.info("BUILDER2_CREATOR_REPAIR_OK candidateId=%s prototypeId=%s", candidate_id, prototype_id)
             if clean_retry_attempted and phase == "retry":
                 logger.info("BUILDER2_CREATOR_RETRY_OK candidateId=%s prototypeId=%s", candidate_id, prototype_id)
@@ -1020,6 +1106,25 @@ def generate_creator_candidate(
                     exc.args[0],
                 )
             if phase == "normal" and _is_structural_repairable(code, field):
+                if is_slogan_word_limit_failure(str(exc.args[0] if exc.args else "")):
+                    from engine.builder2_advertising_closure_contract import (
+                        SLOGAN_MAX_WORD_COUNT,
+                        count_slogan_words_excluding_product,
+                    )
+
+                    closure = last_parsed.get("advertisingClosure") if isinstance(last_parsed.get("advertisingClosure"), dict) else {}
+                    product_label = str(closure.get("productNameText") or product_name or "").strip()
+                    actual_words = count_slogan_words_excluding_product(
+                        str(closure.get("sloganText") or ""),
+                        product_label,
+                    )
+                    logger.info(
+                        "BUILDER2_CREATOR_SLOGAN_REPAIR_ELIGIBLE candidateId=%s prototypeId=%s configuredWordLimit=%s actualWordCount=%s",
+                        candidate_id,
+                        prototype_id,
+                        SLOGAN_MAX_WORD_COUNT,
+                        actual_words,
+                    )
                 collected_structural_failures = collect_creator_structural_errors(
                     last_parsed,
                     assigned_prototype_id=prototype_id,
@@ -1037,6 +1142,9 @@ def generate_creator_candidate(
             break
 
     assert last_exc is not None
+    final_reason = str(last_exc.args[0])
+    if repair_attempted and is_slogan_word_limit_failure(final_reason):
+        final_reason = "builder2_creator_slogan_word_limit_repair_failed"
     if state is not None:
         state.setdefault("creatorDiagnosticsByCandidate", {})[candidate_id] = dict(diagnostics)
         if last_parsed:
@@ -1053,7 +1161,6 @@ def generate_creator_candidate(
                 top_level_keys=sorted(last_parsed.keys()),
             )
         record_creator_rejected(state)
-    final_reason = str(last_exc.args[0])
     parse_category = parsing_failure_category(final_reason) or "(none)"
     logger.error(
         "BUILDER2_CREATOR_REJECTED jobId=%s tournamentId=%s candidateId=%s prototypeId=%s "

@@ -16,6 +16,8 @@ from engine.builder2_tournament_contracts import Builder2TournamentError
 
 logger = logging.getLogger(__name__)
 
+SLOGAN_MAX_WORD_COUNT = 7
+
 DEFAULT_CLOSURE_DURATION_SECONDS = 2.0
 DEFAULT_CLOSURE_PRESENTATION_MODE = "end_card"
 VALID_CLOSURE_PRESENTATION_MODES = frozenset({"end_card", "final_overlay"})
@@ -54,7 +56,8 @@ def _clean(value: Any) -> str:
     return str(value or "").strip()
 
 
-def _word_count_excluding_product(text: str, product_name: str) -> int:
+def count_slogan_words_excluding_product(text: str, product_name: str) -> int:
+    """Count whitespace-separated tokens; subtract one contiguous product-name match."""
     words = re.findall(r"\S+", _clean(text))
     product_words = re.findall(r"\S+", _clean(product_name))
     if not product_words:
@@ -67,6 +70,26 @@ def _word_count_excluding_product(text: str, product_name: str) -> int:
             count = max(0, count - len(product_lower))
             break
     return count
+
+
+def _word_count_excluding_product(text: str, product_name: str) -> int:
+    return count_slogan_words_excluding_product(text, product_name)
+
+
+def build_slogan_word_limit_prompt_text(*, max_words: int = SLOGAN_MAX_WORD_COUNT) -> str:
+    return (
+        f"Single-slogan word limit (server-enforced): advertisingClosure.sloganText may contain at most "
+        f"{max_words} words after excluding the plain product/brand identification.\n"
+        "Count words exactly as the server does: split on whitespace into non-empty tokens (\\S+). "
+        "Hyphens and punctuation stay attached to their token and do not split a word.\n"
+        "advertisingClosure.productNameText is rendered separately as plain identification on the closure card; "
+        "do NOT repeat the product/brand name inside sloganText.\n"
+        "sloganText is the only advertising sentence — no in-video headline, no second slogan, no extra copy layer.\n"
+        "Before returning JSON, count the final sloganText with the same rule and confirm it is within the limit. "
+        "If it is too long, shorten the slogan itself while preserving its bridge to the central visible detail "
+        "and to the relative advantage.\n"
+        "Exceeding the limit invalidates the candidate."
+    )
 
 
 def normalize_advertising_closure(raw: Any) -> Dict[str, Any]:
@@ -115,7 +138,7 @@ def validate_slogan_text_structure(
     if not text:
         _raise("builder2_advertising_closure_invalid", field="sloganText")
     word_count = _word_count_excluding_product(text, product_name)
-    if word_count > 7:
+    if word_count > SLOGAN_MAX_WORD_COUNT:
         _raise("builder2_advertising_closure_invalid", field="sloganText.word_limit")
 
 

@@ -232,6 +232,12 @@ def is_tournament_ready_for_winner_selection(state: Dict[str, Any], *, read_only
 def assert_tournament_ready_for_winner_selection(state: Dict[str, Any]) -> None:
     summary = tournament_resolution_summary(state)
     if summary["readyForAuthoritativeWinnerSelection"]:
+        logger.info(
+            "BUILDER2_TOURNAMENT_ALL_PROTOTYPES_ACCEPTED acceptedCreators=%s acceptedJudgments=%s assigned=%s",
+            summary["acceptedCreatorCount"],
+            summary["acceptedJudgmentCount"],
+            summary["assignedPrototypeCount"],
+        )
         return
     parts: List[str] = []
     if summary["acceptedCreatorCount"] != summary["assignedPrototypeCount"]:
