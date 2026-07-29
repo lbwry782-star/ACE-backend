@@ -254,6 +254,61 @@ def build_creator_repair_prompt(
     )
 
 
+def build_semantic_bridge_repair_prompt(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    strategy_foundation: Dict[str, Any],
+    prototype: Builder2Prototype,
+    candidate_id: str,
+    base_candidate: Dict[str, Any],
+    validation_failures: List[str],
+) -> str:
+    allowed_paths = ", ".join(
+        (
+            "semanticBridge.keyWordOrConcept",
+            "semanticBridge.visualMeaning",
+            "semanticBridge.strategicMeaning",
+            "semanticBridge.sloganMeaning",
+            "semanticBridge.howTheMeaningsMeet",
+            "semanticBridge.understandableWithoutCreatorReport",
+            "semanticBridge.dualMeaningUsed",
+            "semanticBridge.physicalMeaningActivatedByVisual",
+            "semanticBridge.strategicMeaningActivatedBySlogan",
+            "semanticBridge.meaningsConverge",
+            "visualBridgeAssessment.sloganConnectionToVisibleDetail",
+            "visualBridgeAssessment.sloganConnectionToRelativeAdvantage",
+            "metaphoricalEmbodiment.sloganBridgeToBusinessMeaning",
+            "verbalPotential.keywordOrKeyPhrase",
+            "verbalPotential.strategicMeaning",
+        )
+    )
+    return (
+        "You are the Builder2 Creator semantic-bridge repair role.\n"
+        "Complete the semantic bridge between the preserved visual mechanism, preserved strategic meaning, "
+        "and the already repaired seven-word slogan.\n"
+        "Do NOT generate a new Creator candidate.\n"
+        "Do NOT change the slogan, visual execution, strategic problem, relative advantage, prototype method, "
+        "scene, Runway feasibility, no-logo plan, product name, or any non-bridge field.\n"
+        f"Candidate ID: {candidate_id}\n"
+        f"Assigned prototype ID: {prototype.prototype_id}\n\n"
+        "Immutable preserved candidate context:\n"
+        f"{json.dumps(base_candidate, ensure_ascii=False)}\n\n"
+        "Exact validation failures to fix:\n"
+        + "\n".join(f"- {item}" for item in validation_failures)
+        + "\n\nSemantic-bridge repair scope:\n"
+        "- Return a JSON object with top-level key semanticBridgeRepairPatch containing ONLY fields that must change.\n"
+        "- Provide substantive semantic/verbal bridge fields that establish why the preserved visual meaning and "
+        "preserved slogan meaning converge on the preserved relative advantage.\n"
+        "- Do NOT merely set meaningsConverge=true without completing the required semantic fields.\n"
+        "- Do NOT change advertisingClosure.sloganText.\n"
+        f"- Permitted paths only: {allowed_paths}.\n"
+        "- Omit unchanged fields.\n"
+        f"Return one JSON object only with top-level semanticBridgeRepairPatch."
+    )
+
+
 def build_creator_retry_prompt(
     *,
     product_name: str,

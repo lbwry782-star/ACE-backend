@@ -283,6 +283,92 @@ def validate_creator_complete_ad_fields(
     candidate["semanticBridge"] = bridge
 
 
+def collect_creator_complete_ad_structural_errors(
+    candidate: Dict[str, Any],
+    *,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    assigned_prototype_id: str = "",
+    product_name: str = "",
+) -> List[str]:
+    """Collect all complete-ad structural failures without fail-fast stopping."""
+    errors: List[str] = []
+
+    def add_reason(reason: str) -> None:
+        msg = _clean(reason)
+        if msg and msg not in errors:
+            errors.append(msg)
+
+    def add(code: str, field: str) -> None:
+        if field:
+            add_reason(f"{code}:{field}")
+        else:
+            add_reason(code)
+
+    closure_raw = candidate.get("advertisingClosure")
+    if not isinstance(closure_raw, dict):
+        add("builder2_creator_validation_failed", "advertisingClosure")
+        return errors
+    try:
+        closure = normalize_advertising_closure(closure_raw)
+    except Builder2TournamentError as exc:
+        add_reason(str(exc.args[0] if exc.args else "builder2_creator_validation_failed"))
+        return errors
+    if closure.get("required") is not True:
+        add("builder2_creator_validation_failed", "advertisingClosure.required")
+    authoritative_product = _clean(product_name)
+    if not authoritative_product and isinstance(strategy_foundation, dict):
+        authoritative_product = _clean(strategy_foundation.get("productNameResolved"))
+    product_name_text = _clean(closure.get("productNameText"))
+    if not product_name_text:
+        add("builder2_creator_validation_failed", "advertisingClosure.productNameText")
+    elif authoritative_product and product_name_text != authoritative_product:
+        add("builder2_creator_validation_failed", "advertisingClosure.productNameText.identity")
+    slogan = _clean(closure.get("sloganText"))
+    try:
+        validate_slogan_text_structure(slogan=slogan, product_name=product_name_text)
+    except Builder2TournamentError as exc:
+        add_reason(str(exc.args[0] if exc.args else "builder2_advertising_closure_invalid"))
+    if _clean(closure.get("presentationMode")) != "end_card":
+        add("builder2_creator_validation_failed", "advertisingClosure.presentationMode")
+    try:
+        duration = float(closure.get("durationSeconds"))
+    except (TypeError, ValueError):
+        duration = 0.0
+    canonical_duration = resolve_canonical_creator_end_card_duration_seconds()
+    if abs(duration - canonical_duration) > 0.01:
+        add("builder2_creator_validation_failed", "advertisingClosure.durationSeconds")
+    if closure.get("noLogo") is not True:
+        add("builder2_creator_validation_failed", "advertisingClosure.noLogo")
+
+    bridge = candidate.get("semanticBridge")
+    if not isinstance(bridge, dict):
+        add("builder2_creator_validation_failed", "semanticBridge")
+        return errors
+    for key in (
+        "keyWordOrConcept",
+        "visualMeaning",
+        "sloganMeaning",
+        "strategicMeaning",
+        "howTheMeaningsMeet",
+    ):
+        if not _clean(bridge.get(key)):
+            add("builder2_creator_validation_failed", f"semanticBridge.{key}")
+    if bridge.get("understandableWithoutCreatorReport") is not True:
+        add("builder2_creator_validation_failed", "semanticBridge.understandableWithoutCreatorReport")
+    if bridge.get("dualMeaningUsed") is True:
+        for key in DUAL_MEANING_FIELDS[1:]:
+            if bridge.get(key) is not True:
+                add("builder2_creator_validation_failed", f"semanticBridge.{key}")
+    return errors
+
+
+def _field_from_complete_ad_error(exc: Builder2TournamentError) -> str:
+    reason = str(exc.args[0] if exc.args else "")
+    if ":" in reason:
+        return reason.split(":", 1)[-1]
+    return reason
+
+
 def validate_judge_semantic_alignment_assessment(judgment: Dict[str, Any]) -> None:
     assessment = judgment.get("semanticAlignmentAssessment")
     if not isinstance(assessment, dict):

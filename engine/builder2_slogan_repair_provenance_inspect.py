@@ -13,7 +13,12 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 
 from engine.builder2_advertising_closure_contract import count_slogan_words_excluding_product
-from engine.builder2_creator import validate_creator_candidate
+from engine.builder2_creator import collect_creator_structural_errors, validate_creator_candidate
+from engine.builder2_creator_semantic_bridge_repair_patch import (
+    apply_persisted_slogan_to_base,
+    semantic_bridge_repair_required,
+    structural_failure_field_paths,
+)
 from engine.builder2_creator_normalization import normalize_creator_candidate
 from engine.builder2_creator_slogan_repair_patch import (
     _apply_selected_patch_paths,
@@ -28,6 +33,8 @@ from engine.builder2_slogan_repair_provenance import (
     resolve_slogan_repair_base_and_source,
     semantic_basis_fingerprint,
     semantic_basis_meanings_converge,
+    semantic_basis_meanings_converge_normalized,
+    semantic_basis_meanings_converge_presence,
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_store import load_tournament_state
@@ -67,15 +74,22 @@ def inspect_slogan_repair_provenance(
         "originalFailureCode": "",
         "originalCallType": "",
         "originalMeaningsConverge": None,
+        "originalMeaningsConvergePresence": "",
+        "originalMeaningsConvergeRaw": None,
+        "originalMeaningsConvergeNormalized": None,
         "originalSemanticBasisFingerprint": "",
         "repairSourceFound": False,
         "repairSourceCandidateId": "",
         "repairSourceCallType": "",
         "repairSourceMeaningsConverge": None,
+        "repairSourceMeaningsConvergePresence": "",
+        "repairSourceMeaningsConvergeRaw": None,
         "repairSourceSemanticBasisFingerprint": "",
         "baseSourceCollision": False,
         "sloganWordCountBefore": 0,
         "repairedSloganWordCount": 0,
+        "completeStructuralFailurePaths": [],
+        "semanticBridgeRepairRequired": False,
         "sloganOnlyMergeAttempted": False,
         "mergedPreNormalizeMeaningsConverge": None,
         "mergedPreNormalizeFingerprint": "",
@@ -112,12 +126,24 @@ def inspect_slogan_repair_provenance(
     report["originalFailureCode"] = _clean(original_payload.get("failureReason")).split(":")[-1]
     report["originalCallType"] = infer_rejected_call_type(original_payload)
     report["originalMeaningsConverge"] = semantic_basis_meanings_converge(original_parsed)
+    report["originalMeaningsConvergePresence"] = semantic_basis_meanings_converge_presence(original_parsed)
+    report["originalMeaningsConvergeRaw"] = semantic_basis_meanings_converge(original_parsed)
+    report["originalMeaningsConvergeNormalized"] = semantic_basis_meanings_converge_normalized(
+        original_parsed,
+        assigned_prototype_id=prototype_id,
+        prototype_display_name=display_name,
+        strategy_foundation=strategy,
+        job_id=job_id,
+        candidate_id=original_id,
+    )
     report["originalSemanticBasisFingerprint"] = semantic_basis_fingerprint(original_parsed)
 
     report["repairSourceFound"] = True
     report["repairSourceCandidateId"] = repair_id
     report["repairSourceCallType"] = infer_rejected_call_type(repair_payload)
     report["repairSourceMeaningsConverge"] = semantic_basis_meanings_converge(repair_parsed)
+    report["repairSourceMeaningsConvergePresence"] = semantic_basis_meanings_converge_presence(repair_parsed)
+    report["repairSourceMeaningsConvergeRaw"] = semantic_basis_meanings_converge(repair_parsed)
     report["repairSourceSemanticBasisFingerprint"] = semantic_basis_fingerprint(repair_parsed)
     report["baseSourceCollision"] = bool(original_id and repair_id and original_id == repair_id)
 
@@ -129,6 +155,31 @@ def inspect_slogan_repair_provenance(
     )
     repaired_slogan = extract_repaired_slogan_text(repair_parsed)
     report["repairedSloganWordCount"] = count_slogan_words_excluding_product(repaired_slogan, product_label)
+
+    try:
+        slogan_applied_base, _ = apply_persisted_slogan_to_base(original_parsed, repair_parsed)
+    except Builder2TournamentError as exc:
+        report["failureField"] = str(exc.args[0] if exc.args else "").split(":")[-1]
+        return report
+
+    complete_errors = collect_creator_structural_errors(
+        slogan_applied_base,
+        assigned_prototype_id=prototype_id,
+        prototype_display_name=display_name,
+        strategy_foundation=strategy,
+        job_id=job_id,
+        candidate_id=repair_id or original_id,
+        prototype_id=prototype_id,
+    )
+    report["completeStructuralFailurePaths"] = structural_failure_field_paths(complete_errors)
+    required, _paths = semantic_bridge_repair_required(
+        slogan_applied_base,
+        assigned_prototype_id=prototype_id,
+        prototype_display_name=display_name,
+        strategy_foundation=strategy,
+        product_name=product_name,
+    )
+    report["semanticBridgeRepairRequired"] = required
 
     only_word_limit, _errors = candidate_fails_only_slogan_word_limit(
         original_parsed,

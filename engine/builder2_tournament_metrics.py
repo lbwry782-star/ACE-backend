@@ -14,6 +14,7 @@ DEFAULT_METRICS: Dict[str, Any] = {
     "strategyRepairCalls": 0,
     "creatorCalls": 0,
     "creatorRepairCalls": 0,
+    "creatorSemanticBridgeRepairCalls": 0,
     "creatorRetryCalls": 0,
     "creatorRejectedAttempts": 0,
     "creatorEligibleCandidates": 0,
@@ -64,6 +65,7 @@ def _recalc_total_calls(metrics: Dict[str, Any]) -> None:
         + int(metrics.get("strategyRepairCalls") or 0)
         + int(metrics.get("creatorCalls") or 0)
         + int(metrics.get("creatorRepairCalls") or 0)
+        + int(metrics.get("creatorSemanticBridgeRepairCalls") or 0)
         + int(metrics.get("creatorRetryCalls") or 0)
         + int(metrics.get("judgeCalls") or 0)
         + int(metrics.get("judgeRepairCalls") or 0)
@@ -95,6 +97,10 @@ def record_model_call(
         else:
             key = "creatorCalls"
         metrics[key] = int(metrics.get(key) or 0) + 1
+        metrics["creatorElapsedMs"] = float(metrics.get("creatorElapsedMs") or 0) + elapsed_ms
+        bucket = "creator"
+    elif role == "builder2_creator_semantic_bridge_repair":
+        metrics["creatorSemanticBridgeRepairCalls"] = int(metrics.get("creatorSemanticBridgeRepairCalls") or 0) + 1
         metrics["creatorElapsedMs"] = float(metrics.get("creatorElapsedMs") or 0) + elapsed_ms
         bucket = "creator"
     elif role == "builder2_judge":

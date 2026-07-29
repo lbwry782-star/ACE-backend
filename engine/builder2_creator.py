@@ -580,17 +580,19 @@ def collect_creator_structural_errors(
             run(lambda k=key: require_non_empty_str(report.get(k), field=f"creatorReport.{k}"))
 
     if strategy_foundation is not None and not compatibility_mode:
-        from engine.builder2_complete_ad_contract import validate_creator_complete_ad_fields
+        from engine.builder2_complete_ad_contract import collect_creator_complete_ad_structural_errors
 
-        def run_complete_ad() -> None:
-            validate_creator_complete_ad_fields(
-                normalized,
-                strategy_foundation=strategy_foundation,
-                assigned_prototype_id=assigned_prototype_id,
-                product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
-            )
-
-        run(run_complete_ad)
+        complete_ad_errors = collect_creator_complete_ad_structural_errors(
+            normalized,
+            strategy_foundation=strategy_foundation,
+            assigned_prototype_id=assigned_prototype_id,
+            product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
+        )
+        for item in complete_ad_errors:
+            code = item.split(":", 1)[0] if ":" in item else item
+            field = item.split(":", 1)[-1] if ":" in item else ""
+            if _is_structural_repairable(code, field) and item not in errors:
+                errors.append(item)
 
     errors.extend(
         collect_creator_methodology_structural_errors(
@@ -601,6 +603,15 @@ def collect_creator_structural_errors(
         )
     )
     unique = filter_creator_owned_structural_errors(list(dict.fromkeys(errors)))
+    logger.info(
+        "BUILDER2_CREATOR_STRUCTURAL_ERRORS_COMPLETE jobId=%s tournamentId=%s candidateId=%s prototypeId=%s count=%s paths=%s",
+        job_id or "(none)",
+        tournament_id or "(none)",
+        candidate_id or "(none)",
+        prototype_id or assigned_prototype_id or "(none)",
+        len(unique),
+        ",".join(item.split(":", 1)[-1] for item in unique[:16]),
+    )
     logger.info(
         "BUILDER2_CREATOR_STRUCTURAL_ERRORS_COLLECTED jobId=%s tournamentId=%s candidateId=%s prototypeId=%s count=%s paths=%s",
         job_id or "(none)",

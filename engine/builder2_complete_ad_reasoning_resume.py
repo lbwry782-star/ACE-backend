@@ -43,6 +43,13 @@ from engine.builder2_creator_slogan_repair_patch import (
     populate_slogan_repair_call_report,
     try_offline_slogan_repair_salvage_for_prototype,
 )
+from engine.builder2_creator_semantic_bridge_repair_patch import (
+    additional_semantic_bridge_repair_allowed,
+    detect_semantic_bridge_repair_context,
+    execute_semantic_bridge_repair_call,
+    populate_semantic_bridge_repair_call_report,
+    semantic_bridge_repair_env_authorized,
+)
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_judge import judge_candidate
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
@@ -155,6 +162,7 @@ def _reasoning_call_snapshot(state: Optional[Dict[str, Any]]) -> Dict[str, int]:
     return {
         "creator": int(metrics.get("creatorCalls") or 0)
         + int(metrics.get("creatorRepairCalls") or 0)
+        + int(metrics.get("creatorSemanticBridgeRepairCalls") or 0)
         + int(metrics.get("creatorRetryCalls") or 0),
         "judge": int(metrics.get("judgeCalls") or 0)
         + int(metrics.get("judgeRepairCalls") or 0)
@@ -574,30 +582,46 @@ def run_controlled_complete_ad_reasoning_resume(
                             )
                             save_tournament_state(job_id, state)
                         elif not additional_paid_slogan_repair_allowed(state, missing_prototype_id):
-                            reason = salvage_reason or "builder2_slogan_repair_paid_retry_requires_approval"
-                            if salvage_paths:
-                                reason = f"{reason}:{','.join(salvage_paths[:8])}"
-                            record_process_failure_tag(state, reason)
-                            _persist_resumable_failure(
-                                state,
-                                job_id=job_id,
-                                failure_stage="creator_generation",
-                                failure_reason=reason,
-                            )
-                            populate_slogan_repair_call_report(state, report, prototype_id=missing_prototype_id)
-                            return _emit_resume_stage_failure(
-                                report,
-                                state,
-                                job_id=job_id,
-                                failure_stage="creator_generation",
-                                failure_reason=reason,
-                                budget=budget,
-                                reasoning_role="builder2_creator",
-                                prototype_id=missing_prototype_id,
-                                validation_rejection_code=reason,
-                                redis_mutated=True,
-                                lease_acquired=lease_acquired,
-                            )
+                            semantic_bridge_after_salvage = None
+                            try:
+                                semantic_bridge_after_salvage = detect_semantic_bridge_repair_context(
+                                    state,
+                                    prototype_id=missing_prototype_id,
+                                    product_name=product_name,
+                                    compatibility_mode=compatibility_mode,
+                                    original_candidate_id=_clean((original_word_limit or {}).get("candidateId")),
+                                    repair_candidate_id=_clean((repair_source or {}).get("candidateId")),
+                                )
+                            except Builder2TournamentError:
+                                semantic_bridge_after_salvage = None
+                            if not (
+                                isinstance(semantic_bridge_after_salvage, dict)
+                                and semantic_bridge_after_salvage.get("required")
+                            ):
+                                reason = salvage_reason or "builder2_slogan_repair_paid_retry_requires_approval"
+                                if salvage_paths:
+                                    reason = f"{reason}:{','.join(salvage_paths[:8])}"
+                                record_process_failure_tag(state, reason)
+                                _persist_resumable_failure(
+                                    state,
+                                    job_id=job_id,
+                                    failure_stage="creator_generation",
+                                    failure_reason=reason,
+                                )
+                                populate_slogan_repair_call_report(state, report, prototype_id=missing_prototype_id)
+                                return _emit_resume_stage_failure(
+                                    report,
+                                    state,
+                                    job_id=job_id,
+                                    failure_stage="creator_generation",
+                                    failure_reason=reason,
+                                    budget=budget,
+                                    reasoning_role="builder2_creator",
+                                    prototype_id=missing_prototype_id,
+                                    validation_rejection_code=reason,
+                                    redis_mutated=True,
+                                    lease_acquired=lease_acquired,
+                                )
                         elif rejected_payload:
                             logger.warning(
                                 "BUILDER2_SLOGAN_REPAIR_OFFLINE_SALVAGE_IMPOSSIBLE jobId=%s prototypeId=%s reason=%s paths=%s",
@@ -605,6 +629,115 @@ def run_controlled_complete_ad_reasoning_resume(
                                 missing_prototype_id,
                                 salvage_reason or "unknown",
                                 ",".join(salvage_paths[:8]) if salvage_paths else "(none)",
+                            )
+                semantic_bridge_context: Optional[Dict[str, Any]] = None
+                if not _candidate_id_for_prototype(state, missing_prototype_id):
+                    original_word_limit = find_original_slogan_word_limit_rejection(state, missing_prototype_id)
+                    from engine.builder2_creator_slogan_repair_patch import find_slogan_repair_patch_source
+
+                    repair_source = find_slogan_repair_patch_source(state, missing_prototype_id)
+                    try:
+                        semantic_bridge_context = detect_semantic_bridge_repair_context(
+                            state,
+                            prototype_id=missing_prototype_id,
+                            product_name=product_name,
+                            compatibility_mode=compatibility_mode,
+                            original_candidate_id=_clean((original_word_limit or {}).get("candidateId")),
+                            repair_candidate_id=_clean((repair_source or {}).get("candidateId")),
+                        )
+                    except Builder2TournamentError:
+                        semantic_bridge_context = None
+                    if isinstance(semantic_bridge_context, dict) and semantic_bridge_context.get("required"):
+                        report["semanticBridgeRepairRequired"] = True
+                        if additional_semantic_bridge_repair_allowed(state, missing_prototype_id):
+                            budget.assert_can_call("builder2_creator")
+                            metrics_before = _reasoning_call_snapshot(state)
+                            try:
+                                semantic_candidate_id, _semantic_candidate, _semantic_meta = execute_semantic_bridge_repair_call(
+                                    state,
+                                    prototype_id=missing_prototype_id,
+                                    product_name=product_name,
+                                    product_description=product_description,
+                                    language=language,
+                                    compatibility_mode=compatibility_mode,
+                                    llm_client=llm_client,
+                                    original_candidate_id=_clean((original_word_limit or {}).get("candidateId")),
+                                    repair_candidate_id=_clean((repair_source or {}).get("candidateId")),
+                                    accept_candidate_id=_clean((repair_source or {}).get("candidateId")),
+                                )
+                            except Builder2TournamentError as exc:
+                                _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+                                reason = str(exc.args[0] if exc.args else "builder2_semantic_bridge_repair_failed")
+                                record_process_failure_tag(state, reason)
+                                _persist_resumable_failure(
+                                    state,
+                                    job_id=job_id,
+                                    failure_stage="creator_generation",
+                                    failure_reason=reason,
+                                )
+                                populate_semantic_bridge_repair_call_report(
+                                    state,
+                                    report,
+                                    prototype_id=missing_prototype_id,
+                                )
+                                return _emit_resume_stage_failure(
+                                    report,
+                                    state,
+                                    job_id=job_id,
+                                    failure_stage="creator_generation",
+                                    failure_reason=reason,
+                                    budget=budget,
+                                    reasoning_role="builder2_creator_semantic_bridge_repair",
+                                    prototype_id=missing_prototype_id,
+                                    validation_rejection_code=reason,
+                                    redis_mutated=True,
+                                    lease_acquired=lease_acquired,
+                                )
+                            _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+                            if budget.creator_calls_this_run == metrics_before["creator"]:
+                                budget.record("builder2_creator")
+                            populate_semantic_bridge_repair_call_report(
+                                state,
+                                report,
+                                prototype_id=missing_prototype_id,
+                                invocation_semantic_bridge_repair_calls=1,
+                                semantic_bridge_repair_accepted=True,
+                            )
+                            logger.info(
+                                "BUILDER2_SEMANTIC_BRIDGE_REPAIR_RESUME_ACCEPTED jobId=%s prototypeId=%s candidateId=%s",
+                                job_id,
+                                missing_prototype_id,
+                                semantic_candidate_id,
+                            )
+                            save_tournament_state(job_id, state)
+                        else:
+                            reason = "builder2_semantic_bridge_repair_not_authorized"
+                            if not semantic_bridge_repair_env_authorized():
+                                reason = "builder2_semantic_bridge_repair_env_not_set"
+                            record_process_failure_tag(state, reason)
+                            _persist_resumable_failure(
+                                state,
+                                job_id=job_id,
+                                failure_stage="creator_generation",
+                                failure_reason=reason,
+                            )
+                            populate_semantic_bridge_repair_call_report(
+                                state,
+                                report,
+                                prototype_id=missing_prototype_id,
+                            )
+                            return _emit_resume_stage_failure(
+                                report,
+                                state,
+                                job_id=job_id,
+                                failure_stage="creator_generation",
+                                failure_reason=reason,
+                                budget=budget,
+                                reasoning_role="builder2_creator_semantic_bridge_repair",
+                                prototype_id=missing_prototype_id,
+                                validation_rejection_code=reason,
+                                redis_mutated=True,
+                                lease_acquired=lease_acquired,
                             )
                 if not _candidate_id_for_prototype(state, missing_prototype_id):
                     if rejected_payload:
@@ -618,6 +751,9 @@ def run_controlled_complete_ad_reasoning_resume(
                     if (
                         is_slogan_word_limit_failure(_clean((rejected_payload or {}).get("failureReason")))
                         and not additional_paid_slogan_repair_allowed(state, missing_prototype_id)
+                        and not (
+                            isinstance(semantic_bridge_context, dict) and semantic_bridge_context.get("required")
+                        )
                     ):
                         reason = "builder2_slogan_repair_paid_retry_requires_approval"
                         record_process_failure_tag(state, reason)
@@ -636,6 +772,33 @@ def run_controlled_complete_ad_reasoning_resume(
                             failure_reason=reason,
                             budget=budget,
                             reasoning_role="builder2_creator",
+                            prototype_id=missing_prototype_id,
+                            validation_rejection_code=reason,
+                            redis_mutated=True,
+                            lease_acquired=lease_acquired,
+                        )
+                    if isinstance(semantic_bridge_context, dict) and semantic_bridge_context.get("required"):
+                        reason = "builder2_semantic_bridge_repair_not_completed"
+                        record_process_failure_tag(state, reason)
+                        _persist_resumable_failure(
+                            state,
+                            job_id=job_id,
+                            failure_stage="creator_generation",
+                            failure_reason=reason,
+                        )
+                        populate_semantic_bridge_repair_call_report(
+                            state,
+                            report,
+                            prototype_id=missing_prototype_id,
+                        )
+                        return _emit_resume_stage_failure(
+                            report,
+                            state,
+                            job_id=job_id,
+                            failure_stage="creator_generation",
+                            failure_reason=reason,
+                            budget=budget,
+                            reasoning_role="builder2_creator_semantic_bridge_repair",
                             prototype_id=missing_prototype_id,
                             validation_rejection_code=reason,
                             redis_mutated=True,

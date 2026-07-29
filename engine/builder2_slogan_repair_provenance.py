@@ -90,6 +90,49 @@ def semantic_basis_meanings_converge(candidate: Dict[str, Any]) -> Optional[bool
     return value if isinstance(value, bool) else None
 
 
+def semantic_basis_meanings_converge_presence(candidate: Dict[str, Any]) -> str:
+    bridge = candidate.get("semanticBridge") if isinstance(candidate.get("semanticBridge"), dict) else {}
+    if "meaningsConverge" not in bridge:
+        return "absent"
+    value = bridge.get("meaningsConverge")
+    if value is None:
+        return "null"
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    return "other"
+
+
+def semantic_basis_meanings_converge_normalized(
+    candidate: Dict[str, Any],
+    *,
+    assigned_prototype_id: str,
+    prototype_display_name: str,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+    job_id: str = "",
+    candidate_id: str = "",
+) -> Optional[bool]:
+    from engine.builder2_creator import normalize_creator_raw
+    from engine.builder2_creator_normalization import normalize_creator_candidate
+
+    try:
+        normalized, _resolved = normalize_creator_candidate(
+            deepcopy(candidate),
+            assigned_prototype_id=assigned_prototype_id,
+            prototype_display_name=prototype_display_name,
+            strategy_foundation=strategy_foundation,
+            compatibility_mode=compatibility_mode,
+            base_normalizer=normalize_creator_raw,
+            job_id=job_id,
+            candidate_id=candidate_id,
+        )
+    except Builder2TournamentError:
+        return None
+    return semantic_basis_meanings_converge(normalized)
+
+
 def log_semantic_basis_fingerprint(
     *,
     candidate_id: str,
