@@ -22,7 +22,7 @@ from engine.builder2_complete_ad_reasoning_resume import (
     run_controlled_complete_ad_reasoning_resume,
     validate_controlled_complete_ad_preconditions,
 )
-from engine.builder2_creator import is_slogan_word_limit_failure
+from engine.builder2_creator_slogan_repair_patch import populate_slogan_repair_call_report
 from engine.builder2_tournament_completion_gate import (
     accepted_creator_count,
     accepted_judgment_count,
@@ -99,6 +99,15 @@ def _initial_report(*, job_id: str) -> Dict[str, Any]:
         "thinkSmallNormalCreatorCalls": 0,
         "thinkSmallRepairCalls": 0,
         "thinkSmallJudgeCalls": 0,
+        "invocationCreatorNormalCalls": 0,
+        "invocationCreatorRepairCalls": 0,
+        "persistedCreatorNormalCalls": 0,
+        "persistedCreatorRepairCalls": 0,
+        "totalCreatorNormalCalls": 0,
+        "totalCreatorRepairCalls": 0,
+        "additionalPaidRepairAllowed": True,
+        "offlineSalvageAttempted": False,
+        "offlineSalvageAccepted": False,
         "repeatedStrategyCalls": 0,
         "repeatedAcceptedCreatorCalls": 0,
         "repeatedAcceptedJudgeCalls": 0,
@@ -159,6 +168,10 @@ def run_incomplete_tournament_resume(
         and rejected_payload.get("parsed")
     )
 
+    baseline_metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
+    baseline_creator_normal = int(baseline_metrics.get("creatorCalls") or 0)
+    baseline_creator_repair = int(baseline_metrics.get("creatorRepairCalls") or 0)
+
     baseline = _baseline_reasoning_metrics(state)
     reasoning_report = run_controlled_complete_ad_reasoning_resume(
         job_id=job_id,
@@ -171,7 +184,9 @@ def run_incomplete_tournament_resume(
     after = _baseline_reasoning_metrics(state)
     metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
 
-    creator_delta = max(0, after["creator"] - baseline["creator"])
+    creator_normal_delta = max(0, int(metrics.get("creatorCalls") or 0) - baseline_creator_normal)
+    creator_repair_delta = max(0, int(metrics.get("creatorRepairCalls") or 0) - baseline_creator_repair)
+    creator_delta = creator_normal_delta + creator_repair_delta
     judge_delta = max(0, after["judge"] - baseline["judge"])
     strategy_delta = max(0, after["strategy"] - baseline["strategy"])
     winner_delta = max(0, after["winner"] - baseline["winner"])
@@ -181,18 +196,19 @@ def run_incomplete_tournament_resume(
     report["repeatedAcceptedJudgeCalls"] = max(0, judge_delta - (1 if missing_prototype == "think_small" else 0))
 
     if missing_prototype == "think_small":
-        if isinstance(rejected_payload, dict) and is_slogan_word_limit_failure(
-            _clean(rejected_payload.get("failureReason"))
-        ):
-            report["thinkSmallNormalCreatorCalls"] = 0
-            report["thinkSmallRepairCalls"] = min(1, creator_delta)
-        else:
-            report["thinkSmallNormalCreatorCalls"] = min(1, creator_delta)
-            report["thinkSmallRepairCalls"] = max(0, creator_delta - report["thinkSmallNormalCreatorCalls"])
+        populate_slogan_repair_call_report(
+            state,
+            report,
+            prototype_id="think_small",
+            invocation_creator_normal_calls=creator_normal_delta,
+            invocation_creator_repair_calls=creator_repair_delta,
+        )
+        report["thinkSmallNormalCreatorCalls"] = report["totalCreatorNormalCalls"]
+        report["thinkSmallRepairCalls"] = report["totalCreatorRepairCalls"]
         report["thinkSmallJudgeCalls"] = min(1, judge_delta)
     else:
-        report["thinkSmallNormalCreatorCalls"] = 0
-        report["thinkSmallRepairCalls"] = 0
+        report["thinkSmallNormalCreatorCalls"] = int(baseline_metrics.get("creatorCalls") or 0)
+        report["thinkSmallRepairCalls"] = int(baseline_metrics.get("creatorRepairCalls") or 0)
         report["thinkSmallJudgeCalls"] = 0
 
     report["winnerSelected"] = bool(reasoning_report.get("finalWinnerCandidateId") or state.get("winnerCandidateId"))

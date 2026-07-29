@@ -37,6 +37,12 @@ from engine.builder2_complete_ad_creator_recovery import (
 )
 from engine.builder2_complete_ad_resume_plan import parsed_winner_reusable_for_candidate
 from engine.builder2_creator import generate_creator_candidate, is_slogan_word_limit_failure
+from engine.builder2_creator_slogan_repair_patch import (
+    additional_paid_slogan_repair_allowed,
+    find_original_slogan_word_limit_rejection,
+    populate_slogan_repair_call_report,
+    try_offline_slogan_repair_salvage_for_prototype,
+)
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_judge import judge_candidate
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
@@ -538,6 +544,63 @@ def run_controlled_complete_ad_reasoning_resume(
                         offline_reason or "unknown",
                     )
                 if not _candidate_id_for_prototype(state, missing_prototype_id):
+                    rejected_failure = _clean((rejected_payload or {}).get("failureReason"))
+                    slogan_word_limit_case = is_slogan_word_limit_failure(rejected_failure) or bool(
+                        find_original_slogan_word_limit_rejection(state, missing_prototype_id)
+                    )
+                    if slogan_word_limit_case:
+                        salvage_accepted, salvage_id, salvage_reason, salvage_paths = (
+                            try_offline_slogan_repair_salvage_for_prototype(
+                                state,
+                                prototype_id=missing_prototype_id,
+                                product_name=product_name,
+                                compatibility_mode=compatibility_mode,
+                            )
+                        )
+                        report["offlineSalvageAttempted"] = True
+                        report["offlineSalvageAccepted"] = salvage_accepted
+                        if salvage_accepted:
+                            logger.info(
+                                "BUILDER2_SLOGAN_REPAIR_OFFLINE_SALVAGE_SUCCEEDED jobId=%s prototypeId=%s candidateId=%s",
+                                job_id,
+                                missing_prototype_id,
+                                salvage_id,
+                            )
+                            save_tournament_state(job_id, state)
+                        elif not additional_paid_slogan_repair_allowed(state, missing_prototype_id):
+                            reason = salvage_reason or "builder2_slogan_repair_paid_retry_requires_approval"
+                            if salvage_paths:
+                                reason = f"{reason}:{','.join(salvage_paths[:8])}"
+                            record_process_failure_tag(state, reason)
+                            _persist_resumable_failure(
+                                state,
+                                job_id=job_id,
+                                failure_stage="creator_generation",
+                                failure_reason=reason,
+                            )
+                            populate_slogan_repair_call_report(state, report, prototype_id=missing_prototype_id)
+                            return _emit_resume_stage_failure(
+                                report,
+                                state,
+                                job_id=job_id,
+                                failure_stage="creator_generation",
+                                failure_reason=reason,
+                                budget=budget,
+                                reasoning_role="builder2_creator",
+                                prototype_id=missing_prototype_id,
+                                validation_rejection_code=reason,
+                                redis_mutated=True,
+                                lease_acquired=lease_acquired,
+                            )
+                        elif rejected_payload:
+                            logger.warning(
+                                "BUILDER2_SLOGAN_REPAIR_OFFLINE_SALVAGE_IMPOSSIBLE jobId=%s prototypeId=%s reason=%s paths=%s",
+                                job_id,
+                                missing_prototype_id,
+                                salvage_reason or "unknown",
+                                ",".join(salvage_paths[:8]) if salvage_paths else "(none)",
+                            )
+                if not _candidate_id_for_prototype(state, missing_prototype_id):
                     if rejected_payload:
                         logger.warning(
                             "BUILDER2_REJECTED_CREATOR_OFFLINE_RECOVERY_FALLBACK_OPENAI jobId=%s prototypeId=%s "
@@ -546,12 +609,42 @@ def run_controlled_complete_ad_reasoning_resume(
                             missing_prototype_id,
                             offline_reason or "unknown",
                         )
+                    if (
+                        is_slogan_word_limit_failure(_clean((rejected_payload or {}).get("failureReason")))
+                        and not additional_paid_slogan_repair_allowed(state, missing_prototype_id)
+                    ):
+                        reason = "builder2_slogan_repair_paid_retry_requires_approval"
+                        record_process_failure_tag(state, reason)
+                        _persist_resumable_failure(
+                            state,
+                            job_id=job_id,
+                            failure_stage="creator_generation",
+                            failure_reason=reason,
+                        )
+                        populate_slogan_repair_call_report(state, report, prototype_id=missing_prototype_id)
+                        return _emit_resume_stage_failure(
+                            report,
+                            state,
+                            job_id=job_id,
+                            failure_stage="creator_generation",
+                            failure_reason=reason,
+                            budget=budget,
+                            reasoning_role="builder2_creator",
+                            prototype_id=missing_prototype_id,
+                            validation_rejection_code=reason,
+                            redis_mutated=True,
+                            lease_acquired=lease_acquired,
+                        )
                     budget.assert_can_call("builder2_creator")
                     metrics_before = _reasoning_call_snapshot(state)
                     candidate_id = f"cand-1-{missing_prototype_id}-1-{uuid.uuid4().hex[:8]}"
                     creator_kwargs: Dict[str, Any] = {"single_attempt_only": True}
                     rejected_failure = _clean((rejected_payload or {}).get("failureReason"))
                     rejected_parsed = (rejected_payload or {}).get("parsed") if isinstance(rejected_payload, dict) else None
+                    original_word_limit = find_original_slogan_word_limit_rejection(state, missing_prototype_id)
+                    if isinstance(original_word_limit, dict) and isinstance(original_word_limit.get("parsed"), dict):
+                        rejected_parsed = original_word_limit.get("parsed")
+                        rejected_failure = _clean(original_word_limit.get("failureReason")) or SLOGAN_WORD_LIMIT_FAILURE
                     if (
                         isinstance(rejected_parsed, dict)
                         and rejected_parsed

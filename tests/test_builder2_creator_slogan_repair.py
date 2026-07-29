@@ -24,6 +24,15 @@ from engine.builder2_creator import (
     is_slogan_word_limit_failure,
     validate_creator_candidate,
 )
+from engine.builder2_creator_slogan_repair_patch import (
+    ALLOWLIST_PATHS,
+    SLOGAN_REPAIR_PARSED_INDEX_KEY,
+    additional_paid_slogan_repair_allowed,
+    candidate_fails_only_slogan_word_limit,
+    merge_slogan_repair_patch_response,
+    try_offline_slogan_repair_salvage_for_prototype,
+    validate_and_merge_slogan_repair_candidate,
+)
 from engine.builder2_incomplete_tournament_resume import run_incomplete_tournament_resume
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_resume_contract import BUILDER2_RESUME_CONTRACT_VERSION
@@ -215,6 +224,89 @@ class TestSloganRepairRouting(unittest.TestCase):
         self.assertEqual(state["metrics"].get("creatorRepairCalls"), 1)
 
 
+class TestSloganRepairPatchMerger(unittest.TestCase):
+    def _dual_meaning_base(self, *, slogan_text: str) -> Dict[str, Any]:
+        candidate = _candidate_with_slogan("think_small", slogan_text=slogan_text)
+        candidate["semanticBridge"].update(
+            {
+                "dualMeaningUsed": True,
+                "physicalMeaningActivatedByVisual": True,
+                "strategicMeaningActivatedBySlogan": True,
+                "meaningsConverge": True,
+            }
+        )
+        return candidate
+
+    def test_original_fails_only_word_limit(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        only, errors = candidate_fails_only_slogan_word_limit(
+            base,
+            assigned_prototype_id="think_small",
+            prototype_display_name="Think Small",
+            strategy_foundation=_strategy(language="he"),
+        )
+        self.assertTrue(only, errors)
+
+    def test_repair_regression_on_meanings_converge_is_blocked(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        repair = deepcopy(base)
+        repair["advertisingClosure"]["sloganText"] = _hebrew_slogan(5)
+        repair["semanticBridge"]["meaningsConverge"] = False
+        repair["visualMechanism"] = "Forbidden visual rewrite."
+        merged, meta = merge_slogan_repair_patch_response(
+            base,
+            repair,
+            product_name="ACE Product",
+        )
+        self.assertTrue(merged["semanticBridge"]["meaningsConverge"])
+        self.assertEqual(base["visualMechanism"], merged["visualMechanism"])
+        self.assertLessEqual(
+            count_slogan_words_excluding_product(merged["advertisingClosure"]["sloganText"], "ACE Product"),
+            SLOGAN_MAX_WORD_COUNT,
+        )
+
+    def test_merged_candidate_passes_full_validation(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        repair = deepcopy(base)
+        repair["advertisingClosure"]["sloganText"] = _hebrew_slogan(5)
+        repair["semanticBridge"]["meaningsConverge"] = False
+        candidate, _meta = validate_and_merge_slogan_repair_candidate(
+            base,
+            repair,
+            assigned_prototype_id="think_small",
+            prototype_display_name="Think Small",
+            strategy_foundation=_strategy(language="he"),
+            product_name="ACE Product",
+        )
+        self.assertTrue(candidate["semanticBridge"]["meaningsConverge"])
+        validate_creator_complete_ad_fields(
+            candidate,
+            strategy_foundation=_strategy(language="he"),
+            assigned_prototype_id="think_small",
+            product_name="ACE Product",
+        )
+
+    def test_only_allowlisted_paths_applied(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        repair = deepcopy(base)
+        repair["advertisingClosure"]["sloganText"] = _hebrew_slogan(4)
+        repair["prototypeMethodApplied"] = "Changed method"
+        merged, meta = merge_slogan_repair_patch_response(base, repair, product_name="ACE Product")
+        self.assertEqual(base["prototypeMethodApplied"], merged["prototypeMethodApplied"])
+        for path in meta["appliedPaths"]:
+            self.assertTrue(path in ALLOWLIST_PATHS or any(path.startswith(f"{p}.") for p in ALLOWLIST_PATHS))
+
+    def test_slogan_repair_patch_object_supported(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        repair = {
+            "sloganRepairPatch": {
+                "advertisingClosure": {"sloganText": _hebrew_slogan(4)},
+            }
+        }
+        merged, _meta = merge_slogan_repair_patch_response(base, repair, product_name="ACE Product")
+        self.assertEqual(merged["advertisingClosure"]["sloganText"], _hebrew_slogan(4))
+
+
 class TestSloganRepairPromptAndValidation(unittest.TestCase):
     def test_repaired_candidate_passes_full_validation(self) -> None:
         candidate = _candidate_with_slogan("think_small", slogan_text=_hebrew_slogan(6))
@@ -276,6 +368,78 @@ def _missing_think_small_state() -> Dict[str, Any]:
         }
     }
     return state
+
+
+class TestSloganRepairOfflineSalvage(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+
+    def tearDown(self) -> None:
+        disable_memory_store()
+
+    def _production_shaped_state(self) -> Dict[str, Any]:
+        state = _missing_think_small_state()
+        original_id = "cand-1-think_small-1-d630c92f"
+        repair_id = "cand-1-think_small-1-24f1eeb9"
+        original = _candidate_with_slogan("think_small", slogan_text=_hebrew_slogan(9))
+        original["semanticBridge"].update(
+            {
+                "dualMeaningUsed": True,
+                "physicalMeaningActivatedByVisual": True,
+                "strategicMeaningActivatedBySlogan": True,
+                "meaningsConverge": True,
+            }
+        )
+        repaired = deepcopy(original)
+        repaired["advertisingClosure"]["sloganText"] = _hebrew_slogan(5)
+        repaired["semanticBridge"]["meaningsConverge"] = False
+        state[REJECTED_CREATOR_PARSED_INDEX_KEY] = {
+            original_id: {
+                "candidateId": original_id,
+                "prototypeId": "think_small",
+                "parsed": deepcopy(original),
+                "failureReason": "builder2_advertising_closure_invalid:sloganText.word_limit",
+            },
+            repair_id: {
+                "candidateId": repair_id,
+                "prototypeId": "think_small",
+                "parsed": deepcopy(repaired),
+                "failureReason": "builder2_creator_validation_failed:semanticBridge.meaningsConverge",
+            },
+        }
+        state["metrics"] = {"creatorCalls": 6, "creatorRepairCalls": 1, "judgeCalls": 5}
+        return state
+
+    def test_offline_salvage_accepts_without_openai(self) -> None:
+        state = self._production_shaped_state()
+        accepted, candidate_id, reason, paths = try_offline_slogan_repair_salvage_for_prototype(
+            state,
+            prototype_id="think_small",
+            product_name="ACE Product",
+            original_candidate_id="cand-1-think_small-1-d630c92f",
+            patch_candidate_id="cand-1-think_small-1-24f1eeb9",
+            accept_candidate_id="cand-1-think_small-1-24f1eeb9",
+        )
+        self.assertTrue(accepted, (reason, paths))
+        self.assertEqual(candidate_id, "cand-1-think_small-1-24f1eeb9")
+        self.assertFalse(additional_paid_slogan_repair_allowed(state, "think_small"))
+
+    def test_offline_salvage_persists_repair_response_index(self) -> None:
+        state = self._production_shaped_state()
+        state[SLOGAN_REPAIR_PARSED_INDEX_KEY] = {
+            "cand-1-think_small-1-24f1eeb9": {
+                "candidateId": "cand-1-think_small-1-24f1eeb9",
+                "prototypeId": "think_small",
+                "parsed": state[REJECTED_CREATOR_PARSED_INDEX_KEY]["cand-1-think_small-1-24f1eeb9"]["parsed"],
+                "failureReason": "builder2_creator_validation_failed:semanticBridge.meaningsConverge",
+            }
+        }
+        accepted, _, reason, _ = try_offline_slogan_repair_salvage_for_prototype(
+            state,
+            prototype_id="think_small",
+            product_name="ACE Product",
+        )
+        self.assertTrue(accepted, reason)
 
 
 class TestIncompleteTournamentResume(unittest.TestCase):

@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -817,8 +818,10 @@ def generate_creator_candidate(
 
     last_exc: Optional[Builder2TournamentError] = None
     last_parsed: Dict[str, Any] = {}
+    last_repair_raw_parsed: Optional[Dict[str, Any]] = None
     response_text = ""
     collected_structural_failures: List[str] = []
+    slogan_repair_base: Optional[Dict[str, Any]] = None
 
     if repair_only_from_parsed:
         failure_reason = str(repair_only_failure_reason or "").strip() or "builder2_advertising_closure_invalid:sloganText.word_limit"
@@ -849,7 +852,10 @@ def generate_creator_candidate(
                 continue
             repair_attempted = True
             failure_reason = str(last_exc.args[0] if last_exc.args else "")
-            if is_slogan_word_limit_failure(failure_reason):
+            if is_slogan_word_limit_failure(failure_reason) or any(
+                is_slogan_word_limit_failure(item) for item in collected_structural_failures
+            ):
+                slogan_repair_base = deepcopy(last_parsed)
                 from engine.builder2_advertising_closure_contract import (
                     SLOGAN_MAX_WORD_COUNT,
                     count_slogan_words_excluding_product,
@@ -986,11 +992,38 @@ def generate_creator_candidate(
 
         try:
             parsed, top_level_keys, schema_version_received = _parse_creator_payload(response_text)
-            last_parsed = parsed
+            if repair_attempted and phase == "repair":
+                last_repair_raw_parsed = deepcopy(parsed)
+            validation_parsed = parsed
+            if (
+                repair_attempted
+                and phase == "repair"
+                and slogan_repair_base is not None
+                and (
+                    is_slogan_word_limit_failure(str(last_exc.args[0] if last_exc and last_exc.args else ""))
+                    or any(is_slogan_word_limit_failure(item) for item in collected_structural_failures)
+                )
+            ):
+                from engine.builder2_creator_slogan_repair_patch import validate_and_merge_slogan_repair_candidate
+
+                validation_parsed, _patch_meta = validate_and_merge_slogan_repair_candidate(
+                    slogan_repair_base,
+                    parsed,
+                    assigned_prototype_id=prototype_id,
+                    prototype_display_name=prototype.display_name,
+                    strategy_foundation=strategy_foundation,
+                    compatibility_mode=compatibility_mode,
+                    product_name=product_name,
+                    job_id=job_id,
+                    tournament_id=tournament_id,
+                    candidate_id=candidate_id,
+                    tournament_state=state,
+                )
+            last_parsed = validation_parsed
             from engine.builder2_creator_normalization import normalize_creator_candidate
 
             _, normalization_resolved = normalize_creator_candidate(
-                parsed,
+                validation_parsed,
                 assigned_prototype_id=prototype_id,
                 prototype_display_name=prototype.display_name,
                 strategy_foundation=strategy_foundation,
@@ -1000,7 +1033,7 @@ def generate_creator_candidate(
                 candidate_id=candidate_id,
             )
             candidate = validate_creator_candidate(
-                parsed,
+                validation_parsed,
                 assigned_prototype_id=prototype_id,
                 prototype_display_name=prototype.display_name,
                 strategy_foundation=strategy_foundation,
@@ -1086,6 +1119,17 @@ def generate_creator_candidate(
                     prototype_id,
                     exc.args[0],
                 )
+                if state is not None and last_repair_raw_parsed and slogan_repair_base is not None:
+                    from engine.builder2_creator_slogan_repair_patch import persist_slogan_repair_parsed_response
+
+                    persist_slogan_repair_parsed_response(
+                        state,
+                        candidate_id=candidate_id,
+                        prototype_id=prototype_id,
+                        parsed=last_repair_raw_parsed,
+                        failure_reason=str(exc.args[0] if exc.args else ""),
+                        source="creator_repair",
+                    )
                 if state is not None:
                     from engine.builder2_creator_circuit_breaker import record_creator_contract_failure
 
@@ -1143,23 +1187,40 @@ def generate_creator_candidate(
 
     assert last_exc is not None
     final_reason = str(last_exc.args[0])
-    if repair_attempted and is_slogan_word_limit_failure(final_reason):
-        final_reason = "builder2_creator_slogan_word_limit_repair_failed"
+    if repair_attempted:
+        if "semanticBridge.meaningsConverge" in final_reason or final_reason.startswith(
+            "builder2_slogan_repair_patch_regressed"
+        ):
+            final_reason = "builder2_slogan_repair_patch_regressed_valid_field:semanticBridge.meaningsConverge"
+        elif is_slogan_word_limit_failure(final_reason):
+            final_reason = "builder2_creator_slogan_word_limit_repair_failed"
     if state is not None:
         state.setdefault("creatorDiagnosticsByCandidate", {})[candidate_id] = dict(diagnostics)
         if last_parsed:
             from engine.builder2_complete_ad_creator_recovery import persist_rejected_creator_parsed_response
 
+            reject_parsed = last_repair_raw_parsed if repair_attempted and last_repair_raw_parsed else last_parsed
             persist_rejected_creator_parsed_response(
                 state,
                 candidate_id=candidate_id,
                 prototype_id=prototype_id,
                 round_index=round_index,
                 attempt_number=attempt_number,
-                parsed=last_parsed,
+                parsed=reject_parsed,
                 failure_reason=str(last_exc.args[0] if last_exc.args else ""),
-                top_level_keys=sorted(last_parsed.keys()),
+                top_level_keys=sorted(reject_parsed.keys()),
             )
+            if repair_attempted and last_repair_raw_parsed and slogan_repair_base is not None:
+                from engine.builder2_creator_slogan_repair_patch import persist_slogan_repair_parsed_response
+
+                persist_slogan_repair_parsed_response(
+                    state,
+                    candidate_id=candidate_id,
+                    prototype_id=prototype_id,
+                    parsed=last_repair_raw_parsed,
+                    failure_reason=final_reason,
+                    source="creator_repair",
+                )
         record_creator_rejected(state)
     parse_category = parsing_failure_category(final_reason) or "(none)"
     logger.error(

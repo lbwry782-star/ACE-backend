@@ -223,6 +223,12 @@ def build_creator_repair_prompt(
             "the canonical slogan.\n"
             "- Keep exactly one canonical slogan; dependsOnEarlierCopy must remain false; do not add a headline or second copy layer.\n"
             f"{build_slogan_word_limit_prompt_text()}\n"
+            "- Return a JSON object with top-level key sloganRepairPatch containing ONLY the allowlisted slogan-related fields.\n"
+            "- Do NOT return a full Creator candidate; the server merges sloganRepairPatch into the original candidate.\n"
+            "- sloganRepairPatch may include: advertisingClosure.sloganText, semanticBridge.sloganMeaning, "
+            "semanticBridge.howTheMeaningsMeet, metaphoricalEmbodiment.sloganBridgeToBusinessMeaning, "
+            "visualBridgeAssessment.sloganConnectionToVisibleDetail, visualBridgeAssessment.sloganConnectionToRelativeAdvantage, "
+            "verbalPotential.keywordOrKeyPhrase, verbalPotential.strategicMeaning.\n"
         )
     return (
         "You are the Builder2 Creator repair role.\n"
@@ -238,7 +244,11 @@ def build_creator_repair_prompt(
         + "\n".join(f"- {item}" for item in validation_failures)
         + slogan_repair_block
         + "\n\n"
-        f"Return one repaired JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}."
+        + (
+            f"Return one JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r} and top-level sloganRepairPatch."
+            if slogan_repair
+            else f"Return one repaired JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}."
+        )
     )
 
 
