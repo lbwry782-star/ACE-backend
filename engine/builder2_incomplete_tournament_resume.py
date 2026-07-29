@@ -23,6 +23,7 @@ from engine.builder2_complete_ad_reasoning_resume import (
     validate_controlled_complete_ad_preconditions,
 )
 from engine.builder2_creator_slogan_repair_patch import populate_slogan_repair_call_report
+from engine.builder2_creator_semantic_bridge_repair_patch import populate_semantic_bridge_repair_call_report
 from engine.builder2_tournament_completion_gate import (
     accepted_creator_count,
     accepted_judgment_count,
@@ -77,6 +78,7 @@ def _baseline_reasoning_metrics(state: Dict[str, Any]) -> Dict[str, int]:
 def _render_commands(*, job_id: str) -> Dict[str, str]:
     return {
         "incompleteTournamentResume": (
+            f"BUILDER2_ALLOW_ONE_ADDITIONAL_SEMANTIC_BRIDGE_REPAIR=true "
             f"BUILDER2_INCOMPLETE_TOURNAMENT_RESUME_JOB_ID={job_id} "
             "python -m engine.builder2_incomplete_tournament_resume"
         ),
@@ -115,6 +117,16 @@ def _initial_report(*, job_id: str) -> Dict[str, Any]:
         "mediaPipelineStarted": False,
         "runwaySubmissionCalls": 0,
         "finalJobCompleted": False,
+        "invocationSemanticBridgeRepairCalls": 0,
+        "persistedSemanticBridgeRepairCalls": 0,
+        "totalSemanticBridgeRepairCalls": 0,
+        "semanticBridgeRepairAuthorized": False,
+        "semanticBridgeRepairReserved": False,
+        "semanticBridgeRepairDispatched": False,
+        "semanticBridgeRepairResponseReceived": False,
+        "semanticBridgeRepairAccepted": False,
+        "semanticBridgeRepairLifecycleState": "",
+        "semanticBridgeRepairPreDispatchFailureRecovered": False,
         "failureStage": None,
         "failureCode": None,
         "renderCommands": _render_commands(job_id=job_id),
@@ -171,6 +183,7 @@ def run_incomplete_tournament_resume(
     baseline_metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
     baseline_creator_normal = int(baseline_metrics.get("creatorCalls") or 0)
     baseline_creator_repair = int(baseline_metrics.get("creatorRepairCalls") or 0)
+    baseline_semantic_repair = int(baseline_metrics.get("creatorSemanticBridgeRepairCalls") or 0)
 
     baseline = _baseline_reasoning_metrics(state)
     reasoning_report = run_controlled_complete_ad_reasoning_resume(
@@ -186,6 +199,7 @@ def run_incomplete_tournament_resume(
 
     creator_normal_delta = max(0, int(metrics.get("creatorCalls") or 0) - baseline_creator_normal)
     creator_repair_delta = max(0, int(metrics.get("creatorRepairCalls") or 0) - baseline_creator_repair)
+    semantic_repair_delta = max(0, int(metrics.get("creatorSemanticBridgeRepairCalls") or 0) - baseline_semantic_repair)
     creator_delta = creator_normal_delta + creator_repair_delta
     judge_delta = max(0, after["judge"] - baseline["judge"])
     strategy_delta = max(0, after["strategy"] - baseline["strategy"])
@@ -203,6 +217,14 @@ def run_incomplete_tournament_resume(
             invocation_creator_normal_calls=creator_normal_delta,
             invocation_creator_repair_calls=creator_repair_delta,
         )
+        populate_semantic_bridge_repair_call_report(
+            state,
+            report,
+            prototype_id="think_small",
+            invocation_semantic_bridge_repair_calls=semantic_repair_delta,
+            semantic_bridge_repair_accepted=bool(reasoning_report.get("semanticBridgeRepairAccepted")),
+            pre_dispatch_failure_recovered=bool(reasoning_report.get("semanticBridgeRepairPreDispatchFailureRecovered")),
+        )
         report["thinkSmallNormalCreatorCalls"] = report["totalCreatorNormalCalls"]
         report["thinkSmallRepairCalls"] = report["persistedCreatorRepairCalls"]
         report["thinkSmallJudgeCalls"] = min(1, judge_delta)
@@ -216,6 +238,13 @@ def run_incomplete_tournament_resume(
     report["acceptedJudgmentsReusedCount"] = accepted_judgment_count(state)
 
     if not reasoning_report.get("ok"):
+        if missing_prototype == "think_small":
+            populate_semantic_bridge_repair_call_report(
+                state,
+                report,
+                prototype_id="think_small",
+                invocation_semantic_bridge_repair_calls=semantic_repair_delta,
+            )
         report["failureStage"] = reasoning_report.get("failureStage") or "reasoning_resume"
         report["failureCode"] = reasoning_report.get("failureReason")
         return report

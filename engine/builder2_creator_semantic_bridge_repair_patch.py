@@ -8,7 +8,7 @@ import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from engine.builder2_complete_ad_contract import DUAL_MEANING_FIELDS
 from engine.builder2_creator import (
@@ -35,6 +35,26 @@ SEMANTIC_BRIDGE_REPAIR_PATCH_ROOT = "semanticBridgeRepairPatch"
 SEMANTIC_BRIDGE_REPAIR_CALL_LEDGER_KEY = "semanticBridgeRepairCallLedger"
 SEMANTIC_BRIDGE_REPAIR_CALL_KIND = "creatorSemanticBridgeRepair"
 SEMANTIC_BRIDGE_REPAIR_ENV_FLAG = "BUILDER2_ALLOW_ONE_ADDITIONAL_SEMANTIC_BRIDGE_REPAIR"
+SEMANTIC_BRIDGE_REPAIR_ROLE = "builder2_creator_semantic_bridge_repair"
+
+LIFECYCLE_AUTHORIZED = "authorized"
+LIFECYCLE_RESERVED = "reserved"
+LIFECYCLE_DISPATCHED = "dispatched"
+LIFECYCLE_RESPONSE_RECEIVED = "response_received"
+LIFECYCLE_ACCEPTED = "accepted"
+LIFECYCLE_REJECTED = "rejected"
+LIFECYCLE_FAILED_PRE_DISPATCH = "failed_pre_dispatch"
+LIFECYCLE_FAILED_POST_DISPATCH_UNKNOWN = "failed_post_dispatch_unknown"
+
+PRE_DISPATCH_FAILURE_CODES = frozenset(
+    {
+        "builder2_semantic_bridge_repair_client_missing",
+        "builder2_semantic_bridge_repair_model_missing",
+        "builder2_semantic_bridge_repair_preflight_failed",
+        "builder2_semantic_bridge_repair_not_authorized",
+        "builder2_semantic_bridge_repair_not_required",
+    }
+)
 
 SEMANTIC_BRIDGE_REPAIR_ALLOWLIST_PATHS: Tuple[str, ...] = (
     "semanticBridge.keyWordOrConcept",
@@ -170,21 +190,62 @@ def _ledger_bucket(state: Dict[str, Any], prototype_id: str) -> Dict[str, Any]:
 def reconcile_semantic_bridge_repair_call_ledger(state: Dict[str, Any], *, prototype_id: str) -> Dict[str, Any]:
     bucket = _ledger_bucket(state, prototype_id)
     metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
-    persisted = int(bucket.get("persistedSemanticBridgeRepairCalls") or 0)
     metric_count = int(metrics.get("creatorSemanticBridgeRepairCalls") or 0)
-    canonical = max(persisted, metric_count)
-    if canonical > 1:
-        canonical = 1
-    bucket["persistedSemanticBridgeRepairCalls"] = canonical
-    bucket["canonicalSemanticBridgeRepairCalls"] = canonical
+    paid_dispatch = int(bucket.get("paidDispatchCount") or 0)
+    if bucket.get("dispatchedAt") and paid_dispatch < 1:
+        paid_dispatch = 1
+    if metric_count > paid_dispatch:
+        paid_dispatch = min(metric_count, 1)
+    if paid_dispatch > 1:
+        paid_dispatch = 1
+    bucket["paidDispatchCount"] = paid_dispatch
+    bucket["persistedSemanticBridgeRepairCalls"] = paid_dispatch
+    bucket["canonicalSemanticBridgeRepairCalls"] = paid_dispatch
+    if paid_dispatch >= 1 and not _clean(bucket.get("lifecycleState")):
+        bucket["lifecycleState"] = LIFECYCLE_DISPATCHED
     return bucket
+
+
+def get_semantic_bridge_repair_ledger_snapshot(
+    state: Dict[str, Any],
+    *,
+    prototype_id: str,
+) -> Dict[str, Any]:
+    bucket = reconcile_semantic_bridge_repair_call_ledger(state, prototype_id=prototype_id)
+    lifecycle = _clean(bucket.get("lifecycleState"))
+    paid_dispatch = int(bucket.get("paidDispatchCount") or 0)
+    return {
+        "lifecycleState": lifecycle or (LIFECYCLE_AUTHORIZED if semantic_bridge_repair_env_authorized() else ""),
+        "reservationPresent": bool(bucket.get("reservedAt")),
+        "dispatchRecorded": bool(bucket.get("dispatchedAt")) or paid_dispatch >= 1,
+        "responseReceived": bool(bucket.get("responseReceivedAt")),
+        "accepted": lifecycle == LIFECYCLE_ACCEPTED or bool(bucket.get("acceptedAt")),
+        "paidDispatchCount": paid_dispatch,
+        "failureCode": _clean(bucket.get("failureCode")),
+        "preDispatchFailureRecoverable": lifecycle == LIFECYCLE_FAILED_PRE_DISPATCH and paid_dispatch < 1,
+    }
+
+
+def is_pre_dispatch_failure_code(reason: str) -> bool:
+    code = _clean(reason)
+    if code in PRE_DISPATCH_FAILURE_CODES:
+        return True
+    return code.startswith("builder2_semantic_bridge_repair_invalid:") and code.endswith("_missing")
 
 
 def additional_semantic_bridge_repair_allowed(state: Dict[str, Any], prototype_id: str) -> bool:
     if not semantic_bridge_repair_env_authorized():
         return False
     bucket = reconcile_semantic_bridge_repair_call_ledger(state, prototype_id=prototype_id)
-    if int(bucket.get("canonicalSemanticBridgeRepairCalls") or 0) >= 1:
+    paid_dispatch = int(bucket.get("paidDispatchCount") or 0)
+    lifecycle = _clean(bucket.get("lifecycleState"))
+    if paid_dispatch >= 1 or lifecycle in {LIFECYCLE_DISPATCHED, LIFECYCLE_RESPONSE_RECEIVED, LIFECYCLE_ACCEPTED}:
+        return False
+    if lifecycle == LIFECYCLE_FAILED_PRE_DISPATCH and paid_dispatch < 1:
+        return True
+    if lifecycle in {LIFECYCLE_RESERVED, LIFECYCLE_AUTHORIZED, ""}:
+        pass
+    elif lifecycle in {LIFECYCLE_REJECTED, LIFECYCLE_FAILED_POST_DISPATCH_UNKNOWN}:
         return False
     reconcile_slogan_repair_call_ledger(state, prototype_id=prototype_id)
     slogan_bucket = state.get(SLOGAN_REPAIR_CALL_LEDGER_KEY, {}).get(prototype_id, {})
@@ -195,14 +256,71 @@ def additional_semantic_bridge_repair_allowed(state: Dict[str, Any], prototype_i
     return True
 
 
-def reserve_semantic_bridge_repair_call(state: Dict[str, Any], *, prototype_id: str) -> None:
+def reclaim_or_reserve_semantic_bridge_repair_call(state: Dict[str, Any], *, prototype_id: str) -> bool:
     bucket = reconcile_semantic_bridge_repair_call_ledger(state, prototype_id=prototype_id)
-    if int(bucket.get("canonicalSemanticBridgeRepairCalls") or 0) >= 1:
+    paid_dispatch = int(bucket.get("paidDispatchCount") or 0)
+    lifecycle = _clean(bucket.get("lifecycleState"))
+    if paid_dispatch >= 1 or lifecycle in {LIFECYCLE_DISPATCHED, LIFECYCLE_RESPONSE_RECEIVED, LIFECYCLE_ACCEPTED}:
         raise Builder2TournamentError("builder2_semantic_bridge_repair_call_already_used")
+    reused = False
+    if lifecycle == LIFECYCLE_FAILED_PRE_DISPATCH and bucket.get("reservedAt"):
+        reused = True
+        bucket["preDispatchFailureRecovered"] = True
+        logger.info(
+            "BUILDER2_SEMANTIC_BRIDGE_REPAIR_RESERVATION_REUSED prototypeId=%s lifecycleState=%s paidDispatchCount=%s",
+            prototype_id,
+            lifecycle,
+            paid_dispatch,
+        )
+    bucket["lifecycleState"] = LIFECYCLE_RESERVED
+    bucket["reservedAt"] = bucket.get("reservedAt") or _utc_now_iso()
+    bucket["callKind"] = SEMANTIC_BRIDGE_REPAIR_CALL_KIND
+    bucket["authorizedAt"] = bucket.get("authorizedAt") or _utc_now_iso()
+    bucket.pop("failureCode", None)
+    bucket.pop("failedPreDispatchAt", None)
+    return reused
+
+
+def mark_semantic_bridge_repair_failed_pre_dispatch(
+    state: Dict[str, Any],
+    *,
+    prototype_id: str,
+    failure_code: str,
+) -> None:
+    bucket = _ledger_bucket(state, prototype_id)
+    if int(bucket.get("paidDispatchCount") or 0) >= 1:
+        return
+    bucket["lifecycleState"] = LIFECYCLE_FAILED_PRE_DISPATCH
+    bucket["failureCode"] = _clean(failure_code)
+    bucket["failedPreDispatchAt"] = _utc_now_iso()
+    if not bucket.get("reservedAt"):
+        bucket["reservedAt"] = _utc_now_iso()
+        bucket["callKind"] = SEMANTIC_BRIDGE_REPAIR_CALL_KIND
+
+
+def mark_semantic_bridge_repair_dispatched(state: Dict[str, Any], *, prototype_id: str) -> None:
+    bucket = reconcile_semantic_bridge_repair_call_ledger(state, prototype_id=prototype_id)
+    bucket["lifecycleState"] = LIFECYCLE_DISPATCHED
+    bucket["dispatchedAt"] = _utc_now_iso()
+    bucket["paidDispatchCount"] = 1
     bucket["persistedSemanticBridgeRepairCalls"] = 1
     bucket["canonicalSemanticBridgeRepairCalls"] = 1
-    bucket["reservedAt"] = _utc_now_iso()
-    bucket["callKind"] = SEMANTIC_BRIDGE_REPAIR_CALL_KIND
+
+
+def mark_semantic_bridge_repair_response_received(state: Dict[str, Any], *, prototype_id: str) -> None:
+    bucket = _ledger_bucket(state, prototype_id)
+    bucket["lifecycleState"] = LIFECYCLE_RESPONSE_RECEIVED
+    bucket["responseReceivedAt"] = _utc_now_iso()
+
+
+def mark_semantic_bridge_repair_accepted(state: Dict[str, Any], *, prototype_id: str) -> None:
+    bucket = _ledger_bucket(state, prototype_id)
+    bucket["lifecycleState"] = LIFECYCLE_ACCEPTED
+    bucket["acceptedAt"] = _utc_now_iso()
+
+
+def reserve_semantic_bridge_repair_call(state: Dict[str, Any], *, prototype_id: str) -> None:
+    reclaim_or_reserve_semantic_bridge_repair_call(state, prototype_id=prototype_id)
 
 
 def revert_forbidden_semantic_bridge_paths(base_candidate: Dict[str, Any], merged: Dict[str, Any]) -> List[str]:
@@ -332,6 +450,149 @@ def detect_semantic_bridge_repair_context(
     }
 
 
+def preflight_semantic_bridge_repair(
+    state: Dict[str, Any],
+    *,
+    prototype_id: str,
+    product_name: str = "",
+    product_description: str = "",
+    language: str = "he",
+    compatibility_mode: bool = False,
+    llm_client: Optional[Callable[..., Any]] = None,
+    original_candidate_id: str = "",
+    repair_candidate_id: str = "",
+    accept_candidate_id: str = "",
+) -> Dict[str, Any]:
+    from engine.builder2_prototypes import require_prototype
+    from engine.builder2_reasoning_config import resolve_builder2_reasoning_model
+    from engine.builder2_tournament_prompts import build_semantic_bridge_repair_prompt
+
+    job_id = _clean(state.get("jobId"))
+    if not semantic_bridge_repair_env_authorized():
+        raise Builder2TournamentError("builder2_semantic_bridge_repair_not_authorized")
+
+    logger.info(
+        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_PREFLIGHT_START jobId=%s prototypeId=%s role=%s",
+        job_id,
+        prototype_id,
+        SEMANTIC_BRIDGE_REPAIR_ROLE,
+    )
+
+    model = resolve_builder2_reasoning_model()
+    if not _clean(model):
+        raise Builder2TournamentError("builder2_semantic_bridge_repair_model_missing")
+
+    if llm_client is None:
+        api_key = _clean(os.environ.get("OPENAI_API_KEY"))
+        if not api_key:
+            raise Builder2TournamentError("builder2_semantic_bridge_repair_client_missing")
+
+    try:
+        context = detect_semantic_bridge_repair_context(
+            state,
+            prototype_id=prototype_id,
+            product_name=product_name,
+            compatibility_mode=compatibility_mode,
+            original_candidate_id=original_candidate_id,
+            repair_candidate_id=repair_candidate_id,
+        )
+    except Builder2TournamentError as exc:
+        reason = str(exc.args[0] if exc.args else "builder2_semantic_bridge_repair_preflight_failed")
+        raise Builder2TournamentError(f"builder2_semantic_bridge_repair_preflight_failed:{reason}") from exc
+
+    if not context["required"]:
+        raise Builder2TournamentError("builder2_semantic_bridge_repair_not_required")
+
+    failure_paths = list(context.get("failurePaths") or [])
+    if any(path.endswith("sloganText.word_limit") for path in failure_paths):
+        raise Builder2TournamentError("builder2_semantic_bridge_repair_preflight_failed:word_limit_remaining")
+    semantic_paths = [path for path in failure_paths if path.startswith("semanticBridge.")]
+    if not semantic_paths:
+        raise Builder2TournamentError("builder2_semantic_bridge_repair_preflight_failed:no_semantic_paths")
+    non_converge = [path for path in semantic_paths if path != "semanticBridge.meaningsConverge"]
+    if non_converge:
+        raise Builder2TournamentError(
+            "builder2_semantic_bridge_repair_preflight_failed:non_converge_paths:" + ",".join(non_converge[:8])
+        )
+
+    candidate_id = accept_candidate_id or context["acceptCandidateId"]
+    if not candidate_id:
+        candidate_id = f"cand-1-{prototype_id}-1-semantic-bridge-repair"
+
+    prototype = require_prototype(prototype_id)
+    strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
+    try:
+        prompt = build_semantic_bridge_repair_prompt(
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            strategy_foundation=strategy,
+            prototype=prototype,
+            candidate_id=candidate_id,
+            base_candidate=context["baseParsed"],
+            validation_failures=failure_paths,
+        )
+    except Exception as exc:
+        raise Builder2TournamentError(
+            f"builder2_semantic_bridge_repair_preflight_failed:prompt:{exc.__class__.__name__}"
+        ) from exc
+    if not _clean(prompt):
+        raise Builder2TournamentError("builder2_semantic_bridge_repair_preflight_failed:prompt_empty")
+
+    logger.info(
+        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_CLIENT_RESOLVED jobId=%s prototypeId=%s role=%s model=%s llmClientProvided=%s",
+        job_id,
+        prototype_id,
+        SEMANTIC_BRIDGE_REPAIR_ROLE,
+        model,
+        str(llm_client is not None).lower(),
+    )
+    logger.info(
+        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_PREFLIGHT_OK jobId=%s prototypeId=%s role=%s model=%s",
+        job_id,
+        prototype_id,
+        SEMANTIC_BRIDGE_REPAIR_ROLE,
+        model,
+    )
+    return {
+        "context": context,
+        "model": model,
+        "prompt": prompt,
+        "candidateId": candidate_id,
+        "prototype": prototype,
+        "displayName": prototype.display_name,
+        "strategy": strategy,
+    }
+
+
+def inspect_semantic_bridge_repair_lifecycle(
+    state: Dict[str, Any],
+    *,
+    prototype_id: str,
+) -> Dict[str, Any]:
+    snapshot = get_semantic_bridge_repair_ledger_snapshot(state, prototype_id=prototype_id)
+    paid_dispatch = int(snapshot.get("paidDispatchCount") or 0)
+    lifecycle = _clean(snapshot.get("lifecycleState"))
+    authorized = semantic_bridge_repair_env_authorized()
+    another_allowed = additional_semantic_bridge_repair_allowed(state, prototype_id) and paid_dispatch < 1
+    return {
+        "jobId": _clean(state.get("jobId")),
+        "prototypeId": prototype_id,
+        "authorizationPresent": authorized,
+        "semanticBridgeRepairLedgerFound": bool(state.get(SEMANTIC_BRIDGE_REPAIR_CALL_LEDGER_KEY)),
+        "lifecycleState": lifecycle,
+        "reservationPresent": bool(snapshot.get("reservationPresent")),
+        "dispatchRecorded": bool(snapshot.get("dispatchRecorded")),
+        "responseReceived": bool(snapshot.get("responseReceived")),
+        "accepted": bool(snapshot.get("accepted")),
+        "paidDispatchCount": paid_dispatch,
+        "preDispatchFailureRecoverable": bool(snapshot.get("preDispatchFailureRecoverable")),
+        "anotherPaidDispatchAllowed": another_allowed,
+        "stateMutated": False,
+        "paidCalls": paid_dispatch,
+    }
+
+
 def populate_semantic_bridge_repair_call_report(
     state: Dict[str, Any],
     report: Dict[str, Any],
@@ -339,14 +600,26 @@ def populate_semantic_bridge_repair_call_report(
     prototype_id: str,
     invocation_semantic_bridge_repair_calls: int = 0,
     semantic_bridge_repair_accepted: bool = False,
+    pre_dispatch_failure_recovered: bool = False,
 ) -> None:
     bucket = reconcile_semantic_bridge_repair_call_ledger(state, prototype_id=prototype_id)
-    persisted = int(bucket.get("canonicalSemanticBridgeRepairCalls") or 0)
+    snapshot = get_semantic_bridge_repair_ledger_snapshot(state, prototype_id=prototype_id)
+    paid_dispatch = int(snapshot.get("paidDispatchCount") or 0)
+    lifecycle = _clean(snapshot.get("lifecycleState"))
     report["invocationSemanticBridgeRepairCalls"] = int(invocation_semantic_bridge_repair_calls)
-    report["persistedSemanticBridgeRepairCalls"] = persisted
-    report["totalSemanticBridgeRepairCalls"] = persisted
+    report["persistedSemanticBridgeRepairCalls"] = paid_dispatch
+    report["totalSemanticBridgeRepairCalls"] = paid_dispatch
     report["semanticBridgeRepairAuthorized"] = semantic_bridge_repair_env_authorized()
-    report["semanticBridgeRepairAccepted"] = bool(semantic_bridge_repair_accepted)
+    report["semanticBridgeRepairReserved"] = bool(snapshot.get("reservationPresent"))
+    report["semanticBridgeRepairDispatched"] = bool(snapshot.get("dispatchRecorded"))
+    report["semanticBridgeRepairResponseReceived"] = bool(snapshot.get("responseReceived"))
+    report["semanticBridgeRepairAccepted"] = bool(semantic_bridge_repair_accepted or snapshot.get("accepted"))
+    report["semanticBridgeRepairLifecycleState"] = lifecycle or (
+        LIFECYCLE_AUTHORIZED if report["semanticBridgeRepairAuthorized"] else ""
+    )
+    report["semanticBridgeRepairPreDispatchFailureRecovered"] = bool(
+        pre_dispatch_failure_recovered or bucket.get("preDispatchFailureRecovered")
+    )
 
 
 def execute_semantic_bridge_repair_call(
@@ -363,31 +636,45 @@ def execute_semantic_bridge_repair_call(
     accept_candidate_id: str = "",
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     from engine.builder2_accepted_creator_store import persist_accepted_creator_candidate
-    from engine.builder2_prototypes import require_prototype
-    from engine.builder2_tournament_prompts import build_semantic_bridge_repair_prompt
+    from engine.builder2_tournament_llm import call_builder2_role_json
 
-    if llm_client is None:
-        raise Builder2TournamentError("builder2_semantic_bridge_repair_invalid:llm_client_missing")
+    job_id = _clean(state.get("jobId"))
     if not additional_semantic_bridge_repair_allowed(state, prototype_id):
         raise Builder2TournamentError("builder2_semantic_bridge_repair_not_authorized")
 
-    context = detect_semantic_bridge_repair_context(
-        state,
-        prototype_id=prototype_id,
-        product_name=product_name,
-        compatibility_mode=compatibility_mode,
-        original_candidate_id=original_candidate_id,
-        repair_candidate_id=repair_candidate_id,
-    )
-    if not context["required"]:
-        raise Builder2TournamentError("builder2_semantic_bridge_repair_not_required")
+    try:
+        preflight = preflight_semantic_bridge_repair(
+            state,
+            prototype_id=prototype_id,
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            compatibility_mode=compatibility_mode,
+            llm_client=llm_client,
+            original_candidate_id=original_candidate_id,
+            repair_candidate_id=repair_candidate_id,
+            accept_candidate_id=accept_candidate_id,
+        )
+    except Builder2TournamentError as exc:
+        reason = str(exc.args[0] if exc.args else "builder2_semantic_bridge_repair_preflight_failed")
+        if is_pre_dispatch_failure_code(reason) or reason.startswith("builder2_semantic_bridge_repair_preflight_failed"):
+            mark_semantic_bridge_repair_failed_pre_dispatch(
+                state,
+                prototype_id=prototype_id,
+                failure_code=reason,
+            )
+        raise
 
+    context = preflight["context"]
     base_parsed = context["baseParsed"]
     original_payload = context["originalPayload"]
     failure_paths = context["failurePaths"]
-    candidate_id = accept_candidate_id or context["acceptCandidateId"]
-    if not candidate_id:
-        candidate_id = f"cand-1-{prototype_id}-1-semantic-bridge-repair"
+    candidate_id = preflight["candidateId"]
+    prototype = preflight["prototype"]
+    display_name = preflight["displayName"]
+    strategy = preflight["strategy"]
+    model = preflight["model"]
+    prompt = preflight["prompt"]
 
     logger.info(
         "BUILDER2_SEMANTIC_BRIDGE_REPAIR_REQUIRED candidateId=%s prototypeId=%s failurePaths=%s",
@@ -402,43 +689,55 @@ def execute_semantic_bridge_repair_call(
         SEMANTIC_BRIDGE_REPAIR_ENV_FLAG,
     )
 
-    reserve_semantic_bridge_repair_call(state, prototype_id=prototype_id)
-
-    prototype = require_prototype(prototype_id)
-    display_name = prototype.display_name
-    strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
-    prompt = build_semantic_bridge_repair_prompt(
-        product_name=product_name,
-        product_description=product_description,
-        language=language,
-        strategy_foundation=strategy,
-        prototype=prototype,
-        candidate_id=candidate_id,
-        base_candidate=base_parsed,
-        validation_failures=failure_paths,
-    )
+    reservation_reused = reclaim_or_reserve_semantic_bridge_repair_call(state, prototype_id=prototype_id)
+    if reservation_reused:
+        logger.info(
+            "BUILDER2_SEMANTIC_BRIDGE_REPAIR_PRE_DISPATCH_FAILURE_RECOVERED jobId=%s prototypeId=%s candidateId=%s",
+            job_id,
+            prototype_id,
+            candidate_id,
+        )
 
     logger.info(
-        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_START candidateId=%s prototypeId=%s callKind=%s",
+        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_DISPATCH_START jobId=%s candidateId=%s prototypeId=%s role=%s model=%s callKind=%s",
+        job_id,
         candidate_id,
         prototype_id,
+        SEMANTIC_BRIDGE_REPAIR_ROLE,
+        model,
         SEMANTIC_BRIDGE_REPAIR_CALL_KIND,
     )
 
     timer = MetricsTimer()
-    response = llm_client(prompt=prompt, model_role="builder2_creator_semantic_bridge_repair")
-    record_model_call(
-        state,
-        role="builder2_creator_semantic_bridge_repair",
-        elapsed_ms=timer.elapsed_ms(),
-    )
+    dispatched = {"done": False}
 
-    if isinstance(response, str):
-        parsed = json.loads(response)
-    elif isinstance(response, dict):
-        parsed = response
-    else:
-        raise Builder2TournamentError("builder2_semantic_bridge_repair_invalid:response_type")
+    def _on_paid_request_submitted() -> None:
+        if dispatched["done"]:
+            return
+        dispatched["done"] = True
+        mark_semantic_bridge_repair_dispatched(state, prototype_id=prototype_id)
+        record_model_call(
+            state,
+            role=SEMANTIC_BRIDGE_REPAIR_ROLE,
+            elapsed_ms=timer.elapsed_ms(),
+        )
+
+    parsed = call_builder2_role_json(
+        role=SEMANTIC_BRIDGE_REPAIR_ROLE,
+        model=model,
+        prompt=prompt,
+        call_type="repair",
+        llm_client=llm_client,
+        on_paid_request_submitted=_on_paid_request_submitted,
+    )
+    mark_semantic_bridge_repair_response_received(state, prototype_id=prototype_id)
+    logger.info(
+        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_RESPONSE_RECEIVED jobId=%s candidateId=%s prototypeId=%s lifecycleState=%s",
+        job_id,
+        candidate_id,
+        prototype_id,
+        LIFECYCLE_RESPONSE_RECEIVED,
+    )
 
     merged, meta = merge_semantic_bridge_repair_patch(base_parsed, parsed)
     logger.info(
@@ -454,13 +753,16 @@ def execute_semantic_bridge_repair_call(
         prototype_display_name=display_name,
         strategy_foundation=strategy,
         compatibility_mode=compatibility_mode,
-        job_id=_clean(state.get("jobId")),
+        job_id=job_id,
         tournament_id=_clean(state.get("tournamentId")),
         candidate_id=candidate_id,
         tournament_state=state,
     )
     ok, field = validate_semantic_bridge_establishes_convergence(candidate)
     if not ok:
+        bucket = _ledger_bucket(state, prototype_id)
+        bucket["lifecycleState"] = LIFECYCLE_REJECTED
+        bucket["failureCode"] = f"builder2_semantic_bridge_repair_incomplete:{field}"
         raise Builder2TournamentError(f"builder2_semantic_bridge_repair_incomplete:{field}")
 
     round_index = int(original_payload.get("roundIndex") or base_parsed.get("roundIndex") or 1)
@@ -491,6 +793,7 @@ def execute_semantic_bridge_repair_call(
             "semanticBridgeRepairAcceptedAt": _utc_now_iso(),
         }
     )
+    mark_semantic_bridge_repair_accepted(state, prototype_id=prototype_id)
 
     logger.info(
         "BUILDER2_SEMANTIC_BRIDGE_REPAIR_MERGED candidateId=%s prototypeId=%s appliedPathCount=%s",
@@ -499,9 +802,10 @@ def execute_semantic_bridge_repair_call(
         len(meta.get("appliedPaths") or []),
     )
     logger.info(
-        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_ACCEPTED candidateId=%s prototypeId=%s meaningsConverge=%s",
+        "BUILDER2_SEMANTIC_BRIDGE_REPAIR_ACCEPTED jobId=%s candidateId=%s prototypeId=%s lifecycleState=%s",
+        job_id,
         candidate_id,
         prototype_id,
-        str(candidate.get("semanticBridge", {}).get("meaningsConverge") is True).lower(),
+        LIFECYCLE_ACCEPTED,
     )
     return candidate_id, candidate, meta

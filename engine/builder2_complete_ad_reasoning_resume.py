@@ -47,6 +47,7 @@ from engine.builder2_creator_semantic_bridge_repair_patch import (
     additional_semantic_bridge_repair_allowed,
     detect_semantic_bridge_repair_context,
     execute_semantic_bridge_repair_call,
+    is_pre_dispatch_failure_code,
     populate_semantic_bridge_repair_call_report,
     semantic_bridge_repair_env_authorized,
 )
@@ -679,6 +680,7 @@ def run_controlled_complete_ad_reasoning_resume(
                                     state,
                                     report,
                                     prototype_id=missing_prototype_id,
+                                    pre_dispatch_failure_recovered=is_pre_dispatch_failure_code(reason),
                                 )
                                 return _emit_resume_stage_failure(
                                     report,
@@ -702,6 +704,11 @@ def run_controlled_complete_ad_reasoning_resume(
                                 prototype_id=missing_prototype_id,
                                 invocation_semantic_bridge_repair_calls=1,
                                 semantic_bridge_repair_accepted=True,
+                                pre_dispatch_failure_recovered=bool(
+                                    (state.get("semanticBridgeRepairCallLedger") or {})
+                                    .get(missing_prototype_id, {})
+                                    .get("preDispatchFailureRecovered")
+                                ),
                             )
                             logger.info(
                                 "BUILDER2_SEMANTIC_BRIDGE_REPAIR_RESUME_ACCEPTED jobId=%s prototypeId=%s candidateId=%s",

@@ -13,15 +13,24 @@ from engine.builder2_advertising_closure_contract import SLOGAN_MAX_WORD_COUNT, 
 from engine.builder2_complete_ad_creator_recovery import REJECTED_CREATOR_PARSED_INDEX_KEY
 from engine.builder2_creator import collect_creator_structural_errors
 from engine.builder2_creator_semantic_bridge_repair_patch import (
-    SEMANTIC_BRIDGE_REPAIR_CALL_LEDGER_KEY,
+    LIFECYCLE_ACCEPTED,
+    LIFECYCLE_FAILED_PRE_DISPATCH,
+    LIFECYCLE_RESERVED,
     SEMANTIC_BRIDGE_REPAIR_ENV_FLAG,
     SEMANTIC_BRIDGE_REPAIR_PATCH_ROOT,
+    SEMANTIC_BRIDGE_REPAIR_ROLE,
     additional_semantic_bridge_repair_allowed,
     apply_persisted_slogan_to_base,
     detect_semantic_bridge_repair_context,
     execute_semantic_bridge_repair_call,
+    get_semantic_bridge_repair_ledger_snapshot,
+    inspect_semantic_bridge_repair_lifecycle,
+    mark_semantic_bridge_repair_dispatched,
+    mark_semantic_bridge_repair_failed_pre_dispatch,
     merge_semantic_bridge_repair_patch,
-    reserve_semantic_bridge_repair_call,
+    populate_semantic_bridge_repair_call_report,
+    preflight_semantic_bridge_repair,
+    reclaim_or_reserve_semantic_bridge_repair_call,
     semantic_bridge_repair_env_authorized,
     semantic_bridge_repair_required,
     structural_failure_field_paths,
@@ -211,6 +220,8 @@ class TestSemanticBridgeRepairPatch(unittest.TestCase):
 class TestSemanticBridgeRepairAuthorization(unittest.TestCase):
     def tearDown(self) -> None:
         os.environ.pop(SEMANTIC_BRIDGE_REPAIR_ENV_FLAG, None)
+        os.environ.pop("OPENAI_API_KEY", None)
+        os.environ.pop("BUILDER2_REASONING_MODEL", None)
 
     def test_env_flag_defaults_false(self) -> None:
         os.environ.pop(SEMANTIC_BRIDGE_REPAIR_ENV_FLAG, None)
@@ -220,12 +231,12 @@ class TestSemanticBridgeRepairAuthorization(unittest.TestCase):
         state = _hidden_defect_pair_state()
         self.assertFalse(additional_semantic_bridge_repair_allowed(state, "think_small"))
 
-    def test_exactly_one_call_reserved(self) -> None:
+    def test_paid_dispatch_blocks_second_reservation(self) -> None:
         state = _hidden_defect_pair_state()
         os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
-        reserve_semantic_bridge_repair_call(state, prototype_id="think_small")
+        mark_semantic_bridge_repair_dispatched(state, prototype_id="think_small")
         with self.assertRaises(Builder2TournamentError):
-            reserve_semantic_bridge_repair_call(state, prototype_id="think_small")
+            reclaim_or_reserve_semantic_bridge_repair_call(state, prototype_id="think_small")
 
     def test_execute_requires_authorization(self) -> None:
         state = _hidden_defect_pair_state()
@@ -242,13 +253,48 @@ class TestSemanticBridgeRepairAuthorization(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.args[0], "builder2_semantic_bridge_repair_not_authorized")
 
+    def test_missing_client_fails_before_dispatch_without_paid_metric(self) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+        os.environ.pop("OPENAI_API_KEY", None)
+        with self.assertRaises(Builder2TournamentError) as ctx:
+            execute_semantic_bridge_repair_call(
+                state,
+                prototype_id="think_small",
+                product_name="ACE Product",
+                llm_client=None,
+            )
+        self.assertEqual(ctx.exception.args[0], "builder2_semantic_bridge_repair_client_missing")
+        self.assertEqual(state["metrics"]["creatorSemanticBridgeRepairCalls"], 0)
+        snapshot = get_semantic_bridge_repair_ledger_snapshot(state, prototype_id="think_small")
+        self.assertEqual(snapshot["lifecycleState"], LIFECYCLE_FAILED_PRE_DISPATCH)
+        self.assertEqual(snapshot["paidDispatchCount"], 0)
+
+    def test_failed_pre_dispatch_reservation_is_reused(self) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+        mark_semantic_bridge_repair_failed_pre_dispatch(
+            state,
+            prototype_id="think_small",
+            failure_code="builder2_semantic_bridge_repair_client_missing",
+        )
+        self.assertTrue(additional_semantic_bridge_repair_allowed(state, "think_small"))
+        reused = reclaim_or_reserve_semantic_bridge_repair_call(state, prototype_id="think_small")
+        self.assertTrue(reused)
+        snapshot = get_semantic_bridge_repair_ledger_snapshot(state, prototype_id="think_small")
+        self.assertEqual(snapshot["lifecycleState"], LIFECYCLE_RESERVED)
+
     def test_execute_accepts_with_env_and_mock_llm(self) -> None:
         state = _hidden_defect_pair_state()
         os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
         prompts: List[str] = []
+        roles: List[str] = []
+        models: List[str] = []
 
         def llm(**kwargs: Any) -> Dict[str, Any]:
-            prompts.append(kwargs.get("prompt", ""))
+            prompts.append(str(kwargs.get("prompt") or ""))
+            roles.append(str(kwargs.get("role") or ""))
+            models.append(str(kwargs.get("model") or ""))
             return _valid_semantic_bridge_patch()
 
         candidate_id, candidate, _meta = execute_semantic_bridge_repair_call(
@@ -263,9 +309,102 @@ class TestSemanticBridgeRepairAuthorization(unittest.TestCase):
         self.assertTrue(candidate["semanticBridge"]["meaningsConverge"])
         self.assertEqual(state["metrics"]["creatorSemanticBridgeRepairCalls"], 1)
         self.assertEqual(len(prompts), 1)
+        self.assertEqual(roles, [SEMANTIC_BRIDGE_REPAIR_ROLE])
+        self.assertTrue(all(models))
         self.assertIn("semantic-bridge repair role", prompts[0])
         self.assertIn("Do NOT change advertisingClosure.sloganText", prompts[0])
         self.assertFalse(additional_semantic_bridge_repair_allowed(state, "think_small"))
+        snapshot = get_semantic_bridge_repair_ledger_snapshot(state, prototype_id="think_small")
+        self.assertEqual(snapshot["lifecycleState"], LIFECYCLE_ACCEPTED)
+        self.assertEqual(snapshot["paidDispatchCount"], 1)
+
+    def test_duplicate_dispatch_blocked_after_acceptance(self) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+
+        def llm(**kwargs: Any) -> Dict[str, Any]:
+            return _valid_semantic_bridge_patch()
+
+        execute_semantic_bridge_repair_call(
+            state,
+            prototype_id="think_small",
+            product_name="ACE Product",
+            llm_client=llm,
+            accept_candidate_id="cand-1-think_small-1-24f1eeb9",
+        )
+        with self.assertRaises(Builder2TournamentError) as ctx:
+            execute_semantic_bridge_repair_call(
+                state,
+                prototype_id="think_small",
+                product_name="ACE Product",
+                llm_client=llm,
+                accept_candidate_id="cand-1-think_small-1-24f1eeb9",
+            )
+        self.assertEqual(ctx.exception.args[0], "builder2_semantic_bridge_repair_not_authorized")
+
+    @patch("engine.builder2_tournament_llm.call_builder2_role_json")
+    def test_canonical_builder2_role_json_wiring(self, mock_call: Any) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+        os.environ["BUILDER2_REASONING_MODEL"] = "gpt-test-builder2-model"
+        mock_call.return_value = _valid_semantic_bridge_patch()
+
+        def llm(**kwargs: Any) -> Dict[str, Any]:
+            raise AssertionError("direct llm_client should not be used when call_builder2_role_json is patched")
+
+        execute_semantic_bridge_repair_call(
+            state,
+            prototype_id="think_small",
+            product_name="ACE Product",
+            llm_client=llm,
+            accept_candidate_id="cand-1-think_small-1-24f1eeb9",
+        )
+        mock_call.assert_called_once()
+        kwargs = mock_call.call_args.kwargs
+        self.assertEqual(kwargs["role"], SEMANTIC_BRIDGE_REPAIR_ROLE)
+        self.assertEqual(kwargs["model"], "gpt-test-builder2-model")
+        self.assertEqual(kwargs["call_type"], "repair")
+        self.assertIsNotNone(kwargs.get("on_paid_request_submitted"))
+
+    def test_report_fields_include_lifecycle(self) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+        report: Dict[str, Any] = {}
+        populate_semantic_bridge_repair_call_report(state, report, prototype_id="think_small")
+        self.assertTrue(report["semanticBridgeRepairAuthorized"])
+        self.assertFalse(report["semanticBridgeRepairDispatched"])
+        self.assertEqual(report["totalSemanticBridgeRepairCalls"], 0)
+        self.assertIn("semanticBridgeRepairLifecycleState", report)
+
+    def test_inspector_reports_recoverable_pre_dispatch_state(self) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+        mark_semantic_bridge_repair_failed_pre_dispatch(
+            state,
+            prototype_id="think_small",
+            failure_code="builder2_semantic_bridge_repair_client_missing",
+        )
+        lifecycle = inspect_semantic_bridge_repair_lifecycle(state, prototype_id="think_small")
+        self.assertTrue(lifecycle["authorizationPresent"])
+        self.assertTrue(lifecycle["preDispatchFailureRecoverable"])
+        self.assertEqual(lifecycle["paidDispatchCount"], 0)
+        self.assertFalse(lifecycle["stateMutated"])
+
+    def test_preflight_resolves_builder2_model(self) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+        os.environ["BUILDER2_REASONING_MODEL"] = "gpt-test-model-only"
+
+        def llm(**kwargs: Any) -> Dict[str, Any]:
+            return _valid_semantic_bridge_patch()
+
+        preflight = preflight_semantic_bridge_repair(
+            state,
+            prototype_id="think_small",
+            product_name="ACE Product",
+            llm_client=llm,
+        )
+        self.assertEqual(preflight["model"], "gpt-test-model-only")
 
 
 class TestCompleteStructuralErrorCollection(unittest.TestCase):

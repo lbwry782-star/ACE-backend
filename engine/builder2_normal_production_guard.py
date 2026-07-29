@@ -58,6 +58,7 @@ class NormalProductionGuard:
         if bucket not in NORMAL_PRODUCTION_ALLOWED_BUCKETS and role not in {
             "builder2_strategy",
             "builder2_creator",
+            "builder2_creator_semantic_bridge_repair",
             "builder2_judge",
             "builder2_winner",
             "winner_development",

@@ -14,6 +14,7 @@ _KNOWN_ROLE_BUCKETS: Dict[str, str] = {
     "builder2_strategy": "strategy",
     "strategy": "strategy",
     "builder2_creator": "creator",
+    "builder2_creator_semantic_bridge_repair": "creator",
     "creator": "creator",
     "builder2_judge": "judge",
     "judge": "judge",

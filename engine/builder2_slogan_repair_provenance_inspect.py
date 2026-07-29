@@ -16,6 +16,7 @@ from engine.builder2_advertising_closure_contract import count_slogan_words_excl
 from engine.builder2_creator import collect_creator_structural_errors, validate_creator_candidate
 from engine.builder2_creator_semantic_bridge_repair_patch import (
     apply_persisted_slogan_to_base,
+    inspect_semantic_bridge_repair_lifecycle,
     semantic_bridge_repair_required,
     structural_failure_field_paths,
 )
@@ -243,6 +244,10 @@ def inspect_slogan_repair_provenance(
     except Builder2TournamentError as exc:
         report["failureField"] = str(exc.args[0] if exc.args else "").split(":")[-1]
 
+    report["semanticBridgeRepairLifecycle"] = inspect_semantic_bridge_repair_lifecycle(
+        state,
+        prototype_id=prototype_id,
+    )
     return report
 
 
