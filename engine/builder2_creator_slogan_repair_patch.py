@@ -15,6 +15,15 @@ from engine.builder2_advertising_closure_contract import (
     validate_slogan_text_structure,
 )
 from engine.builder2_creator import collect_creator_structural_errors, is_slogan_word_limit_failure, validate_creator_candidate
+from engine.builder2_slogan_repair_provenance import (
+    SOURCE_ROLE_ORIGINAL,
+    SOURCE_ROLE_REPAIR,
+    assert_semantic_basis_unchanged,
+    log_semantic_basis_fingerprint,
+    resolve_slogan_repair_base_and_source,
+    semantic_basis_fingerprint,
+    validate_semantic_basis_with_repaired_slogan,
+)
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
 logger = logging.getLogger(__name__)
@@ -298,6 +307,17 @@ def select_minimal_validating_patch(
     candidate_id: str = "",
     tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    from engine.builder2_creator_normalization import normalize_creator_candidate
+    from engine.builder2_creator import normalize_creator_raw
+
+    base_candidate = deepcopy(base_candidate)
+    base_fingerprint = semantic_basis_fingerprint(base_candidate)
+    log_semantic_basis_fingerprint(
+        candidate_id=candidate_id,
+        source_role=SOURCE_ROLE_ORIGINAL,
+        candidate=base_candidate,
+        log_event="BUILDER2_SLOGAN_REPAIR_BASE_FINGERPRINT",
+    )
     repaired_slogan = extract_repaired_slogan_text(repair_response)
     if not repaired_slogan:
         raise Builder2TournamentError("builder2_slogan_repair_offline_merge_invalid:patch_missing")
@@ -331,9 +351,61 @@ def select_minimal_validating_patch(
         forbidden_reverted = revert_forbidden_paths(base_candidate, merged)
         reverted_paths = list(reverted_paths) + list(forbidden_reverted)
         group_label = ",".join(groups) if groups else "A"
+        merged_fingerprint = semantic_basis_fingerprint(merged)
+        if merged_fingerprint != base_fingerprint:
+            raise Builder2TournamentError("builder2_slogan_repair_normalization_mutated_protected_basis")
+        log_semantic_basis_fingerprint(
+            candidate_id=candidate_id,
+            source_role=SOURCE_ROLE_ORIGINAL,
+            candidate=merged,
+            log_event="BUILDER2_SLOGAN_REPAIR_MERGED_PRE_NORMALIZE_FINGERPRINT",
+        )
+        validation_input = deepcopy(merged)
+        try:
+            normalized, _resolved = normalize_creator_candidate(
+                validation_input,
+                assigned_prototype_id=assigned_prototype_id,
+                prototype_display_name=prototype_display_name,
+                strategy_foundation=strategy_foundation,
+                compatibility_mode=compatibility_mode,
+                base_normalizer=normalize_creator_raw,
+                job_id=job_id,
+                candidate_id=candidate_id,
+            )
+        except Builder2TournamentError as exc:
+            last_failure_field = _validation_failure_field(exc)
+            logger.info(
+                "BUILDER2_SLOGAN_REPAIR_MINIMAL_PATCH_VARIANT_TESTED candidateId=%s prototypeId=%s groups=%s "
+                "appliedPathCount=%s validationResult=failed failureField=%s",
+                candidate_id or "(none)",
+                assigned_prototype_id,
+                group_label,
+                len(applied_paths),
+                last_failure_field,
+            )
+            continue
+        assert_semantic_basis_unchanged(
+            before=merged,
+            after=normalized,
+            failure_code="builder2_slogan_repair_normalization_mutated_protected_basis",
+        )
+        log_semantic_basis_fingerprint(
+            candidate_id=candidate_id,
+            source_role=SOURCE_ROLE_ORIGINAL,
+            candidate=normalized,
+            log_event="BUILDER2_SLOGAN_REPAIR_MERGED_POST_NORMALIZE_FINGERPRINT",
+        )
+        validation_snapshot = deepcopy(normalized)
+        validation_fingerprint = semantic_basis_fingerprint(validation_snapshot)
+        log_semantic_basis_fingerprint(
+            candidate_id=candidate_id,
+            source_role=SOURCE_ROLE_ORIGINAL,
+            candidate=validation_snapshot,
+            log_event="BUILDER2_SLOGAN_REPAIR_VALIDATION_INPUT_FINGERPRINT",
+        )
         try:
             candidate = validate_creator_candidate(
-                merged,
+                validation_snapshot,
                 assigned_prototype_id=assigned_prototype_id,
                 prototype_display_name=prototype_display_name,
                 strategy_foundation=strategy_foundation,
@@ -363,6 +435,9 @@ def select_minimal_validating_patch(
                     last_failure_field,
                 )
             continue
+
+        if semantic_basis_fingerprint(validation_snapshot) != validation_fingerprint:
+            raise Builder2TournamentError("builder2_slogan_repair_validation_mutated_protected_basis")
 
         logger.info(
             "BUILDER2_SLOGAN_REPAIR_MINIMAL_PATCH_VARIANT_TESTED candidateId=%s prototypeId=%s groups=%s "
@@ -483,6 +558,7 @@ def candidate_fails_only_slogan_word_limit(
     strategy_foundation: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
     product_name: str = "",
+    repaired_slogan: str = "",
 ) -> Tuple[bool, List[str]]:
     errors = collect_creator_structural_errors(
         candidate,
@@ -505,6 +581,14 @@ def candidate_fails_only_slogan_word_limit(
     ]
     if non_word_limit:
         return False, errors
+    if repaired_slogan:
+        basis_ok, basis_field = validate_semantic_basis_with_repaired_slogan(
+            candidate,
+            repaired_slogan,
+            product_name=product_name,
+        )
+        if not basis_ok:
+            return False, [f"builder2_creator_validation_failed:{basis_field}"]
     try:
         validate_creator_candidate(
             candidate,
@@ -529,6 +613,8 @@ def persist_slogan_repair_parsed_response(
     parsed: Dict[str, Any],
     failure_reason: str = "",
     source: str = "creator_repair",
+    call_type: str = "repair",
+    source_role: str = "repair_response",
 ) -> None:
     if not isinstance(parsed, dict) or not parsed:
         return
@@ -542,6 +628,8 @@ def persist_slogan_repair_parsed_response(
         "parsed": deepcopy(parsed),
         "failureReason": failure_reason,
         "source": source,
+        "callType": _clean(call_type) or "repair",
+        "sourceRole": _clean(source_role) or "repair_response",
         "storedAt": _utc_now_iso(),
     }
 
@@ -559,38 +647,54 @@ def load_slogan_repair_parsed_response(state: Dict[str, Any], candidate_id: str)
     return deepcopy(payload)
 
 
+def _payload_candidate_id(payload: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return _clean(payload.get("candidateId")) or _clean((payload.get("parsed") or {}).get("candidateId"))
+
+
+def _find_repair_source_only(
+    state: Dict[str, Any],
+    prototype_id: str,
+    *,
+    preferred_candidate_id: str = "",
+    product_name: str = "",
+) -> Optional[Dict[str, Any]]:
+    from engine.builder2_complete_ad_creator_recovery import REJECTED_CREATOR_PARSED_INDEX_KEY
+    from engine.builder2_slogan_repair_provenance import _payload_is_repair_source
+
+    if preferred_candidate_id:
+        loaded = load_slogan_repair_parsed_response(state, preferred_candidate_id)
+        if loaded:
+            return loaded
+    repair_index = state.get(SLOGAN_REPAIR_PARSED_INDEX_KEY)
+    repair_candidates: List[Dict[str, Any]] = []
+    if isinstance(repair_index, dict):
+        for payload in repair_index.values():
+            if isinstance(payload, dict) and _clean(payload.get("prototypeId")) == prototype_id:
+                repair_candidates.append(deepcopy(payload))
+    rejected_index = state.get(REJECTED_CREATOR_PARSED_INDEX_KEY)
+    if isinstance(rejected_index, dict):
+        for payload in rejected_index.values():
+            if not isinstance(payload, dict) or _clean(payload.get("prototypeId")) != prototype_id:
+                continue
+            if _payload_is_repair_source(payload, product_name=product_name):
+                repair_candidates.append(deepcopy(payload))
+    repair_candidates.sort(key=lambda item: (_clean(item.get("storedAt")), _payload_candidate_id(item)), reverse=True)
+    return repair_candidates[0] if repair_candidates else None
+
+
 def find_slogan_repair_patch_source(
     state: Dict[str, Any],
     prototype_id: str,
     *,
     preferred_candidate_id: str = "",
 ) -> Optional[Dict[str, Any]]:
-    if preferred_candidate_id:
-        loaded = load_slogan_repair_parsed_response(state, preferred_candidate_id)
-        if loaded:
-            return loaded
-    index = state.get(SLOGAN_REPAIR_PARSED_INDEX_KEY)
-    latest: Optional[Dict[str, Any]] = None
-    if isinstance(index, dict):
-        for payload in index.values():
-            if isinstance(payload, dict) and _clean(payload.get("prototypeId")) == prototype_id:
-                latest = deepcopy(payload)
-    if latest:
-        return latest
-    from engine.builder2_complete_ad_creator_recovery import REJECTED_CREATOR_PARSED_INDEX_KEY
-
-    rejected_index = state.get(REJECTED_CREATOR_PARSED_INDEX_KEY)
-    if not isinstance(rejected_index, dict):
-        return None
-    for candidate_id, payload in rejected_index.items():
-        if not isinstance(payload, dict) or _clean(payload.get("prototypeId")) != prototype_id:
-            continue
-        if candidate_id == preferred_candidate_id and preferred_candidate_id:
-            return deepcopy(payload)
-        failure = _clean(payload.get("failureReason"))
-        if failure and not is_slogan_word_limit_failure(failure):
-            latest = deepcopy(payload)
-    return latest
+    return _find_repair_source_only(
+        state,
+        prototype_id,
+        preferred_candidate_id=preferred_candidate_id,
+    )
 
 
 def find_original_slogan_word_limit_rejection(
@@ -600,22 +704,27 @@ def find_original_slogan_word_limit_rejection(
     preferred_candidate_id: str = "",
 ) -> Optional[Dict[str, Any]]:
     from engine.builder2_complete_ad_creator_recovery import REJECTED_CREATOR_PARSED_INDEX_KEY
+    from engine.builder2_slogan_repair_provenance import CALL_TYPE_NORMAL, _payload_is_original_base, infer_rejected_call_type
 
     index = state.get(REJECTED_CREATOR_PARSED_INDEX_KEY)
     if not isinstance(index, dict):
         return None
-    if preferred_candidate_id and preferred_candidate_id in index:
-        payload = index.get(preferred_candidate_id)
-        if isinstance(payload, dict) and is_slogan_word_limit_failure(_clean(payload.get("failureReason"))):
-            return deepcopy(payload)
+    matches: List[Dict[str, Any]] = []
     for payload in index.values():
-        if not isinstance(payload, dict):
+        if not isinstance(payload, dict) or _clean(payload.get("prototypeId")) != prototype_id:
             continue
-        if _clean(payload.get("prototypeId")) != prototype_id:
+        if preferred_candidate_id and _payload_candidate_id(payload) != preferred_candidate_id:
             continue
-        if is_slogan_word_limit_failure(_clean(payload.get("failureReason"))):
-            return deepcopy(payload)
-    return None
+        if _payload_is_original_base(payload):
+            matches.append(deepcopy(payload))
+        elif is_slogan_word_limit_failure(_clean(payload.get("failureReason"))) and infer_rejected_call_type(payload) == CALL_TYPE_NORMAL:
+            matches.append(deepcopy(payload))
+    if preferred_candidate_id:
+        for payload in matches:
+            if _payload_candidate_id(payload) == preferred_candidate_id:
+                return payload
+    matches.sort(key=lambda item: _clean(item.get("storedAt")))
+    return matches[0] if matches else None
 
 
 def prototype_display_name_for_id(prototype_id: str) -> str:
@@ -783,24 +892,23 @@ def try_offline_slogan_repair_salvage_for_prototype(
 
     display_name = prototype_display_name_for_id(prototype_id)
     record_offline_slogan_salvage_attempt(state, prototype_id=prototype_id, accepted=False)
-    original_payload = find_original_slogan_word_limit_rejection(
-        state,
-        prototype_id,
-        preferred_candidate_id=original_candidate_id,
-    )
-    patch_payload = find_slogan_repair_patch_source(
-        state,
-        prototype_id,
-        preferred_candidate_id=patch_candidate_id,
-    )
+    try:
+        original_payload, patch_payload = resolve_slogan_repair_base_and_source(
+            state,
+            prototype_id,
+            original_candidate_id=original_candidate_id,
+            repair_candidate_id=patch_candidate_id,
+            product_name=product_name or _clean((state.get("strategyFoundation") or {}).get("productNameResolved")),
+        )
+    except Builder2TournamentError as exc:
+        reason = str(exc.args[0] if exc.args else "builder2_slogan_repair_offline_merge_invalid")
+        paths = [reason.split(":")[-1]]
+        return False, None, reason, paths
     failing_paths: List[str] = []
-    if original_payload is None:
-        return False, None, "builder2_slogan_repair_offline_merge_invalid:original_missing", ["original_candidate"]
-    if patch_payload is None:
-        return False, None, "builder2_slogan_repair_offline_merge_invalid:patch_missing", ["repair_patch_source"]
-    base_parsed = dict(original_payload.get("parsed") or {})
-    patch_parsed = dict(patch_payload.get("parsed") or {})
+    base_parsed = deepcopy(original_payload.get("parsed") or {})
+    patch_parsed = deepcopy(patch_payload.get("parsed") or {})
     strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
+    repaired_slogan = extract_repaired_slogan_text(patch_parsed)
     only_word_limit, structural_errors = candidate_fails_only_slogan_word_limit(
         base_parsed,
         assigned_prototype_id=prototype_id,
@@ -808,6 +916,7 @@ def try_offline_slogan_repair_salvage_for_prototype(
         strategy_foundation=strategy,
         compatibility_mode=compatibility_mode,
         product_name=product_name,
+        repaired_slogan=repaired_slogan,
     )
     if not only_word_limit and structural_errors:
         failing_paths = [item.split(":", 1)[-1] for item in structural_errors]

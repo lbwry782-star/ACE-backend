@@ -650,6 +650,172 @@ class TestMaxRoundsOneTournamentRepair(unittest.TestCase):
         self.assertTrue(state.get("winnerCandidateId"))
 
 
+class TestSloganRepairProvenance(unittest.TestCase):
+    ORIGINAL_ID = "cand-1-think_small-1-d630c92f"
+    REPAIR_ID = "cand-1-think_small-1-24f1eeb9"
+
+    def _pair_state(self, *, repair_first: bool = False) -> Dict[str, Any]:
+        state = _missing_think_small_state()
+        original = _candidate_with_slogan("think_small", slogan_text=_hebrew_slogan(9))
+        original["semanticBridge"].update(
+            {
+                "dualMeaningUsed": True,
+                "physicalMeaningActivatedByVisual": True,
+                "strategicMeaningActivatedBySlogan": True,
+                "meaningsConverge": True,
+            }
+        )
+        repaired = deepcopy(original)
+        repaired["advertisingClosure"]["sloganText"] = _hebrew_slogan(7)
+        repaired["semanticBridge"]["sloganMeaning"] = "Repair-only slogan meaning for shorter copy."
+        repaired["semanticBridge"]["howTheMeaningsMeet"] = "Repair-only bridge explanation for shorter copy."
+        repaired["semanticBridge"]["meaningsConverge"] = False
+        original_record = {
+            "candidateId": self.ORIGINAL_ID,
+            "prototypeId": "think_small",
+            "parsed": deepcopy(original),
+            "failureReason": "builder2_advertising_closure_invalid:sloganText.word_limit",
+            "callType": "normal",
+            "sourceRole": "original_rejection",
+            "storedAt": "2026-01-01T00:00:00+00:00",
+        }
+        repair_record = {
+            "candidateId": self.REPAIR_ID,
+            "prototypeId": "think_small",
+            "parsed": deepcopy(repaired),
+            "failureReason": "builder2_creator_validation_failed:semanticBridge.meaningsConverge",
+            "callType": "repair",
+            "sourceRole": "repair_response",
+            "storedAt": "2026-01-02T00:00:00+00:00",
+        }
+        if repair_first:
+            state[REJECTED_CREATOR_PARSED_INDEX_KEY] = {
+                self.REPAIR_ID: repair_record,
+                self.ORIGINAL_ID: original_record,
+            }
+        else:
+            state[REJECTED_CREATOR_PARSED_INDEX_KEY] = {
+                self.ORIGINAL_ID: original_record,
+                self.REPAIR_ID: repair_record,
+            }
+        state[SLOGAN_REPAIR_PARSED_INDEX_KEY] = {
+            self.REPAIR_ID: {
+                "candidateId": self.REPAIR_ID,
+                "prototypeId": "think_small",
+                "parsed": deepcopy(repaired),
+                "failureReason": "builder2_creator_validation_failed:semanticBridge.meaningsConverge",
+                "callType": "repair",
+                "sourceRole": "repair_response",
+                "storedAt": "2026-01-02T00:00:00+00:00",
+            }
+        }
+        state["metrics"] = {"creatorCalls": 1, "creatorRepairCalls": 1}
+        return state
+
+    def test_two_rejected_records_exist(self) -> None:
+        state = self._pair_state()
+        self.assertEqual(len(state[REJECTED_CREATOR_PARSED_INDEX_KEY]), 2)
+
+    def test_later_record_is_repair_response(self) -> None:
+        state = self._pair_state()
+        repair = state[REJECTED_CREATOR_PARSED_INDEX_KEY][self.REPAIR_ID]
+        self.assertEqual(repair["callType"], "repair")
+
+    def test_naive_latest_lookup_can_be_wrong(self) -> None:
+        from engine.builder2_slogan_repair_provenance import naive_latest_rejected_for_prototype
+
+        state = self._pair_state(repair_first=True)
+        naive = naive_latest_rejected_for_prototype(state, "think_small")
+        self.assertIsNotNone(naive)
+        self.assertEqual(_clean(naive.get("candidateId")), self.REPAIR_ID)
+
+    def test_resolver_selects_original_and_repair_roles(self) -> None:
+        from engine.builder2_slogan_repair_provenance import resolve_slogan_repair_base_and_source
+
+        state = self._pair_state(repair_first=True)
+        original_payload, repair_payload = resolve_slogan_repair_base_and_source(state, "think_small")
+        self.assertEqual(_clean(original_payload.get("candidateId")), self.ORIGINAL_ID)
+        self.assertEqual(_clean(repair_payload.get("candidateId")), self.REPAIR_ID)
+
+    def test_base_and_source_ids_must_differ(self) -> None:
+        from engine.builder2_slogan_repair_provenance import resolve_slogan_repair_base_and_source
+
+        state = self._pair_state()
+        original_payload, repair_payload = resolve_slogan_repair_base_and_source(state, "think_small")
+        self.assertNotEqual(
+            _clean(original_payload.get("candidateId")),
+            _clean(repair_payload.get("candidateId")),
+        )
+
+    def test_collision_detected_when_same_candidate_used_for_both_roles(self) -> None:
+        from engine.builder2_slogan_repair_provenance import resolve_slogan_repair_base_and_source
+
+        state = self._pair_state()
+        repair_payload = deepcopy(state[SLOGAN_REPAIR_PARSED_INDEX_KEY][self.REPAIR_ID])
+        repair_payload["candidateId"] = self.ORIGINAL_ID
+        state[SLOGAN_REPAIR_PARSED_INDEX_KEY] = {self.ORIGINAL_ID: repair_payload}
+        with self.assertRaises(Builder2TournamentError) as ctx:
+            resolve_slogan_repair_base_and_source(state, "think_small")
+        self.assertEqual(ctx.exception.args[0], "builder2_slogan_repair_base_source_collision")
+
+    def test_slogan_only_merge_preserves_original_semantic_basis(self) -> None:
+        from engine.builder2_slogan_repair_provenance import (
+            resolve_slogan_repair_base_and_source,
+            semantic_basis_fingerprint,
+            semantic_basis_meanings_converge,
+        )
+
+        state = self._pair_state(repair_first=True)
+        original_payload, repair_payload = resolve_slogan_repair_base_and_source(state, "think_small")
+        base = deepcopy(original_payload.get("parsed") or {})
+        repair = deepcopy(repair_payload.get("parsed") or {})
+        base_fp = semantic_basis_fingerprint(base)
+        candidate, meta = validate_and_merge_slogan_repair_candidate(
+            base,
+            repair,
+            assigned_prototype_id="think_small",
+            prototype_display_name="Think Small",
+            product_name="ACE Product",
+            candidate_id=self.REPAIR_ID,
+        )
+        self.assertEqual(meta["appliedPaths"], ["advertisingClosure.sloganText"])
+        self.assertTrue(candidate["semanticBridge"]["meaningsConverge"])
+        self.assertEqual(semantic_basis_fingerprint(candidate), base_fp)
+        self.assertNotEqual(semantic_basis_meanings_converge(repair), True)
+
+    def test_persisted_lookup_fixture_reproduces_ordering_and_passes_after_fix(self) -> None:
+        state = self._pair_state(repair_first=True)
+        accepted, candidate_id, reason, paths = try_offline_slogan_repair_salvage_for_prototype(
+            state,
+            prototype_id="think_small",
+            product_name="ACE Product",
+        )
+        self.assertTrue(accepted, (reason, paths))
+        self.assertEqual(candidate_id, self.REPAIR_ID)
+
+    def test_provenance_inspector_report_shape(self) -> None:
+        from engine.builder2_slogan_repair_provenance_inspect import inspect_slogan_repair_provenance
+
+        state = self._pair_state(repair_first=True)
+        report = inspect_slogan_repair_provenance(state, prototype_id="think_small")
+        self.assertTrue(report["originalCandidateFound"])
+        self.assertTrue(report["repairSourceFound"])
+        self.assertFalse(report["baseSourceCollision"])
+        self.assertTrue(report["validationPassed"])
+        self.assertFalse(report["stateMutated"])
+        self.assertEqual(report["paidCalls"], 0)
+        self.assertEqual(report["originalCandidateId"], self.ORIGINAL_ID)
+        self.assertEqual(report["repairSourceCandidateId"], self.REPAIR_ID)
+        self.assertEqual(report["originalSemanticBasisFingerprint"], report["mergedPreNormalizeFingerprint"])
+        self.assertEqual(report["originalSemanticBasisFingerprint"], report["validationInputFingerprint"])
+
+    def test_find_rejected_prefers_word_limit_original(self) -> None:
+        state = self._pair_state(repair_first=True)
+        payload = find_rejected_creator_for_prototype(state, "think_small")
+        self.assertIsNotNone(payload)
+        self.assertEqual(_clean(payload.get("candidateId")), self.ORIGINAL_ID)
+
+
 class TestBuilder1AndFrontendUnchanged(unittest.TestCase):
     def test_builder1_module_still_importable(self) -> None:
         import app  # noqa: F401

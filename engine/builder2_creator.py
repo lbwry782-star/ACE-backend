@@ -867,6 +867,21 @@ def generate_creator_candidate(
                     str(closure.get("sloganText") or ""),
                     product_label,
                 )
+                if state is not None:
+                    from engine.builder2_complete_ad_creator_recovery import persist_rejected_creator_parsed_response
+
+                    persist_rejected_creator_parsed_response(
+                        state,
+                        candidate_id=candidate_id,
+                        prototype_id=prototype_id,
+                        round_index=round_index,
+                        attempt_number=attempt_number,
+                        parsed=slogan_repair_base,
+                        failure_reason=failure_reason or "builder2_advertising_closure_invalid:sloganText.word_limit",
+                        top_level_keys=sorted(slogan_repair_base.keys()),
+                        call_type="normal",
+                        source_role="original_rejection",
+                    )
                 logger.info(
                     "BUILDER2_CREATOR_SLOGAN_REPAIR_ELIGIBLE candidateId=%s prototypeId=%s configuredWordLimit=%s actualWordCount=%s",
                     candidate_id,
@@ -1215,6 +1230,8 @@ def generate_creator_candidate(
                 parsed=reject_parsed,
                 failure_reason=str(last_exc.args[0] if last_exc.args else ""),
                 top_level_keys=sorted(reject_parsed.keys()),
+                call_type="repair" if repair_attempted else "normal",
+                source_role="repair_response" if repair_attempted else "original_rejection",
             )
             if repair_attempted and last_repair_raw_parsed and slogan_repair_base is not None:
                 from engine.builder2_creator_slogan_repair_patch import persist_slogan_repair_parsed_response

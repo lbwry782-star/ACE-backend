@@ -549,12 +549,18 @@ def run_controlled_complete_ad_reasoning_resume(
                         find_original_slogan_word_limit_rejection(state, missing_prototype_id)
                     )
                     if slogan_word_limit_case:
+                        original_word_limit = find_original_slogan_word_limit_rejection(state, missing_prototype_id)
+                        from engine.builder2_creator_slogan_repair_patch import find_slogan_repair_patch_source
+
+                        repair_source = find_slogan_repair_patch_source(state, missing_prototype_id)
                         salvage_accepted, salvage_id, salvage_reason, salvage_paths = (
                             try_offline_slogan_repair_salvage_for_prototype(
                                 state,
                                 prototype_id=missing_prototype_id,
                                 product_name=product_name,
                                 compatibility_mode=compatibility_mode,
+                                original_candidate_id=_clean((original_word_limit or {}).get("candidateId")),
+                                patch_candidate_id=_clean((repair_source or {}).get("candidateId")),
                             )
                         )
                         report["offlineSalvageAttempted"] = True

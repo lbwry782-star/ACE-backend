@@ -36,6 +36,8 @@ def persist_rejected_creator_parsed_response(
     parsed: Dict[str, Any],
     failure_reason: str,
     top_level_keys: Optional[List[str]] = None,
+    call_type: str = "",
+    source_role: str = "",
 ) -> None:
     if not isinstance(parsed, dict) or not parsed:
         return
@@ -43,7 +45,16 @@ def persist_rejected_creator_parsed_response(
     if not isinstance(index, dict):
         index = {}
         state[REJECTED_CREATOR_PARSED_INDEX_KEY] = index
-    index[candidate_id] = {
+    existing = index.get(candidate_id)
+    if isinstance(existing, dict):
+        from engine.builder2_slogan_repair_provenance import CALL_TYPE_NORMAL, infer_rejected_call_type
+
+        incoming_call_type = _clean(call_type) or infer_rejected_call_type(
+            {"callType": call_type, "failureReason": failure_reason, "source": source_role}
+        )
+        if infer_rejected_call_type(existing) == CALL_TYPE_NORMAL and incoming_call_type != CALL_TYPE_NORMAL:
+            return
+    record = {
         "candidateId": candidate_id,
         "prototypeId": prototype_id,
         "roundIndex": round_index,
@@ -54,6 +65,11 @@ def persist_rejected_creator_parsed_response(
         "failureReason": failure_reason,
         "storedAt": _utc_now_iso(),
     }
+    if _clean(call_type):
+        record["callType"] = _clean(call_type)
+    if _clean(source_role):
+        record["sourceRole"] = _clean(source_role)
+    index[candidate_id] = record
 
 
 def load_rejected_creator_parsed_response(state: Dict[str, Any], candidate_id: str) -> Optional[Dict[str, Any]]:
@@ -70,12 +86,28 @@ def load_rejected_creator_parsed_response(state: Dict[str, Any], candidate_id: s
 
 
 def find_rejected_creator_for_prototype(state: Dict[str, Any], prototype_id: str) -> Optional[Dict[str, Any]]:
+    from engine.builder2_creator import is_slogan_word_limit_failure
+    from engine.builder2_slogan_repair_provenance import CALL_TYPE_NORMAL, infer_rejected_call_type
+
     index = state.get(REJECTED_CREATOR_PARSED_INDEX_KEY)
     if not isinstance(index, dict):
         return None
+    word_limit_originals: List[Dict[str, Any]] = []
+    other_rejections: List[Dict[str, Any]] = []
     for payload in index.values():
-        if isinstance(payload, dict) and _clean(payload.get("prototypeId")) == prototype_id:
-            return deepcopy(payload)
+        if not isinstance(payload, dict) or _clean(payload.get("prototypeId")) != prototype_id:
+            continue
+        failure = _clean(payload.get("failureReason"))
+        if is_slogan_word_limit_failure(failure) and infer_rejected_call_type(payload) == CALL_TYPE_NORMAL:
+            word_limit_originals.append(payload)
+        else:
+            other_rejections.append(payload)
+    if word_limit_originals:
+        word_limit_originals.sort(key=lambda item: _clean(item.get("storedAt")))
+        return deepcopy(word_limit_originals[0])
+    if other_rejections:
+        other_rejections.sort(key=lambda item: _clean(item.get("storedAt")))
+        return deepcopy(other_rejections[-1])
     for rec in (state.get("candidates") or {}).values():
         if not isinstance(rec, dict):
             continue
