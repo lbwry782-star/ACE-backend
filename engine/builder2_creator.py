@@ -1188,10 +1188,16 @@ def generate_creator_candidate(
     assert last_exc is not None
     final_reason = str(last_exc.args[0])
     if repair_attempted:
-        if "semanticBridge.meaningsConverge" in final_reason or final_reason.startswith(
+        if final_reason.startswith("builder2_slogan_repair_forbidden_path_attempted"):
+            pass
+        elif final_reason.startswith("builder2_slogan_repair_allowed_patch_semantic_incompatibility"):
+            pass
+        elif final_reason.startswith("builder2_slogan_repair_no_valid_minimal_patch"):
+            pass
+        elif "semanticBridge.meaningsConverge" in final_reason or final_reason.startswith(
             "builder2_slogan_repair_patch_regressed"
         ):
-            final_reason = "builder2_slogan_repair_patch_regressed_valid_field:semanticBridge.meaningsConverge"
+            final_reason = "builder2_slogan_repair_allowed_patch_semantic_incompatibility:semanticBridge.meaningsConverge"
         elif is_slogan_word_limit_failure(final_reason):
             final_reason = "builder2_creator_slogan_word_limit_repair_failed"
     if state is not None:

@@ -204,7 +204,7 @@ def run_incomplete_tournament_resume(
             invocation_creator_repair_calls=creator_repair_delta,
         )
         report["thinkSmallNormalCreatorCalls"] = report["totalCreatorNormalCalls"]
-        report["thinkSmallRepairCalls"] = report["totalCreatorRepairCalls"]
+        report["thinkSmallRepairCalls"] = report["persistedCreatorRepairCalls"]
         report["thinkSmallJudgeCalls"] = min(1, judge_delta)
     else:
         report["thinkSmallNormalCreatorCalls"] = int(baseline_metrics.get("creatorCalls") or 0)

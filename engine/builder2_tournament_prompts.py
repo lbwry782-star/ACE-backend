@@ -223,12 +223,14 @@ def build_creator_repair_prompt(
             "the canonical slogan.\n"
             "- Keep exactly one canonical slogan; dependsOnEarlierCopy must remain false; do not add a headline or second copy layer.\n"
             f"{build_slogan_word_limit_prompt_text()}\n"
-            "- Return a JSON object with top-level key sloganRepairPatch containing ONLY the allowlisted slogan-related fields.\n"
-            "- Do NOT return a full Creator candidate; the server merges sloganRepairPatch into the original candidate.\n"
-            "- sloganRepairPatch may include: advertisingClosure.sloganText, semanticBridge.sloganMeaning, "
-            "semanticBridge.howTheMeaningsMeet, metaphoricalEmbodiment.sloganBridgeToBusinessMeaning, "
+            "- Return a JSON object with top-level key sloganRepairPatch containing ONLY fields that must change.\n"
+            "- Required: advertisingClosure.sloganText.\n"
+            "- Optional: semanticBridge.sloganMeaning, semanticBridge.howTheMeaningsMeet, "
+            "metaphoricalEmbodiment.sloganBridgeToBusinessMeaning, "
             "visualBridgeAssessment.sloganConnectionToVisibleDetail, visualBridgeAssessment.sloganConnectionToRelativeAdvantage, "
             "verbalPotential.keywordOrKeyPhrase, verbalPotential.strategicMeaning.\n"
+            "- Do NOT repeat unchanged fields; omit any field that can remain from the original candidate.\n"
+            "- Do NOT return a full Creator candidate; the server merges sloganRepairPatch into the original candidate.\n"
         )
     return (
         "You are the Builder2 Creator repair role.\n"

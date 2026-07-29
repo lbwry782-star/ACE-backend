@@ -26,10 +26,13 @@ from engine.builder2_creator import (
 )
 from engine.builder2_creator_slogan_repair_patch import (
     ALLOWLIST_PATHS,
+    SLOGAN_REPAIR_CALL_LEDGER_KEY,
     SLOGAN_REPAIR_PARSED_INDEX_KEY,
     additional_paid_slogan_repair_allowed,
     candidate_fails_only_slogan_word_limit,
     merge_slogan_repair_patch_response,
+    populate_slogan_repair_call_report,
+    reconcile_slogan_repair_call_ledger,
     try_offline_slogan_repair_salvage_for_prototype,
     validate_and_merge_slogan_repair_candidate,
 )
@@ -257,6 +260,7 @@ class TestSloganRepairPatchMerger(unittest.TestCase):
             base,
             repair,
             product_name="ACE Product",
+            apply_all_allowlisted=True,
         )
         self.assertTrue(merged["semanticBridge"]["meaningsConverge"])
         self.assertEqual(base["visualMechanism"], merged["visualMechanism"])
@@ -291,10 +295,82 @@ class TestSloganRepairPatchMerger(unittest.TestCase):
         repair = deepcopy(base)
         repair["advertisingClosure"]["sloganText"] = _hebrew_slogan(4)
         repair["prototypeMethodApplied"] = "Changed method"
-        merged, meta = merge_slogan_repair_patch_response(base, repair, product_name="ACE Product")
+        merged, meta = merge_slogan_repair_patch_response(
+            base, repair, product_name="ACE Product", apply_all_allowlisted=True
+        )
         self.assertEqual(base["prototypeMethodApplied"], merged["prototypeMethodApplied"])
         for path in meta["appliedPaths"]:
             self.assertTrue(path in ALLOWLIST_PATHS or any(path.startswith(f"{p}.") for p in ALLOWLIST_PATHS))
+
+    def test_minimal_merge_selects_slogan_only_when_valid(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        repair = deepcopy(base)
+        repair["advertisingClosure"]["sloganText"] = _hebrew_slogan(7)
+        repair["semanticBridge"]["sloganMeaning"] = "Incompatible repair-only slogan meaning."
+        repair["semanticBridge"]["howTheMeaningsMeet"] = "Incompatible repair-only bridge explanation."
+        repair["semanticBridge"]["meaningsConverge"] = False
+        candidate, meta = validate_and_merge_slogan_repair_candidate(
+            base,
+            repair,
+            assigned_prototype_id="think_small",
+            prototype_display_name="Think Small",
+            strategy_foundation=_strategy(language="he"),
+            product_name="ACE Product",
+        )
+        self.assertEqual(meta["appliedPaths"], ["advertisingClosure.sloganText"])
+        self.assertTrue(candidate["semanticBridge"]["meaningsConverge"])
+        self.assertEqual(
+            base["semanticBridge"]["sloganMeaning"],
+            candidate["semanticBridge"]["sloganMeaning"],
+        )
+
+    def test_legacy_apply_all_applies_eight_paths(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        repair = deepcopy(base)
+        repair["advertisingClosure"]["sloganText"] = _hebrew_slogan(7)
+        repair["semanticBridge"]["sloganMeaning"] = "Repair slogan meaning."
+        repair["semanticBridge"]["howTheMeaningsMeet"] = "Repair bridge explanation."
+        repair["metaphoricalEmbodiment"]["sloganBridgeToBusinessMeaning"] = "Repair business bridge."
+        repair["visualBridgeAssessment"]["sloganConnectionToVisibleDetail"] = "Repair visible detail link."
+        repair["visualBridgeAssessment"]["sloganConnectionToRelativeAdvantage"] = "Repair advantage link."
+        repair["verbalPotential"]["keywordOrKeyPhrase"] = "repair-keyword"
+        repair["verbalPotential"]["strategicMeaning"] = "Repair strategic verbal meaning."
+        _merged, meta = merge_slogan_repair_patch_response(
+            base,
+            repair,
+            product_name="ACE Product",
+            apply_all_allowlisted=True,
+        )
+        self.assertEqual(len(meta["appliedPaths"]), 8)
+
+    def test_all_eight_paths_available_but_minimal_uses_slogan_only(self) -> None:
+        base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
+        repair = deepcopy(base)
+        repair["advertisingClosure"]["sloganText"] = _hebrew_slogan(7)
+        repair["semanticBridge"]["sloganMeaning"] = "Incompatible repair-only slogan meaning."
+        repair["semanticBridge"]["howTheMeaningsMeet"] = "Incompatible repair-only bridge explanation."
+        repair["semanticBridge"]["meaningsConverge"] = False
+        _merged_all, meta_all = merge_slogan_repair_patch_response(
+            base,
+            repair,
+            product_name="ACE Product",
+            apply_all_allowlisted=True,
+        )
+        self.assertEqual(len(meta_all["appliedPaths"]), 8)
+        candidate, meta = validate_and_merge_slogan_repair_candidate(
+            base,
+            repair,
+            assigned_prototype_id="think_small",
+            prototype_display_name="Think Small",
+            strategy_foundation=_strategy(language="he"),
+            product_name="ACE Product",
+        )
+        self.assertEqual(meta["appliedPaths"], ["advertisingClosure.sloganText"])
+        self.assertTrue(candidate["semanticBridge"]["meaningsConverge"])
+        self.assertEqual(
+            base["semanticBridge"]["sloganMeaning"],
+            candidate["semanticBridge"]["sloganMeaning"],
+        )
 
     def test_slogan_repair_patch_object_supported(self) -> None:
         base = self._dual_meaning_base(slogan_text=_hebrew_slogan(9))
@@ -303,7 +379,9 @@ class TestSloganRepairPatchMerger(unittest.TestCase):
                 "advertisingClosure": {"sloganText": _hebrew_slogan(4)},
             }
         }
-        merged, _meta = merge_slogan_repair_patch_response(base, repair, product_name="ACE Product")
+        merged, _meta = merge_slogan_repair_patch_response(
+            base, repair, product_name="ACE Product", apply_all_allowlisted=True
+        )
         self.assertEqual(merged["advertisingClosure"]["sloganText"], _hebrew_slogan(4))
 
 
@@ -391,8 +469,18 @@ class TestSloganRepairOfflineSalvage(unittest.TestCase):
             }
         )
         repaired = deepcopy(original)
-        repaired["advertisingClosure"]["sloganText"] = _hebrew_slogan(5)
+        repaired["advertisingClosure"]["sloganText"] = _hebrew_slogan(7)
+        repaired["semanticBridge"]["sloganMeaning"] = "Repair-only slogan meaning for shorter copy."
+        repaired["semanticBridge"]["howTheMeaningsMeet"] = "Repair-only bridge explanation for shorter copy."
         repaired["semanticBridge"]["meaningsConverge"] = False
+        repaired["metaphoricalEmbodiment"]["sloganBridgeToBusinessMeaning"] = "Repair-only business bridge."
+        repaired["visualBridgeAssessment"]["sloganConnectionToVisibleDetail"] = "Repair-only visible detail link."
+        repaired["visualBridgeAssessment"]["sloganConnectionToRelativeAdvantage"] = "Repair-only advantage link."
+        repaired["verbalPotential"]["keywordOrKeyPhrase"] = "repair-keyword"
+        repaired["verbalPotential"]["strategicMeaning"] = "Repair-only strategic verbal meaning."
+        state[SLOGAN_REPAIR_CALL_LEDGER_KEY] = {
+            "think_small": {"persistedCreatorRepairCalls": 2, "persistedCreatorNormalCalls": 1}
+        }
         state[REJECTED_CREATOR_PARSED_INDEX_KEY] = {
             original_id: {
                 "candidateId": original_id,
@@ -423,6 +511,23 @@ class TestSloganRepairOfflineSalvage(unittest.TestCase):
         self.assertTrue(accepted, (reason, paths))
         self.assertEqual(candidate_id, "cand-1-think_small-1-24f1eeb9")
         self.assertFalse(additional_paid_slogan_repair_allowed(state, "think_small"))
+        bucket = reconcile_slogan_repair_call_ledger(state, prototype_id="think_small")
+        self.assertEqual(bucket["canonicalCreatorRepairCalls"], 1)
+        self.assertEqual(bucket["canonicalCreatorNormalCalls"], 1)
+
+    def test_call_ledger_reconciliation_does_not_double_count(self) -> None:
+        state = self._production_shaped_state()
+        report: Dict[str, Any] = {}
+        populate_slogan_repair_call_report(
+            state,
+            report,
+            prototype_id="think_small",
+            invocation_creator_normal_calls=0,
+            invocation_creator_repair_calls=0,
+        )
+        self.assertEqual(report["persistedCreatorRepairCalls"], 1)
+        self.assertEqual(report["totalCreatorRepairCalls"], 1)
+        self.assertEqual(report["invocationCreatorRepairCalls"], 0)
 
     def test_offline_salvage_persists_repair_response_index(self) -> None:
         state = self._production_shaped_state()

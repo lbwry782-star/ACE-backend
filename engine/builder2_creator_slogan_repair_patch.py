@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from copy import deepcopy
 from datetime import datetime, timezone
+from itertools import combinations
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from engine.builder2_advertising_closure_contract import (
@@ -33,6 +34,30 @@ ALLOWLIST_PATHS: Tuple[str, ...] = (
     "verbalPotential.strategicMeaning",
 )
 
+DEPENDENCY_GROUP_A = "A"
+DEPENDENCY_GROUP_B = "B"
+DEPENDENCY_GROUP_C = "C"
+DEPENDENCY_GROUP_D = "D"
+DEPENDENCY_GROUP_E = "E"
+
+DEPENDENCY_GROUPS: Dict[str, Tuple[str, ...]] = {
+    DEPENDENCY_GROUP_A: ("advertisingClosure.sloganText",),
+    DEPENDENCY_GROUP_B: ("semanticBridge.sloganMeaning", "semanticBridge.howTheMeaningsMeet"),
+    DEPENDENCY_GROUP_C: (
+        "visualBridgeAssessment.sloganConnectionToVisibleDetail",
+        "visualBridgeAssessment.sloganConnectionToRelativeAdvantage",
+    ),
+    DEPENDENCY_GROUP_D: ("metaphoricalEmbodiment.sloganBridgeToBusinessMeaning",),
+    DEPENDENCY_GROUP_E: ("verbalPotential.keywordOrKeyPhrase", "verbalPotential.strategicMeaning"),
+}
+
+OPTIONAL_DEPENDENCY_GROUP_ORDER: Tuple[str, ...] = (
+    DEPENDENCY_GROUP_B,
+    DEPENDENCY_GROUP_C,
+    DEPENDENCY_GROUP_D,
+    DEPENDENCY_GROUP_E,
+)
+
 SEMANTIC_BRIDGE_PRESERVED_KEYS: Tuple[str, ...] = (
     "keyWordOrConcept",
     "visualMeaning",
@@ -42,11 +67,6 @@ SEMANTIC_BRIDGE_PRESERVED_KEYS: Tuple[str, ...] = (
     "physicalMeaningActivatedByVisual",
     "strategicMeaningActivatedBySlogan",
     "meaningsConverge",
-)
-
-SEMANTIC_BRIDGE_SLOGAN_DEPENDENT_KEYS: Tuple[str, ...] = (
-    "sloganMeaning",
-    "howTheMeaningsMeet",
 )
 
 
@@ -127,11 +147,72 @@ def extract_slogan_repair_patch(repair_response: Dict[str, Any]) -> Dict[str, An
     return extracted
 
 
-def _apply_allowlisted_patch(base: Dict[str, Any], patch: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
-    merged = deepcopy(base)
+def extract_repaired_slogan_text(repair_response: Dict[str, Any]) -> str:
+    patch = extract_slogan_repair_patch(repair_response)
+    slogan = _clean(_get_nested(patch, "advertisingClosure.sloganText"))
+    if not slogan:
+        slogan = _clean(_get_nested(repair_response, "advertisingClosure.sloganText"))
+    return slogan
+
+
+def optional_patch_paths_available(repair_response: Dict[str, Any]) -> Dict[str, List[str]]:
+    patch = extract_slogan_repair_patch(repair_response)
+    available: Dict[str, List[str]] = {}
+    for group_id in OPTIONAL_DEPENDENCY_GROUP_ORDER:
+        paths: List[str] = []
+        for path in DEPENDENCY_GROUPS[group_id]:
+            value = _get_nested(patch, path)
+            if value is None:
+                value = _get_nested(repair_response, path)
+            if value is not None and value != "":
+                paths.append(path)
+        if paths:
+            available[group_id] = paths
+    return available
+
+
+def _iter_optional_group_subsets() -> List[Tuple[str, ...]]:
+    subsets: List[Tuple[str, ...]] = [()]
+    for size in range(1, len(OPTIONAL_DEPENDENCY_GROUP_ORDER) + 1):
+        for combo in combinations(OPTIONAL_DEPENDENCY_GROUP_ORDER, size):
+            subsets.append(combo)
+    return subsets
+
+
+def _paths_for_groups(
+    groups: Sequence[str],
+    *,
+    repaired_slogan: str,
+    optional_available: Dict[str, List[str]],
+) -> List[str]:
+    paths: List[str] = []
+    if repaired_slogan:
+        paths.append("advertisingClosure.sloganText")
+    for group_id in groups:
+        paths.extend(optional_available.get(group_id, []))
+    return paths
+
+
+def _apply_selected_patch_paths(
+    base_candidate: Dict[str, Any],
+    repair_response: Dict[str, Any],
+    *,
+    paths: Sequence[str],
+    repaired_slogan: str,
+) -> Tuple[Dict[str, Any], List[str]]:
+    merged = deepcopy(base_candidate)
+    patch = extract_slogan_repair_patch(repair_response)
     applied: List[str] = []
-    for path in ALLOWLIST_PATHS:
+    for path in paths:
+        if path == "advertisingClosure.sloganText":
+            if not repaired_slogan:
+                continue
+            _set_nested(merged, path, repaired_slogan)
+            applied.append(path)
+            continue
         value = _get_nested(patch, path)
+        if value is None:
+            value = _get_nested(repair_response, path)
         if value is None or value == "":
             continue
         _set_nested(merged, path, deepcopy(value))
@@ -139,7 +220,7 @@ def _apply_allowlisted_patch(base: Dict[str, Any], patch: Dict[str, Any]) -> Tup
     return merged, applied
 
 
-def _preserve_semantic_bridge_basis(base: Dict[str, Any], merged: Dict[str, Any], patch: Dict[str, Any]) -> List[str]:
+def preserve_semantic_bridge_basis(base: Dict[str, Any], merged: Dict[str, Any]) -> List[str]:
     reverted: List[str] = []
     base_bridge = base.get("semanticBridge") if isinstance(base.get("semanticBridge"), dict) else {}
     merged_bridge = merged.setdefault("semanticBridge", {})
@@ -153,14 +234,26 @@ def _preserve_semantic_bridge_basis(base: Dict[str, Any], merged: Dict[str, Any]
         merged_bridge[key] = deepcopy(base_bridge[key])
         if before != merged_bridge.get(key):
             reverted.append(f"semanticBridge.{key}")
-    for key in SEMANTIC_BRIDGE_SLOGAN_DEPENDENT_KEYS:
-        patch_value = _get_nested(patch, f"semanticBridge.{key}")
-        if patch_value is not None and _clean(patch_value):
-            merged_bridge[key] = patch_value
-    base_converge = base_bridge.get("meaningsConverge")
-    if base_converge is True and merged_bridge.get("meaningsConverge") is not True:
-        merged_bridge["meaningsConverge"] = True
-        reverted.append("semanticBridge.meaningsConverge")
+    return reverted
+
+
+def revert_forbidden_paths(base_candidate: Dict[str, Any], merged: Dict[str, Any]) -> List[str]:
+    reverted: List[str] = []
+    changed_paths = sorted(diff_changed_paths(base_candidate, merged))
+    forbidden = [path for path in changed_paths if not _path_allowed(path)]
+    if forbidden:
+        for path in forbidden:
+            base_value = _get_nested(base_candidate, path)
+            if base_value is None:
+                _delete_nested(merged, path)
+            else:
+                _set_nested(merged, path, deepcopy(base_value))
+            reverted.append(path)
+        logger.info(
+            "BUILDER2_SLOGAN_REPAIR_FORBIDDEN_CHANGE_REVERTED pathCount=%s paths=%s",
+            len(forbidden),
+            ",".join(forbidden[:12]),
+        )
     return reverted
 
 
@@ -174,63 +267,194 @@ def diff_changed_paths(base: Dict[str, Any], merged: Dict[str, Any]) -> Set[str]
     return changed
 
 
-def merge_slogan_repair_patch_response(
+def _validation_failure_field(exc: Builder2TournamentError) -> str:
+    reason = str(exc.args[0] if exc.args else "")
+    if ":" in reason:
+        return reason.split(":", 1)[-1]
+    return reason
+
+
+def _classify_slogan_repair_validation_failure(field: str, *, forbidden_reverted: Sequence[str]) -> str:
+    if field in forbidden_reverted:
+        return f"builder2_slogan_repair_forbidden_path_attempted:{field}"
+    if field.startswith("semanticBridge.") or field.startswith("visualBridgeAssessment.") or field.startswith(
+        "metaphoricalEmbodiment."
+    ) or field.startswith("verbalPotential."):
+        return f"builder2_slogan_repair_allowed_patch_semantic_incompatibility:{field}"
+    return f"builder2_slogan_repair_offline_merge_invalid:{field}"
+
+
+def select_minimal_validating_patch(
     base_candidate: Dict[str, Any],
     repair_response: Dict[str, Any],
     *,
+    assigned_prototype_id: str,
+    prototype_display_name: str,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
     product_name: str = "",
+    job_id: str = "",
+    tournament_id: str = "",
+    candidate_id: str = "",
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    patch = extract_slogan_repair_patch(repair_response)
-    if not patch and not _clean(_get_nested(repair_response, "advertisingClosure.sloganText")):
+    repaired_slogan = extract_repaired_slogan_text(repair_response)
+    if not repaired_slogan:
         raise Builder2TournamentError("builder2_slogan_repair_offline_merge_invalid:patch_missing")
 
-    merged, applied_paths = _apply_allowlisted_patch(base_candidate, patch or repair_response)
-    reverted_paths = _preserve_semantic_bridge_basis(base_candidate, merged, patch or repair_response)
-
-    changed_paths = sorted(diff_changed_paths(base_candidate, merged))
-    forbidden = [path for path in changed_paths if not _path_allowed(path)]
-    if forbidden:
-        for path in forbidden:
-            base_value = _get_nested(base_candidate, path)
-            if base_value is None:
-                _delete_nested(merged, path)
-            else:
-                _set_nested(merged, path, deepcopy(base_value))
-            if path not in reverted_paths:
-                reverted_paths.append(path)
-        logger.info(
-            "BUILDER2_SLOGAN_REPAIR_FORBIDDEN_CHANGE_REVERTED pathCount=%s paths=%s",
-            len(forbidden),
-            ",".join(forbidden[:12]),
-        )
-
-    closure = merged.get("advertisingClosure") if isinstance(merged.get("advertisingClosure"), dict) else {}
+    closure = base_candidate.get("advertisingClosure") if isinstance(base_candidate.get("advertisingClosure"), dict) else {}
     product_label = _clean(closure.get("productNameText") or product_name)
-    slogan = _clean(closure.get("sloganText"))
-    if not slogan:
-        raise Builder2TournamentError("builder2_slogan_repair_offline_merge_invalid:advertisingClosure.sloganText")
-    validate_slogan_text_structure(slogan=slogan, product_name=product_label)
+    validate_slogan_text_structure(slogan=repaired_slogan, product_name=product_label)
 
+    optional_available = optional_patch_paths_available(repair_response)
+    logger.info(
+        "BUILDER2_SLOGAN_REPAIR_MINIMAL_PATCH_START candidateId=%s prototypeId=%s optionalGroupCount=%s configuredWordLimit=%s actualWordCount=%s",
+        candidate_id or "(none)",
+        assigned_prototype_id,
+        len(optional_available),
+        SLOGAN_MAX_WORD_COUNT,
+        count_slogan_words_excluding_product(repaired_slogan, product_label),
+    )
+
+    passing: List[Tuple[Dict[str, Any], List[str], Tuple[str, ...], str]] = []
+    last_failure_field = ""
+
+    for groups in _iter_optional_group_subsets():
+        paths = _paths_for_groups(groups, repaired_slogan=repaired_slogan, optional_available=optional_available)
+        merged, applied_paths = _apply_selected_patch_paths(
+            base_candidate,
+            repair_response,
+            paths=paths,
+            repaired_slogan=repaired_slogan,
+        )
+        reverted_paths = preserve_semantic_bridge_basis(base_candidate, merged)
+        forbidden_reverted = revert_forbidden_paths(base_candidate, merged)
+        reverted_paths = list(reverted_paths) + list(forbidden_reverted)
+        group_label = ",".join(groups) if groups else "A"
+        try:
+            candidate = validate_creator_candidate(
+                merged,
+                assigned_prototype_id=assigned_prototype_id,
+                prototype_display_name=prototype_display_name,
+                strategy_foundation=strategy_foundation,
+                compatibility_mode=compatibility_mode,
+                job_id=job_id,
+                tournament_id=tournament_id,
+                candidate_id=candidate_id,
+                tournament_state=tournament_state,
+            )
+        except Builder2TournamentError as exc:
+            last_failure_field = _validation_failure_field(exc)
+            logger.info(
+                "BUILDER2_SLOGAN_REPAIR_MINIMAL_PATCH_VARIANT_TESTED candidateId=%s prototypeId=%s groups=%s "
+                "appliedPathCount=%s validationResult=failed failureField=%s",
+                candidate_id or "(none)",
+                assigned_prototype_id,
+                group_label,
+                len(applied_paths),
+                last_failure_field,
+            )
+            if groups and last_failure_field.startswith("semanticBridge."):
+                logger.info(
+                    "BUILDER2_SLOGAN_REPAIR_ALLOWED_PATCH_INCOMPATIBLE candidateId=%s prototypeId=%s groups=%s failureField=%s",
+                    candidate_id or "(none)",
+                    assigned_prototype_id,
+                    group_label,
+                    last_failure_field,
+                )
+            continue
+
+        logger.info(
+            "BUILDER2_SLOGAN_REPAIR_MINIMAL_PATCH_VARIANT_TESTED candidateId=%s prototypeId=%s groups=%s "
+            "appliedPathCount=%s validationResult=passed",
+            candidate_id or "(none)",
+            assigned_prototype_id,
+            group_label,
+            len(applied_paths),
+        )
+        passing.append((candidate, applied_paths, groups, group_label))
+
+    if not passing:
+        if last_failure_field:
+            raise Builder2TournamentError(f"builder2_slogan_repair_no_valid_minimal_patch:{last_failure_field}")
+        raise Builder2TournamentError("builder2_slogan_repair_no_valid_minimal_patch:validation_failed")
+
+    passing.sort(key=lambda item: (len(item[1]), item[2]))
+    candidate, applied_paths, groups, group_label = passing[0]
+    logger.info(
+        "BUILDER2_SLOGAN_REPAIR_MINIMAL_PATCH_SELECTED candidateId=%s prototypeId=%s groups=%s appliedPathCount=%s paths=%s",
+        candidate_id or "(none)",
+        assigned_prototype_id,
+        group_label,
+        len(applied_paths),
+        ",".join(applied_paths),
+    )
     logger.info(
         "BUILDER2_SLOGAN_REPAIR_PATCH_RECEIVED appliedPathCount=%s revertedPathCount=%s configuredWordLimit=%s actualWordCount=%s",
         len(applied_paths),
-        len(reverted_paths),
+        0,
         SLOGAN_MAX_WORD_COUNT,
-        count_slogan_words_excluding_product(slogan, product_label),
+        count_slogan_words_excluding_product(
+            _clean(_get_nested(candidate, "advertisingClosure.sloganText")),
+            product_label,
+        ),
     )
     if applied_paths:
         logger.info(
             "BUILDER2_SLOGAN_REPAIR_PATCH_PATHS_VALIDATED paths=%s",
             ",".join(applied_paths),
         )
-
     meta = {
         "appliedPaths": applied_paths,
-        "revertedPaths": reverted_paths,
-        "changedPaths": sorted(diff_changed_paths(base_candidate, merged)),
-        "actualWordCount": count_slogan_words_excluding_product(slogan, product_label),
+        "revertedPaths": [],
+        "changedPaths": sorted(diff_changed_paths(base_candidate, candidate)),
+        "selectedGroups": list(groups),
+        "actualWordCount": count_slogan_words_excluding_product(
+            _clean(_get_nested(candidate, "advertisingClosure.sloganText")),
+            product_label,
+        ),
     }
-    return merged, meta
+    return candidate, meta
+
+
+def merge_slogan_repair_patch_response(
+    base_candidate: Dict[str, Any],
+    repair_response: Dict[str, Any],
+    *,
+    product_name: str = "",
+    apply_all_allowlisted: bool = False,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if apply_all_allowlisted:
+        patch = extract_slogan_repair_patch(repair_response)
+        if not patch and not _clean(_get_nested(repair_response, "advertisingClosure.sloganText")):
+            raise Builder2TournamentError("builder2_slogan_repair_offline_merge_invalid:patch_missing")
+        paths = [path for path in ALLOWLIST_PATHS if _get_nested(patch or repair_response, path) not in (None, "")]
+        if "advertisingClosure.sloganText" not in paths:
+            slogan = extract_repaired_slogan_text(repair_response)
+            if slogan:
+                paths = ["advertisingClosure.sloganText", *paths]
+        merged, applied_paths = _apply_selected_patch_paths(
+            base_candidate,
+            repair_response,
+            paths=paths,
+            repaired_slogan=extract_repaired_slogan_text(repair_response),
+        )
+        reverted_paths = preserve_semantic_bridge_basis(base_candidate, merged)
+        reverted_paths.extend(revert_forbidden_paths(base_candidate, merged))
+        closure = merged.get("advertisingClosure") if isinstance(merged.get("advertisingClosure"), dict) else {}
+        product_label = _clean(closure.get("productNameText") or product_name)
+        slogan = _clean(closure.get("sloganText"))
+        if not slogan:
+            raise Builder2TournamentError("builder2_slogan_repair_offline_merge_invalid:advertisingClosure.sloganText")
+        validate_slogan_text_structure(slogan=slogan, product_name=product_label)
+        meta = {
+            "appliedPaths": applied_paths,
+            "revertedPaths": reverted_paths,
+            "changedPaths": sorted(diff_changed_paths(base_candidate, merged)),
+            "actualWordCount": count_slogan_words_excluding_product(slogan, product_label),
+        }
+        return merged, meta
+    raise Builder2TournamentError("builder2_slogan_repair_offline_merge_invalid:minimal_patch_required")
 
 
 def original_candidate_slogan_only_structural_errors(
@@ -412,17 +636,44 @@ def _ledger_bucket(state: Dict[str, Any], prototype_id: str) -> Dict[str, Any]:
     return bucket
 
 
-def sync_slogan_repair_call_ledger_from_metrics(state: Dict[str, Any], *, prototype_id: str) -> Dict[str, Any]:
+def find_rejected_creator_for_prototype(state: Dict[str, Any], prototype_id: str) -> Optional[Dict[str, Any]]:
+    from engine.builder2_complete_ad_creator_recovery import find_rejected_creator_for_prototype as _find
+
+    return _find(state, prototype_id)
+
+
+def reconcile_slogan_repair_call_ledger(state: Dict[str, Any], *, prototype_id: str) -> Dict[str, Any]:
     bucket = _ledger_bucket(state, prototype_id)
     metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
-    if find_original_slogan_word_limit_rejection(state, prototype_id) or _clean(
-        (find_rejected_creator_for_prototype(state, prototype_id) or {}).get("failureReason")
-    ):
-        bucket.setdefault("persistedCreatorNormalCalls", 1)
-    bucket["persistedCreatorRepairCalls"] = max(
-        int(bucket.get("persistedCreatorRepairCalls") or 0),
-        int(metrics.get("creatorRepairCalls") or 0),
-    )
+    legacy_normal = int(metrics.get("creatorCalls") or 0)
+    legacy_repair = int(metrics.get("creatorRepairCalls") or 0)
+    ledger_normal = int(bucket.get("persistedCreatorNormalCalls") or 0)
+    ledger_repair = int(bucket.get("persistedCreatorRepairCalls") or 0)
+
+    canonical_normal = 1 if find_original_slogan_word_limit_rejection(state, prototype_id) else ledger_normal
+    if canonical_normal <= 0 and legacy_normal > 0 and find_original_slogan_word_limit_rejection(state, prototype_id):
+        canonical_normal = 1
+
+    has_patch_source = bool(find_slogan_repair_patch_source(state, prototype_id))
+    canonical_repair = legacy_repair
+    if has_patch_source and legacy_repair > 0:
+        canonical_repair = min(legacy_repair, 1)
+    duplicate_suppressed = max(0, ledger_repair - canonical_repair) if ledger_repair > canonical_repair else 0
+    if ledger_repair != canonical_repair or ledger_normal != canonical_normal:
+        logger.info(
+            "BUILDER2_REASONING_CALL_LEDGER_RECONCILED role=builder2_creator prototypeId=%s legacyCount=%s "
+            "ledgerCount=%s canonicalUniqueCount=%s duplicateSuppressed=%s callKind=creatorRepair",
+            prototype_id,
+            legacy_repair,
+            ledger_repair,
+            canonical_repair,
+            duplicate_suppressed,
+        )
+
+    bucket["persistedCreatorNormalCalls"] = canonical_normal
+    bucket["persistedCreatorRepairCalls"] = canonical_repair
+    bucket["canonicalCreatorNormalCalls"] = canonical_normal
+    bucket["canonicalCreatorRepairCalls"] = canonical_repair
     bucket.setdefault("persistedJudgeCalls", int(metrics.get("judgeCalls") or 0))
     bucket.setdefault("persistedWinnerCalls", int(metrics.get("winnerDevelopmentCalls") or 0))
     bucket.setdefault(
@@ -432,10 +683,8 @@ def sync_slogan_repair_call_ledger_from_metrics(state: Dict[str, Any], *, protot
     return bucket
 
 
-def find_rejected_creator_for_prototype(state: Dict[str, Any], prototype_id: str) -> Optional[Dict[str, Any]]:
-    from engine.builder2_complete_ad_creator_recovery import find_rejected_creator_for_prototype as _find
-
-    return _find(state, prototype_id)
+def sync_slogan_repair_call_ledger_from_metrics(state: Dict[str, Any], *, prototype_id: str) -> Dict[str, Any]:
+    return reconcile_slogan_repair_call_ledger(state, prototype_id=prototype_id)
 
 
 def populate_slogan_repair_call_report(
@@ -446,26 +695,23 @@ def populate_slogan_repair_call_report(
     invocation_creator_normal_calls: int = 0,
     invocation_creator_repair_calls: int = 0,
 ) -> None:
-    bucket = sync_slogan_repair_call_ledger_from_metrics(state, prototype_id=prototype_id)
-    metrics = state.get("metrics") if isinstance(state.get("metrics"), dict) else {}
-    persisted_normal = int(bucket.get("persistedCreatorNormalCalls") or 0)
-    persisted_repair = int(bucket.get("persistedCreatorRepairCalls") or 0)
-    bucket["persistedCreatorNormalCalls"] = persisted_normal
-    bucket["persistedCreatorRepairCalls"] = persisted_repair
+    bucket = reconcile_slogan_repair_call_ledger(state, prototype_id=prototype_id)
+    persisted_normal = int(bucket.get("canonicalCreatorNormalCalls") or bucket.get("persistedCreatorNormalCalls") or 0)
+    persisted_repair = int(bucket.get("canonicalCreatorRepairCalls") or bucket.get("persistedCreatorRepairCalls") or 0)
     report["invocationCreatorNormalCalls"] = int(invocation_creator_normal_calls)
     report["invocationCreatorRepairCalls"] = int(invocation_creator_repair_calls)
     report["persistedCreatorNormalCalls"] = persisted_normal
     report["persistedCreatorRepairCalls"] = persisted_repair
-    report["totalCreatorNormalCalls"] = persisted_normal
-    report["totalCreatorRepairCalls"] = persisted_repair
+    report["totalCreatorNormalCalls"] = persisted_normal + int(invocation_creator_normal_calls)
+    report["totalCreatorRepairCalls"] = persisted_repair + int(invocation_creator_repair_calls)
     report["additionalPaidRepairAllowed"] = additional_paid_slogan_repair_allowed(state, prototype_id)
     report["offlineSalvageAttempted"] = bool(bucket.get("offlineSalvageAttempted"))
     report["offlineSalvageAccepted"] = bool(bucket.get("offlineSalvageAccepted"))
 
 
 def additional_paid_slogan_repair_allowed(state: Dict[str, Any], prototype_id: str) -> bool:
-    bucket = sync_slogan_repair_call_ledger_from_metrics(state, prototype_id=prototype_id)
-    repair_calls = int(bucket.get("persistedCreatorRepairCalls") or 0)
+    bucket = reconcile_slogan_repair_call_ledger(state, prototype_id=prototype_id)
+    repair_calls = int(bucket.get("canonicalCreatorRepairCalls") or bucket.get("persistedCreatorRepairCalls") or 0)
     if repair_calls >= 1 and bucket.get("offlineSalvageAccepted"):
         return False
     if repair_calls >= 1 and find_slogan_repair_patch_source(state, prototype_id):
@@ -493,28 +739,22 @@ def validate_and_merge_slogan_repair_candidate(
     candidate_id: str = "",
     tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    merged, meta = merge_slogan_repair_patch_response(
-        base_candidate,
-        repair_response,
-        product_name=product_name,
-    )
     try:
-        candidate = validate_creator_candidate(
-            merged,
+        candidate, meta = select_minimal_validating_patch(
+            base_candidate,
+            repair_response,
             assigned_prototype_id=assigned_prototype_id,
             prototype_display_name=prototype_display_name,
             strategy_foundation=strategy_foundation,
             compatibility_mode=compatibility_mode,
+            product_name=product_name,
             job_id=job_id,
             tournament_id=tournament_id,
             candidate_id=candidate_id,
             tournament_state=tournament_state,
         )
-    except Builder2TournamentError as exc:
-        field = str(exc.args[0] if exc.args else "")
-        if "semanticBridge.meaningsConverge" in field:
-            raise Builder2TournamentError("builder2_slogan_repair_patch_regressed_valid_field:semanticBridge.meaningsConverge") from exc
-        raise Builder2TournamentError(f"builder2_slogan_repair_offline_merge_invalid:{field.split(':')[-1]}") from exc
+    except Builder2TournamentError:
+        raise
     logger.info(
         "BUILDER2_SLOGAN_REPAIR_MERGED_CANDIDATE_VALIDATED candidateId=%s prototypeId=%s appliedPathCount=%s",
         candidate_id or "(none)",
@@ -631,6 +871,7 @@ def try_offline_slogan_repair_salvage_for_prototype(
                 if is_slogan_word_limit_failure(_clean(payload.get("failureReason"))):
                     rejected_index.pop(cid, None)
     record_offline_slogan_salvage_attempt(state, prototype_id=prototype_id, accepted=True)
+    reconcile_slogan_repair_call_ledger(state, prototype_id=prototype_id)
     logger.info(
         "BUILDER2_SLOGAN_REPAIR_OFFLINE_SALVAGE_ACCEPTED jobId=%s prototypeId=%s candidateId=%s",
         _clean(state.get("jobId")) or "(none)",
