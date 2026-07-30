@@ -145,7 +145,7 @@ class TestRecoveryEligibilityBlocking(unittest.TestCase):
     def test_valid_closure_inclusive_final_blocks_recovery(self) -> None:
         state = _false_completion_state(with_valid_closure=True)
         state["mediaResume"]["advertisingClosureRendered"] = True
-        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 12.01
+        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 13.51
         evaluation = evaluate_finalization_recovery_eligibility(
             state=state,
             plan=state["winnerDevelopmentPlan"],
@@ -159,7 +159,7 @@ class TestRecoveryEligibilityBlocking(unittest.TestCase):
         state = _false_completion_state(with_valid_closure=True)
         state["mediaResume"]["advertisingClosureRendered"] = True
         state["mediaResume"]["advertisingClosureStatus"] = "completed"
-        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 12.01
+        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 13.51
         evaluation = evaluate_finalization_recovery_eligibility(
             state=state,
             plan=state["winnerDevelopmentPlan"],

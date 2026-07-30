@@ -78,7 +78,7 @@ def _completed_false_publication_state() -> dict[str, Any]:
     media["finalVideoPath"] = BROKEN_HEADLINE_FINAL_URL
     media["advertisingClosureRendered"] = True
     media["advertisingClosureStatus"] = "completed"
-    media["actualFinalVideoDurationSeconds"] = 12.034
+    media["actualFinalVideoDurationSeconds"] = 13.534
     media["headlineReconstructionCompleted"] = True
     media.pop("finalPublicationVerificationAccepted", None)
     media.pop("finalPublicationDurableStorageConfirmed", None)

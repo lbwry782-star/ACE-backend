@@ -18,7 +18,9 @@ logger = logging.getLogger(__name__)
 
 SLOGAN_MAX_WORD_COUNT = 7
 
-DEFAULT_CLOSURE_DURATION_SECONDS = 2.0
+from engine.builder2_new_format_config import resolve_builder2_end_card_duration_seconds
+
+DEFAULT_CLOSURE_DURATION_SECONDS = resolve_builder2_end_card_duration_seconds()
 DEFAULT_CLOSURE_PRESENTATION_MODE = "end_card"
 VALID_CLOSURE_PRESENTATION_MODES = frozenset({"end_card", "final_overlay"})
 VALID_CLOSURE_HEADLINE_SOURCES = frozenset(

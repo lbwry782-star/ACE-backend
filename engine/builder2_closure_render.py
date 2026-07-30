@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
 
 import requests
@@ -392,6 +392,7 @@ def render_builder2_advertising_closure_endcard(
             product_name=product,
             slogan=slogan_text,
             language=lang,
+            closure_segment_duration_seconds=duration_seconds,
         )
     except Builder2TournamentError as exc:
         raise Builder2ClosureRenderError(
@@ -681,7 +682,7 @@ def render_builder2_advertising_closure_endcard(
             input_fingerprint=input_fingerprint,
             closure_ffprobe_calls=closure_ffprobe_calls,
             duration_diagnostics=duration_diagnostics,
-            typography_metadata=typography_layout.metadata(),
+            typography_metadata=typography_layout.metadata(measured_final_duration_seconds=measured),
         )
     finally:
         try:

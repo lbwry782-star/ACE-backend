@@ -46,7 +46,7 @@ def _success_child_script() -> List[str]:
         os.write(2, b"BUILDER2_CLOSURE_CONCAT_INVOKE stage=concatenation elapsedMs=1.0 cardOutputCreated=true\\n")
         print("INFO BUILDER2_CLOSURE_CONCAT_COMPLETED ffmpegReturnCode=0 outputCreated=true", flush=True)
         os.write(2, b"BUILDER2_CLOSURE_CONCAT_RETURNED stage=concatenation elapsedMs=2.0 concatReturnAccepted=true\\n")
-        print("INFO BUILDER2_CLOSURE_OUTPUT_PROBED measuredFinalDurationSeconds=12.034", flush=True)
+        print("INFO BUILDER2_CLOSURE_OUTPUT_PROBED measuredFinalDurationSeconds=13.534", flush=True)
         print("INFO BUILDER2_CLOSURE_DURATION_VERIFIED durationAccepted=true", flush=True)
         print("INFO BUILDER2_CLOSURE_ENDCARD_DONE elapsedMs=3.0 durationAccepted=true", flush=True)
         os.write(2, b"BUILDER2_CLOSURE_RESULT_RETURNING stage=completion elapsedMs=3.0 durationAccepted=true\\n")
@@ -324,7 +324,7 @@ class TestProbeChildProcess(unittest.TestCase):
 
 class TestClosureLowLevelMarkers(unittest.TestCase):
     @patch("engine.builder2_closure_render._run_checked")
-    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 12.034])
+    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 13.534])
     @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
     @patch("engine.builder2_closure_render._default_font_path", return_value="/fonts/default.ttf")
     @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/usr/bin/ffmpeg")
@@ -372,7 +372,7 @@ class TestClosureLowLevelMarkers(unittest.TestCase):
         self.assertGreater(invoke_pos, -1)
         self.assertGreater(returned_pos, invoke_pos)
         self.assertGreater(result_pos, returned_pos)
-        self.assertAlmostEqual(result.measured_duration_seconds, 12.034, places=3)
+        self.assertAlmostEqual(result.measured_duration_seconds, 13.534, places=3)
         self.assertEqual(run_checked.call_count, 2)
 
 

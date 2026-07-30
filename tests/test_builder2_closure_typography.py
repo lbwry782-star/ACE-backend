@@ -18,15 +18,20 @@ from engine.builder2_closure_render import ClosureRenderResult, render_builder2_
 from engine.builder2_closure_rerender_inspect import inspect_builder2_closure_rerender, main as rerender_inspect_main
 from engine.builder2_closure_typography import (
     BUILDER2_CLOSURE_TYPOGRAPHY_V1,
+    BUILDER2_CLOSURE_TYPOGRAPHY_V2,
     BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
     CLOSURE_BACKGROUND_FFMPEG_COLOR,
     CLOSURE_BACKGROUND_STYLE_VERSION,
+    CLOSURE_PRODUCT_REVEAL_START_S,
+    CLOSURE_SLOGAN_REVEAL_START_S,
+    CLOSURE_TEXT_REVEAL_VERSION,
     MIN_ACCEPTABLE_DOMINANCE_RATIO,
     PREVIOUS_PRODUCT_SLOGAN_BLOCK_GAP_PX,
     PRODUCT_FONT_RELATIVE,
     PRODUCT_SLOGAN_BLOCK_GAP_PX,
     SLOGAN_FONT_RELATIVE,
     TARGET_PRODUCT_SLOGAN_SIZE_RATIO,
+    build_closure_card_drawtext_filter,
     closure_card_lavfi_background,
     fit_builder2_closure_typography,
     font_supports_hebrew_glyphs,
@@ -157,7 +162,7 @@ class TestBuilder2ClosureTypographyContract(unittest.TestCase):
         )
         meta = layout.metadata()
         self.assertEqual(meta["typographyContractVersion"], BUILDER2_CLOSURE_TYPOGRAPHY_VERSION)
-        self.assertEqual(meta["typographyContractVersion"], "builder2_closure_typography_v2")
+        self.assertEqual(meta["typographyContractVersion"], "builder2_closure_typography_v3")
         self.assertTrue(meta["productNameRenderedAsPlainText"])
         self.assertTrue(meta["sloganRenderedExactlyOnce"])
         self.assertFalse(meta["separateHeadlineRendered"])
@@ -165,6 +170,12 @@ class TestBuilder2ClosureTypographyContract(unittest.TestCase):
         self.assertTrue(meta["closurePunctuationSanitizationApplied"])
         self.assertEqual(meta["closureBackgroundStyleVersion"], CLOSURE_BACKGROUND_STYLE_VERSION)
         self.assertEqual(meta["effectiveProductSloganGapPx"], PRODUCT_SLOGAN_BLOCK_GAP_PX)
+        self.assertTrue(meta["closureTextRevealEnabled"])
+        self.assertEqual(meta["closureTextRevealVersion"], CLOSURE_TEXT_REVEAL_VERSION)
+        self.assertTrue(meta["productTextRevealApplied"])
+        self.assertTrue(meta["sloganTextRevealApplied"])
+        self.assertAlmostEqual(meta["configuredClosureSegmentDurationSeconds"], 3.5, places=2)
+        self.assertAlmostEqual(meta["configuredFinalVideoDurationSeconds"], 13.5, places=2)
 
     def test_vertical_spacing_tighter_than_previous_version(self) -> None:
         layout = fit_builder2_closure_typography(
@@ -173,7 +184,14 @@ class TestBuilder2ClosureTypographyContract(unittest.TestCase):
             language="en",
         )
         self.assertLess(layout.product_slogan_gap_px, PREVIOUS_PRODUCT_SLOGAN_BLOCK_GAP_PX)
-        self.assertEqual(layout.product_slogan_gap_px, 18)
+        self.assertEqual(layout.product_slogan_gap_px, 9)
+        product_specs = [spec for spec in layout.line_specs if spec.role == "product"]
+        slogan_specs = [spec for spec in layout.line_specs if spec.role == "slogan"]
+        self.assertTrue(product_specs)
+        self.assertTrue(slogan_specs)
+        last_product_y = product_specs[-1].y_px
+        first_slogan_y = slogan_specs[0].y_px
+        self.assertGreaterEqual(first_slogan_y - last_product_y, layout.product_slogan_gap_px)
 
     def test_punctuation_removed_from_rendered_copy(self) -> None:
         layout = fit_builder2_closure_typography(
@@ -199,8 +217,27 @@ class TestBuilder2ClosureTypographyContract(unittest.TestCase):
         self.assertNotIn(",", rendered)
         self.assertNotIn("!", rendered)
 
+    def test_drawtext_filter_uses_upward_reveal_y_expression(self) -> None:
+        layout = fit_builder2_closure_typography(
+            product_name="Product",
+            slogan="Slogan line",
+            language="en",
+        )
+        from pathlib import Path as PathType
+
+        text_paths = [PathType(f"/tmp/line_{index}.txt") for index in range(len(layout.line_specs))]
+        filter_chain = build_closure_card_drawtext_filter(
+            layout,
+            textfile_paths=text_paths,
+            ffmpeg_path_filter=lambda path: str(path),
+        )
+        self.assertIn("y='", filter_chain)
+        self.assertNotIn(f"y={layout.line_specs[0].y_px}", filter_chain)
+        self.assertIn(f"t-{CLOSURE_PRODUCT_REVEAL_START_S:.3f}", filter_chain)
+        self.assertIn(f"t-{CLOSURE_SLOGAN_REVEAL_START_S:.3f}", filter_chain)
+
     def test_black_purple_background_lavfi(self) -> None:
-        spec = closure_card_lavfi_background(width=1280, height=720, duration=2.0)
+        spec = closure_card_lavfi_background(width=1280, height=720, duration=3.5)
         self.assertIn(CLOSURE_BACKGROUND_FFMPEG_COLOR, spec)
         self.assertNotIn("c=black", spec)
 
@@ -223,7 +260,14 @@ class TestBuilder2ClosureRerenderInspect(unittest.TestCase):
         self.assertTrue(report["canonicalSloganPresent"])
         self.assertEqual(report["requestedTypographyContractVersion"], BUILDER2_CLOSURE_TYPOGRAPHY_VERSION)
 
-    def test_v1_job_needs_v2_upgrade(self) -> None:
+    def test_v2_job_needs_v3_upgrade(self) -> None:
+        state = _completed_state_for_rerender(typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_V2)
+        state["mediaResume"].pop("closureOnlyRerenderCompletedForVersion", None)
+        report = inspect_builder2_closure_rerender(state)
+        self.assertTrue(report["typographyUpgradeNeeded"])
+        self.assertTrue(report["closureOnlyRerenderEligible"])
+
+    def test_v1_job_needs_v3_upgrade(self) -> None:
         state = _completed_state_for_rerender(typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_V1)
         state["mediaResume"].pop("closureOnlyRerenderCompletedForVersion", None)
         report = inspect_builder2_closure_rerender(state)
@@ -287,7 +331,7 @@ class TestBuilder2ClosureOnlyRerender(unittest.TestCase):
         render_mock.return_value = ClosureRenderResult(
             public_url="",
             local_path="/tmp/out.mp4",
-            measured_duration_seconds=12.01,
+            measured_duration_seconds=13.51,
             output_token="newtoken0123456789abcdef01234567",
             input_fingerprint="abc",
             typography_metadata=typography_meta,

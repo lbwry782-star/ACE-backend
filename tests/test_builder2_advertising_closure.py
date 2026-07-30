@@ -97,7 +97,7 @@ def _completed_state(
         media["finalVideoWithClosureUrl"] = "https://example.com/final-with-closure.mp4"
         media["finalPublicUrl"] = "https://example.com/final-with-closure.mp4"
         media["advertisingClosureRendered"] = True
-        media["actualFinalVideoDurationSeconds"] = 12.01
+        media["actualFinalVideoDurationSeconds"] = 13.51
         media["advertisingClosureStatus"] = "completed"
         state["advertisingClosureStatus"] = "completed"
     return state
@@ -264,7 +264,7 @@ class TestAdvertisingClosureResume(unittest.TestCase):
             render_endcard=lambda *args, **kwargs: ClosureRenderResult(
                 public_url="https://example.com/final-with-closure.mp4",
                 local_path="/tmp/final-with-closure.mp4",
-                measured_duration_seconds=12.01,
+                measured_duration_seconds=13.51,
                 output_token="tok" * 8,
                 input_fingerprint="abc",
             ),

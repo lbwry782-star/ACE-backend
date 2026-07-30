@@ -479,7 +479,7 @@ def build_winner_development_prompt(
         "Do not generate a separate in-video headline. advertisingClosure.sloganText from the winning candidate is the "
         "only advertising sentence and must bridge the finished visual mechanism.\n"
         "Required advertisingClosure object: required=true, productNameText, sloganText, language, "
-        "presentationMode=end_card, durationSeconds=2, headlineSource, noLogo=true.\n"
+        "presentationMode=end_card, durationSeconds=3.5, headlineSource, noLogo=true.\n"
         f"Video duration seconds: {duration}\n"
         f"Runway mode: {runway_mode}\n"
         f"Product name: {product_name or '(empty)'}\n"

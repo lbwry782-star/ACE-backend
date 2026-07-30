@@ -51,7 +51,7 @@ def mock_closure_render_result(source_video_url: str = "", **kwargs: Any) -> Clo
     return ClosureRenderResult(
         public_url="",
         local_path=str(output_path or "/tmp/builder2_final.mp4"),
-        measured_duration_seconds=12.034,
+        measured_duration_seconds=13.534,
         output_token="abcd1234567890123456789012345678",
         input_fingerprint="abc",
         closure_ffprobe_calls=1,

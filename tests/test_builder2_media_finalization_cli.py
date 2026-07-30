@@ -47,11 +47,11 @@ from tests.builder2_preflight_test_helpers import patch_accepted_web_storage_cap
 
 
 def _success_closure_result(**overrides: Any) -> ClosureRenderResult:
-    measured = overrides.get("measured_duration_seconds", 12.042)
+    measured = overrides.get("measured_duration_seconds", 13.542)
     diagnostics = build_final_duration_verification_diagnostics(
         measured,
         visual_duration_seconds=10.042,
-        effective_closure_segment_duration_seconds=2.0,
+        effective_closure_segment_duration_seconds=3.5,
     )
     return ClosureRenderResult(
         public_url=overrides.get("public_url", ""),
@@ -66,7 +66,7 @@ def _success_closure_result(**overrides: Any) -> ClosureRenderResult:
 def _mock_closure_render_writes_output(*_args: Any, **kwargs: Any) -> ClosureRenderResult:
     output_path = kwargs["output_path"]
     output_path.write_bytes(b"video")
-    measured = kwargs.get("measured_duration_seconds", 12.042)
+    measured = kwargs.get("measured_duration_seconds", 13.542)
     return _success_closure_result(
         local_path=str(output_path),
         public_url="",
@@ -414,7 +414,7 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
         self.assertEqual(passed_duration, 3.0)
         self.assertAlmostEqual(
             resolve_builder2_effective_closure_segment_duration_seconds(passed_duration),
-            2.0,
+            3.5,
             places=3,
         )
 
@@ -446,14 +446,14 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
         )
         closure_render.side_effect = lambda *args, **kwargs: _mock_closure_render_writes_output(
             *args,
-            measured_duration_seconds=12.042,
+            measured_duration_seconds=13.542,
             **kwargs,
         )
         state = _false_completion_state(with_valid_closure=False)
         state["advertisingClosure"]["durationSeconds"] = 3.0
         with patch("engine.builder2_media_finalization_resume._probe_duration", return_value=10.042):
             report = run_finalization_preflight(job_id=JOB_ID, state=state, job_video_url=HEADLINE_URL)
-        self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], 12.042, places=3)
+        self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], 13.542, places=3)
 
 
 class TestBuilder2MediaFinalizationCliModuleEntry(unittest.TestCase):
@@ -491,7 +491,7 @@ class TestBuilder2ClosureRenderReturnsNormally(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"video")
 
-        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 12.042]):
+        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 13.542]):
             with patch("engine.builder2_closure_render._input_has_audio", return_value=False):
                 with patch("engine.builder2_closure_render._default_font_path", return_value="/fonts/default.ttf"):
                     with patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/usr/bin/ffmpeg"):
@@ -510,7 +510,7 @@ class TestBuilder2ClosureRenderReturnsNormally(unittest.TestCase):
                                             )
         self.assertIsInstance(result, ClosureRenderResult)
         self.assertEqual(result.public_url, "")
-        self.assertAlmostEqual(result.measured_duration_seconds, 12.042, places=3)
+        self.assertAlmostEqual(result.measured_duration_seconds, 13.542, places=3)
 
 
 def _concat_failure_report(*, failure_reason: str = "builder2_closure_ffmpeg_failed") -> Dict[str, Any]:
@@ -766,7 +766,7 @@ class TestBuilder2RecoveryFailSafeReporting(unittest.TestCase):
             "ok": True,
             "preflight": True,
             "readyForFinalizationRecovery": True,
-            "measuredFinalDurationSeconds": 12.034,
+            "measuredFinalDurationSeconds": 13.534,
         }
         buffer = io.StringIO()
 
@@ -780,7 +780,7 @@ class TestBuilder2RecoveryFailSafeReporting(unittest.TestCase):
         self.assertEqual(code, 0)
         payload = json.loads(buffer.getvalue().strip())
         self.assertTrue(payload["readyForFinalizationRecovery"])
-        self.assertAlmostEqual(payload["measuredFinalDurationSeconds"], 12.034, places=3)
+        self.assertAlmostEqual(payload["measuredFinalDurationSeconds"], 13.534, places=3)
 
 
 if __name__ == "__main__":

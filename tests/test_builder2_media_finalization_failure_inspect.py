@@ -57,7 +57,7 @@ def _false_completion_state(*, with_valid_closure: bool = False) -> Dict[str, An
             "sloganText": "SECRET SLOGAN TEXT",
             "language": "he",
             "presentationMode": "end_card",
-            "durationSeconds": 2.0,
+            "durationSeconds": 3.5,
             "noLogo": True,
         },
         SERVER_OWNED_WINNER_SOURCE_KEY: {
@@ -101,11 +101,11 @@ def _false_completion_state(*, with_valid_closure: bool = False) -> Dict[str, An
             "finalPublicUrl": final_url,
             "finalVideoPath": final_url,
             "finalVideoWithClosureUrl": final_url,
-            "finalVideoDurationSeconds": 12.0 if with_valid_closure else 10.042,
-            "endCardDurationSeconds": 2.0,
+            "finalVideoDurationSeconds": 13.5 if with_valid_closure else 10.042,
+            "endCardDurationSeconds": 3.5,
             "advertisingClosureStatus": "completed",
             "advertisingClosureRendered": with_valid_closure,
-            "actualFinalVideoDurationSeconds": 12.01 if with_valid_closure else None,
+            "actualFinalVideoDurationSeconds": 13.51 if with_valid_closure else None,
             "closureRenderedAt": "2026-05-20T00:00:00+00:00",
             "ffmpegStatus": "completed",
             "headlineArtifactUrl": HEADLINE_URL if with_valid_closure else None,
@@ -196,7 +196,7 @@ class TestBuilder2MediaFinalizationFailureInspect(unittest.TestCase):
         state["mediaResume"]["headlineArtifactUrl"] = HEADLINE_URL
         state["mediaResume"]["headlineArtifactUrl"] = HEADLINE_URL
         state["mediaResume"]["advertisingClosureRendered"] = True
-        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 12.01
+        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 13.51
         read_raw.return_value = deepcopy(state)
         job_get_raw.return_value = _job_raw(video_url=CLOSURE_URL)
         report = inspect_builder2_media_finalization_failure(JOB_ID)

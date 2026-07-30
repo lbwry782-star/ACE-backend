@@ -94,7 +94,7 @@ class TestSingleSloganContract(unittest.TestCase):
                 "sloganText": "Closure slogan",
                 "language": "he",
                 "presentationMode": "end_card",
-                "durationSeconds": 2.0,
+                "durationSeconds": 3.5,
                 "noLogo": True,
             },
         }

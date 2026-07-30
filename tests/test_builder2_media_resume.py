@@ -51,7 +51,7 @@ def _mock_render_advertising_closure(**kwargs: Any) -> tuple[Dict[str, Any], Any
     media["finalVideoPath"] = CLOSURE_URL
     media["advertisingClosureStatus"] = "completed"
     media["advertisingClosureRendered"] = True
-    media["actualFinalVideoDurationSeconds"] = 12.0
+    media["actualFinalVideoDurationSeconds"] = 13.5
     media.update(verified_final_publication_media_fields())
     state["advertisingClosureStatus"] = "completed"
     return state, AdvertisingClosureRenderCounters(closure_ffmpeg_calls=1)
@@ -342,7 +342,7 @@ class TestMediaPipelineIdempotency(unittest.TestCase):
             "mediaResumeStatus": "completed",
             "advertisingClosureRendered": True,
             "advertisingClosureStatus": "completed",
-            "actualFinalVideoDurationSeconds": 12.034,
+            "actualFinalVideoDurationSeconds": 13.534,
             **verified_final_publication_media_fields(),
         }
         _, counters = execute_builder2_media_pipeline(

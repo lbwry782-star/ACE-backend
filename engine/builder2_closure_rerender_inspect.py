@@ -12,10 +12,15 @@ from engine.builder2_closure_copy import closure_copy_fields_present
 from engine.builder2_closure_typography import (
     BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
     CLOSURE_BACKGROUND_STYLE_VERSION,
+    CLOSURE_TEXT_REVEAL_VERSION,
     closure_typography_upgrade_needed,
     current_closure_typography_version,
     resolve_builder2_closure_product_font_path,
     resolve_builder2_closure_slogan_font_path,
+)
+from engine.builder2_new_format_config import (
+    resolve_builder2_effective_closure_segment_duration_seconds,
+    resolve_builder2_final_video_duration_seconds,
 )
 from engine.builder2_final_output_diagnostics import (
     durable_final_url_present,
@@ -88,6 +93,9 @@ def inspect_builder2_closure_rerender(
         "currentTypographyContractVersion": current_version or None,
         "requestedTypographyContractVersion": requested_typography_version,
         "closureBackgroundStyleVersion": CLOSURE_BACKGROUND_STYLE_VERSION,
+        "closureTextRevealVersion": CLOSURE_TEXT_REVEAL_VERSION,
+        "configuredClosureSegmentDurationSeconds": resolve_builder2_effective_closure_segment_duration_seconds(),
+        "configuredFinalVideoDurationSeconds": resolve_builder2_final_video_duration_seconds(),
         "typographyUpgradeNeeded": upgrade_needed,
         "closureOnlyRerenderEligible": eligible,
         "closureOnlyRerenderMissingFields": missing,

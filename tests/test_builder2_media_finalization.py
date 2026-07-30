@@ -56,7 +56,7 @@ def _valid_closure_result(**overrides: Any) -> ClosureRenderResult:
     return ClosureRenderResult(
         public_url=overrides.get("public_url", CLOSURE_URL),
         local_path=overrides.get("local_path", "/tmp/out.mp4"),
-        measured_duration_seconds=overrides.get("measured_duration_seconds", 12.01),
+        measured_duration_seconds=overrides.get("measured_duration_seconds", 13.51),
         output_token=overrides.get("output_token", "tok" * 8),
         input_fingerprint=overrides.get("input_fingerprint", "abc"),
     )
@@ -64,7 +64,7 @@ def _valid_closure_result(**overrides: Any) -> ClosureRenderResult:
 
 def _mock_closure_render_write_output(*args: Any, **kwargs: Any) -> ClosureRenderResult:
     output_path = kwargs.get("output_path")
-    measured = 12.01
+    measured = 13.51
     if output_path is not None:
         Path(output_path).write_bytes(b"x" * 128)
         return _valid_closure_result(local_path=str(output_path), public_url="", measured_duration_seconds=measured)
@@ -106,7 +106,7 @@ def _pipeline_outcome_from_render(**kwargs: Any) -> "FinalizationPipelineOutcome
                 "finalPublicUrl": CLOSURE_URL,
                 "finalVideoPath": CLOSURE_URL,
                 "advertisingClosureRendered": True,
-                "actualFinalVideoDurationSeconds": 12.01,
+                "actualFinalVideoDurationSeconds": 13.51,
                 "advertisingClosureStatus": "completed",
                 "headlineReconstructionCompleted": True,
                 "headlineArtifactSource": "deterministic_local_reconstruction_from_raw_runway",
@@ -195,7 +195,7 @@ class TestClosureRenderErrors(unittest.TestCase):
     @patch("engine.builder2_closure_render.requests.get")
     @patch("engine.builder2_closure_render._default_font_path", return_value="/font.ttf")
     @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/ffmpeg")
-    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.0, 12.01])
+    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.0, 13.51])
     @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
     def test_success_returns_distinct_result(
         self,
@@ -222,7 +222,7 @@ class TestClosureRenderErrors(unittest.TestCase):
         )
         self.assertEqual(result.public_url, "")
         self.assertEqual(result.local_path, str(out))
-        self.assertAlmostEqual(result.measured_duration_seconds, 12.01, places=2)
+        self.assertAlmostEqual(result.measured_duration_seconds, 13.51, places=2)
 
 
 class TestAdvertisingClosurePipelineSemantics(unittest.TestCase):
@@ -275,7 +275,7 @@ class TestAdvertisingClosurePipelineSemantics(unittest.TestCase):
         media = updated["mediaResume"]
         self.assertTrue(media["advertisingClosureRendered"])
         self.assertEqual(media["advertisingClosureStatus"], "completed")
-        self.assertEqual(media["actualFinalVideoDurationSeconds"], 12.01)
+        self.assertEqual(media["actualFinalVideoDurationSeconds"], 13.51)
         self.assertEqual(counters.closure_ffmpeg_calls, 1)
 
 
@@ -464,7 +464,7 @@ class TestFinalizationPreflight(unittest.TestCase):
 class TestDurationVerification(unittest.TestCase):
     def test_configured_duration_alone_fails_contract(self) -> None:
         state = _false_completion_state(with_valid_closure=False)
-        state["mediaResume"]["finalVideoDurationSeconds"] = 12.0
+        state["mediaResume"]["finalVideoDurationSeconds"] = 13.5
         state["mediaResume"]["advertisingClosureRendered"] = True
         state["mediaResume"]["advertisingClosureStatus"] = "completed"
         ok, failure, failures = validate_builder2_media_completion_contract(
@@ -663,7 +663,7 @@ class TestFinalizationRecovery(unittest.TestCase):
     ) -> None:
         state = _false_completion_state(with_valid_closure=True)
         state["mediaResume"]["advertisingClosureRendered"] = True
-        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 12.01
+        state["mediaResume"]["actualFinalVideoDurationSeconds"] = 13.51
         read_raw.return_value = deepcopy(state)
         job_get_raw.return_value = _job_raw(video_url=CLOSURE_URL)
         report = run_one_media_finalization_resume(job_id=JOB_ID, acquire_lease=True)
@@ -788,7 +788,7 @@ class TestPreflightSynthetic(unittest.TestCase):
         self.assertTrue(report["rawRunwayFallbackAccepted"])
         self.assertTrue(report["localHeadlineRenderAccepted"])
         self.assertAlmostEqual(report["measuredHeadlineDurationSeconds"], 10.042, places=3)
-        self.assertAlmostEqual(report["measuredFinalDurationSeconds"], 12.01, places=2)
+        self.assertAlmostEqual(report["measuredFinalDurationSeconds"], 13.51, places=2)
         self.assertTrue(report["finalDurationAccepted"])
         self.assertEqual(report["headlineFfmpegCalls"], 1)
         self.assertEqual(report["closureFfmpegCalls"], 1)

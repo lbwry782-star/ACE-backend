@@ -270,7 +270,7 @@ class TestFreshProductionIntegration(unittest.TestCase):
                 "finalVideoWithClosureUrl": headline_url,
                 "advertisingClosureRendered": True,
                 "advertisingClosureStatus": "completed",
-                "actualFinalVideoDurationSeconds": 12.034,
+                "actualFinalVideoDurationSeconds": 13.534,
             }
         )
         ok, _, failures = validate_builder2_media_completion_contract(
@@ -342,7 +342,7 @@ class TestFreshProductionDoesNotInvokeRecoveryClis(unittest.TestCase):
                         "finalPublicationUploadedByteCount": 128,
                         "advertisingClosureRendered": True,
                         "advertisingClosureStatus": "completed",
-                        "actualFinalVideoDurationSeconds": 12.034,
+                        "actualFinalVideoDurationSeconds": 13.534,
                         "headlineOverlaySkipped": True,
                         "sloganRenderedExactlyOnce": True,
                         "advertisingCopyRenderStages": 1,

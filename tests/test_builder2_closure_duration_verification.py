@@ -23,62 +23,66 @@ from engine.builder2_media_finalization_resume import (
 )
 from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 
+_VISUAL = 10.042
+_EXPECTED_FINAL = _VISUAL + 3.5
+_SEGMENT = 3.5
+
 
 class TestEffectiveClosureSegmentContract(unittest.TestCase):
-    def test_effective_segment_is_configured_two_seconds(self) -> None:
-        self.assertAlmostEqual(resolve_builder2_effective_closure_segment_duration_seconds(), 2.0, places=3)
-        self.assertAlmostEqual(resolve_builder2_effective_closure_segment_duration_seconds(3.0), 2.0, places=3)
+    def test_effective_segment_is_configured_three_point_five_seconds(self) -> None:
+        self.assertAlmostEqual(resolve_builder2_effective_closure_segment_duration_seconds(), _SEGMENT, places=3)
+        self.assertAlmostEqual(resolve_builder2_effective_closure_segment_duration_seconds(2.0), _SEGMENT, places=3)
 
-    def test_production_shape_calculates_twelve_not_thirteen(self) -> None:
+    def test_production_shape_calculates_thirteen_point_five_not_twelve(self) -> None:
         diag = verify_builder2_final_video_duration(
-            12.042,
-            visual_duration_seconds=10.042,
-            end_card_duration_seconds=3.0,
+            _EXPECTED_FINAL,
+            visual_duration_seconds=_VISUAL,
+            end_card_duration_seconds=2.0,
         )
-        self.assertAlmostEqual(diag.effective_closure_segment_duration_seconds, 2.0, places=3)
-        self.assertAlmostEqual(diag.calculated_expected_final_duration_seconds, 12.042, places=3)
-        self.assertNotAlmostEqual(diag.calculated_expected_final_duration_seconds, 13.042, places=3)
+        self.assertAlmostEqual(diag.effective_closure_segment_duration_seconds, _SEGMENT, places=3)
+        self.assertAlmostEqual(diag.calculated_expected_final_duration_seconds, _EXPECTED_FINAL, places=3)
+        self.assertNotAlmostEqual(diag.calculated_expected_final_duration_seconds, 12.042, places=3)
 
     def test_frame_rounding_accepted(self) -> None:
         verify_builder2_final_video_duration(
-            12.045,
-            visual_duration_seconds=10.042,
-            end_card_duration_seconds=2.0,
+            _EXPECTED_FINAL + 0.003,
+            visual_duration_seconds=_VISUAL,
+            end_card_duration_seconds=_SEGMENT,
         )
 
-    def test_thirteen_second_output_rejected(self) -> None:
+    def test_excessive_gain_rejected(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
-                13.034,
-                visual_duration_seconds=10.042,
-                end_card_duration_seconds=3.0,
+                14.6,
+                visual_duration_seconds=_VISUAL,
+                end_card_duration_seconds=_SEGMENT,
             )
         self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_excessive_closure_gain")
 
-    def test_three_second_gain_rejected(self) -> None:
+    def test_legacy_two_second_gain_rejected(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
-                13.042,
-                visual_duration_seconds=10.042,
-                end_card_duration_seconds=2.0,
+                12.033,
+                visual_duration_seconds=_VISUAL,
+                end_card_duration_seconds=_SEGMENT,
             )
-        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_excessive_closure_gain")
+        self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_missing_end_card")
 
-    def test_two_second_gain_accepted(self) -> None:
+    def test_three_point_five_second_gain_accepted(self) -> None:
         diag = verify_builder2_final_video_duration(
-            12.033,
-            visual_duration_seconds=10.042,
-            end_card_duration_seconds=2.0,
+            13.533,
+            visual_duration_seconds=_VISUAL,
+            end_card_duration_seconds=_SEGMENT,
         )
-        self.assertAlmostEqual(diag.actual_closure_gain_seconds, 1.991, places=3)
+        self.assertAlmostEqual(diag.actual_closure_gain_seconds, 3.491, places=3)
         self.assertTrue(diag.closure_gain_accepted)
 
     def test_source_only_rejected(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
-                10.042,
-                visual_duration_seconds=10.042,
-                end_card_duration_seconds=2.0,
+                _VISUAL,
+                visual_duration_seconds=_VISUAL,
+                end_card_duration_seconds=_SEGMENT,
             )
         self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_not_longer_than_visual")
 
@@ -86,40 +90,40 @@ class TestEffectiveClosureSegmentContract(unittest.TestCase):
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
                 22.084,
-                visual_duration_seconds=10.042,
-                end_card_duration_seconds=2.0,
+                visual_duration_seconds=_VISUAL,
+                end_card_duration_seconds=_SEGMENT,
             )
         self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_excessive_closure_gain")
 
     def test_insufficient_gain_rejected(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
-                11.5,
-                visual_duration_seconds=10.042,
-                end_card_duration_seconds=2.0,
+                13.0,
+                visual_duration_seconds=_VISUAL,
+                end_card_duration_seconds=_SEGMENT,
             )
         self.assertEqual(ctx.exception.args[0], "builder2_media_final_duration_missing_end_card")
 
     def test_rejected_duration_preserved_in_diagnostics(self) -> None:
         with self.assertRaises(Builder2ClosureRenderError) as ctx:
             verify_builder2_final_video_duration(
-                13.034,
-                visual_duration_seconds=10.042,
-                end_card_duration_seconds=3.0,
+                14.6,
+                visual_duration_seconds=_VISUAL,
+                end_card_duration_seconds=_SEGMENT,
             )
         exc = ctx.exception
         assert exc.duration_diagnostics is not None
-        self.assertAlmostEqual(exc.duration_diagnostics.measured_closure_output_duration_seconds, 13.034, places=3)
+        self.assertAlmostEqual(exc.duration_diagnostics.measured_closure_output_duration_seconds, 14.6, places=3)
         self.assertAlmostEqual(
             exc.duration_diagnostics.calculated_expected_final_duration_seconds,
-            12.042,
+            _EXPECTED_FINAL,
             places=3,
         )
         self.assertFalse(exc.duration_diagnostics.closure_gain_accepted)
 
 
 class TestClosureFfmpegCommandConstruction(unittest.TestCase):
-    def test_card_and_concat_use_two_second_authoritative_segment(self) -> None:
+    def test_card_and_concat_use_three_point_five_second_authoritative_segment(self) -> None:
         from types import SimpleNamespace
 
         captured: list[tuple[list[str], str, str]] = []
@@ -145,7 +149,7 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
                 return SimpleNamespace(st_size=1234, st_mode=33188)
             return real_stat(self)
 
-        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 12.042]), patch(
+        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[_VISUAL, _EXPECTED_FINAL]), patch(
             "engine.builder2_closure_render._input_has_audio",
             return_value=False,
         ), patch(
@@ -161,7 +165,7 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
             "engine.builder2_closure_render.verify_builder2_final_video_duration",
             side_effect=lambda measured, **kwargs: build_final_duration_verification_diagnostics(
                 measured,
-                visual_duration_seconds=10.042,
+                visual_duration_seconds=_VISUAL,
             ),
         ):
             render_builder2_advertising_closure_endcard(
@@ -169,7 +173,7 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
                 product_name="Product",
                 slogan="Slogan",
                 language="en",
-                duration_seconds=3.0,
+                duration_seconds=2.0,
                 output_path=out,
                 ffmpeg_runner=runner,
             )
@@ -178,19 +182,21 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
         concat_cmd = next(cmd for cmd, _stage, category in captured if category == "ffmpeg_concat")
         card_input = "".join(card_cmd)
         filter_complex = concat_cmd[concat_cmd.index("-filter_complex") + 1]
-        self.assertIn("d=2.0", card_input)
+        filter_vf = card_cmd[card_cmd.index("-vf") + 1]
+        self.assertIn("d=3.5", card_input)
         self.assertIn("-t", card_cmd)
-        self.assertIn("2.000000", card_cmd)
-        self.assertIn("trim=duration=2.000000", filter_complex)
-        self.assertNotIn("d=3.0", card_input)
-        self.assertNotIn("trim=duration=3", filter_complex)
+        self.assertIn("3.500000", card_cmd)
+        self.assertIn("trim=duration=3.500000", filter_complex)
+        self.assertIn("y='", filter_vf)
+        self.assertNotIn("d=2.0", card_input)
+        self.assertNotIn("trim=duration=2", filter_complex)
 
 
 class TestClosureDurationDiagnosticsSafety(unittest.TestCase):
     def test_diagnostics_exclude_paths_and_creative_text(self) -> None:
         diag = build_final_duration_verification_diagnostics(
-            13.034,
-            visual_duration_seconds=10.042,
+            14.6,
+            visual_duration_seconds=_VISUAL,
             failure_code="builder2_media_final_duration_excessive_closure_gain",
         )
         payload = json.dumps(diag.to_report_dict())
@@ -201,17 +207,17 @@ class TestClosureDurationDiagnosticsSafety(unittest.TestCase):
     def test_failure_report_includes_gain_and_effective_segment(self) -> None:
         report = _initial_report(job_id="job-1", preflight=True)
         diagnostics = FinalDurationVerificationDiagnostics(
-            measured_closure_output_duration_seconds=13.034,
-            measured_closure_source_duration_seconds=10.042,
+            measured_closure_output_duration_seconds=14.6,
+            measured_closure_source_duration_seconds=_VISUAL,
             configured_visual_duration_seconds=10.0,
-            configured_end_card_duration_seconds=2.0,
-            effective_closure_segment_duration_seconds=2.0,
-            configured_final_duration_seconds=12.0,
-            calculated_expected_final_duration_seconds=12.042,
-            accepted_final_duration_lower_bound_seconds=11.692,
-            accepted_final_duration_upper_bound_seconds=12.392,
-            final_duration_delta_seconds=0.992,
-            actual_closure_gain_seconds=2.992,
+            configured_end_card_duration_seconds=_SEGMENT,
+            effective_closure_segment_duration_seconds=_SEGMENT,
+            configured_final_duration_seconds=13.5,
+            calculated_expected_final_duration_seconds=_EXPECTED_FINAL,
+            accepted_final_duration_lower_bound_seconds=_EXPECTED_FINAL - 0.35,
+            accepted_final_duration_upper_bound_seconds=_EXPECTED_FINAL + 0.35,
+            final_duration_delta_seconds=1.058,
+            actual_closure_gain_seconds=4.558,
             closure_gain_accepted=False,
             final_duration_verification_failure_code="builder2_media_final_duration_excessive_closure_gain",
         )
@@ -225,9 +231,9 @@ class TestClosureDurationDiagnosticsSafety(unittest.TestCase):
             closure_ffprobe_calls=2,
         )
         _apply_closure_duration_diagnostics(report, exc)
-        self.assertAlmostEqual(report["effectiveClosureSegmentDurationSeconds"], 2.0, places=3)
-        self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], 12.042, places=3)
-        self.assertAlmostEqual(report["actualClosureGainSeconds"], 2.992, places=3)
+        self.assertAlmostEqual(report["effectiveClosureSegmentDurationSeconds"], _SEGMENT, places=3)
+        self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], _EXPECTED_FINAL, places=3)
+        self.assertAlmostEqual(report["actualClosureGainSeconds"], 4.558, places=3)
         self.assertFalse(report["closureGainAccepted"])
 
 
@@ -269,8 +275,8 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
         )()
 
         diagnostics = build_final_duration_verification_diagnostics(
-            13.034,
-            visual_duration_seconds=10.042,
+            14.6,
+            visual_duration_seconds=_VISUAL,
             failure_code="builder2_media_final_duration_excessive_closure_gain",
         )
         mock_render.side_effect = Builder2ClosureRenderError(
@@ -290,7 +296,7 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
                 "required": True,
                 "productNameText": "P",
                 "sloganText": "S",
-                "durationSeconds": 3.0,
+                "durationSeconds": 2.0,
             },
             "mediaResume": {},
         }
@@ -298,7 +304,7 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
 
         with patch(
             "engine.builder2_media_finalization_resume._probe_duration",
-            return_value=10.042,
+            return_value=_VISUAL,
         ):
             _execute_finalization_render_pipeline(
                 job_id="job-1",
@@ -311,7 +317,7 @@ class TestPreflightDurationFailureReporting(unittest.TestCase):
             )
 
         self.assertEqual(report["failureStage"], "duration_verification")
-        self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], 12.042, places=3)
+        self.assertAlmostEqual(report["calculatedExpectedFinalDurationSeconds"], _EXPECTED_FINAL, places=3)
         self.assertEqual(report["openAICalls"], 0)
         self.assertEqual(report["redisMutations"], 0)
 

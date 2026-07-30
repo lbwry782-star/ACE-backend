@@ -177,7 +177,7 @@ class TestRecoveryPipelineRegression(unittest.TestCase):
             output_path = kwargs["output_path"]
             self.assertEqual(output_path.name, "builder2_final.mp4")
             output_path.write_bytes(b"x" * 1028987)
-            return _render_result(measured=12.034, local_path=str(output_path))
+            return _render_result(measured=13.534, local_path=str(output_path))
 
         closure_render.side_effect = _render
         publish.return_value = _verified_publication_result()
@@ -204,7 +204,7 @@ class TestRecoveryPipelineRegression(unittest.TestCase):
         self.assertEqual(outcome.public_url, CLOSURE_URL)
         self.assertTrue(report["localRenderAccepted"])
         self.assertTrue(report["closureRenderAccepted"])
-        self.assertEqual(report["measuredFinalDurationSeconds"], 12.034)
+        self.assertEqual(report["measuredFinalDurationSeconds"], 13.534)
         self.assertTrue(report["finalDurationAccepted"])
         self.assertEqual(report["publicationCalls"], 1)
         publish.assert_called_once()
@@ -234,7 +234,7 @@ class TestRecoveryPipelineRegression(unittest.TestCase):
 
         def _render(*_args: Any, **kwargs: Any) -> ClosureRenderResult:
             kwargs["output_path"].write_bytes(b"x" * 1028987)
-            return _render_result(measured=12.034, local_path=str(kwargs["output_path"]))
+            return _render_result(measured=13.534, local_path=str(kwargs["output_path"]))
 
         closure_render.side_effect = _render
         publish.side_effect = Builder2FinalPublicationError("builder2_final_publication_failed")
@@ -260,7 +260,7 @@ class TestRecoveryPipelineRegression(unittest.TestCase):
         self.assertIsNone(outcome)
         self.assertTrue(report["localRenderAccepted"])
         self.assertTrue(report["closureRenderAccepted"])
-        self.assertEqual(report["measuredFinalDurationSeconds"], 12.034)
+        self.assertEqual(report["measuredFinalDurationSeconds"], 13.534)
         self.assertTrue(report["finalDurationAccepted"])
         self.assertFalse(report["publicationAccepted"])
         self.assertEqual(report["failureStage"], "publication")

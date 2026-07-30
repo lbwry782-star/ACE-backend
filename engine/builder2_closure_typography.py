@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.video_language import normalize_video_content_language
 
-BUILDER2_CLOSURE_TYPOGRAPHY_VERSION = "builder2_closure_typography_v2"
+BUILDER2_CLOSURE_TYPOGRAPHY_VERSION = "builder2_closure_typography_v3"
+BUILDER2_CLOSURE_TYPOGRAPHY_V2 = "builder2_closure_typography_v2"
 BUILDER2_CLOSURE_TYPOGRAPHY_V1 = "builder2_closure_typography_v1"
 
 PRODUCT_FONT_RELATIVE = Path("assets") / "fonts" / "OgenBlack.ttf"
@@ -24,8 +25,9 @@ CANVAS_WIDTH = 1280
 CANVAS_HEIGHT = 720
 HORIZONTAL_SAFE_MARGIN_PX = 80
 VERTICAL_SAFE_MARGIN_PX = 60
-PRODUCT_SLOGAN_BLOCK_GAP_PX = 18
-PREVIOUS_PRODUCT_SLOGAN_BLOCK_GAP_PX = 36
+PRODUCT_SLOGAN_BLOCK_GAP_PX = 9
+PREVIOUS_PRODUCT_SLOGAN_BLOCK_GAP_PX = 18
+LEGACY_PRODUCT_SLOGAN_BLOCK_GAP_PX = 36
 MAX_PRODUCT_LINES = 2
 MAX_SLOGAN_LINES = 2
 BASE_SLOGAN_FONT_SIZE = 44
@@ -36,6 +38,14 @@ LINE_HEIGHT_FACTOR = 1.18
 CLOSURE_BACKGROUND_STYLE_VERSION = "builder2_closure_background_black_purple_v1"
 # Dark near-black with a subtle purple cast (FFmpeg 0xRRGGBB).
 CLOSURE_BACKGROUND_FFMPEG_COLOR = "0x0E0014"
+
+CLOSURE_TEXT_REVEAL_VERSION = "builder2_closure_text_reveal_upward_v1"
+CLOSURE_TEXT_REVEAL_TRAVEL_PX = 52
+CLOSURE_PRODUCT_REVEAL_START_S = 0.20
+CLOSURE_PRODUCT_REVEAL_DURATION_S = 0.65
+CLOSURE_SLOGAN_REVEAL_START_S = 0.78
+CLOSURE_SLOGAN_REVEAL_DURATION_S = 0.65
+CLOSURE_PRODUCT_LINE_STAGGER_S = 0.08
 
 _CLOSURE_PUNCTUATION_PATTERN = re.compile(
     r"[\.\,\:\;\!\?\"\'`\(\)\[\]\{\}\/\\|\-–—―…·•«»„”“‘’׳״]+"
@@ -183,6 +193,9 @@ class ClosureTypographyLineSpec:
     y_px: int
     use_text_shaping: bool
     role: str
+    reveal_start_seconds: float = 0.0
+    reveal_duration_seconds: float = CLOSURE_PRODUCT_REVEAL_DURATION_S
+    reveal_travel_px: int = CLOSURE_TEXT_REVEAL_TRAVEL_PX
 
 
 @dataclass(frozen=True)
@@ -204,9 +217,21 @@ class ClosureTypographyLayout:
     rendered_product_text: str = ""
     rendered_slogan_text: str = ""
     product_slogan_gap_px: int = PRODUCT_SLOGAN_BLOCK_GAP_PX
+    configured_closure_segment_duration_seconds: float = 0.0
     line_specs: Tuple[ClosureTypographyLineSpec, ...] = field(default_factory=tuple)
 
-    def metadata(self) -> Dict[str, Any]:
+    def metadata(self, *, measured_final_duration_seconds: float | None = None) -> Dict[str, Any]:
+        from engine.builder2_new_format_config import (
+            resolve_builder2_effective_closure_segment_duration_seconds,
+            resolve_builder2_final_video_duration_seconds,
+        )
+
+        configured_closure = float(
+            self.configured_closure_segment_duration_seconds
+            or resolve_builder2_effective_closure_segment_duration_seconds()
+        )
+        product_specs = [spec for spec in self.line_specs if spec.role == "product"]
+        slogan_specs = [spec for spec in self.line_specs if spec.role == "slogan"]
         return {
             "typographyContractVersion": BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
             "productFontAsset": PRODUCT_FONT_RELATIVE.as_posix(),
@@ -227,6 +252,14 @@ class ClosureTypographyLayout:
             "closurePunctuationSanitizationApplied": True,
             "closureBackgroundStyleVersion": CLOSURE_BACKGROUND_STYLE_VERSION,
             "closureBackgroundFfmpegColor": CLOSURE_BACKGROUND_FFMPEG_COLOR,
+            "configuredClosureSegmentDurationSeconds": configured_closure,
+            "configuredFinalVideoDurationSeconds": resolve_builder2_final_video_duration_seconds(),
+            "measuredFinalDurationSeconds": measured_final_duration_seconds,
+            "closureTextRevealVersion": CLOSURE_TEXT_REVEAL_VERSION,
+            "closureTextRevealEnabled": True,
+            "productTextRevealApplied": bool(product_specs),
+            "sloganTextRevealApplied": bool(slogan_specs),
+            "closureTextRevealTravelPx": CLOSURE_TEXT_REVEAL_TRAVEL_PX,
             "productNameRenderedAsPlainText": True,
             "productNameFontRole": "primary",
             "sloganFontRole": "secondary",
@@ -241,6 +274,7 @@ def fit_builder2_closure_typography(
     product_name: str,
     slogan: str,
     language: str = "he",
+    closure_segment_duration_seconds: float | None = None,
 ) -> ClosureTypographyLayout:
     product_font, slogan_font = validate_builder2_closure_font_assets()
     lang = normalize_video_content_language(language)
@@ -315,7 +349,7 @@ def fit_builder2_closure_typography(
         line_specs: List[ClosureTypographyLineSpec] = []
         y_cursor = start_y
         product_shaping = lang == "he" or _has_hebrew_letter(product_text)
-        for line in product_lines:
+        for index, line in enumerate(product_lines):
             line_specs.append(
                 ClosureTypographyLineSpec(
                     text=line,
@@ -324,12 +358,15 @@ def fit_builder2_closure_typography(
                     y_px=y_cursor,
                     use_text_shaping=product_shaping,
                     role="product",
+                    reveal_start_seconds=CLOSURE_PRODUCT_REVEAL_START_S + (index * CLOSURE_PRODUCT_LINE_STAGGER_S),
+                    reveal_duration_seconds=CLOSURE_PRODUCT_REVEAL_DURATION_S,
+                    reveal_travel_px=CLOSURE_TEXT_REVEAL_TRAVEL_PX,
                 )
             )
             y_cursor += _line_height_px(product_size)
         y_cursor += gap_px
         slogan_shaping = lang == "he" or _has_hebrew_letter(slogan_text)
-        for line in slogan_lines:
+        for index, line in enumerate(slogan_lines):
             line_specs.append(
                 ClosureTypographyLineSpec(
                     text=line,
@@ -338,9 +375,18 @@ def fit_builder2_closure_typography(
                     y_px=y_cursor,
                     use_text_shaping=slogan_shaping,
                     role="slogan",
+                    reveal_start_seconds=CLOSURE_SLOGAN_REVEAL_START_S + (index * CLOSURE_PRODUCT_LINE_STAGGER_S),
+                    reveal_duration_seconds=CLOSURE_SLOGAN_REVEAL_DURATION_S,
+                    reveal_travel_px=CLOSURE_TEXT_REVEAL_TRAVEL_PX,
                 )
             )
             y_cursor += _line_height_px(slogan_size)
+
+        from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
+
+        configured_closure = resolve_builder2_effective_closure_segment_duration_seconds(
+            closure_segment_duration_seconds
+        )
 
         best = ClosureTypographyLayout(
             product_lines=tuple(product_lines),
@@ -360,6 +406,7 @@ def fit_builder2_closure_typography(
             rendered_product_text=" ".join(product_lines),
             rendered_slogan_text=" ".join(slogan_lines),
             product_slogan_gap_px=gap_px,
+            configured_closure_segment_duration_seconds=configured_closure,
             line_specs=tuple(line_specs),
         )
         break
@@ -369,6 +416,14 @@ def fit_builder2_closure_typography(
     if best.effective_dominance_ratio < MIN_ACCEPTABLE_DOMINANCE_RATIO:
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied")
     return best
+
+
+def _drawtext_reveal_y_expression(spec: ClosureTypographyLineSpec) -> str:
+    final_y = spec.y_px
+    travel = spec.reveal_travel_px
+    start = spec.reveal_start_seconds
+    duration = max(0.05, spec.reveal_duration_seconds)
+    return f"{final_y}+({travel})*max(0\\,1-min(1\\,(t-{start:.3f})/{duration:.3f}))"
 
 
 def build_closure_card_drawtext_filter(
@@ -384,16 +439,22 @@ def build_closure_card_drawtext_filter(
         font_e = ffmpeg_path_filter(spec.font_path)
         text_e = ffmpeg_path_filter(text_path)
         shaping = ":text_shaping=1" if spec.use_text_shaping else ""
+        y_expr = _drawtext_reveal_y_expression(spec)
         parts.append(
             f"drawtext=fontfile='{font_e}':textfile='{text_e}':"
-            f"fontcolor=white:fontsize={spec.fontsize}:x=(w-text_w)/2:y={spec.y_px}"
+            f"fontcolor=white:fontsize={spec.fontsize}:x=(w-text_w)/2:y='{y_expr}'"
             f":borderw=2:bordercolor=black@0.35{shaping}"
         )
     return ",".join(parts)
 
 
-def stamp_closure_typography_metadata(target: Dict[str, Any], layout: ClosureTypographyLayout) -> None:
-    target.update(layout.metadata())
+def stamp_closure_typography_metadata(
+    target: Dict[str, Any],
+    layout: ClosureTypographyLayout,
+    *,
+    measured_final_duration_seconds: float | None = None,
+) -> None:
+    target.update(layout.metadata(measured_final_duration_seconds=measured_final_duration_seconds))
 
 
 def current_closure_typography_version(media: Dict[str, Any]) -> str:
@@ -418,6 +479,10 @@ def verify_closure_typography_metadata(metadata: Dict[str, Any]) -> None:
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:punctuation")
     if metadata.get("closureBackgroundStyleVersion") != CLOSURE_BACKGROUND_STYLE_VERSION:
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:background")
+    if metadata.get("closureTextRevealEnabled") is not True:
+        raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:animation")
+    if metadata.get("closureTextRevealVersion") != CLOSURE_TEXT_REVEAL_VERSION:
+        raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:animation_version")
     if metadata.get("brandNameDominanceSatisfied") is not True:
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied")
     if metadata.get("separateHeadlineRendered") is True:

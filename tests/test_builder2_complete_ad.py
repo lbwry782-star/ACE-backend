@@ -109,14 +109,14 @@ class TestNormalProductionBudget(unittest.TestCase):
 
 class TestRunwayAndDurationConfig(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
-    def test_defaults_gen4_5_ten_twelve_two(self) -> None:
+    def test_defaults_gen4_5_ten_thirteen_point_five(self) -> None:
         self.assertEqual(resolve_builder2_runway_video_model(), "gen4.5")
         self.assertEqual(resolve_builder2_video_duration_seconds(), DEFAULT_BUILDER2_RUNWAY_DURATION_SECONDS)
         ok, failures = validate_new_format_runway_configuration()
         self.assertTrue(ok, failures)
         self.assertEqual(DEFAULT_BUILDER2_RUNWAY_DURATION_SECONDS, 10)
-        self.assertEqual(DEFAULT_BUILDER2_END_CARD_DURATION_SECONDS, 2.0)
-        self.assertEqual(DEFAULT_BUILDER2_FINAL_VIDEO_DURATION_SECONDS, 12.0)
+        self.assertEqual(DEFAULT_BUILDER2_END_CARD_DURATION_SECONDS, 3.5)
+        self.assertEqual(DEFAULT_BUILDER2_FINAL_VIDEO_DURATION_SECONDS, 13.5)
 
 
 class TestDualMeaningRule(unittest.TestCase):

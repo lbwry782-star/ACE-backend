@@ -1,5 +1,5 @@
 """
-Builder2 new complete-ad format configuration — gen4.5, 10s visual, 2s end card, 12s final.
+Builder2 new complete-ad format configuration — gen4.5, 10s visual, 3.5s end card, 13.5s final.
 """
 from __future__ import annotations
 
@@ -21,8 +21,8 @@ NORMAL_REASONING_CALL_BUDGET = 14
 
 DEFAULT_BUILDER2_RUNWAY_MODEL = "gen4.5"
 DEFAULT_BUILDER2_RUNWAY_DURATION_SECONDS = 10
-DEFAULT_BUILDER2_END_CARD_DURATION_SECONDS = 2.0
-DEFAULT_BUILDER2_FINAL_VIDEO_DURATION_SECONDS = 12.0
+DEFAULT_BUILDER2_END_CARD_DURATION_SECONDS = 3.5
+DEFAULT_BUILDER2_FINAL_VIDEO_DURATION_SECONDS = 13.5
 FINAL_DURATION_TOLERANCE_SECONDS = 0.35
 
 LEGACY_RUNWAY_MODEL = "gen4_turbo"
@@ -38,7 +38,7 @@ def resolve_builder2_end_card_duration_seconds() -> float:
         value = float(raw)
     except ValueError:
         raise Builder2RunwayConfigError(f"builder2_invalid_end_card_duration:{raw}")
-    if value <= 0 or value > 5:
+    if value <= 0 or value > 6:
         raise Builder2RunwayConfigError(f"builder2_invalid_end_card_duration:{value}")
     return value
 

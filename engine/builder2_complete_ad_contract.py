@@ -497,7 +497,7 @@ def copy_winner_advertising_closure_from_candidate(
     return closure
 
 
-def validate_final_video_duration(actual_seconds: float, expected_seconds: float = 12.0) -> Tuple[bool, str]:
+def validate_final_video_duration(actual_seconds: float, expected_seconds: float = 13.5) -> Tuple[bool, str]:
     delta = abs(float(actual_seconds) - float(expected_seconds))
     if delta <= FINAL_DURATION_TOLERANCE_SECONDS:
         return True, ""
