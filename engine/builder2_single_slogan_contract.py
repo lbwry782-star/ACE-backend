@@ -186,6 +186,87 @@ def apply_single_slogan_winner_normalization(
     winner_plan["headlineCoreKeyword"] = core_keyword
     winner_plan["headlineCompatibilityAlias"] = True
     winner_plan["headlineOverlaySkipped"] = True
+    stamp_canonical_copy_judge_mapping(
+        winner_plan,
+        winning_judgment=winning_judgment,
+        winning_candidate=winning_candidate,
+        state=state,
+    )
+
+
+def stamp_canonical_copy_judge_mapping(
+    winner_plan: Dict[str, Any],
+    *,
+    winning_judgment: Optional[Dict[str, Any]] = None,
+    winning_candidate: Optional[Dict[str, Any]] = None,
+    state: Optional[Dict[str, Any]] = None,
+) -> None:
+    from engine.builder2_headline_decision_contract import judge_requires_verbal_copy
+
+    required = judge_requires_verbal_copy(winning_judgment)
+    winner_plan["canonicalCopyRequired"] = required
+    if required and canonical_verbal_copy_satisfied_by_slogan(
+        winner_plan,
+        winning_judgment=winning_judgment,
+        winning_candidate=winning_candidate,
+        state=state,
+    ):
+        winner_plan["canonicalCopySatisfiedBy"] = "slogan"
+    elif not required:
+        winner_plan["canonicalCopySatisfiedBy"] = "not_required"
+
+
+def canonical_verbal_copy_satisfied_by_slogan(
+    plan: Dict[str, Any],
+    *,
+    winning_judgment: Optional[Dict[str, Any]] = None,
+    winning_candidate: Optional[Dict[str, Any]] = None,
+    state: Optional[Dict[str, Any]] = None,
+) -> bool:
+    from engine.builder2_headline_decision_contract import judge_requires_verbal_copy
+
+    if not is_single_slogan_contract(state=state, plan=plan):
+        return False
+    slogan = resolve_canonical_slogan_text(plan=plan, state=state)
+    if not _clean(slogan):
+        return False
+    closure = normalize_advertising_closure(plan.get("advertisingClosure"))
+    product = _clean(closure.get("productNameText"))
+    from engine.builder2_advertising_closure_contract import count_slogan_words_excluding_product
+
+    if count_slogan_words_excluding_product(slogan, product) > 7:
+        return False
+    if not judge_requires_verbal_copy(winning_judgment):
+        return True
+    if _clean(plan.get("sloganConnectionToVisibleDetail")) or _clean(plan.get("sloganConnectionToRelativeAdvantage")):
+        return True
+    candidate = winning_candidate if isinstance(winning_candidate, dict) else {}
+    bridge = candidate.get("visualBridgeAssessment")
+    if isinstance(bridge, dict) and (
+        _clean(bridge.get("sloganConnectionToVisibleDetail"))
+        or _clean(bridge.get("sloganConnectionToRelativeAdvantage"))
+    ):
+        return True
+    semantic = candidate.get("semanticBridge")
+    if isinstance(semantic, dict) and _clean(semantic.get("howTheMeaningsMeet")):
+        return True
+    return bool(slogan)
+
+
+def separate_headline_present(plan: Dict[str, Any]) -> bool:
+    if plan.get("headlineCompatibilityAlias") is True:
+        return False
+    slogan = resolve_canonical_slogan_text(plan=plan)
+    headline = _clean(plan.get("headline") or plan.get("headlineText"))
+    return bool(headline and headline != slogan)
+
+
+def compatibility_headline_mirrors_slogan(plan: Dict[str, Any]) -> bool:
+    if plan.get("headlineCompatibilityAlias") is not True:
+        return False
+    slogan = resolve_canonical_slogan_text(plan=plan)
+    headline = _clean(plan.get("headlineText") or plan.get("headline"))
+    return bool(slogan and headline == slogan)
 
 
 def _extract_visual_bridge(

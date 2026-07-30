@@ -165,6 +165,42 @@ class TestOptionalHeadlineReason(unittest.TestCase):
             _process_plan(plan, judgment=judgment)
         self.assertIn("omit_contradicts_judge", str(ctx.exception))
 
+    def test_omit_allowed_under_single_slogan_when_slogan_satisfies_judge(self) -> None:
+        from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
+        from engine.builder2_single_slogan_contract import BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION
+
+        strategy = _strategy(language="he")
+        candidate = _candidate("winning_card")
+        candidate_id = "cand-1-winning_card-1-resume"
+        candidate["advertisingClosure"]["noLogo"] = True
+        plan = _winner_plan(reason=None)
+        plan["copyContractVersion"] = BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION
+        plan["builder2NewFormatVersion"] = BUILDER2_NEW_FORMAT_VERSION
+        plan["prototypeId"] = "winning_card"
+        plan["advertisingClosure"] = deepcopy(candidate["advertisingClosure"])
+        plan["headlineForm"] = "none"
+        plan["headline"] = ""
+        plan["headlineText"] = ""
+        plan["preservationReference"] = {
+            "strategyFoundationId": strategy.get("strategyFoundationId") or "test-tournament-strategy",
+            "prototypeId": "winning_card",
+            "sourceCandidateId": candidate_id,
+        }
+        judgment = _judgment_for_summer_fan(headline_needed=True)
+        source = build_server_owned_winner_source_reference(
+            strategy_foundation=strategy,
+            winning_candidate=candidate,
+            candidate_id=candidate_id,
+        )
+        result = process_winner_development_response(
+            plan,
+            source_reference=source,
+            winning_candidate=candidate,
+            winning_judgment=judgment,
+        )
+        self.assertEqual(result.get("canonicalCopySatisfiedBy"), "slogan")
+        self.assertEqual(result["headlineDecision"]["decision"], "omit")
+
     def test_judge_supports_omit_without_copying_prose(self) -> None:
         plan = _winner_plan(reason=None)
         judgment = _judgment_for_summer_fan(headline_needed=False)

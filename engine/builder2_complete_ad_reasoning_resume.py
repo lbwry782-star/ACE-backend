@@ -84,11 +84,12 @@ from engine.builder2_tournament_store import (
 )
 from engine.builder2_winner_development import develop_builder2_winning_candidate
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development, persist_winner_development_atomically
-from engine.builder2_winner_preservation_contract import (
-    build_server_owned_winner_source_reference,
-    offline_revalidate_parsed_winner_response,
-)
 from engine.builder2_winner_headline_repair import attempt_winner_headline_repair_after_offline_failure
+from engine.builder2_winner_offline_salvage import (
+    assert_no_duplicate_paid_winner_development,
+    attempt_offline_winner_development_salvage,
+    populate_winner_development_call_report,
+)
 from engine.video_jobs_redis import redis_configured, video_job_get_raw
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,13 @@ def _initial_report(*, job_id: str) -> Dict[str, Any]:
         "winnerChangedFromProvisional": False,
         "winnerDevelopmentReused": False,
         "winnerDevelopmentAccepted": False,
+        "winnerDevelopmentOfflineSalvageAttempted": False,
+        "winnerDevelopmentOfflineSalvageAccepted": False,
+        "winnerDevelopmentDispatchCalls": 0,
+        "winnerDevelopmentResponseReceived": False,
+        "winnerDevelopmentParsed": False,
+        "winnerDevelopmentAdditionalPaidCallAllowed": True,
+        "missingPrototypeIds": [],
         "advertisingClosurePresent": False,
         "semanticAlignmentAccepted": False,
         "winnerSloganPreserved": False,
@@ -1055,34 +1063,24 @@ def run_controlled_complete_ad_reasoning_resume(
             winner_reused = True
             report["winnerDevelopmentAccepted"] = True
         elif parsed_winner_reusable_for_candidate(state, winner_candidate_id=winner_id):
-            source = build_server_owned_winner_source_reference(
-                strategy_foundation=strategy,
-                winning_candidate=winning_candidate,
-                candidate_id=winner_id,
-            )
+            report["winnerDevelopmentOfflineSalvageAttempted"] = True
             try:
-                winner_plan = offline_revalidate_parsed_winner_response(
+                _winner_plan, _salvage_meta = attempt_offline_winner_development_salvage(
                     state,
-                    source_reference=source,
+                    winner_candidate_id=winner_id,
+                    prototype_id=_clean(winner_rec.get("prototypeId")),
+                    strategy_foundation=strategy,
                     winning_candidate=winning_candidate,
                     winning_judgment=winning_judgment,
                     compatibility_mode=compatibility_mode,
                     job_id=job_id,
                     tournament_id=_clean(state.get("tournamentId")),
                 )
-                persist_winner_development_atomically(
-                    state,
-                    candidate_id=winner_id,
-                    prototype_id=_clean(winner_rec.get("prototypeId")),
-                    winner_plan=winner_plan,
-                    winning_candidate=winning_candidate,
-                    preservation_snapshot=winner_plan.get("winningCandidatePreservationSnapshot"),
-                    compatibility_mode=compatibility_mode,
-                )
                 winner_reused = True
                 report["winnerDevelopmentAccepted"] = True
+                report["winnerDevelopmentOfflineSalvageAccepted"] = True
             except Builder2TournamentError as exc:
-                reason = str(exc.args[0] if exc.args else "builder2_winner_offline_revalidation_failed")
+                reason = str(exc.args[0] if exc.args else "builder2_winner_offline_salvage_invalid")
                 allow_headline_repair = _env_bool(
                     "BUILDER2_COMPLETE_AD_REASONING_RESUME_ALLOW_WINNER_HEADLINE_REPAIR",
                     False,
@@ -1121,6 +1119,7 @@ def run_controlled_complete_ad_reasoning_resume(
                     if repair_outcome.get("attempted"):
                         report["winnerHeadlineRepairAttempted"] = True
                         report["winnerHeadlineRepairAccepted"] = False
+                    populate_winner_development_call_report(state, report)
                     _persist_resumable_failure(
                         state,
                         job_id=job_id,
@@ -1139,6 +1138,28 @@ def run_controlled_complete_ad_reasoning_resume(
                         lease_acquired=lease_acquired,
                     )
         else:
+            try:
+                assert_no_duplicate_paid_winner_development(state, winner_candidate_id=winner_id)
+            except Builder2TournamentError as exc:
+                reason = str(exc.args[0] if exc.args else "builder2_winner_additional_paid_call_requires_approval")
+                populate_winner_development_call_report(state, report)
+                _persist_resumable_failure(
+                    state,
+                    job_id=job_id,
+                    failure_stage="winner_development",
+                    failure_reason=reason,
+                )
+                return _emit_resume_stage_failure(
+                    report,
+                    state,
+                    job_id=job_id,
+                    failure_stage="winner_development",
+                    failure_reason=reason,
+                    budget=budget,
+                    reasoning_role="builder2_winner",
+                    redis_mutated=True,
+                    lease_acquired=lease_acquired,
+                )
             budget.assert_can_call("builder2_winner")
             ReasoningResumeIsolationGuard.assert_safe_before_winner_development()
             metrics_before = _reasoning_call_snapshot(state)
@@ -1192,6 +1213,7 @@ def run_controlled_complete_ad_reasoning_resume(
             report["winnerDevelopmentAccepted"] = True
 
         report["winnerDevelopmentReused"] = winner_reused
+        populate_winner_development_call_report(state, report)
         _populate_success_report_from_state(
             report,
             state,

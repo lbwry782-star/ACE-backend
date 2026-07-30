@@ -162,6 +162,22 @@ def _judge_requires_headline(winning_judgment: Optional[Dict[str, Any]]) -> Opti
     return None
 
 
+def judge_requires_separate_headline(winning_judgment: Optional[Dict[str, Any]]) -> Optional[bool]:
+    return _judge_requires_headline(winning_judgment)
+
+
+def judge_requires_verbal_copy(winning_judgment: Optional[Dict[str, Any]]) -> bool:
+    if not isinstance(winning_judgment, dict):
+        return False
+    headline = winning_judgment.get("headlineNecessityAssessment")
+    if isinstance(headline, dict) and headline.get("headlineNeeded") is True:
+        return True
+    verbal = winning_judgment.get("verbalLayerAssessment")
+    if isinstance(verbal, dict) and verbal.get("verbalCopyNeeded") is True:
+        return True
+    return False
+
+
 def validate_headline_decision_methodology(
     winner_plan: Dict[str, Any],
     *,
@@ -199,7 +215,28 @@ def validate_headline_decision_methodology(
             _raise("builder2_winner_validation_failed", field="headlineDecision.omit_with_textual_dependency")
         judge_requires = _judge_requires_headline(winning_judgment)
         if judge_requires is True:
-            _raise("builder2_winner_validation_failed", field="headlineDecision.omit_contradicts_judge")
+            from engine.builder2_single_slogan_contract import (
+                canonical_verbal_copy_satisfied_by_slogan,
+                is_single_slogan_contract,
+                stamp_canonical_copy_judge_mapping,
+            )
+
+            if is_single_slogan_contract(plan=winner_plan):
+                stamp_canonical_copy_judge_mapping(
+                    winner_plan,
+                    winning_judgment=winning_judgment,
+                )
+                if canonical_verbal_copy_satisfied_by_slogan(
+                    winner_plan,
+                    winning_judgment=winning_judgment,
+                ):
+                    logger.info(
+                        "BUILDER2_HEADLINE_DECISION_OMIT_SATISFIED_BY_SLOGAN decision=omit canonicalCopySatisfiedBy=slogan",
+                    )
+                else:
+                    _raise("builder2_winner_validation_failed", field="headlineDecision.omit_contradicts_judge")
+            else:
+                _raise("builder2_winner_validation_failed", field="headlineDecision.omit_contradicts_judge")
     elif headline_decision_requires_headline(decision):
         from engine.builder2_tournament_contracts import require_non_empty_str
 
