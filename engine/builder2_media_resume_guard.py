@@ -106,18 +106,24 @@ class MediaResumeIsolationGuard:
 
     @classmethod
     def assert_safe_before_start_image(cls) -> None:
+        if not cls.active:
+            return
         cls.assert_reasoning_isolated()
         if not cls.start_image_enabled:
             raise Builder2TournamentError(f"{MEDIA_RESUME_ISOLATION_ERROR}:startImageDisabled")
 
     @classmethod
     def assert_safe_before_runway(cls) -> None:
+        if not cls.active:
+            return
         cls.assert_reasoning_isolated()
         if not cls.runway_enabled:
             raise Builder2TournamentError(f"{MEDIA_RESUME_ISOLATION_ERROR}:runwayDisabled")
 
     @classmethod
     def assert_safe_before_ffmpeg(cls) -> None:
+        if not cls.active:
+            return
         cls.assert_reasoning_isolated()
         if not cls.ffmpeg_enabled:
             raise Builder2TournamentError(f"{MEDIA_RESUME_ISOLATION_ERROR}:ffmpegDisabled")

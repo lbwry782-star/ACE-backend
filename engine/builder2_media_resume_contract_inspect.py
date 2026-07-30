@@ -9,22 +9,20 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict
 
+from engine.builder2_final_output_diagnostics import (
+    build_builder2_media_diagnostic_fields,
+    collect_media_resume_contract_missing_fields,
+    durable_final_url_present,
+)
 from engine.builder2_media_finalization_contract import resolve_raw_runway_artifact_url
-from engine.builder2_media_resume import collect_media_resume_missing_paths
 from engine.builder2_tournament_completion_gate import (
     accepted_creator_count,
     accepted_judgment_count,
     missing_creator_prototype_ids,
 )
 from engine.builder2_tournament_store import load_tournament_state
-from engine.builder2_winner_persistence import (
-    collect_winner_media_continuation_missing_fields,
-    compute_winner_development_plan_fingerprint,
-    is_valid_persisted_winner_development,
-    is_winner_media_continuation_ready,
-)
 
 
 def _clean(value: Any) -> str:
@@ -35,22 +33,20 @@ def _env(name: str, default: str = "") -> str:
     return (os.environ.get(name) or default).strip()
 
 
-def _public_url_present(media: Dict[str, Any]) -> bool:
-    return bool(_clean(media.get("finalPublicUrl")))
+def _media_bucket(state: Dict[str, Any]) -> Dict[str, Any]:
+    media = state.get("mediaResume")
+    return media if isinstance(media, dict) else {}
 
 
 def inspect_media_resume_contract(state: Dict[str, Any]) -> Dict[str, Any]:
-    media = state.get("mediaResume") if isinstance(state.get("mediaResume"), dict) else {}
+    media = _media_bucket(state)
     winner_id = _clean(state.get("winnerCandidateId") or state.get("winnerDevelopmentCandidateId"))
     winner_rec = (state.get("candidates") or {}).get(winner_id) or {}
     prototype_id = _clean(state.get("winnerDevelopmentPrototypeId") or winner_rec.get("prototypeId"))
     plan = state.get("winnerDevelopmentPlan") if isinstance(state.get("winnerDevelopmentPlan"), dict) else {}
     failure = state.get("winnerDevelopmentFailure") if isinstance(state.get("winnerDevelopmentFailure"), dict) else {}
-    missing = collect_winner_media_continuation_missing_fields(state)
-    media_missing = collect_media_resume_missing_paths(state) if is_winner_media_continuation_ready(state) else missing
-    stored_fp = _clean(state.get("winnerDevelopmentPlanFingerprint"))
-    current_fp = compute_winner_development_plan_fingerprint(plan) if plan else ""
-    state_store_agreement = bool(plan) and (not stored_fp or stored_fp == current_fp)
+    diagnostic = build_builder2_media_diagnostic_fields(state)
+    missing = collect_media_resume_contract_missing_fields(state)
     raw_url = resolve_raw_runway_artifact_url(state)
     return {
         "jobId": _clean(state.get("jobId")),
@@ -63,7 +59,7 @@ def inspect_media_resume_contract(state: Dict[str, Any]) -> Dict[str, Any]:
         "winnerDevelopmentPrototypeId": prototype_id or "",
         "winnerDevelopmentAccepted": state.get("winnerDevelopmentAccepted") is True,
         "winnerDevelopmentSource": _clean(state.get("winnerDevelopmentSource")),
-        "winnerDevelopmentPlanFingerprint": stored_fp or current_fp,
+        "winnerDevelopmentPlanFingerprint": _clean(state.get("winnerDevelopmentPlanFingerprint")),
         "mediaContinuationRequired": state.get("mediaContinuationRequired") is True,
         "historicalWinnerFailureFound": bool(failure),
         "historicalWinnerFailureResolved": state.get("winnerDevelopmentFailureResolved") is True,
@@ -73,11 +69,16 @@ def inspect_media_resume_contract(state: Dict[str, Any]) -> Dict[str, Any]:
         "startImagePresent": bool(_clean(media.get("startImageDataUri") or media.get("startImageArtifactUrl"))),
         "runwayTaskIdPresent": bool(_clean(media.get("runwayTaskId"))),
         "rawRunwayVideoPresent": bool(raw_url),
-        "closureVideoPresent": bool(_clean(media.get("finalVideoWithClosureUrl"))),
-        "durableFinalUrlPresent": _public_url_present(media),
-        "mediaResumeReady": not media_missing,
-        "mediaResumeMissingFields": list(dict.fromkeys(missing + media_missing)),
-        "stateStoreAgreement": state_store_agreement,
+        "closureVideoPresent": diagnostic["closureVideoPresent"],
+        "durableFinalUrlPresent": durable_final_url_present(state),
+        "mediaCompleted": diagnostic["mediaCompleted"],
+        "mediaResumeNeeded": diagnostic["mediaResumeNeeded"],
+        "mediaDiagnosticPhase": diagnostic["mediaDiagnosticPhase"],
+        "finalOutputAvailable": diagnostic["finalOutputAvailable"],
+        "mediaResumeReady": diagnostic["mediaResumeReady"],
+        "mediaResumeBlockedReason": diagnostic["mediaResumeBlockedReason"],
+        "mediaResumeMissingFields": missing,
+        "stateStoreAgreement": diagnostic["stateStoreAgreement"],
         "stateMutated": False,
         "paidCalls": 0,
     }
