@@ -223,6 +223,7 @@ def validate_and_finalize_repaired_winner_plan(
     compatibility_mode: bool,
     job_id: str,
     tournament_id: str,
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     validated = process_winner_development_response(
         merged_parsed,
@@ -233,6 +234,7 @@ def validate_and_finalize_repaired_winner_plan(
         compatibility_mode=compatibility_mode,
         job_id=job_id,
         tournament_id=tournament_id,
+        tournament_state=tournament_state,
     )
     composition_plan = deepcopy(validated)
     try:
@@ -356,6 +358,7 @@ def repair_builder2_winner_headline_from_parsed(
             compatibility_mode=compatibility_mode,
             job_id=job_id,
             tournament_id=tournament_id,
+            tournament_state=state,
         )
         persist_winner_development_atomically(
             state,

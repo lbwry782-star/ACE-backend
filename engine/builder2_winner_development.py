@@ -44,6 +44,7 @@ def validate_winner_plan(
     source_reference: Optional[Dict[str, Any]] = None,
     job_id: str = "",
     tournament_id: str = "",
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if source_reference is not None and winning_candidate is not None:
         return process_winner_development_response(
@@ -55,6 +56,7 @@ def validate_winner_plan(
             compatibility_mode=compatibility_mode,
             job_id=job_id,
             tournament_id=tournament_id,
+            tournament_state=tournament_state,
         )
     return validate_builder2_winner_plan(
         raw,
@@ -223,6 +225,7 @@ def develop_builder2_winning_candidate(
             compatibility_mode=compatibility_mode,
             job_id=job_id,
             tournament_id=tournament_id,
+            tournament_state=state,
         )
     except Builder2TournamentError as exc:
         reason = str(exc.args[0] if exc.args else "")

@@ -9,15 +9,15 @@ from __future__ import annotations
 import json
 import os
 import sys
-from copy import deepcopy
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_store import load_tournament_state
 from engine.builder2_winner_offline_salvage import inspect_winner_development_recovery_state
 from engine.builder2_winner_preservation_contract import (
     build_server_owned_winner_source_reference,
-    offline_revalidate_parsed_winner_response,
+    load_revalidatable_parsed_winner_response,
+    prepare_and_validate_persisted_winner_offline,
 )
 
 
@@ -44,26 +44,42 @@ def inspect_winner_development_resume(
     judgment_id = _clean(winner_rec.get("judgmentId"))
     winning_judgment = ((state.get("judgments") or {}).get(judgment_id) or {}).get("judgment") or {}
     strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
-    if not winner_id or not report.get("winnerParsedResponseFound"):
+    parsed_payload = load_revalidatable_parsed_winner_response(state)
+    if not winner_id or not parsed_payload:
         return report
 
     report["offlineSalvageAttempted"] = True
-    working = deepcopy(state)
     source = build_server_owned_winner_source_reference(
         strategy_foundation=strategy,
         winning_candidate=winning_candidate,
         candidate_id=winner_id,
     )
     try:
-        offline_revalidate_parsed_winner_response(
-            working,
+        prepare_and_validate_persisted_winner_offline(
+            dict(parsed_payload.get("parsed") or {}),
             source_reference=source,
             winning_candidate=winning_candidate,
             winning_judgment=winning_judgment if isinstance(winning_judgment, dict) else None,
+            tournament_state=state,
             job_id=_clean(state.get("jobId")),
             tournament_id=_clean(state.get("tournamentId")),
         )
         report["offlineSalvageValidationPassed"] = True
+        report["offlineSalvageFailureField"] = ""
+        refreshed = inspect_winner_development_recovery_state(
+            state,
+            offline_salvage_attempted=True,
+            offline_salvage_validation_passed=True,
+        )
+        report.update(
+            {
+                "judgeRequiresSeparateHeadline": refreshed.get("judgeRequiresSeparateHeadline"),
+                "compatibilityHeadlineMirrorsSlogan": refreshed.get("compatibilityHeadlineMirrorsSlogan"),
+                "singleSloganContractSatisfied": refreshed.get("singleSloganContractSatisfied"),
+                "headlineDecision": refreshed.get("headlineDecision"),
+                "canonicalCopySatisfiedBy": refreshed.get("canonicalCopySatisfiedBy"),
+            }
+        )
     except Builder2TournamentError as exc:
         reason = str(exc.args[0] if exc.args else "")
         report["offlineSalvageFailureField"] = reason.split(":", 1)[-1] if reason else ""

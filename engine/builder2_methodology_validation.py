@@ -861,6 +861,7 @@ def validate_winner_methodology(
     preservation_snapshot: Optional[Dict[str, Any]] = None,
     winning_judgment: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     if compatibility_mode and not uses_full_methodology(winner_plan):
         logger.info("BUILDER2_METHODOLOGY_COMPATIBILITY_MODE role=winner")
@@ -876,14 +877,16 @@ def validate_winner_methodology(
     validate_headline_decision_methodology(
         winner_plan,
         winning_judgment=winning_judgment if isinstance(winning_judgment, dict) else None,
+        winning_candidate=winning_candidate,
+        tournament_state=tournament_state,
     )
     from engine.builder2_advertising_closure_contract import validate_advertising_closure_methodology
 
     validate_advertising_closure_methodology(winner_plan, require_present=False)
     from engine.builder2_single_slogan_contract import is_single_slogan_contract, validate_single_slogan_plan_contract
 
-    if is_single_slogan_contract(plan=winner_plan):
-        ok, failures = validate_single_slogan_plan_contract(winner_plan)
+    if is_single_slogan_contract(state=tournament_state, plan=winner_plan):
+        ok, failures = validate_single_slogan_plan_contract(winner_plan, state=tournament_state)
         if not ok and failures:
             _raise("builder2_winner_validation_failed", field=failures[0])
     decision = str((winner_plan.get("headlineDecision") or {}).get("decision") or "")

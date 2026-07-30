@@ -134,6 +134,7 @@ def run_one_winner_revalidate(
             compatibility_mode=bool(state.get("methodologyCompatibilityMode")),
             job_id=job_id,
             tournament_id=str(state.get("tournamentId") or ""),
+            tournament_state=state,
         )
         persist_winner_development_atomically(
             state,

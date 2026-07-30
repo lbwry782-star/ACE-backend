@@ -162,7 +162,34 @@ def _judge_requires_headline(winning_judgment: Optional[Dict[str, Any]]) -> Opti
     return None
 
 
-def judge_requires_separate_headline(winning_judgment: Optional[Dict[str, Any]]) -> Optional[bool]:
+def judge_requires_separate_headline(
+    winning_judgment: Optional[Dict[str, Any]],
+    *,
+    state: Optional[Dict[str, Any]] = None,
+    plan: Optional[Dict[str, Any]] = None,
+    winning_candidate: Optional[Dict[str, Any]] = None,
+) -> Optional[bool]:
+    legacy = _judge_requires_headline(winning_judgment)
+    if legacy is not True:
+        return legacy
+    from engine.builder2_single_slogan_contract import (
+        canonical_verbal_copy_satisfied_by_slogan,
+        is_single_slogan_contract,
+    )
+
+    if is_single_slogan_contract(state=state, plan=plan):
+        return False
+    return True
+
+
+def judge_requires_separate_headline_strict(
+    winning_judgment: Optional[Dict[str, Any]],
+    *,
+    state: Optional[Dict[str, Any]] = None,
+    plan: Optional[Dict[str, Any]] = None,
+    winning_candidate: Optional[Dict[str, Any]] = None,
+) -> Optional[bool]:
+    """Legacy dual-copy interpretation without single-slogan remapping."""
     return _judge_requires_headline(winning_judgment)
 
 
@@ -182,6 +209,8 @@ def validate_headline_decision_methodology(
     winner_plan: Dict[str, Any],
     *,
     winning_judgment: Optional[Dict[str, Any]] = None,
+    winning_candidate: Optional[Dict[str, Any]] = None,
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> str:
     raw = winner_plan.get("headlineDecision")
     if raw is None:
@@ -213,7 +242,12 @@ def validate_headline_decision_methodology(
         video_prompt = str(winner_plan.get("videoPrompt") or winner_plan.get("videoPromptCore") or "")
         if _TEXTUAL_HEADLINE_DEPENDENCY.search(video_prompt):
             _raise("builder2_winner_validation_failed", field="headlineDecision.omit_with_textual_dependency")
-        judge_requires = _judge_requires_headline(winning_judgment)
+        judge_requires = judge_requires_separate_headline(
+            winning_judgment,
+            state=tournament_state,
+            plan=winner_plan,
+            winning_candidate=winning_candidate,
+        )
         if judge_requires is True:
             from engine.builder2_single_slogan_contract import (
                 canonical_verbal_copy_satisfied_by_slogan,
@@ -221,20 +255,27 @@ def validate_headline_decision_methodology(
                 stamp_canonical_copy_judge_mapping,
             )
 
-            if is_single_slogan_contract(plan=winner_plan):
+            if is_single_slogan_contract(state=tournament_state, plan=winner_plan):
                 stamp_canonical_copy_judge_mapping(
                     winner_plan,
                     winning_judgment=winning_judgment,
+                    winning_candidate=winning_candidate,
+                    state=tournament_state,
                 )
                 if canonical_verbal_copy_satisfied_by_slogan(
                     winner_plan,
                     winning_judgment=winning_judgment,
+                    winning_candidate=winning_candidate,
+                    state=tournament_state,
                 ):
                     logger.info(
                         "BUILDER2_HEADLINE_DECISION_OMIT_SATISFIED_BY_SLOGAN decision=omit canonicalCopySatisfiedBy=slogan",
                     )
                 else:
-                    _raise("builder2_winner_validation_failed", field="headlineDecision.omit_contradicts_judge")
+                    _raise(
+                        "builder2_winner_validation_failed",
+                        field="builder2_winner_canonical_copy_does_not_satisfy_judge",
+                    )
             else:
                 _raise("builder2_winner_validation_failed", field="headlineDecision.omit_contradicts_judge")
     elif headline_decision_requires_headline(decision):

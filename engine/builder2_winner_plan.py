@@ -111,6 +111,7 @@ def validate_builder2_winner_plan(
     preservation_snapshot: Optional[Dict[str, Any]] = None,
     winning_judgment: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     if raw.get("planningFailure"):
         raise Builder2TournamentError(str(raw.get("planningFailure")))
@@ -176,6 +177,7 @@ def validate_builder2_winner_plan(
             preservation_snapshot=preservation_snapshot,
             winning_judgment=winning_judgment,
             compatibility_mode=compatibility_mode,
+            tournament_state=tournament_state,
         )
     return out
 

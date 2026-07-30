@@ -61,6 +61,7 @@ def apply_complete_ad_winner_plan_normalization(
     *,
     winning_candidate: Dict[str, Any],
     winning_judgment: Optional[Dict[str, Any]] = None,
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     from engine.builder2_headline_decision_contract import (
         apply_headline_decision_execution_normalization,
@@ -91,13 +92,14 @@ def apply_complete_ad_winner_plan_normalization(
         sync_closure_slogan_from_canonical,
     )
 
-    if is_single_slogan_contract(plan=winner_plan):
+    if is_single_slogan_contract(plan=winner_plan, state=tournament_state):
         apply_single_slogan_winner_normalization(
             winner_plan,
             winning_candidate=winning_candidate,
             winning_judgment=winning_judgment,
+            state=tournament_state,
         )
-        sync_closure_slogan_from_canonical(plan=winner_plan)
+        sync_closure_slogan_from_canonical(plan=winner_plan, state=tournament_state)
     else:
         legacy = normalize_legacy_dual_copy(plan=winner_plan)
         if legacy.get("legacyCopyNormalized"):

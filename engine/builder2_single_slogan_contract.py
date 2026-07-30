@@ -269,6 +269,68 @@ def compatibility_headline_mirrors_slogan(plan: Dict[str, Any]) -> bool:
     return bool(slogan and headline == slogan)
 
 
+def compatibility_headline_mirror_status(
+    plan: Dict[str, Any],
+    *,
+    state: Optional[Dict[str, Any]] = None,
+) -> str:
+    if not is_single_slogan_contract(state=state, plan=plan):
+        return "not_required"
+    if plan.get("headlineOverlaySkipped") is True and not _clean(plan.get("headlineText")):
+        return "not_required"
+    if compatibility_headline_mirrors_slogan(plan):
+        return "true"
+    if plan.get("headlineCompatibilityAlias") is True:
+        return "false_invalid"
+    return "not_required"
+
+
+def resolve_persisted_winner_copy_contract_version(
+    *,
+    plan: Dict[str, Any],
+    tournament_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    version = copy_contract_version(state=tournament_state, plan=plan)
+    if version:
+        if not _clean(plan.get("copyContractVersion")):
+            plan["copyContractVersion"] = version
+        return version
+    return ""
+
+
+def apply_persisted_winner_copy_contract_normalization(
+    winner_plan: Dict[str, Any],
+    *,
+    winning_candidate: Dict[str, Any],
+    winning_judgment: Optional[Dict[str, Any]] = None,
+    tournament_state: Optional[Dict[str, Any]] = None,
+) -> None:
+    from engine.builder2_advertising_closure_contract import normalize_advertising_closure
+    from engine.builder2_complete_ad_contract import apply_complete_ad_winner_plan_normalization
+
+    candidate_closure = (winning_candidate or {}).get("advertisingClosure")
+    plan_closure = winner_plan.get("advertisingClosure")
+    if isinstance(candidate_closure, dict):
+        winner_plan["advertisingClosure"] = normalize_advertising_closure(
+            {
+                **candidate_closure,
+                "headlineSource": candidate_closure.get("headlineSource") or "creator_candidate",
+            }
+        )
+    elif isinstance(plan_closure, dict):
+        winner_plan["advertisingClosure"] = normalize_advertising_closure(plan_closure)
+    elif isinstance(tournament_state, dict) and isinstance(tournament_state.get("advertisingClosure"), dict):
+        winner_plan["advertisingClosure"] = normalize_advertising_closure(tournament_state["advertisingClosure"])
+
+    resolve_persisted_winner_copy_contract_version(plan=winner_plan, tournament_state=tournament_state)
+    apply_complete_ad_winner_plan_normalization(
+        winner_plan,
+        winning_candidate=winning_candidate,
+        winning_judgment=winning_judgment,
+        tournament_state=tournament_state,
+    )
+
+
 def _extract_visual_bridge(
     winning_candidate: Dict[str, Any],
     winning_judgment: Optional[Dict[str, Any]],
@@ -290,16 +352,20 @@ def _extract_visual_bridge(
     return {}
 
 
-def validate_single_slogan_plan_contract(plan: Dict[str, Any]) -> Tuple[bool, List[str]]:
+def validate_single_slogan_plan_contract(
+    plan: Dict[str, Any],
+    *,
+    state: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, List[str]]:
     failures: List[str] = []
-    if not is_single_slogan_contract(plan=plan):
+    if not is_single_slogan_contract(state=state, plan=plan):
         return True, failures
     if _clean(plan.get("copyContractVersion")) != BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION:
         failures.append("copy_contract_version_missing")
     slogan = resolve_canonical_slogan_text(plan=plan)
     if not slogan:
         failures.append("canonical_slogan_missing")
-    if builder2_requires_headline_overlay(plan=plan):
+    if builder2_requires_headline_overlay(plan=plan, state=state):
         failures.append("headline_overlay_requested_under_single_slogan_contract")
     headline_raw = _clean(plan.get("headline"))
     if headline_raw and headline_raw != slogan and not plan.get("headlineCompatibilityAlias"):
@@ -325,7 +391,7 @@ def validate_single_slogan_completion(
         return []
     failures: List[str] = []
     media = media if isinstance(media, dict) else (state.get("mediaResume") if isinstance(state.get("mediaResume"), dict) else {})
-    ok, plan_failures = validate_single_slogan_plan_contract(plan)
+    ok, plan_failures = validate_single_slogan_plan_contract(plan, state=state)
     failures.extend(plan_failures)
     if media.get("headlineOverlaySkipped") is not True and media.get("headlinePostprocessStatus") in {"completed", "reused"}:
         failures.append("headline_overlay_rendered_under_single_slogan_contract")

@@ -11,9 +11,8 @@ from engine.builder2_complete_ad_resume_plan import parsed_winner_reusable_for_c
 from engine.builder2_headline_decision_contract import get_normalized_headline_decision
 from engine.builder2_single_slogan_contract import (
     BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION,
-    compatibility_headline_mirrors_slogan,
+    compatibility_headline_mirror_status,
     copy_contract_version,
-    is_single_slogan_contract,
     resolve_canonical_slogan_text,
     separate_headline_present,
     validate_single_slogan_plan_contract,
@@ -32,7 +31,7 @@ from engine.builder2_winner_persistence import (
 from engine.builder2_winner_preservation_contract import (
     build_server_owned_winner_source_reference,
     load_revalidatable_parsed_winner_response,
-    offline_revalidate_parsed_winner_response,
+    prepare_and_validate_persisted_winner_offline,
 )
 
 logger = logging.getLogger(__name__)
@@ -133,22 +132,34 @@ def inspect_winner_development_recovery_state(
     )
     from engine.builder2_advertising_closure_contract import count_slogan_words_excluding_product
 
-    plan_for_inspect = dict(parsed)
+    plan_for_inspect: Dict[str, Any] = {}
     if parsed and winner_rec:
-        from engine.builder2_complete_ad_contract import apply_complete_ad_winner_plan_normalization
-
         candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+        source = build_server_owned_winner_source_reference(
+            strategy_foundation=state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {},
+            winning_candidate=candidate,
+            candidate_id=winner_id,
+        )
         try:
-            apply_complete_ad_winner_plan_normalization(
-                plan_for_inspect,
+            plan_for_inspect = prepare_and_validate_persisted_winner_offline(
+                parsed,
+                source_reference=source,
                 winning_candidate=candidate,
                 winning_judgment=judgment if isinstance(judgment, dict) else None,
+                tournament_state=state,
+                job_id=_clean(state.get("jobId")),
+                tournament_id=_clean(state.get("tournamentId")),
             )
         except Builder2TournamentError:
-            pass
+            plan_for_inspect = dict(parsed)
+    elif parsed:
+        plan_for_inspect = dict(parsed)
     slogan = resolve_canonical_slogan_text(plan=plan_for_inspect, state=state)
     product = _clean((plan_for_inspect.get("advertisingClosure") or {}).get("productNameText"))
-    ok, _failures = validate_single_slogan_plan_contract(plan_for_inspect) if plan_for_inspect else (False, [])
+    ok, _failures = (
+        validate_single_slogan_plan_contract(plan_for_inspect, state=state) if plan_for_inspect else (False, [])
+    )
+    mirror_status = compatibility_headline_mirror_status(plan_for_inspect, state=state) if plan_for_inspect else "not_required"
     return {
         "jobId": _clean(state.get("jobId")),
         "tournamentId": _clean(state.get("tournamentId")),
@@ -164,16 +175,20 @@ def inspect_winner_development_recovery_state(
         "copyContractVersion": copy_contract_version(state=state, plan=plan_for_inspect)
         or BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION,
         "judgeRequiresVerbalCopy": judge_requires_verbal_copy(judgment if isinstance(judgment, dict) else None),
-        "judgeRequiresSeparateHeadline": judge_requires_separate_headline(judgment if isinstance(judgment, dict) else None)
+        "judgeRequiresSeparateHeadline": judge_requires_separate_headline(
+            judgment if isinstance(judgment, dict) else None,
+            state=state,
+            plan=plan_for_inspect if plan_for_inspect else None,
+            winning_candidate=winner_rec.get("creatorOutput") or winner_rec.get("creatorSnapshot") if winner_rec else None,
+        )
         is True,
         "canonicalSloganPresent": bool(slogan),
         "canonicalSloganWordCount": count_slogan_words_excluding_product(slogan, product) if slogan else 0,
         "headlineDecision": get_normalized_headline_decision(plan_for_inspect) if plan_for_inspect else "",
         "separateHeadlinePresent": separate_headline_present(plan_for_inspect) if plan_for_inspect else False,
-        "compatibilityHeadlineMirrorsSlogan": compatibility_headline_mirrors_slogan(plan_for_inspect)
-        if plan_for_inspect
-        else False,
+        "compatibilityHeadlineMirrorsSlogan": mirror_status,
         "singleSloganContractSatisfied": ok,
+        "canonicalCopySatisfiedBy": _clean(plan_for_inspect.get("canonicalCopySatisfiedBy")),
         "offlineSalvageAttempted": bool(offline_salvage_attempted),
         "offlineSalvageValidationPassed": bool(offline_salvage_validation_passed),
         "offlineSalvageFailureField": _clean(offline_salvage_failure_field),
@@ -225,14 +240,15 @@ def attempt_offline_winner_development_salvage(
         candidate_id=winner_candidate_id,
     )
     try:
-        winner_plan = offline_revalidate_parsed_winner_response(
-            state,
+        winner_plan = prepare_and_validate_persisted_winner_offline(
+            dict((load_revalidatable_parsed_winner_response(state) or {}).get("parsed") or {}),
             source_reference=source,
             winning_candidate=winning_candidate,
             winning_judgment=winning_judgment,
             compatibility_mode=compatibility_mode,
-            job_id=job_id,
-            tournament_id=tournament_id,
+            job_id=job_id or _clean(state.get("jobId")),
+            tournament_id=tournament_id or _clean(state.get("tournamentId")),
+            tournament_state=state,
         )
     except Builder2TournamentError as exc:
         reason = str(exc.args[0] if exc.args else "builder2_winner_offline_salvage_invalid")

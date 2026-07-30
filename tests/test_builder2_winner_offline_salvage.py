@@ -84,7 +84,6 @@ def _parsed_winner_plan_omit(*, candidate_id: str, prototype_id: str = "winning_
     plan["headlineCoreKeyword"] = ""
     plan["prototypeId"] = prototype_id
     plan["advertisingClosure"] = deepcopy(candidate["advertisingClosure"])
-    plan["copyContractVersion"] = BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION
     plan["preservationReference"] = {
         "strategyFoundationId": strategy.get("strategyFoundationId") or "strategy-test",
         "prototypeId": prototype_id,
@@ -150,6 +149,7 @@ class TestSingleSloganHeadlineJudgeMapping(unittest.TestCase):
             source_reference=source,
             winning_candidate=candidate,
             winning_judgment=judgment,
+            tournament_state=state,
         )
         self.assertEqual(get_normalized_headline_decision(result), "omit")
         self.assertEqual(result.get("canonicalCopySatisfiedBy"), "slogan")
@@ -227,6 +227,101 @@ class TestWinnerOfflineSalvage(unittest.TestCase):
         self.assertFalse(report["stateMutated"])
         self.assertEqual(report["paidCalls"], 0)
         self.assertEqual(report["copyContractVersion"], BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION)
+        self.assertTrue(report["judgeRequiresVerbalCopy"])
+        self.assertFalse(report["judgeRequiresSeparateHeadline"])
+        self.assertIn(report["compatibilityHeadlineMirrorsSlogan"], {"true", "not_required"})
+        self.assertEqual(report.get("canonicalCopySatisfiedBy"), "slogan")
+        self.assertFalse(report.get("offlineSalvageFailureField"))
+
+    def test_production_shape_without_tournament_state_reproduces_pref_fix_failure(self) -> None:
+        state = _current_job_shaped_state()
+        winner_id = _winning_card_winner_id(state)
+        winner_rec = state["candidates"][winner_id]
+        candidate = winner_rec["creatorOutput"]
+        judgment = state["judgments"][winner_rec["judgmentId"]]["judgment"]
+        plan = deepcopy(state[PARSED_WINNER_RESPONSE_KEY]["parsed"])
+        from engine.builder2_winner_preservation_contract import build_server_owned_winner_source_reference
+
+        source = build_server_owned_winner_source_reference(
+            strategy_foundation=state["strategyFoundation"],
+            winning_candidate=candidate,
+            candidate_id=winner_id,
+        )
+        with self.assertRaises(Builder2TournamentError) as ctx:
+            process_winner_development_response(
+                plan,
+                source_reference=source,
+                winning_candidate=candidate,
+                winning_judgment=judgment,
+            )
+        self.assertIn("omit_contradicts_judge", str(ctx.exception))
+
+    def test_inspector_uses_same_canonical_helper_as_salvage(self) -> None:
+        state = _current_job_shaped_state()
+        with patch(
+            "engine.builder2_winner_development_resume_inspect.prepare_and_validate_persisted_winner_offline",
+            wraps=__import__(
+                "engine.builder2_winner_preservation_contract",
+                fromlist=["prepare_and_validate_persisted_winner_offline"],
+            ).prepare_and_validate_persisted_winner_offline,
+        ) as canonical:
+            report = inspect_winner_development_resume(state)
+        self.assertGreaterEqual(canonical.call_count, 1)
+        self.assertTrue(report["offlineSalvageValidationPassed"])
+
+    def test_judge_mapping_occurs_before_headline_validation(self) -> None:
+        state = _current_job_shaped_state()
+        winner_id = _winning_card_winner_id(state)
+        winner_rec = state["candidates"][winner_id]
+        candidate = winner_rec["creatorOutput"]
+        judgment = state["judgments"][winner_rec["judgmentId"]]["judgment"]
+        plan = deepcopy(state[PARSED_WINNER_RESPONSE_KEY]["parsed"])
+        from engine.builder2_winner_preservation_contract import build_server_owned_winner_source_reference
+
+        from engine.builder2_headline_decision_contract import (
+            validate_headline_decision_methodology as real_headline_validate,
+        )
+        from engine.builder2_single_slogan_contract import stamp_canonical_copy_judge_mapping as real_stamp_fn
+
+        source = build_server_owned_winner_source_reference(
+            strategy_foundation=state["strategyFoundation"],
+            winning_candidate=candidate,
+            candidate_id=winner_id,
+        )
+        call_order: list[str] = []
+
+        def _track_stamp(plan_obj: Dict[str, Any], **kwargs: Any) -> None:
+            call_order.append("stamp")
+            real_stamp_fn(plan_obj, **kwargs)
+
+        def _track_headline(plan_obj: Dict[str, Any], **kwargs: Any) -> str:
+            call_order.append("headline")
+            return real_headline_validate(plan_obj, **kwargs)
+
+        with patch(
+            "engine.builder2_single_slogan_contract.stamp_canonical_copy_judge_mapping",
+            side_effect=_track_stamp,
+        ), patch(
+            "engine.builder2_headline_decision_contract.validate_headline_decision_methodology",
+            side_effect=_track_headline,
+        ):
+            process_winner_development_response(
+                plan,
+                source_reference=source,
+                winning_candidate=candidate,
+                winning_judgment=judgment,
+                tournament_state=state,
+            )
+        self.assertEqual(call_order[:2], ["stamp", "headline"])
+
+    def test_production_shape_parsed_plan_without_copy_contract_on_plan(self) -> None:
+        state = _current_job_shaped_state()
+        parsed = state[PARSED_WINNER_RESPONSE_KEY]["parsed"]
+        self.assertNotIn("copyContractVersion", parsed)
+        self.assertEqual(copy_contract_version(state=state), BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION)
+        report = inspect_winner_development_resume(state)
+        self.assertTrue(report["offlineSalvageValidationPassed"])
+        self.assertNotEqual(report.get("offlineSalvageFailureField"), "headlineDecision.omit_contradicts_judge")
 
     def test_missing_prototype_ids_empty_for_six_accepted(self) -> None:
         state = _current_job_shaped_state()
@@ -264,6 +359,7 @@ class TestWinnerOfflineSalvage(unittest.TestCase):
             plan,
             winning_candidate=candidate,
             winning_judgment=state["judgments"][state["candidates"][winner_id]["judgmentId"]]["judgment"],
+            tournament_state=state,
         )
         self.assertTrue(is_single_slogan_contract(state=state, plan=plan))
         self.assertTrue(

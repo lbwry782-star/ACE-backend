@@ -323,25 +323,48 @@ def process_winner_development_response(
     compatibility_mode: bool = False,
     job_id: str = "",
     tournament_id: str = "",
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    normalized = normalize_winner_response_compatibility_fields(raw)
+    return prepare_and_validate_persisted_winner_offline(
+        raw,
+        source_reference=source_reference,
+        winning_candidate=winning_candidate,
+        preservation_snapshot=preservation_snapshot,
+        winning_judgment=winning_judgment,
+        compatibility_mode=compatibility_mode,
+        job_id=job_id,
+        tournament_id=tournament_id,
+        tournament_state=tournament_state,
+    )
+
+
+def prepare_and_validate_persisted_winner_offline(
+    raw: Dict[str, Any],
+    *,
+    source_reference: Dict[str, Any],
+    winning_candidate: Dict[str, Any],
+    preservation_snapshot: Optional[Dict[str, Any]] = None,
+    winning_judgment: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+    job_id: str = "",
+    tournament_id: str = "",
+    tournament_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    from engine.builder2_single_slogan_contract import apply_persisted_winner_copy_contract_normalization
+    from engine.builder2_winner_plan import validate_builder2_winner_plan
+
+    working = deepcopy(raw)
+    normalized = normalize_winner_response_compatibility_fields(working)
     model_diagnostic = capture_model_preservation_diagnostic(normalized)
     detect_winner_immutable_identity_violations(normalized, source_reference=source_reference)
     merged = apply_server_owned_preservation(normalized, source_reference=source_reference)
-    creator_closure = (winning_candidate or {}).get("advertisingClosure")
-    if isinstance(creator_closure, dict):
-        from engine.builder2_advertising_closure_contract import normalize_advertising_closure
-        from engine.builder2_complete_ad_contract import apply_complete_ad_winner_plan_normalization
-
-        merged["advertisingClosure"] = normalize_advertising_closure(
-            {**creator_closure, "headlineSource": creator_closure.get("headlineSource") or "creator_candidate"}
+    if not compatibility_mode:
+        apply_persisted_winner_copy_contract_normalization(
+            merged,
+            winning_candidate=winning_candidate,
+            winning_judgment=winning_judgment,
+            tournament_state=tournament_state,
         )
-        if not compatibility_mode:
-            apply_complete_ad_winner_plan_normalization(
-                merged,
-                winning_candidate=winning_candidate,
-                winning_judgment=winning_judgment,
-            )
     validate_winner_source_identity(merged, source_reference=source_reference)
     log_preservation_contract_applied(
         job_id=job_id,
@@ -377,6 +400,7 @@ def process_winner_development_response(
             preservation_snapshot=snapshot,
             winning_judgment=winning_judgment,
             compatibility_mode=compatibility_mode,
+            tournament_state=tournament_state,
         )
     except Builder2TournamentError as exc:
         field = str(exc.args[0]).split(":", 1)[-1] if exc.args else None
@@ -445,4 +469,5 @@ def offline_revalidate_parsed_winner_response(
         compatibility_mode=compatibility_mode,
         job_id=job_id,
         tournament_id=tournament_id,
+        tournament_state=state,
     )
