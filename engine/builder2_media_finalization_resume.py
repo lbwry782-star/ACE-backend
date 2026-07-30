@@ -725,6 +725,11 @@ def _execute_finalization_render_pipeline(
         media["finalPublicationUploadedByteCount"] = publication_result.uploaded_byte_count
         media["advertisingClosureRendered"] = True
         media["advertisingClosureStatus"] = "completed"
+        if isinstance(render_result.typography_metadata, dict):
+            media.update(render_result.typography_metadata)
+            media["closureTypographyContractVersion"] = render_result.typography_metadata.get(
+                "typographyContractVersion"
+            )
         state["advertisingClosureStatus"] = "completed"
         media.pop("brokenFinalPublicationUrl", None)
         media.pop("invalidFinalPublicationRouteFamily", None)

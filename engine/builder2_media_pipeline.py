@@ -648,6 +648,11 @@ def execute_builder2_media_pipeline(
             from engine.builder2_no_logo_contract import mark_logo_free_closure_render
 
             mark_logo_free_closure_render(media)
+            if isinstance(render_result.typography_metadata, dict):
+                media.update(render_result.typography_metadata)
+                media["closureTypographyContractVersion"] = render_result.typography_metadata.get(
+                    "typographyContractVersion"
+                )
             media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
             media["endCardDurationSeconds"] = resolve_builder2_end_card_duration_seconds()
             media["expectedFinalVideoDurationSeconds"] = resolve_builder2_final_video_duration_seconds()

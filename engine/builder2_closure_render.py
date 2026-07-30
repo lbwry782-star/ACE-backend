@@ -119,6 +119,7 @@ class ClosureRenderResult:
     input_fingerprint: str
     closure_ffprobe_calls: int = 0
     duration_diagnostics: Optional[FinalDurationVerificationDiagnostics] = None
+    typography_metadata: Optional[Dict[str, Any]] = None
 
 
 def _sanitize_line(text: str) -> str:
@@ -324,9 +325,9 @@ def _run_checked(cmd: list[str], *, stage: str, category: str) -> int:
 
 
 def _default_font_path(language: str) -> str:
-    from engine.video_headline_postprocess import _default_font_path as headline_font
+    from engine.builder2_closure_typography import resolve_builder2_closure_slogan_font_path
 
-    return headline_font(language)
+    return str(resolve_builder2_closure_slogan_font_path())
 
 
 def _closure_storage_token(job_id: str) -> str:
@@ -378,8 +379,33 @@ def render_builder2_advertising_closure_endcard(
 
     lang = normalize_video_content_language(language)
     ffmpeg = _ffmpeg_bin()
-    font = _default_font_path(lang)
-    if not ffmpeg or not font:
+    from engine.builder2_closure_typography import (
+        fit_builder2_closure_typography,
+        build_closure_card_drawtext_filter,
+        validate_builder2_closure_font_assets,
+    )
+
+    try:
+        validate_builder2_closure_font_assets()
+        typography_layout = fit_builder2_closure_typography(
+            product_name=product,
+            slogan=slogan_text,
+            language=lang,
+        )
+    except Builder2TournamentError as exc:
+        raise Builder2ClosureRenderError(
+            str(exc.args[0] if exc.args else "builder2_closure_typography_failed"),
+            stage="input_validation",
+            command_category="validation",
+        ) from exc
+    except Exception as exc:
+        raise Builder2ClosureRenderError(
+            "builder2_closure_missing_ffmpeg_or_font",
+            stage="input_validation",
+            command_category="validation",
+        ) from exc
+
+    if not ffmpeg:
         raise Builder2ClosureRenderError(
             "builder2_closure_missing_ffmpeg_or_font",
             stage="input_validation",
@@ -396,8 +422,7 @@ def render_builder2_advertising_closure_endcard(
     inp = tmp / "in.mp4"
     card = tmp / "card.mp4"
     out_tmp = tmp / "out.mp4"
-    product_file = tmp / "product.txt"
-    slogan_file = tmp / "slogan.txt"
+    line_files: list[Path] = []
 
     def _runner(cmd: list[str], stage: str, category: str) -> int:
         if ffmpeg_runner is not None:
@@ -435,15 +460,14 @@ def render_builder2_advertising_closure_endcard(
         source_duration = _ffprobe_duration_seconds(inp, _FFPROBE_TIMEOUT)
         closure_ffprobe_calls = 1
         has_audio = _input_has_audio(inp, _FFPROBE_TIMEOUT)
-        font_path = _filter_path_for_ffmpeg(Path(font))
-        product_file.write_text(product, encoding="utf-8")
-        slogan_file.write_text(slogan_text, encoding="utf-8")
-
-        card_filter = (
-            f"drawtext=fontfile='{font_path}':textfile='{_filter_path_for_ffmpeg(product_file)}':"
-            f"fontcolor=white:fontsize=52:x=(w-text_w)/2:y=(h/2)-70:borderw=2:bordercolor=black@0.35,"
-            f"drawtext=fontfile='{font_path}':textfile='{_filter_path_for_ffmpeg(slogan_file)}':"
-            f"fontcolor=white:fontsize=40:x=(w-text_w)/2:y=(h/2)+10:borderw=2:bordercolor=black@0.35"
+        for index, spec in enumerate(typography_layout.line_specs):
+            line_path = tmp / f"line_{index}.txt"
+            line_path.write_text(spec.text, encoding="utf-8")
+            line_files.append(line_path)
+        card_filter = build_closure_card_drawtext_filter(
+            typography_layout,
+            textfile_paths=line_files,
+            ffmpeg_path_filter=_filter_path_for_ffmpeg,
         )
         card_cmd = [
             ffmpeg,
@@ -656,6 +680,7 @@ def render_builder2_advertising_closure_endcard(
             input_fingerprint=input_fingerprint,
             closure_ffprobe_calls=closure_ffprobe_calls,
             duration_diagnostics=duration_diagnostics,
+            typography_metadata=typography_layout.metadata(),
         )
     finally:
         try:

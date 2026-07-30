@@ -145,6 +145,9 @@ def render_advertising_closure_for_state(
     media["closureRenderedAt"] = _utc_now_iso()
     media["advertisingClosureRendered"] = True
     media["advertisingClosureStatus"] = "completed"
+    if isinstance(result.typography_metadata, dict):
+        media.update(result.typography_metadata)
+        media["closureTypographyContractVersion"] = result.typography_metadata.get("typographyContractVersion")
     media.pop("advertisingClosureFailure", None)
     state["advertisingClosure"] = normalized
     state["advertisingClosureStatus"] = "completed"
