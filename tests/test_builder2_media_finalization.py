@@ -195,7 +195,7 @@ class TestClosureRenderErrors(unittest.TestCase):
     @patch("engine.builder2_closure_render.requests.get")
     @patch("engine.builder2_closure_render._default_font_path", return_value="/font.ttf")
     @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/ffmpeg")
-    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.0, 13.51])
+    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.0, 3.5, 13.51])
     @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
     def test_success_returns_distinct_result(
         self,
@@ -210,7 +210,7 @@ class TestClosureRenderErrors(unittest.TestCase):
         get_req.return_value.raise_for_status = MagicMock()
 
         def runner(cmd: list[str], stage: str, category: str) -> None:
-            if cmd and str(cmd[-1]).endswith("out.mp4"):
+            if cmd:
                 Path(cmd[-1]).write_bytes(b"fake")
 
         result = render_builder2_advertising_closure_endcard(

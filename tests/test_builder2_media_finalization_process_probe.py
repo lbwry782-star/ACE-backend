@@ -324,7 +324,7 @@ class TestProbeChildProcess(unittest.TestCase):
 
 class TestClosureLowLevelMarkers(unittest.TestCase):
     @patch("engine.builder2_closure_render._run_checked")
-    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 13.534])
+    @patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 3.5, 13.534])
     @patch("engine.builder2_closure_render._input_has_audio", return_value=False)
     @patch("engine.builder2_closure_render._default_font_path", return_value="/fonts/default.ttf")
     @patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/usr/bin/ffmpeg")
@@ -347,7 +347,7 @@ class TestClosureLowLevelMarkers(unittest.TestCase):
                 marker_lines.append(data)
             return original_write(fd, data)
 
-        def _run(cmd: Any, stage: str, category: str) -> int:
+        def _run(cmd: Any, stage: str, category: str, **_kwargs: Any) -> int:
             Path(str(cmd[-1])).write_bytes(b"fake-video")
             return 0
 

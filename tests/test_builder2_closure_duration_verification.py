@@ -149,7 +149,7 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
                 return SimpleNamespace(st_size=1234, st_mode=33188)
             return real_stat(self)
 
-        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[_VISUAL, _EXPECTED_FINAL]), patch(
+        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[_VISUAL, 3.5, _EXPECTED_FINAL]), patch(
             "engine.builder2_closure_render._input_has_audio",
             return_value=False,
         ), patch(
@@ -158,9 +158,6 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
         ), patch(
             "engine.builder2_closure_render._ffmpeg_bin",
             return_value="ffmpeg",
-        ), patch(
-            "engine.builder2_closure_render._filter_path_for_ffmpeg",
-            side_effect=lambda p: str(p),
         ), patch(
             "engine.builder2_closure_render.verify_builder2_final_video_duration",
             side_effect=lambda measured, **kwargs: build_final_duration_verification_diagnostics(
@@ -182,12 +179,14 @@ class TestClosureFfmpegCommandConstruction(unittest.TestCase):
         concat_cmd = next(cmd for cmd, _stage, category in captured if category == "ffmpeg_concat")
         card_input = "".join(card_cmd)
         filter_complex = concat_cmd[concat_cmd.index("-filter_complex") + 1]
-        filter_vf = card_cmd[card_cmd.index("-vf") + 1]
+        filter_vf = card_cmd[card_cmd.index("-filter_complex") + 1]
         self.assertIn("d=3.5", card_input)
         self.assertIn("-t", card_cmd)
         self.assertIn("3.500000", card_cmd)
         self.assertIn("trim=duration=3.500000", filter_complex)
-        self.assertIn("y='", filter_vf)
+        self.assertIn("overlay=", filter_vf)
+        self.assertIn("color=c=0x00000000", filter_vf)
+        self.assertNotIn("[0:v]drawtext", filter_vf.replace(" ", ""))
         self.assertNotIn("d=2.0", card_input)
         self.assertNotIn("trim=duration=2", filter_complex)
 

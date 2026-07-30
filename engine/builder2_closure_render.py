@@ -26,10 +26,13 @@ from engine.builder2_new_format_config import (
     resolve_builder2_final_video_duration_seconds,
     resolve_builder2_video_duration_seconds,
 )
+from engine.builder2_closure_ffmpeg_paths import (
+    ClosureFfmpegAssetSession,
+    assert_closure_ffmpeg_stderr_font_health,
+)
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.video_headline_postprocess import (
     _ffmpeg_bin,
-    _filter_path_for_ffmpeg,
     _input_has_audio,
 )
 from engine.video_language import normalize_video_content_language
@@ -285,7 +288,7 @@ def verify_builder2_final_video_duration(
     )
 
 
-def _run_checked(cmd: list[str], *, stage: str, category: str) -> int:
+def _run_checked(cmd: list[str], *, stage: str, category: str, validate_font_stderr: bool = False) -> int:
     try:
         completed = subprocess.run(
             cmd,
@@ -314,6 +317,8 @@ def _run_checked(cmd: list[str], *, stage: str, category: str) -> int:
             stage=stage,
             command_category=category,
         ) from exc
+    if validate_font_stderr:
+        assert_closure_ffmpeg_stderr_font_health(completed.stderr)
     if completed.stderr:
         logger.debug(
             "BUILDER2_CLOSURE_FFMPEG stage=%s category=%s stderr_len=%s",
@@ -380,7 +385,7 @@ def render_builder2_advertising_closure_endcard(
     lang = normalize_video_content_language(language)
     ffmpeg = _ffmpeg_bin()
     from engine.builder2_closure_typography import (
-        build_closure_card_drawtext_filter,
+        build_closure_card_masked_reveal_filter_complex,
         closure_card_lavfi_background,
         fit_builder2_closure_typography,
         validate_builder2_closure_font_assets,
@@ -424,7 +429,21 @@ def render_builder2_advertising_closure_endcard(
     inp = tmp / "in.mp4"
     card = tmp / "card.mp4"
     out_tmp = tmp / "out.mp4"
-    line_files: list[Path] = []
+
+    def _run_closure_card_ffmpeg(cmd: list[str], *, stage: str, category: str) -> None:
+        if ffmpeg_runner is not None:
+            try:
+                ffmpeg_runner(cmd, stage, category)
+            except subprocess.CalledProcessError as exc:
+                raise Builder2ClosureRenderError(
+                    "builder2_closure_ffmpeg_failed",
+                    stage=stage,
+                    return_code=exc.returncode,
+                    stderr_tail=sanitize_ffmpeg_stderr(exc.stderr),
+                    command_category=category,
+                ) from exc
+            return
+        _run_checked(cmd, stage=stage, category=category, validate_font_stderr=True)
 
     def _runner(cmd: list[str], stage: str, category: str) -> int:
         if ffmpeg_runner is not None:
@@ -462,45 +481,64 @@ def render_builder2_advertising_closure_endcard(
         source_duration = _ffprobe_duration_seconds(inp, _FFPROBE_TIMEOUT)
         closure_ffprobe_calls = 1
         has_audio = _input_has_audio(inp, _FFPROBE_TIMEOUT)
-        for index, spec in enumerate(typography_layout.line_specs):
-            line_path = tmp / f"line_{index}.txt"
-            line_path.write_text(spec.text, encoding="utf-8")
-            line_files.append(line_path)
-        card_filter = build_closure_card_drawtext_filter(
-            typography_layout,
-            textfile_paths=line_files,
-            ffmpeg_path_filter=_filter_path_for_ffmpeg,
-        )
-        card_cmd = [
-            ffmpeg,
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            closure_card_lavfi_background(width=_TARGET_WIDTH, height=_TARGET_HEIGHT, duration=hold),
-            "-vf",
-            card_filter,
-            "-r",
-            str(_TARGET_FPS),
-            "-t",
-            f"{hold:.6f}",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-an",
-            str(card),
-        ]
+        ffmpeg_session = ClosureFfmpegAssetSession.create()
+        try:
+            line_files, font_files = ffmpeg_session.prepare_line_assets(typography_layout.line_specs)
+            card_filter_complex, card_out_label = build_closure_card_masked_reveal_filter_complex(
+                typography_layout,
+                textfile_paths=line_files,
+                font_paths=font_files,
+                duration_seconds=hold,
+                ffmpeg_path_filter=ffmpeg_session.filter_path,
+            )
+            card_cmd = [
+                ffmpeg,
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                closure_card_lavfi_background(width=_TARGET_WIDTH, height=_TARGET_HEIGHT, duration=hold),
+                "-filter_complex",
+                card_filter_complex,
+                "-map",
+                f"[{card_out_label}]",
+                "-r",
+                str(_TARGET_FPS),
+                "-t",
+                f"{hold:.6f}",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-an",
+                str(card),
+            ]
+
+            logger.info("BUILDER2_CLOSURE_ENDCARD start jobId=%s", (job_id or "").strip() or "(none)")
+            t0 = time.monotonic()
+            _run_closure_card_ffmpeg(card_cmd, stage="card_generation", category="ffmpeg_card")
+        finally:
+            ffmpeg_session.cleanup()
+        card_created = card.is_file()
+        card_size = card.stat().st_size if card_created else 0
+        measured_closure_duration = hold
+        if card_created:
+            try:
+                measured_closure_duration = _ffprobe_duration_seconds(card, _FFPROBE_TIMEOUT)
+                closure_ffprobe_calls += 1
+            except RuntimeError:
+                measured_closure_duration = hold
+        effective_hold = float(measured_closure_duration)
 
         if has_audio:
             filter_complex = (
                 f"[0:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"force_original_aspect_ratio=decrease,pad={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0];"
-                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},trim=duration={hold:.6f},"
+                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},trim=duration={effective_hold:.6f},"
                 f"setsar=1,setpts=PTS-STARTPTS[v1];"
                 f"[v0][v1]concat=n=2:v=1:a=0[vout];"
-                f"[0:a]apad,atrim=0:{source_duration + hold}[aout]"
+                f"[0:a]apad,atrim=0:{source_duration + effective_hold}[aout]"
             )
             concat_cmd = [
                 ffmpeg,
@@ -528,7 +566,7 @@ def render_builder2_advertising_closure_endcard(
                 f"[0:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"force_original_aspect_ratio=decrease,pad={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0];"
-                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},trim=duration={hold:.6f},"
+                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},trim=duration={effective_hold:.6f},"
                 f"setsar=1,setpts=PTS-STARTPTS[v1];"
                 f"[v0][v1]concat=n=2:v=1:a=0[vout]"
             )
@@ -551,17 +589,13 @@ def render_builder2_advertising_closure_endcard(
                 str(out_tmp),
             ]
 
-        logger.info("BUILDER2_CLOSURE_ENDCARD start jobId=%s", (job_id or "").strip() or "(none)")
-        t0 = time.monotonic()
-        card_rc = _runner(card_cmd, "card_generation", "ffmpeg_card")
-        card_created = card.is_file()
-        card_size = card.stat().st_size if card_created else 0
         logger.info(
-            "BUILDER2_CLOSURE_CARD_RENDER_COMPLETED ffmpegReturnCode=%s outputCreated=%s outputSizeBytes=%s effectiveClosureDurationSeconds=%.3f",
-            card_rc,
+            "BUILDER2_CLOSURE_CARD_RENDER_COMPLETED ffmpegReturnCode=%s outputCreated=%s outputSizeBytes=%s effectiveClosureDurationSeconds=%.3f measuredClosureDurationSeconds=%.3f",
+            0,
             card_created,
             card_size,
             hold,
+            measured_closure_duration,
         )
         _emit_closure_low_level_marker(
             "BUILDER2_CLOSURE_CONCAT_INVOKE",
@@ -609,7 +643,7 @@ def render_builder2_advertising_closure_endcard(
             duration_diagnostics = verify_builder2_final_video_duration(
                 measured,
                 visual_duration_seconds=source_duration,
-                end_card_duration_seconds=effective_segment,
+                end_card_duration_seconds=measured_closure_duration,
             )
         except Builder2ClosureRenderError as exc:
             if exc.stage == "duration_verification":
@@ -674,6 +708,13 @@ def render_builder2_advertising_closure_endcard(
             elapsed_ms=(time.monotonic() - t0) * 1000.0,
             durationAccepted=duration_accepted,
         )
+        expected_from_components = float(source_duration) + float(measured_closure_duration)
+        closure_duration_tolerance = max(FINAL_DURATION_TOLERANCE_SECONDS, 0.15)
+        final_duration_verified = (
+            duration_accepted
+            and abs(float(measured_closure_duration) - hold) <= closure_duration_tolerance
+            and abs(float(measured) - expected_from_components) <= max(FINAL_DURATION_TOLERANCE_SECONDS, 0.2)
+        )
         return ClosureRenderResult(
             public_url="",
             local_path=str(caller_output_path),
@@ -682,7 +723,13 @@ def render_builder2_advertising_closure_endcard(
             input_fingerprint=input_fingerprint,
             closure_ffprobe_calls=closure_ffprobe_calls,
             duration_diagnostics=duration_diagnostics,
-            typography_metadata=typography_layout.metadata(measured_final_duration_seconds=measured),
+            typography_metadata=typography_layout.metadata(
+                measured_final_duration_seconds=measured,
+                measured_raw_video_duration_seconds=source_duration,
+                measured_closure_duration_seconds=measured_closure_duration,
+                expected_final_video_duration_from_components=expected_from_components,
+                final_duration_verified=final_duration_verified,
+            ),
         )
     finally:
         try:

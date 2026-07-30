@@ -491,7 +491,7 @@ class TestBuilder2ClosureRenderReturnsNormally(unittest.TestCase):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(b"video")
 
-        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 13.542]):
+        with patch("engine.builder2_closure_render._ffprobe_duration_seconds", side_effect=[10.042, 3.5, 13.542]):
             with patch("engine.builder2_closure_render._input_has_audio", return_value=False):
                 with patch("engine.builder2_closure_render._default_font_path", return_value="/fonts/default.ttf"):
                     with patch("engine.builder2_closure_render._ffmpeg_bin", return_value="/usr/bin/ffmpeg"):

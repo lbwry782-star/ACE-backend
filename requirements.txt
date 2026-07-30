@@ -1,6 +1,7 @@
 flask==3.0.0
 flask-cors==4.0.0
 Pillow>=11.0.0
+fonttools>=4.55.0
 gunicorn==21.2.0
 openai==2.30.0
 requests>=2.31.0
