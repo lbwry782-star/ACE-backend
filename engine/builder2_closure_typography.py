@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Sequence, Tuple
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.video_language import normalize_video_content_language
 
-BUILDER2_CLOSURE_TYPOGRAPHY_VERSION = "builder2_closure_typography_v1"
+BUILDER2_CLOSURE_TYPOGRAPHY_VERSION = "builder2_closure_typography_v2"
+BUILDER2_CLOSURE_TYPOGRAPHY_V1 = "builder2_closure_typography_v1"
 
 PRODUCT_FONT_RELATIVE = Path("assets") / "fonts" / "OgenBlack.ttf"
 SLOGAN_FONT_RELATIVE = Path("assets") / "fonts" / "OgenBold.ttf"
@@ -23,13 +24,22 @@ CANVAS_WIDTH = 1280
 CANVAS_HEIGHT = 720
 HORIZONTAL_SAFE_MARGIN_PX = 80
 VERTICAL_SAFE_MARGIN_PX = 60
-PRODUCT_SLOGAN_BLOCK_GAP_PX = 36
+PRODUCT_SLOGAN_BLOCK_GAP_PX = 18
+PREVIOUS_PRODUCT_SLOGAN_BLOCK_GAP_PX = 36
 MAX_PRODUCT_LINES = 2
 MAX_SLOGAN_LINES = 2
 BASE_SLOGAN_FONT_SIZE = 44
 MIN_SLOGAN_FONT_SIZE = 28
 MIN_PRODUCT_FONT_SIZE = 36
 LINE_HEIGHT_FACTOR = 1.18
+
+CLOSURE_BACKGROUND_STYLE_VERSION = "builder2_closure_background_black_purple_v1"
+# Dark near-black with a subtle purple cast (FFmpeg 0xRRGGBB).
+CLOSURE_BACKGROUND_FFMPEG_COLOR = "0x0E0014"
+
+_CLOSURE_PUNCTUATION_PATTERN = re.compile(
+    r"[\.\,\:\;\!\?\"\'`\(\)\[\]\{\}\/\\|\-–—―…·•«»„”“‘’׳״]+"
+)
 
 
 def _repo_root() -> Path:
@@ -91,6 +101,20 @@ def _has_hebrew_letter(text: str) -> bool:
 
 def _sanitize_line(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip())
+
+
+def sanitize_closure_render_text(text: str) -> str:
+    """Remove punctuation for visible closure copy; preserve letters, digits, and spaces."""
+    cleaned = _CLOSURE_PUNCTUATION_PATTERN.sub(" ", text or "")
+    return _sanitize_line(cleaned)
+
+
+def closure_punctuation_removed(original: str, rendered: str) -> bool:
+    return sanitize_closure_render_text(original) == _sanitize_line(rendered)
+
+
+def closure_card_lavfi_background(*, width: int, height: int, duration: float) -> str:
+    return f"color=c={CLOSURE_BACKGROUND_FFMPEG_COLOR}:s={width}x{height}:d={duration:.6f}"
 
 
 def _text_width_px(font_path: Path, text: str, fontsize: int) -> int:
@@ -175,6 +199,11 @@ class ClosureTypographyLayout:
     product_line_count: int
     slogan_line_count: int
     safe_margins_satisfied: bool
+    original_product_text: str = ""
+    original_slogan_text: str = ""
+    rendered_product_text: str = ""
+    rendered_slogan_text: str = ""
+    product_slogan_gap_px: int = PRODUCT_SLOGAN_BLOCK_GAP_PX
     line_specs: Tuple[ClosureTypographyLineSpec, ...] = field(default_factory=tuple)
 
     def metadata(self) -> Dict[str, Any]:
@@ -187,9 +216,17 @@ class ClosureTypographyLayout:
             "requestedSloganFontSize": self.requested_slogan_font_size,
             "effectiveSloganFontSize": self.effective_slogan_font_size,
             "effectiveDominanceRatio": round(self.effective_dominance_ratio, 4),
+            "effectiveProductSloganGapPx": self.product_slogan_gap_px,
             "productLineCount": self.product_line_count,
             "sloganLineCount": self.slogan_line_count,
             "safeMarginsSatisfied": self.safe_margins_satisfied,
+            "canonicalProductNameText": self.original_product_text,
+            "canonicalSloganText": self.original_slogan_text,
+            "renderedClosureProductText": self.rendered_product_text,
+            "renderedClosureSloganText": self.rendered_slogan_text,
+            "closurePunctuationSanitizationApplied": True,
+            "closureBackgroundStyleVersion": CLOSURE_BACKGROUND_STYLE_VERSION,
+            "closureBackgroundFfmpegColor": CLOSURE_BACKGROUND_FFMPEG_COLOR,
             "productNameRenderedAsPlainText": True,
             "productNameFontRole": "primary",
             "sloganFontRole": "secondary",
@@ -207,10 +244,14 @@ def fit_builder2_closure_typography(
 ) -> ClosureTypographyLayout:
     product_font, slogan_font = validate_builder2_closure_font_assets()
     lang = normalize_video_content_language(language)
-    product_text = _sanitize_line(product_name)
-    slogan_text = _sanitize_line(slogan)
+    original_product = _sanitize_line(product_name)
+    original_slogan = _sanitize_line(slogan)
+    product_text = sanitize_closure_render_text(original_product)
+    slogan_text = sanitize_closure_render_text(original_slogan)
     if not product_text or not slogan_text:
         raise Builder2TournamentError("builder2_closure_missing_text")
+
+    gap_px = PRODUCT_SLOGAN_BLOCK_GAP_PX
 
     safe_width = CANVAS_WIDTH - (2 * HORIZONTAL_SAFE_MARGIN_PX)
     safe_height = CANVAS_HEIGHT - (2 * VERTICAL_SAFE_MARGIN_PX)
@@ -248,7 +289,7 @@ def fit_builder2_closure_typography(
         slogan_block_h = sum(_line_height_px(slogan_size) for _ in slogan_lines)
         if len(slogan_lines) > 1:
             slogan_block_h += int((len(slogan_lines) - 1) * slogan_size * 0.08)
-        total_h = product_block_h + PRODUCT_SLOGAN_BLOCK_GAP_PX + slogan_block_h
+        total_h = product_block_h + gap_px + slogan_block_h
         if total_h > safe_height:
             continue
 
@@ -286,7 +327,7 @@ def fit_builder2_closure_typography(
                 )
             )
             y_cursor += _line_height_px(product_size)
-        y_cursor += PRODUCT_SLOGAN_BLOCK_GAP_PX
+        y_cursor += gap_px
         slogan_shaping = lang == "he" or _has_hebrew_letter(slogan_text)
         for line in slogan_lines:
             line_specs.append(
@@ -314,6 +355,11 @@ def fit_builder2_closure_typography(
             product_line_count=len(product_lines),
             slogan_line_count=len(slogan_lines),
             safe_margins_satisfied=True,
+            original_product_text=original_product,
+            original_slogan_text=original_slogan,
+            rendered_product_text=" ".join(product_lines),
+            rendered_slogan_text=" ".join(slogan_lines),
+            product_slogan_gap_px=gap_px,
             line_specs=tuple(line_specs),
         )
         break
@@ -368,6 +414,10 @@ def closure_typography_upgrade_needed(
 def verify_closure_typography_metadata(metadata: Dict[str, Any]) -> None:
     if metadata.get("typographyContractVersion") != BUILDER2_CLOSURE_TYPOGRAPHY_VERSION:
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:typography_version")
+    if metadata.get("closurePunctuationSanitizationApplied") is not True:
+        raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:punctuation")
+    if metadata.get("closureBackgroundStyleVersion") != CLOSURE_BACKGROUND_STYLE_VERSION:
+        raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:background")
     if metadata.get("brandNameDominanceSatisfied") is not True:
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied")
     if metadata.get("separateHeadlineRendered") is True:

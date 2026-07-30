@@ -17,15 +17,22 @@ from engine.builder2_closure_only_rerender import run_builder2_closure_only_rere
 from engine.builder2_closure_render import ClosureRenderResult, render_builder2_advertising_closure_endcard
 from engine.builder2_closure_rerender_inspect import inspect_builder2_closure_rerender, main as rerender_inspect_main
 from engine.builder2_closure_typography import (
+    BUILDER2_CLOSURE_TYPOGRAPHY_V1,
     BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
+    CLOSURE_BACKGROUND_FFMPEG_COLOR,
+    CLOSURE_BACKGROUND_STYLE_VERSION,
     MIN_ACCEPTABLE_DOMINANCE_RATIO,
+    PREVIOUS_PRODUCT_SLOGAN_BLOCK_GAP_PX,
     PRODUCT_FONT_RELATIVE,
+    PRODUCT_SLOGAN_BLOCK_GAP_PX,
     SLOGAN_FONT_RELATIVE,
     TARGET_PRODUCT_SLOGAN_SIZE_RATIO,
+    closure_card_lavfi_background,
     fit_builder2_closure_typography,
     font_supports_hebrew_glyphs,
     resolve_builder2_closure_product_font_path,
     resolve_builder2_closure_slogan_font_path,
+    sanitize_closure_render_text,
     validate_builder2_closure_font_assets,
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
@@ -150,10 +157,52 @@ class TestBuilder2ClosureTypographyContract(unittest.TestCase):
         )
         meta = layout.metadata()
         self.assertEqual(meta["typographyContractVersion"], BUILDER2_CLOSURE_TYPOGRAPHY_VERSION)
+        self.assertEqual(meta["typographyContractVersion"], "builder2_closure_typography_v2")
         self.assertTrue(meta["productNameRenderedAsPlainText"])
         self.assertTrue(meta["sloganRenderedExactlyOnce"])
         self.assertFalse(meta["separateHeadlineRendered"])
         self.assertTrue(meta["brandNameDominanceSatisfied"])
+        self.assertTrue(meta["closurePunctuationSanitizationApplied"])
+        self.assertEqual(meta["closureBackgroundStyleVersion"], CLOSURE_BACKGROUND_STYLE_VERSION)
+        self.assertEqual(meta["effectiveProductSloganGapPx"], PRODUCT_SLOGAN_BLOCK_GAP_PX)
+
+    def test_vertical_spacing_tighter_than_previous_version(self) -> None:
+        layout = fit_builder2_closure_typography(
+            product_name="Brand",
+            slogan="Slogan line",
+            language="en",
+        )
+        self.assertLess(layout.product_slogan_gap_px, PREVIOUS_PRODUCT_SLOGAN_BLOCK_GAP_PX)
+        self.assertEqual(layout.product_slogan_gap_px, 18)
+
+    def test_punctuation_removed_from_rendered_copy(self) -> None:
+        layout = fit_builder2_closure_typography(
+            product_name='Brand, Inc. — "Premium"',
+            slogan="Hello, world! Really?",
+            language="en",
+        )
+        self.assertNotIn(",", layout.rendered_product_text)
+        self.assertNotIn('"', layout.rendered_product_text)
+        self.assertNotIn("—", layout.rendered_product_text)
+        self.assertNotIn("!", layout.rendered_slogan_text)
+        self.assertNotIn("?", layout.rendered_slogan_text)
+        meta = layout.metadata()
+        self.assertEqual(meta["renderedClosureProductText"], layout.rendered_product_text)
+        self.assertTrue(meta["canonicalProductNameText"])
+
+    def test_sanitize_collapses_spaces(self) -> None:
+        self.assertEqual(sanitize_closure_render_text("Hello,   world."), "Hello world")
+
+    def test_hebrew_punctuation_removed(self) -> None:
+        rendered = sanitize_closure_render_text('שם "מוצר", טוב!')
+        self.assertNotIn('"', rendered)
+        self.assertNotIn(",", rendered)
+        self.assertNotIn("!", rendered)
+
+    def test_black_purple_background_lavfi(self) -> None:
+        spec = closure_card_lavfi_background(width=1280, height=720, duration=2.0)
+        self.assertIn(CLOSURE_BACKGROUND_FFMPEG_COLOR, spec)
+        self.assertNotIn("c=black", spec)
 
     def test_missing_font_fails_before_render(self) -> None:
         with patch(
@@ -172,6 +221,14 @@ class TestBuilder2ClosureRerenderInspect(unittest.TestCase):
         self.assertTrue(report["typographyUpgradeNeeded"])
         self.assertTrue(report["canonicalProductNamePresent"])
         self.assertTrue(report["canonicalSloganPresent"])
+        self.assertEqual(report["requestedTypographyContractVersion"], BUILDER2_CLOSURE_TYPOGRAPHY_VERSION)
+
+    def test_v1_job_needs_v2_upgrade(self) -> None:
+        state = _completed_state_for_rerender(typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_V1)
+        state["mediaResume"].pop("closureOnlyRerenderCompletedForVersion", None)
+        report = inspect_builder2_closure_rerender(state)
+        self.assertTrue(report["typographyUpgradeNeeded"])
+        self.assertTrue(report["closureOnlyRerenderEligible"])
 
     def test_current_version_not_eligible(self) -> None:
         state = _completed_state_for_rerender(typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_VERSION)
@@ -195,6 +252,7 @@ class TestBuilder2ClosureRerenderInspect(unittest.TestCase):
         self.assertEqual(payload["paidCalls"], 0)
         self.assertNotIn("productName", payload)
         self.assertNotIn("slogan", payload)
+        self.assertEqual(payload["closureBackgroundStyleVersion"], CLOSURE_BACKGROUND_STYLE_VERSION)
 
 
 class TestBuilder2ClosureOnlyRerender(unittest.TestCase):

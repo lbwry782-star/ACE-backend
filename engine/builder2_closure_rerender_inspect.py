@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 from engine.builder2_closure_copy import closure_copy_fields_present
 from engine.builder2_closure_typography import (
     BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
+    CLOSURE_BACKGROUND_STYLE_VERSION,
     closure_typography_upgrade_needed,
     current_closure_typography_version,
     resolve_builder2_closure_product_font_path,
@@ -86,6 +87,7 @@ def inspect_builder2_closure_rerender(
         "sloganFontPathResolved": slogan_font_path,
         "currentTypographyContractVersion": current_version or None,
         "requestedTypographyContractVersion": requested_typography_version,
+        "closureBackgroundStyleVersion": CLOSURE_BACKGROUND_STYLE_VERSION,
         "typographyUpgradeNeeded": upgrade_needed,
         "closureOnlyRerenderEligible": eligible,
         "closureOnlyRerenderMissingFields": missing,

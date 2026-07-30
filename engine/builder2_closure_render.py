@@ -380,8 +380,9 @@ def render_builder2_advertising_closure_endcard(
     lang = normalize_video_content_language(language)
     ffmpeg = _ffmpeg_bin()
     from engine.builder2_closure_typography import (
-        fit_builder2_closure_typography,
         build_closure_card_drawtext_filter,
+        closure_card_lavfi_background,
+        fit_builder2_closure_typography,
         validate_builder2_closure_font_assets,
     )
 
@@ -475,7 +476,7 @@ def render_builder2_advertising_closure_endcard(
             "-f",
             "lavfi",
             "-i",
-            f"color=c=black:s={_TARGET_WIDTH}x{_TARGET_HEIGHT}:d={hold}",
+            closure_card_lavfi_background(width=_TARGET_WIDTH, height=_TARGET_HEIGHT, duration=hold),
             "-vf",
             card_filter,
             "-r",
