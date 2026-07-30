@@ -654,8 +654,14 @@ def execute_builder2_media_pipeline(
                     "typographyContractVersion"
                 )
             media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
-            media["endCardDurationSeconds"] = resolve_builder2_end_card_duration_seconds()
-            media["expectedFinalVideoDurationSeconds"] = resolve_builder2_final_video_duration_seconds()
+            from engine.builder2_closure_duration_contract import resolve_expected_final_video_duration_seconds
+
+            media["endCardDurationSeconds"] = resolve_builder2_effective_closure_segment_duration_seconds()
+            media["expectedFinalVideoDurationSeconds"] = resolve_expected_final_video_duration_seconds(
+                raw_video_duration_seconds=render_result.duration_diagnostics.measured_closure_source_duration_seconds
+                if render_result.duration_diagnostics is not None
+                else None,
+            )
             media["advertisingClosureSource"] = state.get("advertisingClosureSource") or "winner_creator_candidate"
             _update_media_progress(state, "publishing_final_video")
             publication = publish_builder2_durable_final_video(

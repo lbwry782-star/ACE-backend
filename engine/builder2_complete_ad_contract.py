@@ -117,9 +117,12 @@ def _raise(code: str, *, field: str) -> None:
 
 
 def resolve_canonical_creator_end_card_duration_seconds() -> float:
-    from engine.builder2_new_format_config import resolve_builder2_end_card_duration_seconds
+    from engine.builder2_closure_duration_contract import resolve_configured_closure_segment_duration_seconds
+    from engine.builder2_closure_typography import BUILDER2_CLOSURE_TYPOGRAPHY_VERSION
 
-    return resolve_builder2_end_card_duration_seconds()
+    return resolve_configured_closure_segment_duration_seconds(
+        typography_contract_version=BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
+    )
 
 
 def _parse_duration_seconds_raw(raw: Any) -> Optional[float]:

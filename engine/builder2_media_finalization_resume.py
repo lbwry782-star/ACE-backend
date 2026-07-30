@@ -24,6 +24,7 @@ from engine.builder2_closure_render import (
     classify_url_route_family,
     render_builder2_advertising_closure_endcard,
 )
+from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 from engine.builder2_final_local_staging import Builder2FinalLocalStagingError, prepare_publication_staging
 from engine.builder2_final_video_publication import (
     Builder2FinalPublicationError,
@@ -629,7 +630,9 @@ def _execute_finalization_render_pipeline(
                 slogan=str(closure.get("sloganText") or ""),
                 output_path=output_path,
                 language=str(closure.get("language") or "en"),
-                duration_seconds=float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None,
+                duration_seconds=resolve_builder2_effective_closure_segment_duration_seconds(
+                    float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None
+                ),
                 job_id=job_id,
             )
         except Builder2ClosureRenderError as exc:

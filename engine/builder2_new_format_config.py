@@ -45,22 +45,25 @@ def resolve_builder2_end_card_duration_seconds() -> float:
 
 def resolve_builder2_effective_closure_segment_duration_seconds(
     requested_duration_seconds: float | None = None,
+    *,
+    typography_contract_version: str | None = None,
 ) -> float:
     """
-    Authoritative Builder2 closure segment duration.
+    Authoritative Builder2 closure segment duration for the active typography contract.
 
-    Fades/transitions must fit inside this segment; nothing may be appended outside it.
+    Typography v3 always resolves to 3.5 seconds and rejects incompatible environment
+    overrides via builder2_closure_duration_contract_mismatch.
     """
-    effective = float(resolve_builder2_end_card_duration_seconds())
-    if requested_duration_seconds is not None:
-        requested = float(requested_duration_seconds)
-        if abs(requested - effective) > 0.01:
-            logger.info(
-                "BUILDER2_CLOSURE_SEGMENT_DURATION_COERCED requested=%.3f effective=%.3f",
-                requested,
-                effective,
-            )
-    return effective
+    from engine.builder2_closure_typography import BUILDER2_CLOSURE_TYPOGRAPHY_VERSION
+    from engine.builder2_closure_duration_contract import (
+        resolve_configured_closure_segment_duration_seconds,
+    )
+
+    version = typography_contract_version or BUILDER2_CLOSURE_TYPOGRAPHY_VERSION
+    return resolve_configured_closure_segment_duration_seconds(
+        typography_contract_version=version,
+        requested_duration_seconds=requested_duration_seconds,
+    )
 
 
 def resolve_builder2_final_video_duration_seconds() -> float:
@@ -108,8 +111,14 @@ def validate_new_format_runway_configuration(*, dry_run: bool = True) -> Tuple[b
     failures: List[str] = []
     model = resolve_builder2_runway_video_model()
     duration = resolve_builder2_video_duration_seconds()
-    end_card = resolve_builder2_end_card_duration_seconds()
-    final_duration = resolve_builder2_final_video_duration_seconds()
+    from engine.builder2_closure_duration_contract import (
+        BUILDER2_CLOSURE_V3_SEGMENT_DURATION_SECONDS,
+        enforce_v3_closure_duration_contract,
+        is_v3_closure_duration_contract_satisfied,
+    )
+
+    end_card = BUILDER2_CLOSURE_V3_SEGMENT_DURATION_SECONDS
+    final_duration = float(duration) + end_card
     if model != DEFAULT_BUILDER2_RUNWAY_MODEL:
         failures.append(f"runway_model_expected_{DEFAULT_BUILDER2_RUNWAY_MODEL}_actual_{model}")
     if duration != DEFAULT_BUILDER2_RUNWAY_DURATION_SECONDS:
@@ -125,8 +134,15 @@ def validate_new_format_runway_configuration(*, dry_run: bool = True) -> Tuple[b
         failures.append(
             f"final_duration_expected_{expected_final}_actual_{final_duration}"
         )
+    if not is_v3_closure_duration_contract_satisfied():
+        failures.append("builder2_closure_duration_contract_mismatch")
     if dry_run and failures:
         logger.error("BUILDER2_NEW_FORMAT_CONFIG_MISMATCH failures=%s", failures)
+    try:
+        enforce_v3_closure_duration_contract()
+    except Exception:
+        if "builder2_closure_duration_contract_mismatch" not in failures:
+            failures.append("builder2_closure_duration_contract_mismatch")
     return not failures, failures
 
 

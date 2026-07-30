@@ -10,10 +10,8 @@ from typing import Any, Callable, Dict, Optional, Union
 from engine.builder2_advertising_closure_contract import normalize_advertising_closure, validate_advertising_closure_object
 from engine.builder2_advertising_closure_resume_guard import AdvertisingClosureResumeGuard
 from engine.builder2_closure_render import Builder2ClosureRenderError, ClosureRenderResult, url_fingerprint
-from engine.builder2_new_format_config import (
-    resolve_builder2_effective_closure_segment_duration_seconds,
-    resolve_builder2_end_card_duration_seconds,
-)
+from engine.builder2_closure_duration_contract import resolve_expected_final_video_duration_seconds
+from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
 
 
 @dataclass
@@ -139,8 +137,9 @@ def render_advertising_closure_for_state(
     media["finalPublicUrl"] = result.public_url
     media["finalVideoPath"] = result.public_url
     media["actualFinalVideoDurationSeconds"] = result.measured_duration_seconds
-    media["expectedFinalVideoDurationSeconds"] = resolve_builder2_end_card_duration_seconds() + float(
-        media.get("rawRunwayDurationSeconds") or 0
+    media["endCardDurationSeconds"] = resolve_builder2_effective_closure_segment_duration_seconds()
+    media["expectedFinalVideoDurationSeconds"] = resolve_expected_final_video_duration_seconds(
+        raw_video_duration_seconds=float(media.get("rawRunwayDurationSeconds") or 0) or None,
     )
     media["closureRenderedAt"] = _utc_now_iso()
     media["advertisingClosureRendered"] = True

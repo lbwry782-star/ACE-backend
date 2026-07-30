@@ -429,6 +429,13 @@ def sync_closure_slogan_from_canonical(*, plan: Dict[str, Any], state: Optional[
     if not canonical:
         return
     closure = normalize_advertising_closure(plan.get("advertisingClosure"))
+    if isinstance(state, dict):
+        existing = state.get("advertisingClosure")
+        if isinstance(existing, dict) and existing.get("durationSeconds") is not None:
+            try:
+                closure["durationSeconds"] = float(existing["durationSeconds"])
+            except (TypeError, ValueError):
+                pass
     closure["sloganText"] = canonical
     closure["required"] = True
     plan["advertisingClosure"] = closure

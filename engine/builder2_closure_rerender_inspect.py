@@ -18,10 +18,7 @@ from engine.builder2_closure_typography import (
     resolve_builder2_closure_product_font_path,
     resolve_builder2_closure_slogan_font_path,
 )
-from engine.builder2_new_format_config import (
-    resolve_builder2_effective_closure_segment_duration_seconds,
-    resolve_builder2_final_video_duration_seconds,
-)
+from engine.builder2_closure_duration_contract import build_closure_duration_inspector_fields
 from engine.builder2_final_output_diagnostics import (
     durable_final_url_present,
     is_builder2_media_diagnostically_completed,
@@ -44,7 +41,12 @@ def inspect_builder2_closure_rerender(
     requested_typography_version: str = BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
 ) -> Dict[str, Any]:
     media = state.get("mediaResume") if isinstance(state.get("mediaResume"), dict) else {}
-    product_present, slogan_present = closure_copy_fields_present(state)
+    current_version = current_closure_typography_version(media)
+    upgrade_needed = closure_typography_upgrade_needed(media, requested_version=requested_typography_version)
+    duration_fields = build_closure_duration_inspector_fields(
+        state,
+        requested_typography_version=requested_typography_version,
+    )
     missing: List[str] = []
     raw_present = bool(resolve_raw_runway_artifact_url(state))
     media_completed = is_builder2_media_diagnostically_completed(state)
@@ -54,10 +56,6 @@ def inspect_builder2_closure_rerender(
         missing.append("mediaCompleted")
     if not raw_present:
         missing.append("rawRunwayVideo")
-    if not product_present:
-        missing.append("canonicalProductName")
-    if not slogan_present:
-        missing.append("canonicalSlogan")
     product_font_present = False
     slogan_font_present = False
     product_font_path = ""
@@ -72,8 +70,11 @@ def inspect_builder2_closure_rerender(
         slogan_font_present = True
     except Exception:
         missing.append("sloganFont")
-    current_version = current_closure_typography_version(media)
-    upgrade_needed = closure_typography_upgrade_needed(media, requested_version=requested_typography_version)
+    product_present, slogan_present = closure_copy_fields_present(state)
+    if not product_present:
+        missing.append("canonicalProductName")
+    if not slogan_present:
+        missing.append("canonicalSlogan")
     if not upgrade_needed:
         missing.append("typographyAlreadyCurrent")
     eligible = not missing
@@ -94,8 +95,6 @@ def inspect_builder2_closure_rerender(
         "requestedTypographyContractVersion": requested_typography_version,
         "closureBackgroundStyleVersion": CLOSURE_BACKGROUND_STYLE_VERSION,
         "closureTextRevealVersion": CLOSURE_TEXT_REVEAL_VERSION,
-        "configuredClosureSegmentDurationSeconds": resolve_builder2_effective_closure_segment_duration_seconds(),
-        "configuredFinalVideoDurationSeconds": resolve_builder2_final_video_duration_seconds(),
         "typographyUpgradeNeeded": upgrade_needed,
         "closureOnlyRerenderEligible": eligible,
         "closureOnlyRerenderMissingFields": missing,
@@ -104,6 +103,7 @@ def inspect_builder2_closure_rerender(
         "reasoningCallRequired": False,
         "stateMutated": False,
         "paidCalls": 0,
+        **duration_fields,
     }
 
 

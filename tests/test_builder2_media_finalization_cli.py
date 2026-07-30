@@ -411,7 +411,7 @@ class TestBuilder2MediaFinalizationCliLibraryBoundaries(unittest.TestCase):
         mark_done.assert_not_called()
         closure_render.assert_called_once()
         passed_duration = closure_render.call_args.kwargs["duration_seconds"]
-        self.assertEqual(passed_duration, 3.0)
+        self.assertEqual(passed_duration, 3.5)
         self.assertAlmostEqual(
             resolve_builder2_effective_closure_segment_duration_seconds(passed_duration),
             3.5,

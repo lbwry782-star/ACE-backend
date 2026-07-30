@@ -328,7 +328,9 @@ class ClosureTypographyLayout:
     ) -> Dict[str, Any]:
         from engine.builder2_new_format_config import (
             resolve_builder2_effective_closure_segment_duration_seconds,
-            resolve_builder2_final_video_duration_seconds,
+        )
+        from engine.builder2_closure_duration_contract import (
+            resolve_expected_final_video_duration_seconds,
         )
 
         configured_closure = float(
@@ -363,11 +365,21 @@ class ClosureTypographyLayout:
             "closureBackgroundStyleVersion": CLOSURE_BACKGROUND_STYLE_VERSION,
             "closureBackgroundFfmpegColor": CLOSURE_BACKGROUND_FFMPEG_COLOR,
             "configuredClosureSegmentDurationSeconds": configured_closure,
-            "configuredFinalVideoDurationSeconds": resolve_builder2_final_video_duration_seconds(),
+            "configuredFinalVideoDurationSeconds": resolve_expected_final_video_duration_seconds(
+                raw_video_duration_seconds=measured_raw_video_duration_seconds,
+            ),
             "measuredRawVideoDurationSeconds": measured_raw_video_duration_seconds,
             "measuredClosureDurationSeconds": measured_closure_duration_seconds,
             "measuredFinalDurationSeconds": measured_final_duration_seconds,
-            "expectedFinalVideoDurationFromComponents": expected_final_video_duration_from_components,
+            "expectedFinalVideoDurationFromComponents": (
+                expected_final_video_duration_from_components
+                if expected_final_video_duration_from_components is not None
+                else (
+                    (float(measured_raw_video_duration_seconds) + configured_closure)
+                    if measured_raw_video_duration_seconds is not None
+                    else resolve_expected_final_video_duration_seconds()
+                )
+            ),
             "finalDurationVerified": final_duration_verified,
             "closureTextRevealVersion": CLOSURE_TEXT_REVEAL_VERSION,
             "closureTextRevealEasing": CLOSURE_TEXT_REVEAL_EASING,

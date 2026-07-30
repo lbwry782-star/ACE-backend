@@ -28,6 +28,7 @@ from engine.builder2_durable_finalization import (
 from engine.builder2_final_video_publication import Builder2FinalPublicationError
 from engine.builder2_media_finalization_contract import resolve_raw_runway_artifact_url
 from engine.builder2_new_format_config import resolve_builder2_effective_closure_segment_duration_seconds
+from engine.builder2_closure_duration_contract import enforce_v3_closure_duration_contract
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_store import load_tournament_state, save_tournament_state
 from engine.video_jobs_redis import redis_configured, video_job_get, video_job_mark_done
@@ -135,6 +136,10 @@ def run_builder2_closure_only_rerender(
             + ",".join(preflight.get("closureOnlyRerenderMissingFields") or [])
         )
         return report
+    if not preflight.get("closureDurationContractSatisfied"):
+        report["failureStage"] = "preflight"
+        report["failureReason"] = "builder2_closure_duration_contract_mismatch"
+        return report
 
     raw_url = resolve_raw_runway_artifact_url(state)
     if not raw_url:
@@ -153,8 +158,10 @@ def run_builder2_closure_only_rerender(
     if not isinstance(closure, dict):
         closure = (state.get("winnerDevelopmentPlan") or {}).get("advertisingClosure") or {}
     duration_seconds = resolve_builder2_effective_closure_segment_duration_seconds(
-        float(closure.get("durationSeconds")) if isinstance(closure, dict) and closure.get("durationSeconds") is not None else None
+        float(closure.get("durationSeconds")) if isinstance(closure, dict) and closure.get("durationSeconds") is not None else None,
+        typography_contract_version=expected_typography_version,
     )
+    enforce_v3_closure_duration_contract()
 
     base_url = _clean(public_base_url or _resolve_public_base_url(state))
     if not base_url:
