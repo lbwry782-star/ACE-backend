@@ -23,6 +23,7 @@ from engine.builder2_single_slogan_contract import (
 from engine.builder2_tournament_completion_gate import missing_creator_prototype_ids, tournament_resolution_summary
 from engine.builder2_tournament_config import DEFAULT_ACTIVE_PROTOTYPE_IDS, DEFAULT_BUILDER2_TOURNAMENT_MAX_ROUNDS
 from engine.builder2_tournament_contracts import Builder2TournamentError
+from engine.builder2_tournament_contracts import TOURNAMENT_STATE_SCHEMA_VERSION
 from engine.builder2_tournament_metrics import ensure_metrics
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store
 from engine.builder2_winner_development_resume_inspect import inspect_winner_development_resume
@@ -125,6 +126,7 @@ def _current_job_shaped_state(*, dispatch_calls: int = 1) -> Dict[str, Any]:
         "failureField": "headlineDecision.omit_contradicts_judge",
     }
     ensure_metrics(state)
+    state.setdefault("schemaVersion", TOURNAMENT_STATE_SCHEMA_VERSION)
     state["metrics"]["winnerDevelopmentCalls"] = dispatch_calls
     return state
 

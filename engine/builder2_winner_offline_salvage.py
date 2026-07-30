@@ -24,9 +24,11 @@ from engine.builder2_tournament_completion_gate import (
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_winner_persistence import (
+    WINNER_DEVELOPMENT_SOURCE_OFFLINE_SALVAGE,
     has_failed_winner_attempt_after_paid_call,
     is_valid_persisted_winner_development,
-    persist_winner_development_atomically,
+    persist_accepted_winner_development_for_media,
+    verify_winner_media_continuation_contract,
 )
 from engine.builder2_winner_preservation_contract import (
     build_server_owned_winner_source_reference,
@@ -262,14 +264,24 @@ def attempt_offline_winner_development_salvage(
         )
         raise
 
-    persist_winner_development_atomically(
+    winner_plan = persist_accepted_winner_development_for_media(
         state,
         candidate_id=winner_candidate_id,
         prototype_id=prototype_id,
         winner_plan=winner_plan,
         winning_candidate=winning_candidate,
+        winning_judgment=winning_judgment,
         preservation_snapshot=winner_plan.get("winningCandidatePreservationSnapshot"),
         compatibility_mode=compatibility_mode,
+        source=WINNER_DEVELOPMENT_SOURCE_OFFLINE_SALVAGE,
+        job_id=job_id or _clean(state.get("jobId")),
+        tournament_id=tournament_id or _clean(state.get("tournamentId")),
+        save=False,
+    )
+    verify_winner_media_continuation_contract(
+        state,
+        job_id=job_id or _clean(state.get("jobId")),
+        tournament_id=tournament_id or _clean(state.get("tournamentId")),
     )
     reconcile_winner_development_call_ledger(state)
     meta["accepted"] = True
@@ -279,7 +291,7 @@ def attempt_offline_winner_development_salvage(
         winner_candidate_id,
         prototype_id,
     )
-    return winner_plan, meta
+    return deepcopy(state.get("winnerDevelopmentPlan") or {}), meta
 
 
 def assert_no_duplicate_paid_winner_development(state: Dict[str, Any], *, winner_candidate_id: str) -> None:

@@ -83,7 +83,12 @@ from engine.builder2_tournament_store import (
     save_tournament_state,
 )
 from engine.builder2_winner_development import develop_builder2_winning_candidate
-from engine.builder2_winner_persistence import is_valid_persisted_winner_development, persist_winner_development_atomically
+from engine.builder2_winner_persistence import (
+    WINNER_DEVELOPMENT_SOURCE_NORMAL,
+    finalize_accepted_winner_reasoning_handoff,
+    is_valid_persisted_winner_development,
+    persist_accepted_winner_development_for_media,
+)
 from engine.builder2_winner_headline_repair import attempt_winner_headline_repair_after_offline_failure
 from engine.builder2_winner_offline_salvage import (
     assert_no_duplicate_paid_winner_development,
@@ -522,7 +527,14 @@ def run_controlled_complete_ad_reasoning_resume(
                 winner_reused=True,
                 stop_before_media=stop_before_media,
             )
-            if stop_before_media:
+            if is_valid_persisted_winner_development(state):
+                finalize_accepted_winner_reasoning_handoff(
+                    state,
+                    job_id=job_id,
+                    stop_before_media=stop_before_media,
+                )
+                save_tournament_state(job_id, state)
+            elif stop_before_media:
                 _finalize_stop_before_media(state, job_id=job_id)
             return report
 
@@ -1201,14 +1213,19 @@ def run_controlled_complete_ad_reasoning_resume(
             _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
             if budget.winner_calls_this_run == metrics_before["winner"]:
                 budget.record("builder2_winner")
-            persist_winner_development_atomically(
+            persist_accepted_winner_development_for_media(
                 state,
                 candidate_id=winner_id,
                 prototype_id=_clean(winner_rec.get("prototypeId")),
                 winner_plan=winner_plan,
                 winning_candidate=winning_candidate,
+                winning_judgment=winning_judgment,
                 preservation_snapshot=winner_plan.get("winningCandidatePreservationSnapshot"),
                 compatibility_mode=compatibility_mode,
+                source=WINNER_DEVELOPMENT_SOURCE_NORMAL,
+                job_id=job_id,
+                tournament_id=_clean(state.get("tournamentId")),
+                save=False,
             )
             report["winnerDevelopmentAccepted"] = True
 
@@ -1222,9 +1239,12 @@ def run_controlled_complete_ad_reasoning_resume(
             stop_before_media=stop_before_media,
         )
         report["winnerChangedFromProvisional"] = bool(provisional_winner and provisional_winner != winner_id)
-
-        if stop_before_media:
-            _finalize_stop_before_media(state, job_id=job_id)
+        finalize_accepted_winner_reasoning_handoff(
+            state,
+            job_id=job_id,
+            stop_before_media=stop_before_media,
+        )
+        save_tournament_state(job_id, state)
 
         return report
     except Exception as exc:

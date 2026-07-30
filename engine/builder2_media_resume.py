@@ -24,7 +24,10 @@ from engine.builder2_runway_config import (
 from engine.builder2_tournament_contracts import WINNER_PLAN_SCHEMA_VERSION, Builder2TournamentError
 from engine.builder2_tournament_store import load_tournament_state, save_tournament_state
 from engine.builder2_winner_downstream import Builder2WinnerDownstreamError, normalize_builder2_winner_downstream
-from engine.builder2_winner_persistence import is_valid_persisted_winner_development
+from engine.builder2_winner_persistence import (
+    collect_winner_media_continuation_missing_fields,
+    is_valid_persisted_winner_development,
+)
 from engine.builder2_winner_preservation_contract import SERVER_OWNED_WINNER_SOURCE_KEY
 from engine.video_jobs_redis import redis_configured, video_job_get, video_job_mark_done, video_job_mark_error
 
@@ -87,17 +90,9 @@ def _initial_report(*, job_id: str, dry_run: bool = False) -> Dict[str, Any]:
 
 
 def collect_media_resume_missing_paths(state: Dict[str, Any]) -> List[str]:
-    missing: List[str] = []
-    if not is_valid_persisted_winner_development(state):
-        missing.append("winnerDevelopmentPlan")
-    if not state.get("mediaContinuationRequired"):
-        missing.append("mediaContinuationRequired")
+    missing = collect_winner_media_continuation_missing_fields(state)
     candidate_id = str(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId") or "").strip()
-    if not candidate_id:
-        missing.append("winnerDevelopmentCandidateId")
     prototype_id = str(state.get("winnerDevelopmentPrototypeId") or "").strip()
-    if not prototype_id:
-        missing.append("winnerDevelopmentPrototypeId")
     plan = state.get("winnerDevelopmentPlan")
     if isinstance(plan, dict):
         if plan.get("schemaVersion") != WINNER_PLAN_SCHEMA_VERSION:

@@ -31,7 +31,9 @@ from engine.builder2_tournament_completion_gate import (
     missing_creator_prototype_ids,
     tournament_resolution_summary,
 )
+from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_store import load_tournament_state
+from engine.builder2_winner_persistence import is_valid_persisted_winner_development, reload_verified_winner_media_state
 from engine.video_jobs_redis import redis_configured, video_job_get_raw
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,37 @@ def _baseline_reasoning_metrics(state: Dict[str, Any]) -> Dict[str, int]:
     }
 
 
+def _populate_historical_prototype_call_reports(state: Dict[str, Any], report: Dict[str, Any]) -> None:
+    populate_slogan_repair_call_report(
+        state,
+        report,
+        prototype_id="think_small",
+        invocation_creator_normal_calls=0,
+        invocation_creator_repair_calls=0,
+    )
+    populate_semantic_bridge_repair_call_report(
+        state,
+        report,
+        prototype_id="think_small",
+        invocation_semantic_bridge_repair_calls=0,
+    )
+    report["thinkSmallNormalCreatorCalls"] = int(report.get("totalCreatorNormalCalls") or 0)
+    report["thinkSmallRepairCalls"] = int(report.get("totalCreatorRepairCalls") or 0)
+    think_small_judges = 0
+    for _judgment_id, record in (state.get("judgments") or {}).items():
+        if not isinstance(record, dict):
+            continue
+        candidate_id = _clean(record.get("candidateId"))
+        candidate = (state.get("candidates") or {}).get(candidate_id) or {}
+        if _clean(candidate.get("prototypeId")) == "think_small" and record.get("accepted") is True:
+            think_small_judges += 1
+    report["thinkSmallJudgeCalls"] = think_small_judges
+    populate_winner_development_call_report(state, report)
+    report["winnerDevelopmentAccepted"] = is_valid_persisted_winner_development(state)
+    if report.get("winnerDevelopmentOfflineSalvageAccepted"):
+        report["winnerDevelopmentAccepted"] = True
+
+
 def _render_commands(*, job_id: str) -> Dict[str, str]:
     return {
         "incompleteTournamentResume": (
@@ -84,6 +117,10 @@ def _render_commands(*, job_id: str) -> Dict[str, str]:
         ),
         "mediaResumeFallback": (
             f"BUILDER2_MEDIA_RESUME_JOB_ID={job_id} python -m engine.builder2_media_resume"
+        ),
+        "mediaResumeContractInspect": (
+            f"BUILDER2_MEDIA_RESUME_CONTRACT_INSPECT_JOB_ID={job_id} "
+            "python -m engine.builder2_media_resume_contract_inspect"
         ),
     }
 
@@ -233,18 +270,19 @@ def run_incomplete_tournament_resume(
             pre_dispatch_failure_recovered=bool(reasoning_report.get("semanticBridgeRepairPreDispatchFailureRecovered")),
         )
         report["thinkSmallNormalCreatorCalls"] = report["totalCreatorNormalCalls"]
-        report["thinkSmallRepairCalls"] = report["persistedCreatorRepairCalls"]
+        report["thinkSmallRepairCalls"] = report["totalCreatorRepairCalls"]
         report["thinkSmallJudgeCalls"] = min(1, judge_delta)
     else:
-        report["thinkSmallNormalCreatorCalls"] = int(baseline_metrics.get("creatorCalls") or 0)
-        report["thinkSmallRepairCalls"] = int(baseline_metrics.get("creatorRepairCalls") or 0)
-        report["thinkSmallJudgeCalls"] = 0
+        _populate_historical_prototype_call_reports(state, report)
 
     report["winnerSelected"] = bool(reasoning_report.get("finalWinnerCandidateId") or state.get("winnerCandidateId"))
     report["acceptedCreatorsReusedCount"] = accepted_creator_count(state)
     report["acceptedJudgmentsReusedCount"] = accepted_judgment_count(state)
     report["missingPrototypeIds"] = list(missing_creator_prototype_ids(state))
     populate_winner_development_call_report(state, report)
+    report["winnerDevelopmentAccepted"] = is_valid_persisted_winner_development(state)
+    if report.get("winnerDevelopmentOfflineSalvageAccepted"):
+        report["winnerDevelopmentAccepted"] = True
     if reasoning_report.get("winnerDevelopmentOfflineSalvageAttempted") is not None:
         report["winnerDevelopmentOfflineSalvageAttempted"] = bool(
             reasoning_report.get("winnerDevelopmentOfflineSalvageAttempted")
@@ -270,6 +308,14 @@ def run_incomplete_tournament_resume(
 
     if run_media:
         from engine.builder2_media_resume import run_one_media_resume
+
+        try:
+            state = reload_verified_winner_media_state(job_id, tournament_id=_clean(state.get("tournamentId")))
+        except Builder2TournamentError as exc:
+            report["failureStage"] = "media_prerequisite"
+            report["failureCode"] = str(exc.args[0] if exc.args else "builder2_winner_media_continuation_not_ready")
+            _populate_historical_prototype_call_reports(state, report)
+            return report
 
         media_report = run_one_media_resume(job_id=job_id, dry_run=False, tournament_state=state)
         report["mediaPipelineStarted"] = bool(media_report.get("readyForMediaResume") or media_report.get("mediaReused"))

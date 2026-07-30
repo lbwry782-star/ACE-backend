@@ -65,7 +65,10 @@ from engine.builder2_winner_development import (
     develop_builder2_winning_candidate,
     normalize_winner_plan_for_runway,
 )
-from engine.builder2_winner_persistence import persist_winner_development_atomically
+from engine.builder2_winner_persistence import (
+    WINNER_DEVELOPMENT_SOURCE_NORMAL,
+    persist_accepted_winner_development_for_media,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -879,14 +882,19 @@ def _run_builder2_tournament_body(
                 state=state,
                 candidate_id=winner_id,
             )
-            persist_winner_development_atomically(
+            persist_accepted_winner_development_for_media(
                 state,
                 candidate_id=winner_id,
                 prototype_id=str(winner_rec.get("prototypeId") or ""),
                 winner_plan=winner_plan,
                 winning_candidate=winner_rec.get("creatorOutput") or {},
+                winning_judgment=winning_judgment,
                 preservation_snapshot=winner_plan.get("winningCandidatePreservationSnapshot"),
                 compatibility_mode=compatibility_mode,
+                source=WINNER_DEVELOPMENT_SOURCE_NORMAL,
+                job_id=job_id,
+                tournament_id=str(state.get("tournamentId") or ""),
+                save=False,
             )
         except Builder2TournamentError as exc:
             record_process_failure_tag(state, str(exc.args[0] if exc.args else "builder2_winner_development_failed"))

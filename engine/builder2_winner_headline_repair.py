@@ -23,7 +23,11 @@ from engine.builder2_winner_downstream import (
     Builder2WinnerDownstreamError,
     validate_builder2_winner_headline_composition_pure,
 )
-from engine.builder2_winner_persistence import is_valid_persisted_winner_development, persist_winner_development_atomically
+from engine.builder2_winner_persistence import (
+    WINNER_DEVELOPMENT_SOURCE_HEADLINE_REPAIR,
+    is_valid_persisted_winner_development,
+    persist_accepted_winner_development_for_media,
+)
 from engine.builder2_winner_preservation_contract import (
     build_server_owned_winner_source_reference,
     build_winning_candidate_preservation_snapshot,
@@ -360,14 +364,19 @@ def repair_builder2_winner_headline_from_parsed(
             tournament_id=tournament_id,
             tournament_state=state,
         )
-        persist_winner_development_atomically(
+        persist_accepted_winner_development_for_media(
             state,
             candidate_id=candidate_id,
             prototype_id=prototype_id,
             winner_plan=winner_plan,
             winning_candidate=winning_candidate,
+            winning_judgment=winning_judgment,
             preservation_snapshot=preservation_snapshot,
             compatibility_mode=compatibility_mode,
+            source=WINNER_DEVELOPMENT_SOURCE_HEADLINE_REPAIR,
+            job_id=job_id,
+            tournament_id=tournament_id,
+            save=False,
         )
     except Builder2TournamentError as exc:
         reason = str(exc.args[0] if exc.args else "builder2_winner_headline_repair_failed")
