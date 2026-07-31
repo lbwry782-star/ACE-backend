@@ -19,7 +19,7 @@ from engine.builder2_resume_resolver import resolve_builder2_resume_stage
 from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
 from engine.builder2_tournament_recovery import is_job_queued, mark_job_queued, register_recoverable_job
 from engine.builder2_tournament_store import load_tournament_state
-from engine.video_jobs_redis import video_job_get_raw, video_job_touch_progress
+from engine.video_jobs_redis import QUEUE_KEY, get_redis, job_key, video_job_get_raw, video_job_touch_progress
 
 _ESTIMATED_TOTAL_SECONDS = 1200
 

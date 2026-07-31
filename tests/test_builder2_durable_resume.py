@@ -44,7 +44,7 @@ from engine.builder2_tournament_store import (
     new_tournament_state,
     save_tournament_state,
 )
-from engine.video_jobs_redis import disable_memory_jobs, enable_memory_jobs, video_job_create
+from engine.video_jobs_redis import QUEUE_KEY, disable_memory_jobs, enable_memory_jobs, job_key, video_job_create
 from tests.test_builder2_media_resume import _media_ready_state
 from tests.test_builder2_reasoning_resume import _candidate_id_for_prototype, _historical_resume_state, _judgment_for_candidate
 from tests.test_builder2_tournament import _candidate, _strategy, _winner_plan_from_prompt
@@ -446,6 +446,164 @@ class TestBuilder2DurableResumeCore(unittest.TestCase):
     def test_owner_context_present_flag(self) -> None:
         self.assertTrue(owner_context_present_in_job(_owned_job_hash("x")))
         self.assertFalse(owner_context_present_in_job({"status": "running"}))
+
+
+class TestBuilder2ResumeRedisPath(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+        disable_memory_recovery()
+        disable_memory_jobs()
+        os.environ["BUILDER2_TOURNAMENT_ENABLED"] = "true"
+
+    def tearDown(self) -> None:
+        disable_memory_store()
+        enable_memory_recovery()
+        enable_memory_jobs()
+
+    def _eligible_state(self, job_id: str) -> Dict[str, Any]:
+        state = _historical_resume_state(job_id=job_id, with_reusable_judgments=6)
+        save_tournament_state(job_id, state)
+        return state
+
+    @patch("engine.builder2_resume_service.register_recoverable_job")
+    @patch("engine.builder2_resume_service.video_job_touch_progress")
+    @patch("engine.builder2_tournament_recovery.get_redis")
+    @patch("engine.builder2_resume_service.get_redis")
+    def test_redis_resume_path_requeues_eligible_job(
+        self,
+        resume_get_redis: Any,
+        recovery_get_redis: Any,
+        _touch: Any,
+        _register: Any,
+    ) -> None:
+        redis_client = MagicMock()
+        redis_client.exists.return_value = False
+        redis_client.set.return_value = True
+        resume_get_redis.return_value = redis_client
+        recovery_get_redis.return_value = redis_client
+
+        job_id = "job-redis-resume"
+        job_hash = _owned_job_hash(job_id)
+        self._eligible_state(job_id)
+
+        with patch("engine.builder2_resume_service.video_job_get_raw", return_value=job_hash):
+            result = request_builder2_resume(job_id, request=_mock_request())
+
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(result.get("resumeRequested"))
+        redis_client.hset.assert_called_once()
+        hset_args, hset_kwargs = redis_client.hset.call_args
+        self.assertEqual(hset_args[0], job_key(job_id))
+        self.assertIn("lastResumeRequestedAt", hset_kwargs["mapping"])
+        redis_client.lpush.assert_called_once_with(QUEUE_KEY, job_id)
+
+    @patch("engine.builder2_tournament_recovery.get_redis")
+    @patch("engine.builder2_resume_service.get_redis")
+    def test_redis_resume_path_missing_job_does_not_enqueue(
+        self,
+        resume_get_redis: Any,
+        recovery_get_redis: Any,
+    ) -> None:
+        redis_client = MagicMock()
+        resume_get_redis.return_value = redis_client
+        recovery_get_redis.return_value = redis_client
+
+        with patch("engine.builder2_resume_service.video_job_get_raw", return_value=None):
+            result = request_builder2_resume("job-missing", request=_mock_request())
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error"), "not_found")
+        redis_client.lpush.assert_not_called()
+        redis_client.hset.assert_not_called()
+
+    @patch("engine.builder2_resume_service.resolve_builder2_resume_stage")
+    @patch("engine.builder2_tournament_recovery.get_redis")
+    @patch("engine.builder2_resume_service.get_redis")
+    def test_redis_resume_path_not_resumable_does_not_enqueue(
+        self,
+        resume_get_redis: Any,
+        recovery_get_redis: Any,
+        resolve_mock: Any,
+    ) -> None:
+        redis_client = MagicMock()
+        resume_get_redis.return_value = redis_client
+        recovery_get_redis.return_value = redis_client
+        resolve_mock.return_value = {
+            "canResume": False,
+            "blockedReason": "not_ready",
+            "resumeFromStage": "strategy",
+        }
+
+        job_id = "job-not-resumable"
+        job_hash = _owned_job_hash(job_id)
+
+        with patch("engine.builder2_resume_service.video_job_get_raw", return_value=job_hash):
+            result = request_builder2_resume(job_id, request=_mock_request())
+
+        self.assertFalse(result.get("ok"))
+        self.assertEqual(result.get("error"), "not_ready")
+        redis_client.lpush.assert_not_called()
+        redis_client.hset.assert_not_called()
+
+    @patch("engine.builder2_resume_service.register_recoverable_job")
+    @patch("engine.builder2_resume_service.video_job_touch_progress")
+    @patch("engine.builder2_resume_service.is_job_queued")
+    @patch("engine.builder2_tournament_recovery.get_redis")
+    @patch("engine.builder2_resume_service.get_redis")
+    def test_redis_resume_path_second_request_skips_duplicate_lpush(
+        self,
+        resume_get_redis: Any,
+        recovery_get_redis: Any,
+        is_queued_mock: Any,
+        _touch: Any,
+        _register: Any,
+    ) -> None:
+        redis_client = MagicMock()
+        redis_client.exists.return_value = False
+        redis_client.set.return_value = True
+        resume_get_redis.return_value = redis_client
+        recovery_get_redis.return_value = redis_client
+
+        job_id = "job-redis-dedupe"
+        job_hash = _owned_job_hash(job_id)
+        self._eligible_state(job_id)
+        is_queued_mock.side_effect = [False, True, True, True]
+
+        with patch("engine.builder2_resume_service.video_job_get_raw", return_value=job_hash):
+            first = request_builder2_resume(job_id, request=_mock_request())
+            second = request_builder2_resume(job_id, request=_mock_request())
+
+        self.assertTrue(first.get("resumeRequested"))
+        self.assertTrue(second.get("resumeAlreadyInProgress"))
+        self.assertEqual(redis_client.lpush.call_count, 1)
+
+    @patch("engine.builder2_resume_service.register_recoverable_job")
+    @patch("engine.builder2_resume_service.video_job_touch_progress")
+    @patch("engine.video_jobs_redis.get_redis")
+    def test_memory_recovery_path_does_not_use_redis_hset_or_lpush(
+        self,
+        redis_mock_factory: Any,
+        _touch: Any,
+        _register: Any,
+    ) -> None:
+        enable_memory_recovery()
+        try:
+            redis_client = MagicMock()
+            redis_mock_factory.return_value = redis_client
+
+            job_id = "job-memory-resume"
+            job_hash = _owned_job_hash(job_id)
+            set_memory_job_hash(job_id, job_hash)
+            self._eligible_state(job_id)
+
+            with patch("engine.builder2_resume_service.video_job_get_raw", return_value=job_hash):
+                result = request_builder2_resume(job_id, request=_mock_request())
+
+            self.assertTrue(result.get("resumeRequested"))
+            redis_client.hset.assert_not_called()
+            redis_client.lpush.assert_not_called()
+        finally:
+            disable_memory_recovery()
 
 
 class TestBuilder2DurableResumeAppRoutes(unittest.TestCase):
