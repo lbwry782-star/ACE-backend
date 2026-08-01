@@ -10,6 +10,7 @@ from engine.builder2_judge_core_contract import (
     VERBAL_ASSESSMENT_BOOLEAN_FIELDS,
     filter_judge_structural_errors,
     is_judge_conclusion_boolean_field,
+    is_judge_factual_grounding_gate_field,
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
@@ -63,6 +64,17 @@ def _shared_paths_across_candidates(candidate_paths: Dict[str, List[str]]) -> Se
     return shared
 
 
+def _structural_failure_paths(error_paths: List[str]) -> List[str]:
+    filtered: List[str] = []
+    for path in error_paths:
+        if is_judge_factual_grounding_gate_field(path):
+            continue
+        if path == "eligible":
+            continue
+        filtered.append(path)
+    return filtered
+
+
 def record_judge_contract_failure(
     state: Dict[str, Any],
     *,
@@ -76,7 +88,7 @@ def record_judge_contract_failure(
         [f"builder2_judge_validation_failed:{p}" for p in error_paths]
         + [f"builder2_judge_schema_invalid:{p}" for p in error_paths]
     )
-    paths = [_failure_field(item) for item in owned]
+    paths = _structural_failure_paths([_failure_field(item) for item in owned])
 
     if false_boolean_misclassified:
         _trip_breaker(
@@ -84,6 +96,9 @@ def record_judge_contract_failure(
             reason="false_boolean_classified_as_malformed",
             paths=sorted(set(paths))[:8],
         )
+        return
+
+    if not paths:
         return
 
     by_candidate = breaker.setdefault("candidateFailurePaths", {})
@@ -124,6 +139,8 @@ def record_judge_contract_failure(
 
 def detect_false_boolean_misclassification(error_paths: List[str]) -> bool:
     for path in error_paths:
+        if is_judge_factual_grounding_gate_field(path):
+            continue
         if not is_judge_conclusion_boolean_field(path):
             continue
         leaf = path.split(".")[-1]

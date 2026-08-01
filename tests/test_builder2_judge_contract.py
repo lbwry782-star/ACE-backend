@@ -260,7 +260,7 @@ class TestJudgeCoherenceAndTournamentOutcomes(unittest.TestCase):
         }
         with self.assertRaises(Builder2TournamentError) as ctx:
             select_global_winner(state)
-        self.assertEqual(ctx.exception.args[0], "builder2_tournament_no_eligible_candidate")
+        self.assertEqual(ctx.exception.args[0], "builder2_no_factually_eligible_candidate")
 
     def test_mixed_unavailable_still_no_valid_candidate(self) -> None:
         state = {

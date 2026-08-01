@@ -170,7 +170,7 @@ def select_global_winner(state: Dict[str, Any]) -> str:
     ]
     judged = [cand for cand in creator_accepted if _has_valid_judgment(cand)]
     if judged and len(judged) == len(creator_accepted):
-        raise Builder2TournamentError("builder2_tournament_no_eligible_candidate")
+        raise Builder2TournamentError("builder2_no_factually_eligible_candidate")
     raise Builder2TournamentError("builder2_tournament_no_valid_candidate")
 
 
@@ -840,7 +840,19 @@ def _run_builder2_tournament_body(
 
     winner_id = state.get("winnerCandidateId")
     if not winner_id:
-        winner_id = select_global_winner(state)
+        try:
+            winner_id = select_global_winner(state)
+        except Builder2TournamentError as exc:
+            reason = str(exc.args[0] if exc.args else exc)
+            if reason == "builder2_no_factually_eligible_candidate":
+                state["status"] = "paused_for_reasoning_resume"
+                state["completionReason"] = "builder2_no_factually_eligible_candidate"
+                state["tournamentBlockingReason"] = reason
+                state["canResume"] = True
+                state["requiresRicherProductInformation"] = True
+                save_tournament_state(job_id, state)
+                raise
+            raise
         mark_authoritative_winner_selection(state, winner_id=winner_id)
         winner_rec = state["candidates"][winner_id]
         judgment_rec = state["judgments"].get(winner_rec.get("judgmentId") or "")

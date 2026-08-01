@@ -34,6 +34,14 @@ JUDGE_METHODOLOGY_TEXT_FIELDS: Tuple[str, ...] = (
     "silentMovieAssessment",
 )
 
+JUDGE_FACTUAL_GROUNDING_GATE_FIELDS: Tuple[str, ...] = (
+    "productClaimFactuallyGrounded",
+    "noUnsupportedFeatureClaim",
+    "noCategoryConventionPresentedAsProductFact",
+    "viewerWouldNotInferUnsupportedCapability",
+    "relativeAdvantageEvidenceAccepted",
+)
+
 JUDGE_CONCLUSION_BOOLEAN_PREFIXES: Tuple[str, ...] = (
     "verbalLayerAssessment.keywordBornFromVisual",
     "verbalLayerAssessment.visualMeaningIsClear",
@@ -44,7 +52,20 @@ JUDGE_CONCLUSION_BOOLEAN_PREFIXES: Tuple[str, ...] = (
     "headlineNecessityAssessment.headlineRecommended",
     "prototypeMethodAssessment.methodActuallyApplied",
     "eligible",
+    *tuple(f"factualGroundingAssessment.{key}" for key in JUDGE_FACTUAL_GROUNDING_GATE_FIELDS),
 )
+
+
+def is_judge_factual_grounding_gate_field(field_path: Optional[str]) -> bool:
+    if not field_path:
+        return False
+    if field_path == "factualGroundingAssessment":
+        return False
+    prefix = "factualGroundingAssessment."
+    if not field_path.startswith(prefix):
+        return False
+    leaf = field_path.split(".", 1)[1]
+    return leaf in JUDGE_FACTUAL_GROUNDING_GATE_FIELDS
 
 JUDGE_SEMANTIC_COHERENCE_FIELDS: FrozenSet[str] = frozenset(
     {

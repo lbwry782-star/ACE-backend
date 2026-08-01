@@ -254,7 +254,7 @@ class TestValidNegativeJudgment(unittest.TestCase):
         }
         with self.assertRaises(Builder2TournamentError) as ctx:
             select_global_winner(state)
-        self.assertEqual(ctx.exception.args[0], "builder2_tournament_no_eligible_candidate")
+        self.assertEqual(ctx.exception.args[0], "builder2_no_factually_eligible_candidate")
 
 
 class TestJudgePurity(unittest.TestCase):

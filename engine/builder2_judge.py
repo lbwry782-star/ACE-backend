@@ -28,6 +28,7 @@ from engine.builder2_tournament_contracts import (
 )
 from engine.builder2_judge_core_contract import (
     filter_judge_structural_errors,
+    is_judge_factual_grounding_gate_field,
     is_judge_structural_repair_field,
 )
 from engine.builder2_judge_normalization import normalize_judge_candidate
@@ -310,6 +311,7 @@ def collect_judge_structural_errors(
     *,
     candidate_id: str,
     candidate: Optional[Dict[str, Any]] = None,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
     job_id: str = "",
     tournament_id: str = "",
@@ -386,6 +388,7 @@ def collect_judge_structural_errors(
         collect_judge_methodology_structural_errors(
             normalized,
             candidate=candidate,
+            strategy_foundation=strategy_foundation,
             compatibility_mode=compatibility_mode,
         )
     )
@@ -401,7 +404,13 @@ def collect_judge_structural_errors(
     return unique
 
 
-def _is_structural_repairable(code: str, field: Optional[str]) -> bool:
+def _is_structural_repairable(code: str, field: Optional[str], *, parsed: Optional[Dict[str, Any]] = None) -> bool:
+    if field and is_judge_factual_grounding_gate_field(field):
+        assessment = (parsed or {}).get("factualGroundingAssessment")
+        if isinstance(assessment, dict):
+            leaf = field.split(".")[-1]
+            if isinstance(assessment.get(leaf), bool):
+                return False
     if code in {
         "builder2_judge_schema_invalid",
         "builder2_judge_score_invalid",
@@ -410,6 +419,64 @@ def _is_structural_repairable(code: str, field: Optional[str]) -> bool:
     if code == "builder2_judge_validation_failed":
         return is_judge_structural_repair_field(field)
     return False
+
+
+def _is_substantive_factual_grounding_failure(field: Optional[str], parsed: Optional[Dict[str, Any]] = None) -> bool:
+    if not field or not is_judge_factual_grounding_gate_field(field):
+        return False
+    assessment = (parsed or {}).get("factualGroundingAssessment")
+    if not isinstance(assessment, dict):
+        return False
+    leaf = field.split(".")[-1]
+    return isinstance(assessment.get(leaf), bool)
+
+
+def _response_fingerprint(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
+
+
+def _parsed_response_fingerprint(parsed: Dict[str, Any]) -> str:
+    return _response_fingerprint(json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def _persist_judge_response_attempt(
+    state: Optional[Dict[str, Any]],
+    *,
+    candidate_id: str,
+    judgment_id: str,
+    call_type: str,
+    response_text: str,
+    parsed: Dict[str, Any],
+    validation_failure_field: Optional[str] = None,
+    validation_failure_reason: Optional[str] = None,
+    structural_errors: Optional[List[str]] = None,
+    response_available: bool = True,
+) -> None:
+    if state is None:
+        return
+    ledger = state.setdefault("judgeResponseLedgerByCandidate", {})
+    entries = ledger.setdefault(candidate_id, [])
+    if not isinstance(entries, list):
+        entries = []
+        ledger[candidate_id] = entries
+    entries.append(
+        {
+            "candidateId": candidate_id,
+            "judgmentId": judgment_id,
+            "callType": call_type,
+            "responseAvailable": response_available,
+            "parsedResponseAvailable": bool(parsed),
+            "parsedResponse": dict(parsed) if isinstance(parsed, dict) else {},
+            "responseFingerprint": _response_fingerprint(response_text),
+            "parsedResponseFingerprint": _parsed_response_fingerprint(parsed) if parsed else "",
+            "validationFailureField": validation_failure_field,
+            "validationFailureReason": validation_failure_reason,
+            "structuralErrors": list(structural_errors or []),
+            "recordedAt": _utc_now_iso(),
+        }
+    )
 
 
 def _is_clean_retryable(code: str, field: Optional[str]) -> bool:
@@ -589,7 +656,11 @@ def judge_candidate(
 
                 if is_judge_contract_circuit_breaker_tripped(state):
                     break
-            if last_exc is None or not _is_structural_repairable(_failure_code(last_exc), _failure_field(last_exc)):
+            if last_exc is None or not _is_structural_repairable(
+                _failure_code(last_exc),
+                _failure_field(last_exc),
+                parsed=last_parsed,
+            ):
                 continue
             repair_attempted = True
             logger.info(
@@ -716,21 +787,51 @@ def judge_candidate(
             )
             if state is not None:
                 state.setdefault("judgeDiagnosticsByCandidate", {})[candidate_id] = dict(diagnostics)
+            _persist_judge_response_attempt(
+                state,
+                candidate_id=candidate_id,
+                judgment_id=judgment_id,
+                call_type=call_type,
+                response_text=response_text,
+                parsed=judgment,
+                response_available=True,
+            )
             return judgment_id, judgment, total, scores
         except Builder2TournamentError as exc:
             last_exc = exc
             retry_rule = _failure_rule(exc) or _failure_field(exc)
             code = _failure_code(exc)
             field = _failure_field(exc)
-            if state is not None and phase in {"normal", "repair"}:
+            collected = collect_judge_structural_errors(
+                last_parsed,
+                candidate_id=candidate_id,
+                candidate=candidate,
+                strategy_foundation=strategy_foundation,
+                compatibility_mode=compatibility_mode,
+                job_id=job_id,
+                tournament_id=tournament_id,
+            )
+            _persist_judge_response_attempt(
+                state,
+                candidate_id=candidate_id,
+                judgment_id=judgment_id,
+                call_type=call_type,
+                response_text=response_text,
+                parsed=last_parsed,
+                validation_failure_field=field,
+                validation_failure_reason=str(exc.args[0] if exc.args else code),
+                structural_errors=collected,
+                response_available=bool(response_text),
+            )
+            if state is not None and phase in {"normal", "repair"} and not _is_substantive_factual_grounding_failure(field, last_parsed):
                 from engine.builder2_judge_circuit_breaker import (
                     detect_false_boolean_misclassification,
                     record_judge_contract_failure,
                 )
 
                 paths = [field or str(exc.args[0])]
-                if collected_structural_failures:
-                    paths = [item.split(":", 1)[-1] for item in collected_structural_failures]
+                if collected:
+                    paths = [item.split(":", 1)[-1] for item in collected]
                 record_judge_contract_failure(
                     state,
                     candidate_id=candidate_id,
@@ -785,15 +886,8 @@ def judge_candidate(
                     judgment_id,
                     exc.args[0],
                 )
-            if phase == "normal" and _is_structural_repairable(code, field):
-                collected_structural_failures = collect_judge_structural_errors(
-                    last_parsed,
-                    candidate_id=candidate_id,
-                    candidate=candidate,
-                    compatibility_mode=compatibility_mode,
-                    job_id=job_id,
-                    tournament_id=tournament_id,
-                )
+            if phase == "normal" and _is_structural_repairable(code, field, parsed=last_parsed):
+                collected_structural_failures = collected
                 continue
             if phase in {"normal", "repair"} and _is_clean_retryable(code, field):
                 continue

@@ -706,6 +706,7 @@ def collect_judge_methodology_structural_errors(
     judgment: Dict[str, Any],
     *,
     candidate: Optional[Dict[str, Any]] = None,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
 ) -> List[str]:
     errors: List[str] = []
@@ -816,6 +817,16 @@ def collect_judge_methodology_structural_errors(
         if not isinstance(fit_score, int) or fit_score < 0 or fit_score > 15:
             errors.append("builder2_judge_validation_failed:prototypeApplicationAssessment.prototypeFitScore")
 
+    from engine.builder2_strategy_evidence_grounding_contract import collect_judge_factual_grounding_structural_errors
+
+    errors.extend(
+        collect_judge_factual_grounding_structural_errors(
+            judgment,
+            strategy_foundation=strategy_foundation,
+            compatibility_mode=compatibility_mode,
+        )
+    )
+
     return list(dict.fromkeys(errors))
 
 
@@ -834,6 +845,7 @@ def validate_judge_methodology(
     errors = collect_judge_methodology_structural_errors(
         judgment,
         candidate=candidate,
+        strategy_foundation=strategy_foundation,
         compatibility_mode=compatibility_mode,
     )
     if errors:

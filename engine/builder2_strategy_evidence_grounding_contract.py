@@ -500,6 +500,99 @@ def build_default_judge_factual_grounding_assessment(*, notes: str = "") -> Dict
     }
 
 
+JUDGE_FACTUAL_GROUNDING_GATE_FIELDS: Tuple[str, ...] = (
+    "productClaimFactuallyGrounded",
+    "noUnsupportedFeatureClaim",
+    "noCategoryConventionPresentedAsProductFact",
+    "viewerWouldNotInferUnsupportedCapability",
+    "relativeAdvantageEvidenceAccepted",
+)
+
+
+def collect_judge_factual_grounding_structural_errors(
+    judgment: Dict[str, Any],
+    *,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+) -> List[str]:
+    if not requires_strategy_evidence_grounding(strategy=strategy_foundation, compatibility_mode=compatibility_mode):
+        return []
+    errors: List[str] = []
+    assessment = judgment.get("factualGroundingAssessment")
+    if not isinstance(assessment, dict):
+        errors.append("builder2_judge_validation_failed:factualGroundingAssessment")
+        return errors
+    for key in JUDGE_FACTUAL_GROUNDING_GATE_FIELDS:
+        if not isinstance(assessment.get(key), bool):
+            errors.append(f"builder2_judge_validation_failed:factualGroundingAssessment.{key}")
+    if not str(assessment.get("notes") or "").strip():
+        errors.append("builder2_judge_validation_failed:factualGroundingAssessment.notes")
+    return list(dict.fromkeys(errors))
+
+
+def validate_judge_factual_grounding_structure(
+    judgment: Dict[str, Any],
+    *,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
+) -> None:
+    errors = collect_judge_factual_grounding_structural_errors(
+        judgment,
+        strategy_foundation=strategy_foundation,
+        compatibility_mode=compatibility_mode,
+    )
+    if errors:
+        first = errors[0]
+        if ":" in first:
+            code, field = first.split(":", 1)
+            _raise(code, field=field)
+        _raise("builder2_judge_validation_failed", field=first)
+
+
+def collect_failed_factual_grounding_gates(assessment: Dict[str, Any]) -> List[str]:
+    return [key for key in JUDGE_FACTUAL_GROUNDING_GATE_FIELDS if assessment.get(key) is not True]
+
+
+def apply_judge_factual_grounding_server_corrections(
+    judgment: Dict[str, Any],
+    *,
+    candidate: Optional[Dict[str, Any]] = None,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+) -> None:
+    if not isinstance(strategy_foundation, dict) or not requires_strategy_evidence_grounding(strategy=strategy_foundation):
+        return
+    assessment = judgment.get("factualGroundingAssessment")
+    if not isinstance(assessment, dict):
+        return
+    introduced: List[str] = []
+    if candidate:
+        stamp_creator_evidence_inheritance(candidate, strategy_foundation=strategy_foundation)
+        introduced = list(candidate.get("newProductClaimsIntroduced") or [])
+    if introduced:
+        if assessment.get("productClaimFactuallyGrounded") is True:
+            assessment["productClaimFactuallyGrounded"] = False
+        if assessment.get("noUnsupportedFeatureClaim") is True:
+            assessment["noUnsupportedFeatureClaim"] = False
+        judgment["eligible"] = False
+        judgment["eligibilityFailureReason"] = "builder2_judge_factual_grounding_failed"
+        judgment["factualGroundingFailedGates"] = sorted(
+            set(collect_failed_factual_grounding_gates(assessment))
+            | {"productClaimFactuallyGrounded", "noUnsupportedFeatureClaim"}
+        )
+        disqualifiers = list(judgment.get("disqualifiers") or [])
+        reason = "unsupported_product_capability"
+        if reason not in disqualifiers:
+            disqualifiers.append(reason)
+        judgment["disqualifiers"] = disqualifiers
+    apply_factual_grounding_eligibility_rules(judgment)
+    failed = collect_failed_factual_grounding_gates(assessment)
+    if failed:
+        judgment["factualGroundingFailedGates"] = sorted(set(judgment.get("factualGroundingFailedGates") or []) | set(failed))
+        if judgment.get("eligible") is True:
+            judgment["eligible"] = False
+            judgment["eligibilityFailureReason"] = "builder2_judge_factual_grounding_failed"
+
+
 def validate_judge_factual_grounding_assessment(
     judgment: Dict[str, Any],
     *,
@@ -510,36 +603,16 @@ def validate_judge_factual_grounding_assessment(
 ) -> None:
     if not requires_strategy_evidence_grounding(strategy=strategy_foundation, compatibility_mode=compatibility_mode):
         return
-    assessment = judgment.get("factualGroundingAssessment")
-    if not isinstance(assessment, dict):
-        _raise("builder2_judge_validation_failed", field="factualGroundingAssessment")
-    for key in (
-        "productClaimFactuallyGrounded",
-        "noUnsupportedFeatureClaim",
-        "noCategoryConventionPresentedAsProductFact",
-        "viewerWouldNotInferUnsupportedCapability",
-        "relativeAdvantageEvidenceAccepted",
-    ):
-        if not isinstance(assessment.get(key), bool):
-            _raise("builder2_judge_validation_failed", field=f"factualGroundingAssessment.{key}")
-    if not str(assessment.get("notes") or "").strip():
-        _raise("builder2_judge_validation_failed", field="factualGroundingAssessment.notes")
-
-    if candidate and strategy_foundation:
-        stamp_creator_evidence_inheritance(candidate, strategy_foundation=strategy_foundation)
-        introduced = candidate.get("newProductClaimsIntroduced") or []
-        if introduced and judgment.get("eligible") is True:
-            judgment["eligible"] = False
-            judgment["eligibilityFailureReason"] = "builder2_judge_factual_grounding_failed"
-            disqualifiers = list(judgment.get("disqualifiers") or [])
-            reason = "unsupported_product_capability"
-            if reason not in disqualifiers:
-                disqualifiers.append(reason)
-            judgment["disqualifiers"] = disqualifiers
-        if introduced and assessment.get("productClaimFactuallyGrounded") is True:
-            _raise("builder2_judge_validation_failed", field="factualGroundingAssessment.productClaimFactuallyGrounded")
-        if introduced and assessment.get("noUnsupportedFeatureClaim") is True:
-            _raise("builder2_judge_validation_failed", field="factualGroundingAssessment.noUnsupportedFeatureClaim")
+    validate_judge_factual_grounding_structure(
+        judgment,
+        strategy_foundation=strategy_foundation,
+        compatibility_mode=compatibility_mode,
+    )
+    apply_judge_factual_grounding_server_corrections(
+        judgment,
+        candidate=candidate,
+        strategy_foundation=strategy_foundation,
+    )
 
 
 def apply_factual_grounding_eligibility_rules(judgment: Dict[str, Any]) -> None:
