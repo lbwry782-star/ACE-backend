@@ -1044,6 +1044,7 @@ def _non_scene_variations_fingerprint(plan: Dict[str, Any]) -> str:
         and key != "headlineDecision"
         and key != "headlineForm"
         and key != "sceneVariations"
+        and key != "continuousEventSceneVariationsNormalization"
     }
     payload = json.dumps(filtered, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]

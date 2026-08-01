@@ -24,6 +24,163 @@ _TEXTUAL_HEADLINE_DEPENDENCY = re.compile(
     re.IGNORECASE,
 )
 
+HEADLINE_OMIT_DEPENDENCY_PATTERNS: tuple[tuple[str, str], ...] = (
+    (r"\bread the headline\b", "headline_read_requirement"),
+    (r"\bheadline text\b", "in_video_headline_text"),
+    (r"\bon-screen text\b", "on_screen_text"),
+    (r"\btitle card\b", "title_card"),
+    (r"\bcaption says\b", "caption_says"),
+    (r"\btext overlay\b", "text_overlay"),
+    (r"\bwritten caption\b", "written_caption"),
+    (r"\b(read|reads|reading)\s+(?:the\s+)?(?:sign|label|caption|subtitle)\b", "readable_sign_or_caption"),
+    (r"\b(?:sign|label|screen)\s+(?:reads|displays|shows)\b", "sign_or_screen_copy"),
+    (
+        r"\b(?:display|show|render|burn(?:s|-in)?|superimpose)\s+(?:an?\s+)?(?:headline|caption|subtitle|overlay)\b",
+        "render_text_instruction",
+    ),
+)
+
+HEADLINE_OMIT_EXCLUDED_FIELD_PREFIXES = frozenset(
+    {
+        "headlineDecision.reason",
+        "advertisingClosure",
+        "advertisingSloganEvidence",
+        "serverPreservationCheck",
+        "serverOwnedWinnerSource",
+        "winnerPreservationCheck",
+        "preservationReference",
+    }
+)
+
+_PROHIBITION_BEFORE_MATCH = re.compile(
+    r"(?:^|[\W_])(?:no|without|avoid|never|not|none|forbidden|prohibited|exclude|ban)\s+(?:any\s+|visible\s+|readable\s+|an?\s+)?$",
+    re.IGNORECASE,
+)
+
+_REQUIREMENT_BEFORE_MATCH = re.compile(
+    r"(?:^|[\W_])(?:must|needs to|required to|have to|should|viewer|audience)\s+(?:\w+\s+){0,3}$",
+    re.IGNORECASE,
+)
+
+
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _sequence_stage_text(stage: Any) -> str:
+    if isinstance(stage, str):
+        return stage.strip()
+    if isinstance(stage, dict):
+        return _clean(stage.get("description") or stage.get("text"))
+    return _clean(stage)
+
+
+def _visual_anchor_text(anchor: Any) -> str:
+    if isinstance(anchor, str):
+        return anchor.strip()
+    if isinstance(anchor, dict):
+        parts = [_clean(anchor.get("description")), _clean(anchor.get("whyEssential"))]
+        return " ".join(part for part in parts if part)
+    return ""
+
+
+def collect_headline_omit_runway_execution_field_texts(plan: Dict[str, Any]) -> list[tuple[str, str]]:
+    texts: list[tuple[str, str]] = []
+    for key in ("videoPrompt", "videoPromptCore", "openingFrameDescription", "coreVisualIdea"):
+        value = _clean(plan.get(key))
+        if value:
+            texts.append((key, value))
+    sequence = plan.get("sequence")
+    if isinstance(sequence, dict):
+        for stage_key in ("beginning", "development", "resolution"):
+            value = _sequence_stage_text(sequence.get(stage_key))
+            if value:
+                texts.append((f"sequence.{stage_key}", value))
+    anchor = _visual_anchor_text(plan.get("visualAnchor"))
+    if anchor:
+        texts.append(("visualAnchor", anchor))
+    return texts
+
+
+def _dependency_match_is_prohibition_only(text: str, match: re.Match[str]) -> bool:
+    start = match.start()
+    before = text[max(0, start - 64): start]
+    if _PROHIBITION_BEFORE_MATCH.search(before):
+        return True
+    policy_window = text[max(0, start - 160): start].lower()
+    if "visual policy" in policy_window and re.search(r"\bno\b[^.]{0,40}$", before.lower()):
+        return True
+    phrase = match.group(0).lower()
+    if phrase in {"read the headline", "headline text"}:
+        req_window = text[max(0, start - 32): start]
+        if _REQUIREMENT_BEFORE_MATCH.search(req_window):
+            return False
+    return False
+
+
+def _scan_field_for_headline_omit_dependency(field_path: str, text: str) -> list[Dict[str, Any]]:
+    hits: list[Dict[str, Any]] = []
+    for pattern, category in HEADLINE_OMIT_DEPENDENCY_PATTERNS:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            prohibited_only = _dependency_match_is_prohibition_only(text, match)
+            hits.append(
+                {
+                    "fieldPath": field_path,
+                    "matchedPhrase": match.group(0),
+                    "safeCategory": category,
+                    "prohibitionOnly": prohibited_only,
+                    "countsAsPreClosureDependency": not prohibited_only,
+                }
+            )
+    return hits
+
+
+def analyze_headline_omit_textual_dependency(
+    winner_plan: Dict[str, Any],
+    *,
+    winning_judgment: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    from engine.builder2_advertising_closure_contract import validate_silent_visual_understanding
+
+    decision = get_normalized_headline_decision(winner_plan)
+    all_hits: list[Dict[str, Any]] = []
+    for field_path, text in collect_headline_omit_runway_execution_field_texts(winner_plan):
+        all_hits.extend(_scan_field_for_headline_omit_dependency(field_path, text))
+
+    active_hits = [hit for hit in all_hits if hit["countsAsPreClosureDependency"]]
+    source_fields = sorted({hit["fieldPath"] for hit in active_hits})
+    categories = sorted({hit["safeCategory"] for hit in active_hits})
+    video_prompt = _clean(winner_plan.get("videoPrompt") or winner_plan.get("videoPromptCore"))
+    video_hits = [hit for hit in active_hits if hit["fieldPath"] in {"videoPrompt", "videoPromptCore"}]
+
+    return {
+        "headlineDecision": decision or None,
+        "textualDependencySourceFields": source_fields,
+        "textualDependencySafeCategories": categories,
+        "textualDependencyMatches": active_hits,
+        "dependencyBeforeClosure": bool(active_hits),
+        "dependencyOnlyOnClosureSlogan": not bool(active_hits),
+        "videoPromptRequestsRenderedText": bool(video_hits),
+        "silentVisualUnderstandable": validate_silent_visual_understanding(
+            winner_plan=winner_plan,
+            winning_judgment=winning_judgment,
+        ),
+        "headlineFieldsRequired": headline_decision_requires_headline(decision),
+    }
+
+
+def winner_plan_has_pre_closure_textual_dependency(
+    winner_plan: Dict[str, Any],
+    *,
+    winning_judgment: Optional[Dict[str, Any]] = None,
+) -> bool:
+    return bool(
+        analyze_headline_omit_textual_dependency(
+            winner_plan,
+            winning_judgment=winning_judgment,
+        )["dependencyBeforeClosure"]
+    )
+
 
 def _raise(code: str, *, field: str) -> None:
     raise Builder2TournamentError(f"{code}:{field}")
@@ -239,8 +396,10 @@ def validate_headline_decision_methodology(
         headline_text = str(winner_plan.get("headlineText") or "").strip()
         if winner_plan.get("headlineCompatibilityAlias") is not True and (headline or headline_text):
             _raise("builder2_winner_validation_failed", field="headlineDecision.omit_with_headline")
-        video_prompt = str(winner_plan.get("videoPrompt") or winner_plan.get("videoPromptCore") or "")
-        if _TEXTUAL_HEADLINE_DEPENDENCY.search(video_prompt):
+        if winner_plan_has_pre_closure_textual_dependency(
+            winner_plan,
+            winning_judgment=winning_judgment,
+        ):
             _raise("builder2_winner_validation_failed", field="headlineDecision.omit_with_textual_dependency")
         judge_requires = judge_requires_separate_headline(
             winning_judgment,

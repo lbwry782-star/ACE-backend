@@ -1,14 +1,26 @@
 """
 Builder2 Winner offline salvage — reuse persisted paid responses without additional API calls.
+
+Run pre-salvage inspect:
+  BUILDER2_WINNER_OFFLINE_SALVAGE_INSPECT_JOB_ID=<jobId> python -m engine.builder2_winner_offline_salvage inspect
+
+Run offline salvage:
+  BUILDER2_WINNER_OFFLINE_SALVAGE_JOB_ID=<jobId> python -m engine.builder2_winner_offline_salvage
 """
 from __future__ import annotations
 
+import json
 import logging
+import os
+import sys
 from copy import deepcopy
 from typing import Any, Dict, Optional, Tuple
 
 from engine.builder2_complete_ad_resume_plan import parsed_winner_reusable_for_candidate
-from engine.builder2_headline_decision_contract import get_normalized_headline_decision
+from engine.builder2_headline_decision_contract import (
+    analyze_headline_omit_textual_dependency,
+    get_normalized_headline_decision,
+)
 from engine.builder2_single_slogan_contract import (
     BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION,
     compatibility_headline_mirror_status,
@@ -23,6 +35,7 @@ from engine.builder2_tournament_completion_gate import (
     missing_creator_prototype_ids,
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
+from engine.builder2_tournament_store import load_tournament_state, save_tournament_state
 from engine.builder2_winner_persistence import (
     WINNER_DEVELOPMENT_SOURCE_OFFLINE_SALVAGE,
     has_failed_winner_attempt_after_paid_call,
@@ -31,10 +44,12 @@ from engine.builder2_winner_persistence import (
     verify_winner_media_continuation_contract,
 )
 from engine.builder2_winner_preservation_contract import (
+    PARSED_WINNER_RESPONSE_KEY,
     build_server_owned_winner_source_reference,
     load_revalidatable_parsed_winner_response,
     prepare_and_validate_persisted_winner_offline,
 )
+from engine.video_jobs_redis import redis_configured
 
 logger = logging.getLogger(__name__)
 
@@ -292,6 +307,233 @@ def attempt_offline_winner_development_salvage(
         prototype_id,
     )
     return deepcopy(state.get("winnerDevelopmentPlan") or {}), meta
+
+
+def _response_fingerprint(state: Dict[str, Any]) -> Optional[str]:
+    payload = load_revalidatable_parsed_winner_response(state)
+    if not payload:
+        return None
+    parsed = payload.get("parsed")
+    if not isinstance(parsed, dict):
+        return None
+    return str(payload.get("responseCharCount") or len(json.dumps(parsed, ensure_ascii=False, sort_keys=True)))
+
+
+def _prepare_inspection_plan(
+    state: Dict[str, Any],
+    *,
+    winner_id: str,
+    winning_candidate: Dict[str, Any],
+    winning_judgment: Dict[str, Any],
+) -> Dict[str, Any]:
+    parsed_payload = load_revalidatable_parsed_winner_response(state)
+    parsed = dict((parsed_payload or {}).get("parsed") or {})
+    if not parsed:
+        return {}
+    source = build_server_owned_winner_source_reference(
+        strategy_foundation=state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {},
+        winning_candidate=winning_candidate,
+        candidate_id=winner_id,
+    )
+    working = deepcopy(parsed)
+    from engine.builder2_winner_scene_variations_normalization import (
+        normalize_continuous_event_scene_variations_for_execution,
+    )
+
+    normalize_continuous_event_scene_variations_for_execution(
+        working,
+        job_id=_clean(state.get("jobId")),
+        tournament_id=_clean(state.get("tournamentId")),
+        candidate_id=winner_id,
+        prototype_id=_clean(working.get("prototypeId") or winning_candidate.get("prototypeId")),
+    )
+    return prepare_and_validate_persisted_winner_offline(
+        working,
+        source_reference=source,
+        winning_candidate=winning_candidate,
+        winning_judgment=winning_judgment,
+        tournament_state=state,
+        job_id=_clean(state.get("jobId")),
+        tournament_id=_clean(state.get("tournamentId")),
+    )
+
+
+def inspect_offline_winner_salvage_preconditions(state: Dict[str, Any]) -> Dict[str, Any]:
+    bucket = reconcile_winner_development_call_ledger(state)
+    parsed_payload = load_revalidatable_parsed_winner_response(state)
+    parsed = dict((parsed_payload or {}).get("parsed") or {})
+    winner_id = _clean(state.get("winnerCandidateId") or state.get("winnerDevelopmentCandidateId"))
+    winner_rec = (state.get("candidates") or {}).get(winner_id) or {}
+    judgment_id = _clean(winner_rec.get("judgmentId"))
+    winning_judgment = ((state.get("judgments") or {}).get(judgment_id) or {}).get("judgment") or {}
+    winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+    dependency = analyze_headline_omit_textual_dependency(parsed, winning_judgment=winning_judgment)
+    structure = _clean(parsed.get("structureType"))
+    scene_meta = parsed.get("continuousEventSceneVariationsNormalization")
+    if not isinstance(scene_meta, dict) and structure == "continuous_event":
+        from engine.builder2_winner_scene_variations_normalization import describe_scene_variations_metadata
+
+        scene_meta = describe_scene_variations_metadata(parsed)
+        scene_meta = {
+            **scene_meta,
+            "continuousEventNormalizationRequired": bool(scene_meta.get("originalListCount")),
+        }
+    remaining_errors: list[str] = []
+    would_pass = False
+    blocked_reason = ""
+    if not parsed_payload:
+        blocked_reason = "builder2_winner_response_not_persisted"
+    elif not winner_id:
+        blocked_reason = "builder2_winner_candidate_missing"
+    else:
+        try:
+            _prepare_inspection_plan(
+                state,
+                winner_id=winner_id,
+                winning_candidate=winning_candidate if isinstance(winning_candidate, dict) else {},
+                winning_judgment=winning_judgment if isinstance(winning_judgment, dict) else {},
+            )
+            would_pass = True
+        except Builder2TournamentError as exc:
+            reason = str(exc.args[0] if exc.args else "")
+            remaining_errors.append(reason.split(":", 1)[-1] if reason else reason)
+            blocked_reason = reason
+    report = inspect_winner_development_recovery_state(state)
+    report.update(
+        {
+            "textualDependencySourceFields": dependency.get("textualDependencySourceFields") or [],
+            "textualDependencySafeCategories": dependency.get("textualDependencySafeCategories") or [],
+            "dependencyBeforeClosure": bool(dependency.get("dependencyBeforeClosure")),
+            "dependencyOnlyOnClosureSlogan": bool(dependency.get("dependencyOnlyOnClosureSlogan")),
+            "videoPromptRequestsRenderedText": bool(dependency.get("videoPromptRequestsRenderedText")),
+            "silentVisualUnderstandable": bool(dependency.get("silentVisualUnderstandable")),
+            "headlineFieldsRequired": bool(dependency.get("headlineFieldsRequired")),
+            "continuousEventNormalizationRequired": structure == "continuous_event"
+            and bool((scene_meta or {}).get("originalListCount")),
+            "remainingValidationErrorsAfterNormalization": remaining_errors,
+            "wouldPassCorrectedHeadlineContract": not bool(dependency.get("dependencyBeforeClosure")),
+            "offlineWinnerSalvagePossible": would_pass and not is_valid_persisted_winner_development(state),
+            "offlineWinnerSalvageBlockedReason": blocked_reason or None,
+            "winnerResponseFingerprint": _response_fingerprint(state),
+            "winnerPaidCallCount": int(bucket.get("paidDispatchCount") or 0),
+            "openAICalls": 0,
+            "stateMutated": False,
+            "paidCalls": 0,
+        }
+    )
+    return report
+
+
+def run_offline_winner_salvage_for_job(
+    job_id: str,
+    *,
+    tournament_state: Optional[Dict[str, Any]] = None,
+    save_state: bool = True,
+) -> Dict[str, Any]:
+    report: Dict[str, Any] = {
+        "jobId": _clean(job_id),
+        "ok": False,
+        "stateMutated": False,
+        "openAICalls": 0,
+        "paidCalls": 0,
+    }
+    if tournament_state is None:
+        if not redis_configured():
+            report["failureReason"] = "builder2_winner_offline_salvage_redis_unconfigured"
+            return report
+        state = load_tournament_state(job_id)
+    else:
+        state = tournament_state
+    if not isinstance(state, dict) or not state:
+        report["failureReason"] = "builder2_winner_offline_salvage_job_not_found"
+        return report
+
+    report.update(inspect_offline_winner_salvage_preconditions(state))
+    winner_id = _clean(state.get("winnerCandidateId") or state.get("winnerDevelopmentCandidateId"))
+    winner_rec = (state.get("candidates") or {}).get(winner_id) or {}
+    winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
+    judgment_id = _clean(winner_rec.get("judgmentId"))
+    winning_judgment = ((state.get("judgments") or {}).get(judgment_id) or {}).get("judgment") or {}
+    prototype_id = _clean(winner_rec.get("prototypeId") or state.get("winnerDevelopmentPrototypeId"))
+
+    if is_valid_persisted_winner_development(state):
+        report["ok"] = True
+        report["winnerDevelopmentAccepted"] = True
+        report["reusedAccepted"] = True
+        populate_winner_development_call_report(state, report)
+        return report
+
+    try:
+        winner_plan, _meta = attempt_offline_winner_development_salvage(
+            state,
+            winner_candidate_id=winner_id,
+            prototype_id=prototype_id,
+            strategy_foundation=state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {},
+            winning_candidate=winning_candidate if isinstance(winning_candidate, dict) else {},
+            winning_judgment=winning_judgment if isinstance(winning_judgment, dict) else {},
+            compatibility_mode=bool(state.get("methodologyCompatibilityMode")),
+            job_id=job_id,
+            tournament_id=_clean(state.get("tournamentId")),
+        )
+    except Builder2TournamentError as exc:
+        report["failureReason"] = str(exc.args[0] if exc.args else "builder2_winner_offline_salvage_invalid")
+        report["offlineWinnerSalvageBlockedReason"] = report["failureReason"]
+        return report
+
+    state["offlineWinnerSalvageAt"] = _clean(state.get("offlineWinnerSalvageAt")) or state.get("winnerDevelopmentAcceptedAt")
+    state["offlineWinnerSalvageVersion"] = "builder2_headline_omit_dependency_v1"
+    if save_state and tournament_state is None:
+        save_tournament_state(job_id, state)
+    report["ok"] = True
+    report["stateMutated"] = save_state and tournament_state is None
+    report["winnerDevelopmentAccepted"] = is_valid_persisted_winner_development(state)
+    report["stoppedBeforeMedia"] = True
+    report["nextStage"] = "media_prerequisite_validation"
+    populate_winner_development_call_report(state, report)
+    return report
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    args = list(argv or sys.argv[1:])
+    mode = "salvage"
+    if args and args[0] == "inspect":
+        mode = "inspect"
+        args = args[1:]
+    job_id = _clean(
+        os.environ.get("BUILDER2_WINNER_OFFLINE_SALVAGE_INSPECT_JOB_ID" if mode == "inspect" else "BUILDER2_WINNER_OFFLINE_SALVAGE_JOB_ID")
+        or (args[0] if args else "")
+    )
+    if not job_id:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "failureReason": "builder2_winner_offline_salvage_job_id_missing",
+                },
+                indent=2,
+            )
+        )
+        return 1
+    if mode == "inspect":
+        if not redis_configured():
+            print(json.dumps({"ok": False, "failureReason": "builder2_winner_offline_salvage_redis_unconfigured"}, indent=2))
+            return 1
+        state = load_tournament_state(job_id)
+        if state is None:
+            print(json.dumps({"ok": False, "failureReason": "builder2_winner_offline_salvage_job_not_found"}, indent=2))
+            return 1
+        report = inspect_offline_winner_salvage_preconditions(state)
+        report["ok"] = True
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    report = run_offline_winner_salvage_for_job(job_id)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report.get("ok") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 
 
 def assert_no_duplicate_paid_winner_development(state: Dict[str, Any], *, winner_candidate_id: str) -> None:

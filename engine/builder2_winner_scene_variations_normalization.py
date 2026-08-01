@@ -51,6 +51,16 @@ def normalize_continuous_event_scene_variations_for_execution(
 
     metadata = describe_scene_variations_metadata(plan)
     plan["sceneVariations"] = []
+    plan["continuousEventSceneVariationsNormalization"] = {
+        "structureType": structure,
+        "keyExisted": metadata["keyExisted"],
+        "originalValueType": metadata["originalValueType"],
+        "originalListCount": metadata["originalListCount"],
+        "normalizedListCount": 0,
+        "normalizationReason": NORMALIZATION_REASON,
+        "sequenceAuthoritative": True,
+        "downstreamUsesOriginalSceneVariations": False,
+    }
 
     logger.info(
         "BUILDER2_CONTINUOUS_EVENT_SCENE_VARIATIONS_NORMALIZED jobId=%s tournamentId=%s candidateId=%s "

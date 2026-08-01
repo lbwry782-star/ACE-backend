@@ -231,14 +231,18 @@ class TestNormalizeContinuousEventSceneVariationsProcessingPaths(unittest.TestCa
         state = self._state_with_scene_variations([{"familyId": "nearness"} for _ in range(4)])
         ctx = _processing_context(state)
         preserved = _preserved_plan_from_state(state)
-        with self.assertRaises(Builder2TournamentError):
-            validate_builder2_winner_plan(
-                deepcopy(preserved),
-                winning_candidate=ctx["winning_candidate"],
-                preservation_snapshot=ctx["preservation_snapshot"],
-                winning_judgment=ctx["winning_judgment"],
-                compatibility_mode=False,
-            )
+        validated = validate_builder2_winner_plan(
+            deepcopy(preserved),
+            winning_candidate=ctx["winning_candidate"],
+            preservation_snapshot=ctx["preservation_snapshot"],
+            winning_judgment=ctx["winning_judgment"],
+            compatibility_mode=False,
+        )
+        self.assertEqual(validated["sceneVariations"], [])
+        self.assertEqual(
+            (validated.get("continuousEventSceneVariationsNormalization") or {}).get("normalizedListCount"),
+            0,
+        )
         validated = process_winner_development_response(
             dict(state[PARSED_WINNER_RESPONSE_KEY]["parsed"]),
             source_reference=ctx["source_reference"],

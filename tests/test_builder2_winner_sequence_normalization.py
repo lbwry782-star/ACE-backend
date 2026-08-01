@@ -253,12 +253,12 @@ class TestWinnerSequenceNormalizationLifecycle(unittest.TestCase):
 
 
 class TestWinnerSequenceSceneVariationsFallback(unittest.TestCase):
-    def test_invalid_scene_variation_count_uses_normalized_sequence_text(self) -> None:
+    def test_invalid_scene_variation_count_clears_variations_for_continuous_event(self) -> None:
         plan = _structured_sequence_plan()
         plan["sceneVariations"] = ["Beat one.", "Beat two.", "Beat three.", "Beat four."]
         validated = validate_builder2_winner_plan(plan)
-        self.assertEqual(len(validated["sceneVariations"]), 3)
+        self.assertEqual(validated["sceneVariations"], [])
         self.assertEqual(
-            validated["sceneVariations"][0],
+            validated["sequence"]["beginning"],
             "The storefront window stays neutral before the proof appears.",
         )

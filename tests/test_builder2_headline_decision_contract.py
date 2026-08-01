@@ -158,6 +158,15 @@ class TestOptionalHeadlineReason(unittest.TestCase):
             _process_plan(plan)
         self.assertIn("textual_dependency", str(ctx.exception))
 
+    def test_omit_with_silent_policy_prohibition_passes(self) -> None:
+        plan = _winner_plan(reason=None)
+        plan["videoPrompt"] = (
+            "Continuous realistic motion only. No on-screen text during the scene. "
+            "No text overlay. Purely pictorial motion."
+        )
+        result = _process_plan(plan)
+        self.assertEqual(result["headlineDecision"]["decision"], "omit")
+
     def test_omit_contradicts_judge_when_headline_required(self) -> None:
         plan = _winner_plan(reason=None)
         judgment = _judgment_for_summer_fan(headline_needed=True)

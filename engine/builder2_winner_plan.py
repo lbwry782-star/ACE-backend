@@ -44,6 +44,11 @@ from engine.video_planning import (
 
 logger = logging.getLogger(__name__)
 
+
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
+
+
 _MONTAGE_LANGUAGE = re.compile(
     r"\b(montage|multiple clips|quick cuts|variation moments|cut between)\b",
     re.IGNORECASE,
@@ -131,6 +136,19 @@ def validate_builder2_winner_plan(
     structure = require_non_empty_str(raw.get("structureType"), field="structureType")
     headline_decision = _headline_decision_value(raw)
     complete_ad_winner = isinstance((winning_candidate or {}).get("advertisingClosure"), dict)
+    out = dict(raw)
+    if structure == "continuous_event":
+        from engine.builder2_winner_scene_variations_normalization import (
+            normalize_continuous_event_scene_variations_for_execution,
+        )
+
+        normalize_continuous_event_scene_variations_for_execution(
+            out,
+            job_id=_clean((tournament_state or {}).get("jobId")),
+            tournament_id=_clean((tournament_state or {}).get("tournamentId")),
+            candidate_id=_clean((winning_candidate or {}).get("candidateId")),
+            prototype_id=_clean(out.get("prototypeId")),
+        )
     if winning_candidate is not None:
         normalized_headline = normalize_headline_decision_object(
             raw.get("headlineDecision"),
@@ -158,7 +176,6 @@ def validate_builder2_winner_plan(
     require_non_empty_str(raw.get("openingFrameDescription"), field="openingFrameDescription")
     require_non_empty_str(raw.get("videoPrompt"), field="videoPrompt")
 
-    out = dict(raw)
     out["sequence"] = normalized_sequence
     variations = out.get("sceneVariations")
 
