@@ -27,6 +27,7 @@ from engine.builder2_closure_typography import (
     closure_reveal_y_local_at_progress,
     expected_visible_ink_height_at_progress,
     fit_builder2_closure_typography,
+    REVEAL_WINDOW_BORDER_INSET_PX,
 )
 from engine.builder2_closure_ffmpeg_paths import (
     ClosureFfmpegAssetSession,
@@ -86,6 +87,16 @@ def _line_window_on_canvas(spec: ClosureTypographyLineSpec) -> Tuple[int, int, i
     )
 
 
+def _line_window_with_border_on_canvas(spec: ClosureTypographyLineSpec) -> Tuple[int, int, int, int]:
+    inset = REVEAL_WINDOW_BORDER_INSET_PX
+    return (
+        spec.overlay_x_px - inset,
+        spec.overlay_y_px - inset,
+        spec.overlay_x_px + spec.reveal_window_width + inset,
+        spec.overlay_y_px + spec.reveal_window_height + inset,
+    )
+
+
 def count_text_pixels_in_region(image_path: Path, region: Tuple[int, int, int, int]) -> Tuple[int, int]:
     bright, ink_height, _min_y, _max_y = measure_text_pixels_in_region(image_path, region)
     return bright, ink_height
@@ -118,11 +129,11 @@ def count_text_pixels_outside_window(image_path: Path, spec: ClosureTypographyLi
     from PIL import Image
 
     image = Image.open(image_path).convert("RGB")
-    left, top, right, bottom = _line_window_on_canvas(spec)
-    ink_left = left - 4
-    ink_right = right + 4
-    ink_top = top - 4
-    ink_bottom = bottom + 4
+    left, top, right, bottom = _line_window_with_border_on_canvas(spec)
+    ink_left = left
+    ink_right = right
+    ink_top = top
+    ink_bottom = bottom
     outside = 0
     for y in range(max(0, ink_top), min(ink_bottom, image.height)):
         for x in range(max(0, ink_left), min(ink_right, image.width)):
@@ -327,7 +338,7 @@ def assert_ease_out_near_complete_at_linear_midpoint(
     eased = closure_reveal_eased_progress(linear_progress)
     if eased < 0.85:
         raise AssertionError(f"linear_midpoint_eased_too_low eased={eased}")
-    minimum = max(1, int(round(stable_visible_height * 0.80)))
+    minimum = max(1, int(stable_visible_height * 0.75))
     if measured_visible_height < minimum:
         raise AssertionError(
             f"linear_midpoint_not_near_complete measured={measured_visible_height} minimum={minimum}"

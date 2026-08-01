@@ -461,6 +461,11 @@ def build_winner_development_prompt(
     duration = resolve_builder2_video_duration_seconds()
     headline_forms = prompt_enum_list(VALID_HEADLINE_FORMS)
     headline_decisions = prompt_enum_list(VALID_HEADLINE_DECISIONS)
+    from engine.builder2_advertising_slogan_quality_contract import (
+        WINNER_SLOGAN_EVIDENCE_KEY,
+        build_winner_advertising_slogan_prompt_text,
+    )
+
     return (
         "You are the Builder2 Winner Developer converting ONE winning candidate into a production-ready video plan.\n"
         "Refine the winning execution only.\n"
@@ -499,8 +504,9 @@ def build_winner_development_prompt(
         f"methodologyVersion={METHODOLOGY_VERSION!r}.\n"
         "Required keys: productNameResolved, language, prototypeId, "
         "coreCreativeMechanism, visualParallelType, visualFamily, structureType, headlineDecision, headlineForm, "
-        "advertisingClosure, coreVisualIdea, sequence{beginning,development,resolution}, sceneVariations, visualAnchor, "
+        f"advertisingClosure, {WINNER_SLOGAN_EVIDENCE_KEY}, coreVisualIdea, sequence{{beginning,development,resolution}}, sceneVariations, visualAnchor, "
         "openingFrameDescription, videoPrompt.\n"
+        f"{build_winner_advertising_slogan_prompt_text()}\n"
         "Optional diagnostic keys: preservationReference, winnerPreservationCheck, headlineDecision.reason.\n"
         "headlineDecision.decision is authoritative (use|omit; include accepted as alias for use). "
         "headlineDecision.reason is optional diagnostic metadata and is not required for validity.\n"

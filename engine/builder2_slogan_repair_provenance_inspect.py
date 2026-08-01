@@ -158,7 +158,11 @@ def inspect_slogan_repair_provenance(
     report["repairedSloganWordCount"] = count_slogan_words_excluding_product(repaired_slogan, product_label)
 
     try:
-        slogan_applied_base, _ = apply_persisted_slogan_to_base(original_parsed, repair_parsed)
+        slogan_applied_base, _ = apply_persisted_slogan_to_base(
+            original_parsed,
+            repair_parsed,
+            strategy_foundation=strategy,
+        )
     except Builder2TournamentError as exc:
         report["failureField"] = str(exc.args[0] if exc.args else "").split(":")[-1]
         return report
@@ -203,6 +207,9 @@ def inspect_slogan_repair_provenance(
     )
     preserve_semantic_bridge_basis(original_parsed, merged)
     revert_forbidden_paths(original_parsed, merged)
+    from engine.builder2_advertising_slogan_quality_contract import sync_creator_slogan_formulation_from_closure
+
+    sync_creator_slogan_formulation_from_closure(merged, strategy_foundation=strategy)
     report["mergedPreNormalizeMeaningsConverge"] = semantic_basis_meanings_converge(merged)
     report["mergedPreNormalizeFingerprint"] = semantic_basis_fingerprint(merged)
 

@@ -455,7 +455,9 @@ def apply_semantic_eligibility_rules(judgment: Dict[str, Any]) -> Dict[str, Any]
         if advertising.get("sloganSpecificToIdea") is False:
             out["eligible"] = False
             out.setdefault("disqualifiers", []).append("slogan_not_specific_to_idea")
-    return out
+    from engine.builder2_advertising_slogan_quality_contract import apply_advertising_slogan_eligibility_rules
+
+    return apply_advertising_slogan_eligibility_rules(out)
 
 
 def validate_winner_slogan_preservation(

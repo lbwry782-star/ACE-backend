@@ -45,9 +45,11 @@ CLOSURE_TEXT_REVEAL_VERSION = "builder2_closure_text_masked_reveal_upward_ease_o
 CLOSURE_TEXT_REVEAL_EASING = "ease_out_cubic"
 REVEAL_PROGRESS_FUNCTION_VERSION = "builder2_closure_reveal_ease_out_cubic_v1"
 REVEAL_WINDOW_HORIZONTAL_PAD_PX = 12
+REVEAL_DRAWTEXT_BORDER_PX = 2
 REVEAL_WINDOW_TOP_PAD_PX = 2
 REVEAL_WINDOW_BOTTOM_PAD_PX = 4
-REVEAL_DRAWTEXT_BORDER_PX = 2
+# drawtext borderw consumes space inside the fixed reveal mask; pad must cover stroke on all sides.
+REVEAL_WINDOW_BORDER_INSET_PX = REVEAL_DRAWTEXT_BORDER_PX
 REVEAL_HIDDEN_EXTRA_PAD_PX = REVEAL_DRAWTEXT_BORDER_PX + 8
 # FFmpeg rendered ink-to-ink gap is smaller than PIL layout gap by this amount.
 CLOSURE_FFMPEG_RENDERED_INK_GAP_ADJUSTMENT_PX = 6
@@ -285,6 +287,7 @@ class ClosureTypographyLineSpec:
     reveal_travel_px: int = 0
     reveal_window_width: int = 0
     reveal_window_height: int = 0
+    reveal_window_top_pad_px: int = 0
     overlay_x_px: int = 0
     overlay_y_px: int = 0
     final_y_local_px: int = 0
@@ -415,23 +418,55 @@ class ClosureTypographyLayout:
         }
 
 
+def closure_reveal_window_top_pad_px(*, bbox: Tuple[int, int, int, int]) -> int:
+    """Top inset inside the reveal mask: ink safe area plus drawtext border stroke."""
+    return REVEAL_WINDOW_TOP_PAD_PX + REVEAL_WINDOW_BORDER_INSET_PX
+
+
+def closure_reveal_window_bottom_pad_px() -> int:
+    return REVEAL_WINDOW_BOTTOM_PAD_PX + REVEAL_WINDOW_BORDER_INSET_PX
+
+
+def closure_reveal_settled_ink_top_in_window(spec: ClosureTypographyLineSpec) -> float:
+    return float(spec.final_y_local_px) + float(spec.ink_bbox[1])
+
+
+def closure_reveal_settled_ink_bottom_in_window(spec: ClosureTypographyLineSpec) -> float:
+    return float(spec.final_y_local_px) + float(spec.ink_bbox[3])
+
+
+def assert_closure_reveal_settled_fits_window(spec: ClosureTypographyLineSpec) -> None:
+    ink_top = closure_reveal_settled_ink_top_in_window(spec)
+    ink_bottom = closure_reveal_settled_ink_bottom_in_window(spec)
+    min_top = float(spec.reveal_window_top_pad_px)
+    if ink_top < min_top:
+        raise Builder2TournamentError("builder2_closure_text_overflow:reveal_top_clip")
+    if ink_bottom > float(spec.reveal_window_height) - REVEAL_WINDOW_BORDER_INSET_PX:
+        raise Builder2TournamentError("builder2_closure_text_overflow:reveal_bottom_clip")
+
+
 def _reveal_window_for_line(
     *,
     font_path: Path,
     text: str,
     fontsize: int,
     safe_width: int,
-) -> Tuple[int, int, int, int, int]:
+) -> Tuple[int, int, int, int, int, int]:
     bbox = _text_ink_bbox(font_path, text, fontsize)
     ink_w = max(1, bbox[2] - bbox[0])
     ink_h = max(1, bbox[3] - bbox[1])
-    window_w = min(safe_width, ink_w + (2 * REVEAL_WINDOW_HORIZONTAL_PAD_PX))
-    # Fixed clip slot: final visible ink area only. Travel happens below this boundary.
-    window_h = REVEAL_WINDOW_TOP_PAD_PX + ink_h + REVEAL_WINDOW_BOTTOM_PAD_PX
-    final_y_local = REVEAL_WINDOW_TOP_PAD_PX - bbox[1]
+    top_pad = closure_reveal_window_top_pad_px(bbox=bbox)
+    bottom_pad = closure_reveal_window_bottom_pad_px()
+    window_w = min(
+        safe_width,
+        ink_w + (2 * REVEAL_WINDOW_HORIZONTAL_PAD_PX) + (2 * REVEAL_WINDOW_BORDER_INSET_PX),
+    )
+    # Fixed clip slot: settled ink sits below top_pad; border stroke stays inside the mask.
+    window_h = top_pad + ink_h + bottom_pad
+    final_y_local = top_pad - bbox[1]
     hidden_y_local = window_h - bbox[1] + REVEAL_HIDDEN_EXTRA_PAD_PX
     reveal_travel_px = hidden_y_local - final_y_local
-    return window_w, window_h, final_y_local, hidden_y_local, reveal_travel_px
+    return window_w, window_h, final_y_local, hidden_y_local, reveal_travel_px, top_pad
 
 
 def closure_reveal_linear_progress_at_timestamp(spec: ClosureTypographyLineSpec, timestamp_seconds: float) -> float:
@@ -650,7 +685,7 @@ def fit_builder2_closure_typography(
         line_specs: List[ClosureTypographyLineSpec] = []
 
         for index, (line, y_px, bbox) in enumerate(product_specs_abs):
-            window_w, window_h, final_y_local, hidden_y_local, reveal_travel = _reveal_window_for_line(
+            window_w, window_h, final_y_local, hidden_y_local, reveal_travel, top_pad = _reveal_window_for_line(
                 font_path=product_font,
                 text=line,
                 fontsize=product_size,
@@ -669,8 +704,9 @@ def fit_builder2_closure_typography(
                     reveal_travel_px=reveal_travel,
                     reveal_window_width=window_w,
                     reveal_window_height=window_h,
+                    reveal_window_top_pad_px=top_pad,
                     overlay_x_px=(CANVAS_WIDTH - window_w) // 2,
-                    overlay_y_px=y_px,
+                    overlay_y_px=y_px + bbox[1] - top_pad,
                     final_y_local_px=final_y_local,
                     hidden_y_local_px=hidden_y_local,
                     ink_bbox=bbox,
@@ -678,12 +714,17 @@ def fit_builder2_closure_typography(
             )
 
         for index, (line, y_px, bbox) in enumerate(slogan_specs_abs):
-            window_w, window_h, final_y_local, hidden_y_local, reveal_travel = _reveal_window_for_line(
+            window_w, window_h, final_y_local, hidden_y_local, reveal_travel, top_pad = _reveal_window_for_line(
                 font_path=slogan_font,
                 text=line,
                 fontsize=slogan_size,
                 safe_width=safe_width,
             )
+            product_window_bottom = max(
+                (spec.overlay_y_px + spec.reveal_window_height for spec in line_specs if spec.role == "product"),
+                default=0,
+            )
+            overlay_y = max(y_px + bbox[1] - top_pad, product_window_bottom)
             line_specs.append(
                 ClosureTypographyLineSpec(
                     text=line,
@@ -697,8 +738,9 @@ def fit_builder2_closure_typography(
                     reveal_travel_px=reveal_travel,
                     reveal_window_width=window_w,
                     reveal_window_height=window_h,
+                    reveal_window_top_pad_px=top_pad,
                     overlay_x_px=(CANVAS_WIDTH - window_w) // 2,
-                    overlay_y_px=y_px,
+                    overlay_y_px=overlay_y,
                     final_y_local_px=final_y_local,
                     hidden_y_local_px=hidden_y_local,
                     ink_bbox=bbox,
@@ -743,6 +785,8 @@ def fit_builder2_closure_typography(
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied")
     if not best.visible_ink_gap_satisfied:
         raise Builder2TournamentError("builder2_closure_brand_dominance_unsatisfied:visible_gap")
+    for spec in best.line_specs:
+        assert_closure_reveal_settled_fits_window(spec)
     return best
 
 

@@ -69,6 +69,11 @@ def _candidate_with_slogan(
     candidate = _candidate(prototype_id, prompt=prompt)
     candidate["advertisingClosure"]["productNameText"] = product_name
     candidate["advertisingClosure"]["sloganText"] = slogan_text
+    formulation = candidate.get("advertisingSloganFormulation")
+    if isinstance(formulation, dict):
+        formulation = dict(formulation)
+        formulation["finalSloganText"] = slogan_text
+        candidate["advertisingSloganFormulation"] = formulation
     return candidate
 
 
@@ -470,6 +475,11 @@ class TestSloganRepairOfflineSalvage(unittest.TestCase):
         )
         repaired = deepcopy(original)
         repaired["advertisingClosure"]["sloganText"] = _hebrew_slogan(7)
+        formulation = repaired.get("advertisingSloganFormulation")
+        if isinstance(formulation, dict):
+            formulation = dict(formulation)
+            formulation["finalSloganText"] = repaired["advertisingClosure"]["sloganText"]
+            repaired["advertisingSloganFormulation"] = formulation
         repaired["semanticBridge"]["sloganMeaning"] = "Repair-only slogan meaning for shorter copy."
         repaired["semanticBridge"]["howTheMeaningsMeet"] = "Repair-only bridge explanation for shorter copy."
         repaired["semanticBridge"]["meaningsConverge"] = False
@@ -667,6 +677,11 @@ class TestSloganRepairProvenance(unittest.TestCase):
         )
         repaired = deepcopy(original)
         repaired["advertisingClosure"]["sloganText"] = _hebrew_slogan(7)
+        formulation = repaired.get("advertisingSloganFormulation")
+        if isinstance(formulation, dict):
+            formulation = dict(formulation)
+            formulation["finalSloganText"] = repaired["advertisingClosure"]["sloganText"]
+            repaired["advertisingSloganFormulation"] = formulation
         repaired["semanticBridge"]["sloganMeaning"] = "Repair-only slogan meaning for shorter copy."
         repaired["semanticBridge"]["howTheMeaningsMeet"] = "Repair-only bridge explanation for shorter copy."
         repaired["semanticBridge"]["meaningsConverge"] = False

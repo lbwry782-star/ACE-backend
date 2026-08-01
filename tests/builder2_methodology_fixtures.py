@@ -11,6 +11,51 @@ from engine.builder2_complete_ad_contract import (
     build_default_creator_advertising_closure,
     build_default_creator_semantic_bridge,
 )
+from engine.builder2_advertising_slogan_quality_contract import (
+    BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION,
+    CREATOR_SLOGAN_FORMULATION_KEY,
+    WINNER_SLOGAN_EVIDENCE_KEY,
+    build_default_creator_slogan_formulation,
+    build_default_judge_slogan_assessment,
+)
+
+
+def advertising_slogan_quality_creator_extras(
+    *,
+    relative_advantage_source: str,
+    final_slogan_text: str,
+    transformation_type: str = "direct_distillation",
+    why_advertising: str = "The line compresses the relative advantage into a memorable closing claim.",
+) -> Dict[str, Any]:
+    return {
+        CREATOR_SLOGAN_FORMULATION_KEY: build_default_creator_slogan_formulation(
+            relative_advantage_source=relative_advantage_source,
+            final_slogan_text=final_slogan_text,
+            transformation_type=transformation_type,
+            why_advertising=why_advertising,
+        ),
+    }
+
+
+def advertising_slogan_quality_judge_extras(*, notes: str = "") -> Dict[str, Any]:
+    return {"advertisingSloganAssessment": build_default_judge_slogan_assessment(notes=notes)}
+
+
+def advertising_slogan_quality_winner_extras(
+    *,
+    relative_advantage_source: str,
+    final_slogan_text: str,
+    transformation_type: str = "direct_distillation",
+    why_advertising: str = "The winning Creator slogan remains the canonical advertising formulation.",
+) -> Dict[str, Any]:
+    return {
+        WINNER_SLOGAN_EVIDENCE_KEY: build_default_creator_slogan_formulation(
+            relative_advantage_source=relative_advantage_source,
+            final_slogan_text=final_slogan_text,
+            transformation_type=transformation_type,
+            why_advertising=why_advertising,
+        ),
+    }
 
 
 def methodology_strategy_extras(*, tournament_id: str = "test-tournament") -> Dict[str, Any]:
@@ -112,6 +157,7 @@ def complete_ad_creator_extras(
     slogan_text: str = "קרוב יותר ממה שחשבת",
     language: str = "he",
     key_word: str = "closer",
+    relative_advantage_source: str = "Closeness becomes the advantage.",
 ) -> Dict[str, Any]:
     return {
         "advertisingClosure": build_default_creator_advertising_closure(
@@ -125,6 +171,10 @@ def complete_ad_creator_extras(
             slogan_meaning="Strategic closeness to the buyer's need",
             strategic_meaning="Closeness becomes the advantage",
             how_they_meet="The visible gesture proves the same strategic promise the slogan closes",
+        ),
+        **advertising_slogan_quality_creator_extras(
+            relative_advantage_source=relative_advantage_source,
+            final_slogan_text=slogan_text,
         ),
     }
 
@@ -517,6 +567,7 @@ def methodology_judgment_extras(*, prototype_id: str = "closest") -> Dict[str, A
             "notes": "The Creator slogan closes the same relative advantage embodied by the film.",
         },
         **complete_ad_judgment_extras(prototype_id=prototype_id),
+        **advertising_slogan_quality_judge_extras(),
         **metaphorical_embodiment_judge_extras(),
     }
 
@@ -529,6 +580,9 @@ def methodology_winner_extras(
 ) -> Dict[str, Any]:
     strategy_obj = strategy or methodology_strategy_extras()
     candidate = winning_candidate or methodology_candidate_extras("closest", strategy=strategy_obj)
+    relative_advantage_source = str((strategy_obj.get("relativeAdvantage") or {}).get("statement") or "").strip()
+    closure = (candidate.get("advertisingClosure") or {}) if isinstance(candidate.get("advertisingClosure"), dict) else {}
+    final_slogan = str(closure.get("sloganText") or "קרוב יותר ממה שחשבת").strip()
     preservation = {
         "strategyFoundationId": strategy_obj.get("strategyFoundationId"),
         "prototypeId": candidate.get("prototypeId"),
@@ -557,6 +611,10 @@ def methodology_winner_extras(
             "structurePreserved": True,
             "editingOnlyStrengthens": True,
         },
+        **advertising_slogan_quality_winner_extras(
+            relative_advantage_source=relative_advantage_source,
+            final_slogan_text=final_slogan,
+        ),
     }
 
 
@@ -572,6 +630,7 @@ def single_slogan_contract_extras(*, slogan_text: str = "קרוב יותר ממ�
         "plainTextAdvertisedNameOnly": True,
         "inSceneBrandTextAllowed": False,
         "builder2NewFormatVersion": "builder2_complete_ad_v1",
+        "advertisingSloganQualityContractVersion": BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION,
         "sloganDecision": "use",
         "sloganText": slogan_text,
         "sloganCoreKeyword": "closer",

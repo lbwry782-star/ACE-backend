@@ -167,6 +167,60 @@ class TestSemanticBridgeHiddenDefect(unittest.TestCase):
         self.assertTrue(context["required"])
 
 
+class TestSemanticBridgeSloganQualityInvariant(unittest.TestCase):
+    ORIGINAL_ID = "cand-1-think_small-1-d630c92f"
+    REPAIR_ID = "cand-1-think_small-1-24f1eeb9"
+
+    def tearDown(self) -> None:
+        os.environ.pop(SEMANTIC_BRIDGE_REPAIR_ENV_FLAG, None)
+
+    def test_hidden_defect_fixture_syncs_formulation_after_persisted_slogan_apply(self) -> None:
+        state = _hidden_defect_pair_state()
+        original = state[REJECTED_CREATOR_PARSED_INDEX_KEY][self.ORIGINAL_ID]["parsed"]
+        repair = state[SLOGAN_REPAIR_PARSED_INDEX_KEY][self.REPAIR_ID]["parsed"]
+        base, repaired_slogan = apply_persisted_slogan_to_base(
+            original,
+            repair,
+            strategy_foundation=state.get("strategyFoundation"),
+        )
+        closure_slogan = base["advertisingClosure"]["sloganText"]
+        formulation = base["advertisingSloganFormulation"]
+        self.assertEqual(closure_slogan, repaired_slogan)
+        self.assertEqual(formulation["finalSloganText"], closure_slogan)
+        self.assertNotEqual(
+            original["advertisingSloganFormulation"]["finalSloganText"],
+            closure_slogan,
+        )
+
+    def test_semantic_bridge_merge_preserves_slogan_and_formulation_evidence(self) -> None:
+        state = _hidden_defect_pair_state()
+        context = detect_semantic_bridge_repair_context(state, prototype_id="think_small", product_name="ACE Product")
+        base = context["baseParsed"]
+        before_formulation = deepcopy(base["advertisingSloganFormulation"])
+        before_slogan = base["advertisingClosure"]["sloganText"]
+        merged, _meta = merge_semantic_bridge_repair_patch(base, _valid_semantic_bridge_patch())
+        self.assertEqual(merged["advertisingClosure"]["sloganText"], before_slogan)
+        self.assertEqual(merged["advertisingSloganFormulation"], before_formulation)
+
+    def test_semantic_bridge_execute_does_not_dispatch_slogan_repair(self) -> None:
+        state = _hidden_defect_pair_state()
+        os.environ[SEMANTIC_BRIDGE_REPAIR_ENV_FLAG] = "true"
+        repair_calls_before = int(state["metrics"].get("creatorRepairCalls") or 0)
+
+        def llm(**kwargs: Any) -> Dict[str, Any]:
+            return _valid_semantic_bridge_patch()
+
+        execute_semantic_bridge_repair_call(
+            state,
+            prototype_id="think_small",
+            product_name="ACE Product",
+            llm_client=llm,
+            accept_candidate_id=self.REPAIR_ID,
+        )
+        self.assertEqual(int(state["metrics"].get("creatorRepairCalls") or 0), repair_calls_before)
+        self.assertEqual(int(state["metrics"].get("creatorSemanticBridgeRepairCalls") or 0), 1)
+
+
 class TestSemanticBridgeRepairPatch(unittest.TestCase):
     def test_merge_cannot_change_slogan_or_visual(self) -> None:
         state = _hidden_defect_pair_state()

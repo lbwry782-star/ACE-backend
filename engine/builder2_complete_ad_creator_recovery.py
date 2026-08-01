@@ -148,6 +148,7 @@ def can_offline_revalidate_rejected_creator(
             job_id=_clean(state.get("jobId")),
             tournament_id=_clean(state.get("tournamentId")),
             candidate_id=candidate_id,
+            tournament_state=state,
         )
         validate_creator_complete_ad_fields(
             candidate,
@@ -194,6 +195,7 @@ def offline_revalidate_and_accept_rejected_creator(
             job_id=job_id,
             tournament_id=_clean(state.get("tournamentId")),
             candidate_id=candidate_id,
+            tournament_state=state,
         )
         validate_creator_complete_ad_fields(
             candidate,

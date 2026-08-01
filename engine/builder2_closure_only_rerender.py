@@ -13,7 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from engine.builder2_closure_copy import resolve_trusted_closure_copy
+from engine.builder2_closure_copy import (
+    apply_closure_only_rerender_copy_override,
+    closure_only_rerender_force_requested,
+    resolve_closure_only_rerender_slogan_override,
+    resolve_trusted_closure_copy,
+)
 from engine.builder2_closure_render import Builder2ClosureRenderError, render_builder2_advertising_closure_endcard
 from engine.builder2_closure_rerender_inspect import inspect_builder2_closure_rerender
 from engine.builder2_closure_typography import (
@@ -121,13 +126,21 @@ def run_builder2_closure_only_rerender(
         return report
 
     media = _media_bucket(state)
-    if _clean(media.get("closureOnlyRerenderCompletedForVersion")) == expected_typography_version:
+    force = closure_only_rerender_force_requested()
+    if (
+        not force
+        and _clean(media.get("closureOnlyRerenderCompletedForVersion")) == expected_typography_version
+    ):
         report["ok"] = True
         report["closureOnlyRerenderAccepted"] = True
         report["idempotentReuse"] = True
         return report
 
-    preflight = inspect_builder2_closure_rerender(state, requested_typography_version=expected_typography_version)
+    preflight = inspect_builder2_closure_rerender(
+        state,
+        requested_typography_version=expected_typography_version,
+        force=force,
+    )
     report["preflight"] = preflight
     if not preflight.get("closureOnlyRerenderEligible"):
         report["failureStage"] = "preflight"
@@ -148,7 +161,12 @@ def run_builder2_closure_only_rerender(
         return report
 
     try:
-        product_name, slogan, language = resolve_trusted_closure_copy(state)
+        slogan_override = resolve_closure_only_rerender_slogan_override(state=state)
+        product_name, slogan, language = resolve_trusted_closure_copy(
+            state,
+            slogan_override=slogan_override,
+        )
+        override_applied = bool(_clean(slogan_override))
     except Builder2TournamentError as exc:
         report["failureStage"] = "copy"
         report["failureReason"] = str(exc.args[0] if exc.args else "builder2_closure_rerender_missing_copy")
@@ -208,6 +226,16 @@ def run_builder2_closure_only_rerender(
         media["closureOnlyRerenderCompletedForVersion"] = expected_typography_version
         media["closureOnlyRerenderCompletedAt"] = _utc_now_iso()
         media["closureOnlyRerenderSource"] = "builder2_closure_only_rerender"
+        if override_applied:
+            apply_closure_only_rerender_copy_override(
+                state,
+                product_name=product_name,
+                slogan=slogan,
+                language=language,
+                override_applied=True,
+            )
+            report["closureSloganOverrideApplied"] = True
+            report["renderedClosureSloganText"] = slogan
         media["mediaResumeStatus"] = "completed"
         state["status"] = "completed"
         state["mediaContinuationRequired"] = False

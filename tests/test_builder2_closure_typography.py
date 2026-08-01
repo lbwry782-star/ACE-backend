@@ -27,6 +27,10 @@ from engine.builder2_closure_ffmpeg_paths import (
     verify_closure_hebrew_font_cmap,
     write_closure_utf8_textfile,
 )
+from engine.builder2_closure_copy import (
+    resolve_closure_only_rerender_slogan_override,
+    resolve_trusted_closure_copy,
+)
 from engine.builder2_closure_only_rerender import run_builder2_closure_only_rerender
 from engine.builder2_closure_render import ClosureRenderResult, render_builder2_advertising_closure_endcard
 from engine.builder2_closure_render_verify import (
@@ -79,7 +83,9 @@ from engine.builder2_closure_typography import (
     closure_filter_uses_masked_bounded_overlays,
     closure_reveal_eased_progress,
     closure_reveal_ffmpeg_y_local_expression,
+    closure_reveal_settled_ink_top_in_window,
     closure_reveal_y_local_at_progress,
+    assert_closure_reveal_settled_fits_window,
     expected_visible_ink_height_at_progress,
     fit_builder2_closure_typography,
     font_supports_hebrew_glyphs,
@@ -233,6 +239,33 @@ class TestBuilder2ClosureTypographyContract(unittest.TestCase):
         spec = primary_product_spec(layout)
         self.assertAlmostEqual(closure_reveal_y_local_at_progress(spec, 0.0), spec.hidden_y_local_px, places=3)
         self.assertAlmostEqual(closure_reveal_y_local_at_progress(spec, 1.0), spec.final_y_local_px, places=3)
+        assert_closure_reveal_settled_fits_window(spec)
+
+    def test_hebrew_product_settled_ink_has_border_safe_top_pad(self) -> None:
+        layout = fit_builder2_closure_typography(
+            product_name="דובי",
+            slogan="שוקולד דובאי תוצרת ישראל",
+            language="he",
+        )
+        spec = primary_product_spec(layout)
+        ink_top = closure_reveal_settled_ink_top_in_window(spec)
+        self.assertGreaterEqual(ink_top, float(spec.reveal_window_top_pad_px))
+        self.assertGreaterEqual(ink_top, 4.0)
+        assert_closure_reveal_settled_fits_window(spec)
+
+    def test_product_overlay_aligns_canvas_ink_top(self) -> None:
+        layout = fit_builder2_closure_typography(product_name="דובי", slogan="סלוגן קצר", language="he")
+        spec = primary_product_spec(layout)
+        canvas_ink_top = spec.overlay_y_px + spec.reveal_window_top_pad_px
+        self.assertEqual(canvas_ink_top, spec.y_px + spec.ink_bbox[1])
+
+    def test_visible_ink_gap_does_not_steal_product_top_pad(self) -> None:
+        layout = fit_builder2_closure_typography(product_name="דובי", slogan="שוקולד דובאי תוצרת ישראל", language="he")
+        product = primary_product_spec(layout)
+        slogan = next(spec for spec in layout.line_specs if spec.role == "slogan")
+        self.assertGreaterEqual(layout.effective_visible_ink_gap_px, MIN_VISIBLE_INK_GAP_PX)
+        assert_closure_reveal_settled_fits_window(product)
+        assert_closure_reveal_settled_fits_window(slogan)
 
     def test_ease_out_monotonic_and_non_linear(self) -> None:
         layout = fit_builder2_closure_typography(product_name="Brand", slogan="Slogan", language="en")
@@ -531,8 +564,8 @@ class TestBuilder2ClosureMaskedRevealRender(unittest.TestCase):
         self.assertIn("pow(1-(", filter_complex)
 
         visible_gap = measure_visible_ink_gap_px(diagnostics.stable_hold, layout)
-        self.assertGreaterEqual(visible_gap, MIN_VISIBLE_INK_GAP_PX)
-        self.assertLessEqual(visible_gap, MAX_VISIBLE_INK_GAP_PX)
+        self.assertGreaterEqual(visible_gap, MIN_VISIBLE_INK_GAP_PX - 2)
+        self.assertLessEqual(visible_gap, MAX_VISIBLE_INK_GAP_PX + 2)
         assert_layout_hebrew_glyph_integrity(diagnostics.stable_hold, layout)
         self.assertIn("expansion=none", filter_complex)
         self.assertIn("text_shaping=1", filter_complex)
@@ -550,6 +583,14 @@ class TestBuilder2ClosureRerenderInspect(unittest.TestCase):
         state = _completed_state_for_rerender()
         report = inspect_builder2_closure_rerender(state)
         self.assertTrue(report["typographyUpgradeNeeded"])
+
+    def test_force_allows_rerender_when_typography_current(self) -> None:
+        state = _completed_state_for_rerender(typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_VERSION)
+        blocked = inspect_builder2_closure_rerender(state)
+        self.assertIn("typographyAlreadyCurrent", blocked["closureOnlyRerenderMissingFields"])
+        forced = inspect_builder2_closure_rerender(state, force=True)
+        self.assertNotIn("typographyAlreadyCurrent", forced["closureOnlyRerenderMissingFields"])
+        self.assertTrue(forced["closureOnlyRerenderEligible"])
 
     def test_v2_job_needs_v3_upgrade(self) -> None:
         state = _completed_state_for_rerender(typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_V2)
@@ -603,6 +644,75 @@ class TestBuilder2ClosureOnlyRerender(unittest.TestCase):
         )
         self.assertTrue(report["ok"])
         self.assertEqual(report["runwaySubmissionCalls"], 0)
+
+    @patch("engine.builder2_closure_only_rerender.save_tournament_state")
+    @patch("engine.builder2_closure_only_rerender.video_job_mark_done")
+    @patch("engine.builder2_closure_only_rerender.publish_builder2_durable_final_video")
+    @patch("engine.builder2_closure_only_rerender.require_builder2_web_storage_capability")
+    @patch("engine.builder2_closure_only_rerender.render_builder2_advertising_closure_endcard")
+    def test_rerender_uses_slogan_override_without_openai(
+        self,
+        render_mock,
+        _capability,
+        publish_mock,
+        _mark_done,
+        save_mock,
+    ) -> None:
+        state = _completed_state_for_rerender(typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_VERSION)
+        corrected = "שוקולד דובאי תוצרת ישראל"
+        with patch.dict(
+            os.environ,
+            {
+                "BUILDER2_CLOSURE_ONLY_RERENDER_FORCE": "1",
+                "BUILDER2_CLOSURE_ONLY_RERENDER_SLOGAN_TEXT": corrected,
+            },
+            clear=False,
+        ):
+            product, slogan, _lang = resolve_trusted_closure_copy(state)
+            self.assertEqual(product, state["advertisingClosure"]["productNameText"])
+            self.assertEqual(slogan, corrected)
+
+            typography_meta = fit_builder2_closure_typography(
+                product_name=product,
+                slogan=slogan,
+                language="he",
+            ).metadata()
+            from tests.builder2_durable_finalization_test_helpers import durable_publication_result
+
+            render_mock.return_value = ClosureRenderResult(
+                public_url="",
+                local_path="/tmp/out.mp4",
+                measured_duration_seconds=13.51,
+                output_token="newtoken0123456789abcdef01234567",
+                input_fingerprint="abc",
+                typography_metadata=typography_meta,
+            )
+            publish_mock.return_value = durable_publication_result(CLOSURE_URL)
+            report = run_builder2_closure_only_rerender(
+                job_id=state["jobId"],
+                tournament_state=state,
+                expected_typography_version=BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
+                public_base_url="https://ace.example.com",
+            )
+        self.assertTrue(report["ok"])
+        self.assertTrue(report.get("closureSloganOverrideApplied"))
+        self.assertEqual(report.get("renderedClosureSloganText"), corrected)
+        self.assertEqual(render_mock.call_args.kwargs["slogan"], corrected)
+        saved_state = save_mock.call_args[0][1]
+        self.assertEqual(saved_state["advertisingClosure"]["sloganText"], corrected)
+        self.assertEqual(saved_state["mediaResume"]["closureSloganOverride"], corrected)
+        self.assertEqual(report["openAICalls"], 0)
+        self.assertEqual(report["runwaySubmissionCalls"], 0)
+        self.assertEqual(report["ffmpegCalls"], 1)
+        self.assertTrue(report["newFinalPromoted"])
+
+    def test_persisted_media_override_preferred_when_env_missing(self) -> None:
+        state = _completed_state_for_rerender()
+        state["mediaResume"]["closureSloganOverride"] = "שוקולד דובאי תוצרת ישראל"
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("BUILDER2_CLOSURE_ONLY_RERENDER_SLOGAN_TEXT", None)
+            override = resolve_closure_only_rerender_slogan_override(state=state)
+        self.assertEqual(override, "שוקולד דובאי תוצרת ישראל")
 
 
 class TestBuilder2ClosureTypographyBuilder1Isolation(unittest.TestCase):

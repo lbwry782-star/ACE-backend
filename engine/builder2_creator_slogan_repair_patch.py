@@ -350,6 +350,10 @@ def select_minimal_validating_patch(
         reverted_paths = preserve_semantic_bridge_basis(base_candidate, merged)
         forbidden_reverted = revert_forbidden_paths(base_candidate, merged)
         reverted_paths = list(reverted_paths) + list(forbidden_reverted)
+        if "advertisingClosure.sloganText" in applied_paths:
+            from engine.builder2_advertising_slogan_quality_contract import sync_creator_slogan_formulation_from_closure
+
+            sync_creator_slogan_formulation_from_closure(merged, strategy_foundation=strategy_foundation)
         group_label = ",".join(groups) if groups else "A"
         merged_fingerprint = semantic_basis_fingerprint(merged)
         if merged_fingerprint != base_fingerprint:

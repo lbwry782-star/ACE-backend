@@ -9,6 +9,9 @@ from typing import Any, Dict
 from unittest.mock import patch
 
 from engine.builder2_advertising_closure_contract import validate_slogan_text_quality, validate_slogan_text_structure
+from engine.builder2_advertising_slogan_quality_contract import (
+    BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION,
+)
 from engine.builder2_complete_ad_contract import (
     apply_complete_ad_winner_plan_normalization,
     apply_semantic_eligibility_rules,
@@ -223,13 +226,15 @@ class TestOfflineCreatorRecovery(unittest.TestCase):
     def tearDown(self) -> None:
         disable_memory_store()
 
-    def test_offline_revalidation_accepts_structurally_valid_generic_slogan(self) -> None:
+    def test_offline_revalidation_accepts_valid_current_contract_candidate(self) -> None:
         candidate = _candidate("greenpeace_essential_pairing")
-        candidate["advertisingClosure"]["sloganText"] = "חלק מהדרך"
         candidate["advertisingClosure"]["productNameText"] = "ACE Product"
+        valid_slogan = candidate["advertisingClosure"]["sloganText"]
+        candidate["advertisingSloganFormulation"]["finalSloganText"] = valid_slogan
         candidate_id = "cand-1-greenpeace_essential_pairing-1-33964989"
         state = _six_prototype_state(judged=5, creators=5)
         state["jobId"] = "job-greenpeace"
+        state["advertisingSloganQualityContractVersion"] = BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION
         persist_rejected_creator_parsed_response(
             state,
             candidate_id=candidate_id,
@@ -244,11 +249,40 @@ class TestOfflineCreatorRecovery(unittest.TestCase):
             candidate_id=candidate_id,
             product_name="ACE Product",
         )
+        self.assertEqual(accepted["advertisingClosure"]["sloganText"], valid_slogan)
         self.assertEqual(
-            accepted["advertisingClosure"]["sloganText"],
-            "חלק מהדרך",
+            accepted["advertisingSloganFormulation"]["finalSloganText"],
+            valid_slogan,
         )
         self.assertIn(candidate_id, state["acceptedCreatorCandidates"])
+
+    def test_offline_revalidation_rejects_generic_slogan_under_quality_contract(self) -> None:
+        candidate = _candidate("greenpeace_essential_pairing")
+        generic_slogan = "חלק מהדרך"
+        candidate["advertisingClosure"]["sloganText"] = generic_slogan
+        candidate["advertisingClosure"]["productNameText"] = "ACE Product"
+        candidate["advertisingSloganFormulation"]["finalSloganText"] = generic_slogan
+        candidate_id = "cand-1-greenpeace_essential_pairing-1-33964989"
+        state = _six_prototype_state(judged=5, creators=5)
+        state["jobId"] = "job-greenpeace-generic"
+        state["advertisingSloganQualityContractVersion"] = BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION
+        persist_rejected_creator_parsed_response(
+            state,
+            candidate_id=candidate_id,
+            prototype_id="greenpeace_essential_pairing",
+            round_index=1,
+            attempt_number=1,
+            parsed=candidate,
+            failure_reason="builder2_advertising_closure_invalid:sloganText.generic",
+        )
+        with self.assertRaises(Builder2TournamentError) as ctx:
+            offline_revalidate_and_accept_rejected_creator(
+                state,
+                candidate_id=candidate_id,
+                product_name="ACE Product",
+            )
+        self.assertIn("sloganText.generic", ctx.exception.args[0])
+        self.assertNotIn(candidate_id, state["acceptedCreatorCandidates"])
 
 
 class TestJudgeGenericIneligibility(unittest.TestCase):

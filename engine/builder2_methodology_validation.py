@@ -298,6 +298,21 @@ def validate_creator_methodology(
                 product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
                 no_logo_required=requires_no_logo,
             )
+        from engine.builder2_advertising_slogan_quality_contract import (
+            BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION,
+            validate_creator_advertising_slogan_formulation,
+        )
+
+        requires_slogan_quality = (
+            str((tournament_state or {}).get("advertisingSloganQualityContractVersion") or "").strip()
+            == BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION
+        )
+        if requires_slogan_quality or isinstance(candidate.get("advertisingSloganFormulation"), dict):
+            validate_creator_advertising_slogan_formulation(
+                candidate,
+                strategy_foundation=strategy_foundation,
+                product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
+            )
 
     anchor = _require_dict(candidate.get("visualAnchor"), field="visualAnchor", code="builder2_creator_schema_invalid")
     if anchor.get("appearsBeforeOrDuringResolution") is not True and not _normalize_text(anchor.get("visualAnchorTiming")):
@@ -737,6 +752,18 @@ def collect_judge_methodology_structural_errors(
         if not str(advertising.get("notes") or "").strip():
             errors.append("builder2_judge_validation_failed:advertisingCompletionAssessment.notes")
 
+    slogan = judgment.get("advertisingSloganAssessment")
+    if not isinstance(slogan, dict):
+        errors.append("builder2_judge_validation_failed:advertisingSloganAssessment")
+    else:
+        from engine.builder2_advertising_slogan_quality_contract import JUDGE_SLOGAN_ASSESSMENT_BOOLEAN_FIELDS
+
+        for key in JUDGE_SLOGAN_ASSESSMENT_BOOLEAN_FIELDS:
+            if not isinstance(slogan.get(key), bool):
+                errors.append(f"builder2_judge_validation_failed:advertisingSloganAssessment.{key}")
+        if not str(slogan.get("notes") or "").strip():
+            errors.append("builder2_judge_validation_failed:advertisingSloganAssessment.notes")
+
     semantic = judgment.get("semanticAlignmentAssessment")
     if not isinstance(semantic, dict):
         errors.append("builder2_judge_validation_failed:semanticAlignmentAssessment")
@@ -810,6 +837,9 @@ def validate_judge_methodology(
     from engine.builder2_advertising_closure_contract import validate_judge_advertising_completion_assessment
 
     validate_judge_advertising_completion_assessment(judgment)
+    from engine.builder2_advertising_slogan_quality_contract import validate_judge_advertising_slogan_assessment
+
+    validate_judge_advertising_slogan_assessment(judgment)
     from engine.builder2_metaphorical_embodiment_contract import validate_judge_metaphorical_embodiment
 
     if isinstance(judgment.get("metaphoricalEmbodimentAssessment"), dict):
@@ -889,6 +919,24 @@ def validate_winner_methodology(
         ok, failures = validate_single_slogan_plan_contract(winner_plan, state=tournament_state)
         if not ok and failures:
             _raise("builder2_winner_validation_failed", field=failures[0])
+    from engine.builder2_advertising_slogan_quality_contract import (
+        BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION,
+        validate_winner_advertising_slogan_evidence,
+    )
+
+    requires_slogan_quality = (
+        str((tournament_state or {}).get("advertisingSloganQualityContractVersion") or "").strip()
+        == BUILDER2_ADVERTISING_SLOGAN_QUALITY_CONTRACT_VERSION
+    )
+    if requires_slogan_quality or isinstance(winner_plan.get("advertisingSloganEvidence"), dict):
+        strategy_foundation = None
+        if isinstance(tournament_state, dict):
+            strategy_foundation = tournament_state.get("strategyFoundation")
+        validate_winner_advertising_slogan_evidence(
+            winner_plan,
+            winning_candidate=winning_candidate,
+            strategy_foundation=strategy_foundation if isinstance(strategy_foundation, dict) else None,
+        )
     decision = str((winner_plan.get("headlineDecision") or {}).get("decision") or "")
 
     _validate_winner_preservation_deterministic(

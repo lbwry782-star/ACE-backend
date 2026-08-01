@@ -43,6 +43,7 @@ from engine.builder2_tournament_store import disable_memory_store, enable_memory
 from engine.builder2_winner_development import normalize_winner_plan_for_runway, validate_winner_plan
 from engine.runway_video import RunwayVideoMVPError, _generate_one_video_mvp_body
 from tests.builder2_methodology_fixtures import (
+    advertising_slogan_quality_winner_extras,
     methodology_candidate_extras,
     methodology_judgment_extras,
     methodology_strategy_extras,
@@ -247,6 +248,21 @@ def _winner_plan_from_prompt(prompt: str, *, language: str = "en") -> Dict[str, 
             plan["visualParallelType"] = cand.get("visualParallelType", plan["visualParallelType"])
             plan["structureType"] = cand.get("structureType", plan["structureType"])
             plan["prototypeId"] = cand.get("prototypeId", plan["prototypeId"])
+            closure = cand.get("advertisingClosure")
+            if isinstance(closure, dict):
+                plan["advertisingClosure"] = dict(closure)
+                slogan_text = str(closure.get("sloganText") or "").strip()
+                relative_advantage_source = str(plan.get("relativeAdvantage") or "").strip()
+                formulation = cand.get("advertisingSloganFormulation")
+                if isinstance(formulation, dict):
+                    plan["advertisingSloganEvidence"] = dict(formulation)
+                elif slogan_text:
+                    plan.update(
+                        advertising_slogan_quality_winner_extras(
+                            relative_advantage_source=relative_advantage_source,
+                            final_slogan_text=slogan_text,
+                        )
+                    )
             if plan.get("preservationReference"):
                 plan["preservationReference"]["coreCreativeMechanism"] = plan["coreCreativeMechanism"]
                 plan["preservationReference"]["prototypeId"] = plan["prototypeId"]

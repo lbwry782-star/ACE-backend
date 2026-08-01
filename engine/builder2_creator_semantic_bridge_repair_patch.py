@@ -132,12 +132,18 @@ def extract_semantic_bridge_repair_patch(repair_response: Dict[str, Any]) -> Dic
 def apply_persisted_slogan_to_base(
     original_parsed: Dict[str, Any],
     repair_parsed: Dict[str, Any],
+    *,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Dict[str, Any], str]:
     base = deepcopy(original_parsed)
     repaired_slogan = extract_repaired_slogan_text(repair_parsed)
     if not repaired_slogan:
         raise Builder2TournamentError("builder2_semantic_bridge_repair_invalid:repaired_slogan_missing")
     _set_nested(base, "advertisingClosure.sloganText", repaired_slogan)
+    if isinstance(base.get("advertisingSloganFormulation"), dict):
+        from engine.builder2_advertising_slogan_quality_contract import sync_creator_slogan_formulation_from_closure
+
+        sync_creator_slogan_formulation_from_closure(base, strategy_foundation=strategy_foundation)
     return base, repaired_slogan
 
 
@@ -430,6 +436,7 @@ def detect_semantic_bridge_repair_context(
     base_parsed, repaired_slogan = apply_persisted_slogan_to_base(
         original_payload.get("parsed") or {},
         repair_payload.get("parsed") or {},
+        strategy_foundation=strategy,
     )
     required, paths = semantic_bridge_repair_required(
         base_parsed,

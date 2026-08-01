@@ -161,6 +161,16 @@ def validate_slogan_text_quality(
             _raise("builder2_advertising_closure_invalid", field="sloganText.unsupported_claim")
     if core_mechanism and text.lower() == _clean(core_mechanism).lower():
         _raise("builder2_advertising_closure_invalid", field="sloganText.describes_action_only")
+    if relative_advantage:
+        from engine.builder2_advertising_slogan_quality_contract import (
+            validate_slogan_advertising_quality_deterministic,
+        )
+
+        validate_slogan_advertising_quality_deterministic(
+            slogan=text,
+            product_name=product_name,
+            relative_advantage=relative_advantage,
+        )
 
 
 def validate_slogan_text(

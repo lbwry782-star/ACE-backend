@@ -8,7 +8,10 @@ import os
 import sys
 from typing import Any, Dict, List
 
-from engine.builder2_closure_copy import closure_copy_fields_present
+from engine.builder2_closure_copy import (
+    closure_copy_fields_present,
+    closure_only_rerender_force_requested,
+)
 from engine.builder2_closure_typography import (
     BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
     CLOSURE_BACKGROUND_STYLE_VERSION,
@@ -39,6 +42,7 @@ def inspect_builder2_closure_rerender(
     state: Dict[str, Any],
     *,
     requested_typography_version: str = BUILDER2_CLOSURE_TYPOGRAPHY_VERSION,
+    force: bool | None = None,
 ) -> Dict[str, Any]:
     media = state.get("mediaResume") if isinstance(state.get("mediaResume"), dict) else {}
     current_version = current_closure_typography_version(media)
@@ -75,7 +79,7 @@ def inspect_builder2_closure_rerender(
         missing.append("canonicalProductName")
     if not slogan_present:
         missing.append("canonicalSlogan")
-    if not upgrade_needed:
+    if not upgrade_needed and not (force if force is not None else closure_only_rerender_force_requested()):
         missing.append("typographyAlreadyCurrent")
     eligible = not missing
     return {
@@ -96,6 +100,7 @@ def inspect_builder2_closure_rerender(
         "closureBackgroundStyleVersion": CLOSURE_BACKGROUND_STYLE_VERSION,
         "closureTextRevealVersion": CLOSURE_TEXT_REVEAL_VERSION,
         "typographyUpgradeNeeded": upgrade_needed,
+        "closureOnlyRerenderForceRequested": force if force is not None else closure_only_rerender_force_requested(),
         "closureOnlyRerenderEligible": eligible,
         "closureOnlyRerenderMissingFields": missing,
         "runwaySubmissionRequired": False,

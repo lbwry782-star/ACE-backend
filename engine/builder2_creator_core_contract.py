@@ -344,6 +344,10 @@ def build_prototype_application_prompt_example(prototype_id: str) -> str:
 
 def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
     from engine.builder2_advertising_closure_contract import build_slogan_word_limit_prompt_text
+    from engine.builder2_advertising_slogan_quality_contract import (
+        CREATOR_SLOGAN_FORMULATION_KEY,
+        build_creator_advertising_slogan_prompt_text,
+    )
 
     app_field = prototype_application_field(prototype_id)
     app_example = build_prototype_application_prompt_example(prototype_id)
@@ -358,6 +362,8 @@ def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
         "visualAnchor{description,whyEssential,visualAnchorTiming}, "
         "verbalPotential{decision,keywordOrKeyPhrase,visualMeaning,strategicMeaning,reason}, "
         "advertisingClosure{required,productNameText,sloganText,language,presentationMode,durationSeconds,noLogo}, "
+        f"{CREATOR_SLOGAN_FORMULATION_KEY}{{relativeAdvantageSource,finalSloganText,advertisingTransformationType,"
+        "whyThisIsAdvertisingCopy,merelyDescriptive,factualGroundingPreserved}, "
         "semanticBridge{keyWordOrConcept,visualMeaning,sloganMeaning,strategicMeaning,howTheMeaningsMeet,"
         "understandableWithoutCreatorReport,dualMeaningUsed,physicalMeaningActivatedByVisual,"
         "strategicMeaningActivatedBySlogan,meaningsConverge}, "
@@ -374,6 +380,7 @@ def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
         "Single-slogan contract: advertisingClosure.sloganText is the only advertising sentence. "
         "Do not invent an in-video headline or a competing closure line.\n"
         f"{build_slogan_word_limit_prompt_text()}\n"
+        f"{build_creator_advertising_slogan_prompt_text()}\n"
         "Creative embodiment (mandatory): identify strategicPerception, list obviousLiteralVisualSymbols, "
         "reject or transform literal domain symbols (graphs, dashboards, reports, CRM screens, forms, counters, arrows), "
         "and create a physical visual embodiment through which the viewer experiences the strategic perception "

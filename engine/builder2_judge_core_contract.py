@@ -9,6 +9,11 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 from engine.builder2_creator_core_contract import VALID_VERBAL_DECISIONS
 from engine.builder2_methodology_contract import METHODOLOGY_VERSION
 from engine.builder2_tournament_contracts import JUDGE_SCORE_RANGES, JUDGMENT_SCHEMA_VERSION
+from engine.builder2_advertising_slogan_quality_contract import (
+    JUDGE_SLOGAN_ASSESSMENT_KEY,
+    build_default_judge_slogan_assessment,
+    build_judge_advertising_slogan_prompt_text,
+)
 
 VALID_VERBAL_APPLICABILITY: FrozenSet[str] = frozenset({"available", "not_needed", "not_found"})
 
@@ -168,6 +173,7 @@ def build_judge_example_json(*, candidate_id: str = "cand-example") -> Dict[str,
             "functionsAsAdvertisement": True,
             "notes": "...",
         },
+        JUDGE_SLOGAN_ASSESSMENT_KEY: build_default_judge_slogan_assessment(),
         "semanticAlignmentAssessment": {
             "visualMeaning": "...",
             "sloganMeaning": "...",
@@ -203,6 +209,7 @@ def build_judge_required_keys_prompt_text(*, creator_verbal_decision: str, candi
         "visualWouldWorkWithoutHeadline (boolean), and notes.\n"
         "advertisingCompletionAssessment must include advertiserIdentifiable, productNamePresent, "
         "relativeAdvantageClosed, sloganSpecificToIdea, functionsAsAdvertisement (booleans), and notes.\n"
+        f"{build_judge_advertising_slogan_prompt_text()}\n"
         "semanticAlignmentAssessment must include visualMeaning, sloganMeaning, combinedAdvertisingMeaning, "
         "sameStrategicPromise, sloganCompletesRatherThanChangesVisual, understandableWithoutCreatorReport, "
         "keyWordMeaningsConnected, semanticAlignment (boolean), and failureReason (null when aligned).\n"
