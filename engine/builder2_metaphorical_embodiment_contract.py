@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, FrozenSet, List, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from engine.builder2_single_slogan_contract import (
     classify_literal_domain_symbols,
@@ -19,9 +19,47 @@ from engine.builder2_single_slogan_contract import (
 
 logger = logging.getLogger(__name__)
 
+BUILDER2_LITERAL_SYMBOL_DISPOSITION_CONTRACT_VERSION = "builder2_literal_symbol_disposition_v1"
+
+VALID_LITERAL_SYMBOL_DISPOSITIONS: FrozenSet[str] = frozenset(
+    {
+        "not_present",
+        "rejected",
+        "transformed",
+        "untransformed",
+    }
+)
+
+LITERAL_SYMBOL_DISPOSITION_FIELD = "literalSymbolDisposition"
+
+TRANSFORMATION_EVIDENCE_KEYWORDS: Tuple[str, ...] = (
+    "reject",
+    "rejected",
+    "transform",
+    "transformed",
+    "instead",
+    "rather than",
+    "replaced",
+    "converted",
+    "physical",
+    "embod",
+    "without using",
+    "not shown",
+    "excluded",
+    "avoid",
+    "דח",
+    "דחי",
+    "המר",
+    "המרה",
+    "פיזי",
+    "במקום",
+    "ללא",
+)
+
 CREATOR_METAPHOR_FIELDS = (
     "strategicPerception",
     "obviousLiteralVisualSymbols",
+    LITERAL_SYMBOL_DISPOSITION_FIELD,
     "literalSymbolsRejectedOrTransformed",
     "creativeEmbodimentMode",
     "embodimentSubjectOrWorld",
@@ -129,7 +167,20 @@ def _require_bool(value: Any, *, field: str) -> bool:
     return value
 
 
-def _collect_literal_symbols(candidate: Dict[str, Any]) -> List[str]:
+def requires_literal_symbol_disposition(*, tournament_state: Optional[Dict[str, Any]] = None) -> bool:
+    if not isinstance(tournament_state, dict):
+        return False
+    return (
+        _clean(tournament_state.get("metaphoricalEmbodimentContractVersion"))
+        == BUILDER2_LITERAL_SYMBOL_DISPOSITION_CONTRACT_VERSION
+    )
+
+
+def stamp_literal_symbol_disposition_contract(state: Dict[str, Any]) -> None:
+    state["metaphoricalEmbodimentContractVersion"] = BUILDER2_LITERAL_SYMBOL_DISPOSITION_CONTRACT_VERSION
+
+
+def _execution_text_parts(candidate: Dict[str, Any]) -> List[str]:
     parts = [
         _clean(candidate.get("coreVisualIdea")),
         _clean(candidate.get("visualMechanism")),
@@ -143,16 +194,222 @@ def _collect_literal_symbols(candidate: Dict[str, Any]) -> List[str]:
         parts.append(_clean(report.get("mechanismScanSummary")))
     metaphor = candidate.get("metaphoricalEmbodiment")
     if isinstance(metaphor, dict):
-        raw = metaphor.get("obviousLiteralVisualSymbols")
-        if isinstance(raw, list):
-            parts.extend(_clean(item) for item in raw)
-        elif raw:
-            parts.append(_clean(raw))
+        for key in (
+            "physicalEmbodiment",
+            "embodimentSubjectOrWorld",
+            "visiblePhysicalRelationship",
+        ):
+            parts.append(_clean(metaphor.get(key)))
+    return [part for part in parts if part]
+
+
+def _declared_literal_symbol_parts(metaphor: Dict[str, Any]) -> List[str]:
+    raw = metaphor.get("obviousLiteralVisualSymbols")
+    if isinstance(raw, list):
+        return [_clean(item) for item in raw if _clean(item)]
+    if raw:
+        return [_clean(raw)]
+    return []
+
+
+def _collect_execution_literal_symbols(candidate: Dict[str, Any]) -> List[str]:
     hits: List[str] = []
-    for part in parts:
+    for part in _execution_text_parts(candidate):
         hits.extend(classify_literal_domain_symbols(part))
     return list(dict.fromkeys(hits))
 
+
+def _collect_declared_literal_symbols(metaphor: Dict[str, Any]) -> List[str]:
+    hits: List[str] = []
+    for part in _declared_literal_symbol_parts(metaphor):
+        hits.extend(classify_literal_domain_symbols(part))
+    return list(dict.fromkeys(hits))
+
+
+def _collect_literal_symbols(candidate: Dict[str, Any]) -> List[str]:
+    """Backward-compatible alias: execution hits only (declared symbols are not execution)."""
+    return _collect_execution_literal_symbols(candidate)
+
+
+def _literal_transformation_evidence_text(metaphor: Dict[str, Any]) -> str:
+    rejected = metaphor.get("literalSymbolsRejectedOrTransformed")
+    rejected_text = " ".join(rejected) if isinstance(rejected, list) else _clean(rejected)
+    return " ".join(
+        part
+        for part in (
+            rejected_text,
+            _clean(metaphor.get("transformationMechanism")),
+            _clean(metaphor.get("whyTheVisualIsNotLiteralExplanation")),
+            _clean(metaphor.get("physicalEmbodiment")),
+            _clean(metaphor.get("visiblePhysicalRelationship")),
+        )
+        if part
+    )
+
+
+def _has_literal_transformation_evidence(text: str) -> bool:
+    lowered = _clean(text).lower()
+    if not lowered:
+        return False
+    return any(keyword in lowered for keyword in TRANSFORMATION_EVIDENCE_KEYWORDS)
+
+
+def _infer_legacy_literal_symbol_disposition(
+    *,
+    metaphor: Dict[str, Any],
+    execution_hits: List[str],
+    declared_hits: List[str],
+) -> str:
+    evidence = _literal_transformation_evidence_text(metaphor)
+    if execution_hits:
+        if _has_literal_transformation_evidence(evidence):
+            return "transformed"
+        return "untransformed"
+    if declared_hits:
+        if _has_literal_transformation_evidence(evidence):
+            return "rejected"
+        return "untransformed"
+    return "not_present"
+
+
+def _validate_literal_symbol_disposition(
+    candidate: Dict[str, Any],
+    *,
+    metaphor: Dict[str, Any],
+    tournament_state: Optional[Dict[str, Any]] = None,
+) -> None:
+    execution_hits = _collect_execution_literal_symbols(candidate)
+    declared_hits = _collect_declared_literal_symbols(metaphor)
+    evidence = _literal_transformation_evidence_text(metaphor)
+    rejected = metaphor.get("literalSymbolsRejectedOrTransformed")
+    rejected_text = " ".join(rejected) if isinstance(rejected, list) else _clean(rejected)
+    disposition = _clean(metaphor.get(LITERAL_SYMBOL_DISPOSITION_FIELD))
+    requires_disposition = requires_literal_symbol_disposition(tournament_state=tournament_state)
+
+    if requires_disposition:
+        if disposition not in VALID_LITERAL_SYMBOL_DISPOSITIONS:
+            raise_single_slogan_contract_error(
+                "builder2_creator_metaphor_validation_failed",
+                field=f"metaphoricalEmbodiment.{LITERAL_SYMBOL_DISPOSITION_FIELD}",
+            )
+    elif not disposition:
+        if execution_hits:
+            if not _has_literal_transformation_evidence(evidence):
+                raise_single_slogan_contract_error(
+                    "builder2_creator_literal_execution_without_transformation",
+                    field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+                )
+            return
+        if declared_hits and not rejected_text:
+            raise_single_slogan_contract_error(
+                "builder2_creator_metaphor_validation_failed",
+                field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+            )
+        return
+
+    if disposition == "untransformed":
+        raise_single_slogan_contract_error(
+            "builder2_creator_literal_execution_without_transformation",
+            field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+        )
+
+    if disposition == "not_present":
+        if _declared_literal_symbol_parts(metaphor):
+            raise_single_slogan_contract_error(
+                "builder2_creator_literal_execution_without_transformation",
+                field="metaphoricalEmbodiment.obviousLiteralVisualSymbols",
+            )
+        if execution_hits:
+            raise_single_slogan_contract_error(
+                "builder2_creator_literal_execution_without_transformation",
+                field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+            )
+        return
+
+    if disposition == "rejected":
+        if not _declared_literal_symbol_parts(metaphor):
+            raise_single_slogan_contract_error(
+                "builder2_creator_metaphor_validation_failed",
+                field="metaphoricalEmbodiment.obviousLiteralVisualSymbols",
+            )
+        if execution_hits:
+            raise_single_slogan_contract_error(
+                "builder2_creator_literal_execution_without_transformation",
+                field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+            )
+        if not _has_literal_transformation_evidence(evidence):
+            raise_single_slogan_contract_error(
+                "builder2_creator_literal_execution_without_transformation",
+                field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+            )
+        return
+
+    if disposition == "transformed":
+        if execution_hits and not _has_literal_transformation_evidence(evidence):
+            raise_single_slogan_contract_error(
+                "builder2_creator_literal_execution_without_transformation",
+                field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+            )
+        if not _has_literal_transformation_evidence(evidence):
+            raise_single_slogan_contract_error(
+                "builder2_creator_metaphor_validation_failed",
+                field="metaphoricalEmbodiment.transformationMechanism",
+            )
+        return
+
+    raise_single_slogan_contract_error(
+        "builder2_creator_literal_execution_without_transformation",
+        field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
+    )
+
+
+def inspect_literal_symbol_disposition(
+    candidate: Dict[str, Any],
+    *,
+    tournament_state: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metaphor = candidate.get("metaphoricalEmbodiment")
+    if not isinstance(metaphor, dict):
+        return {
+            "present": False,
+            "executionLiteralHits": [],
+            "declaredLiteralHits": [],
+            "wouldPassCorrectedContract": False,
+        }
+    execution_hits = _collect_execution_literal_symbols(candidate)
+    declared_hits = _collect_declared_literal_symbols(metaphor)
+    raw_value = metaphor.get("literalSymbolsRejectedOrTransformed")
+    disposition = _clean(metaphor.get(LITERAL_SYMBOL_DISPOSITION_FIELD))
+    inferred = _infer_legacy_literal_symbol_disposition(
+        metaphor=metaphor,
+        execution_hits=execution_hits,
+        declared_hits=declared_hits,
+    )
+    would_pass = False
+    failure = ""
+    try:
+        _validate_literal_symbol_disposition(
+            candidate,
+            metaphor=metaphor,
+            tournament_state=tournament_state,
+        )
+        would_pass = True
+    except Exception as exc:
+        failure = str(exc.args[0] if getattr(exc, "args", None) else exc)
+    return {
+        "present": True,
+        "literalSymbolDisposition": disposition or None,
+        "inferredLegacyDisposition": inferred,
+        "literalSymbolsRejectedOrTransformed": raw_value,
+        "literalSymbolsRejectedOrTransformedType": type(raw_value).__name__,
+        "executionLiteralHits": execution_hits,
+        "declaredLiteralHits": declared_hits,
+        "transformationEvidencePresent": _has_literal_transformation_evidence(
+            _literal_transformation_evidence_text(metaphor)
+        ),
+        "wouldPassCorrectedContract": would_pass,
+        "validationFailure": failure or None,
+    }
 
 
 def _collect_think_small_execution_blob(candidate: Dict[str, Any]) -> str:
@@ -194,6 +451,7 @@ def validate_creator_metaphorical_embodiment(
     *,
     assigned_prototype_id: str,
     single_slogan_required: bool = True,
+    tournament_state: Optional[Dict[str, Any]] = None,
 ) -> None:
     if not single_slogan_required and not is_single_slogan_contract(plan=candidate):
         return
@@ -210,6 +468,8 @@ def validate_creator_metaphorical_embodiment(
             )
 
     for field in CREATOR_METAPHOR_FIELDS:
+        if field == LITERAL_SYMBOL_DISPOSITION_FIELD:
+            continue
         if field in {"obviousLiteralVisualSymbols", "literalSymbolsRejectedOrTransformed"}:
             value = metaphor.get(field)
             if isinstance(value, list):
@@ -240,15 +500,19 @@ def validate_creator_metaphorical_embodiment(
         else:
             _require_text(bridge.get(field), field=f"visualBridgeAssessment.{field}")
 
-    literal_hits = _collect_literal_symbols(candidate)
-    rejected = metaphor.get("literalSymbolsRejectedOrTransformed")
-    rejected_text = " ".join(rejected) if isinstance(rejected, list) else _clean(rejected)
-    transformation_accepted = "transform" in rejected_text.lower() or "reject" in rejected_text.lower()
-    if literal_hits and not transformation_accepted:
-        raise_single_slogan_contract_error(
-            "builder2_creator_literal_execution_without_transformation",
-            field="metaphoricalEmbodiment.literalSymbolsRejectedOrTransformed",
-        )
+    if requires_literal_symbol_disposition(tournament_state=tournament_state):
+        disposition = _clean(metaphor.get(LITERAL_SYMBOL_DISPOSITION_FIELD))
+        if disposition not in VALID_LITERAL_SYMBOL_DISPOSITIONS:
+            raise_single_slogan_contract_error(
+                "builder2_creator_metaphor_validation_failed",
+                field=f"metaphoricalEmbodiment.{LITERAL_SYMBOL_DISPOSITION_FIELD}",
+            )
+
+    _validate_literal_symbol_disposition(
+        candidate,
+        metaphor=metaphor,
+        tournament_state=tournament_state,
+    )
 
     _validate_think_small_embodiment(candidate, assigned_prototype_id=assigned_prototype_id)
 
@@ -347,12 +611,17 @@ def candidate_literal_execution_detected(candidate: Dict[str, Any]) -> bool:
     metaphor = candidate.get("metaphoricalEmbodiment")
     if isinstance(metaphor, dict) and isinstance(metaphor.get("literalExecutionDetected"), bool):
         return metaphor.get("literalExecutionDetected") is True
-    hits = _collect_literal_symbols(candidate)
-    if not hits:
+    if not isinstance(metaphor, dict):
+        return bool(_collect_execution_literal_symbols(candidate))
+    disposition = _clean(metaphor.get(LITERAL_SYMBOL_DISPOSITION_FIELD))
+    if disposition == "untransformed":
+        return True
+    if disposition in {"not_present", "rejected", "transformed"}:
         return False
-    rejected = metaphor.get("literalSymbolsRejectedOrTransformed") if isinstance(metaphor, dict) else ""
-    rejected_text = " ".join(rejected) if isinstance(rejected, list) else _clean(rejected)
-    return "transform" not in rejected_text.lower()
+    execution_hits = _collect_execution_literal_symbols(candidate)
+    if not execution_hits:
+        return False
+    return not _has_literal_transformation_evidence(_literal_transformation_evidence_text(metaphor))
 
 
 def judgment_rejects_literal_execution(judgment: Dict[str, Any]) -> bool:

@@ -217,11 +217,13 @@ def metaphorical_embodiment_creator_extras(
     *,
     strategic_perception: str = "Physical closeness can express strategic fit better than generic scale.",
     creative_embodiment_mode: str = "transformed_action_or_motion",
+    literal_symbol_disposition: str = "rejected",
 ) -> Dict[str, Any]:
     return {
         "metaphoricalEmbodiment": {
             "strategicPerception": strategic_perception,
             "obviousLiteralVisualSymbols": ["agency office proximity map", "location pin dashboard"],
+            "literalSymbolDisposition": literal_symbol_disposition,
             "literalSymbolsRejectedOrTransformed": "Reject map pins; show closeness through human distance closing.",
             "creativeEmbodimentMode": creative_embodiment_mode,
             "embodimentSubjectOrWorld": "Two people in a neutral room",
@@ -275,6 +277,7 @@ def metaphorical_embodiment_shortening_extras() -> Dict[str, Any]:
             **metaphorical_embodiment_creator_extras()["metaphoricalEmbodiment"],
             "strategicPerception": "The product makes a long process shorter without losing substance.",
             "obviousLiteralVisualSymbols": ["timeline chart", "progress bar"],
+            "literalSymbolDisposition": "rejected",
             "literalSymbolsRejectedOrTransformed": "Reject charts; shorten a visibly long physical line or queue.",
             "creativeEmbodimentMode": "external_metaphor",
             "embodimentSubjectOrWorld": "A studio table with physical measuring tools",
@@ -302,6 +305,7 @@ def metaphorical_embodiment_absence_extras() -> Dict[str, Any]:
         "metaphoricalEmbodiment": {
             "strategicPerception": "What is missing reveals the forgotten step.",
             "obviousLiteralVisualSymbols": ["checklist UI", "task reminder notification"],
+            "literalSymbolDisposition": "rejected",
             "literalSymbolsRejectedOrTransformed": "Reject UI; show absence through an incomplete physical routine.",
             "creativeEmbodimentMode": "absence_or_planned_absurdity",
             "embodimentSubjectOrWorld": "A dark room with visible activity continuing",
@@ -329,6 +333,7 @@ def creative_embodiment_think_small_extras() -> Dict[str, Any]:
         "metaphoricalEmbodiment": {
             "strategicPerception": "Smallness becomes the visible advantage when scale and space are transformed.",
             "obviousLiteralVisualSymbols": ["vehicle spec sheet", "size comparison chart"],
+            "literalSymbolDisposition": "transformed",
             "literalSymbolsRejectedOrTransformed": "Reject charts; show the actual product tiny in a vast white field.",
             "creativeEmbodimentMode": "transformed_product",
             "embodimentSubjectOrWorld": "The advertised compact car itself in a vast white field",
@@ -356,6 +361,7 @@ def creative_embodiment_media_replacement_extras() -> Dict[str, Any]:
         "metaphoricalEmbodiment": {
             "strategicPerception": "The advertising medium itself can prove the strategic claim.",
             "obviousLiteralVisualSymbols": ["generic billboard layout", "standard print ad frame"],
+            "literalSymbolDisposition": "transformed",
             "literalSymbolsRejectedOrTransformed": "Reject generic layout; make the medium itself the proof object.",
             "creativeEmbodimentMode": "transformed_medium",
             "embodimentSubjectOrWorld": "The storefront window display surface",
@@ -383,6 +389,7 @@ def creative_embodiment_context_collision_extras() -> Dict[str, Any]:
         "metaphoricalEmbodiment": {
             "strategicPerception": "Extreme context contrast makes the product role visible.",
             "obviousLiteralVisualSymbols": ["category comparison chart", "feature checklist"],
+            "literalSymbolDisposition": "transformed",
             "literalSymbolsRejectedOrTransformed": "Reject charts; place the product in a sharply transformed environment.",
             "creativeEmbodimentMode": "transformed_context",
             "embodimentSubjectOrWorld": "The product remains visible inside a hostile or extreme setting",

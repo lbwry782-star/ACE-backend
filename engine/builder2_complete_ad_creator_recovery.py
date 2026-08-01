@@ -285,3 +285,109 @@ def try_offline_recover_rejected_creator_for_prototype(
     except Builder2TournamentError as exc:
         return False, candidate_id, str(exc.args[0] if exc.args else "revalidation_failed")
     return True, candidate_id, None
+
+
+def _candidate_already_accepted(state: Dict[str, Any], candidate_id: str) -> bool:
+    from engine.builder2_accepted_creator_store import ACCEPTED_CREATOR_INDEX_KEY, backfill_accepted_creator_index
+
+    backfill_accepted_creator_index(state, persist=False)
+    index = state.get(ACCEPTED_CREATOR_INDEX_KEY)
+    if isinstance(index, dict) and isinstance(index.get(candidate_id), dict):
+        return True
+    rec = (state.get("candidates") or {}).get(candidate_id)
+    if isinstance(rec, dict) and rec.get("validationStatus") == "accepted":
+        return True
+    return False
+
+
+def run_offline_creator_recovery_batch(
+    state: Dict[str, Any],
+    *,
+    product_name: str = "",
+    compatibility_mode: bool = False,
+) -> Dict[str, Any]:
+    """
+    Revalidate and accept all persisted rejected Creator responses under corrected shared validation.
+    Idempotent: already-accepted candidates are skipped.
+    """
+    from engine.builder2_accepted_creator_store import backfill_accepted_creator_index
+    from engine.builder2_tournament_completion_gate import (
+        accepted_creator_count,
+        assigned_prototype_ids,
+        missing_creator_prototype_ids,
+    )
+
+    job_id = _clean(state.get("jobId"))
+    strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
+    resolved_product = product_name or _clean(strategy.get("productNameResolved"))
+    report: Dict[str, Any] = {
+        "jobId": job_id,
+        "tournamentId": _clean(state.get("tournamentId")),
+        "strategyCalls": 0,
+        "creatorCalls": 0,
+        "judgeCalls": 0,
+        "winnerCalls": 0,
+        "imageCalls": 0,
+        "runwaySubmissionCalls": 0,
+        "openAICalls": 0,
+        "stateMutated": False,
+        "acceptedBefore": accepted_creator_count(state),
+        "acceptedAfter": accepted_creator_count(state),
+        "rejectedBefore": 0,
+        "rejectedAfter": 0,
+        "results": [],
+        "readyForJudges": False,
+        "reasoningResumePossible": False,
+    }
+    index = state.get(REJECTED_CREATOR_PARSED_INDEX_KEY)
+    if not isinstance(index, dict):
+        index = {}
+    report["rejectedBefore"] = len(index)
+    mutated = False
+    for candidate_id, payload in sorted(index.items()):
+        if not isinstance(payload, dict):
+            continue
+        prototype_id = _clean(payload.get("prototypeId"))
+        item: Dict[str, Any] = {
+            "candidateId": candidate_id,
+            "prototypeId": prototype_id,
+            "alreadyAccepted": _candidate_already_accepted(state, candidate_id),
+            "accepted": False,
+            "skipped": False,
+            "failureReason": None,
+        }
+        if item["alreadyAccepted"]:
+            item["skipped"] = True
+            item["accepted"] = True
+            report["results"].append(item)
+            continue
+        try:
+            offline_revalidate_and_accept_rejected_creator(
+                state,
+                candidate_id=candidate_id,
+                product_name=resolved_product,
+                compatibility_mode=compatibility_mode,
+                log_events=True,
+            )
+            item["accepted"] = True
+            mutated = True
+        except Builder2TournamentError as exc:
+            item["failureReason"] = str(exc.args[0] if exc.args else "revalidation_failed")
+        report["results"].append(item)
+    if mutated:
+        backfill_accepted_creator_index(state)
+        state["offlineCreatorRecoveryAt"] = _utc_now_iso()
+        state["offlineCreatorRecoveryVersion"] = "builder2_literal_symbol_disposition_v1"
+        missing = missing_creator_prototype_ids(state)
+        if not missing:
+            state["status"] = "paused_for_reasoning_resume"
+            state["lastCompletedStep"] = "creator_complete"
+            report["readyForJudges"] = True
+            report["reasoningResumePossible"] = True
+        report["stateMutated"] = True
+    report["acceptedAfter"] = accepted_creator_count(state)
+    remaining_index = state.get(REJECTED_CREATOR_PARSED_INDEX_KEY)
+    report["rejectedAfter"] = len(remaining_index) if isinstance(remaining_index, dict) else 0
+    report["missingCreatorPrototypeIds"] = missing_creator_prototype_ids(state)
+    report["assignedPrototypeIds"] = assigned_prototype_ids(state)
+    return report

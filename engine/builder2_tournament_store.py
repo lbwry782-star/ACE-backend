@@ -189,6 +189,7 @@ def new_tournament_state(
         "error": None,
         "copyContractVersion": "builder2_single_slogan_v1",
         "advertisingSloganQualityContractVersion": "builder2_advertising_slogan_quality_v1",
+        "metaphoricalEmbodimentContractVersion": "builder2_literal_symbol_disposition_v1",
         "logoPolicyVersion": "builder2_no_logos_v1",
         "logosAllowed": False,
         "advertisedLogoAllowed": False,

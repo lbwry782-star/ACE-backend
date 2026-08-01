@@ -287,6 +287,7 @@ def validate_creator_methodology(
                 candidate,
                 assigned_prototype_id=assigned_prototype_id,
                 single_slogan_required=requires_metaphor,
+                tournament_state=tournament_state,
             )
         from engine.builder2_no_logo_contract import BUILDER2_NO_LOGO_POLICY_VERSION, validate_creator_logo_policy
 
