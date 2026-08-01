@@ -26,10 +26,11 @@ from engine.builder2_tournament_contracts import (
     require_dict,
     require_non_empty_str,
 )
-from engine.builder2_judge_core_contract import (
-    filter_judge_structural_errors,
-    is_judge_factual_grounding_gate_field,
-    is_judge_structural_repair_field,
+from engine.builder2_judge_core_contract import filter_judge_structural_errors
+from engine.builder2_judge_structural_repair_classifier import (
+    collect_repairable_structural_failures,
+    is_judge_structural_repairable,
+    is_substantive_factual_grounding_negative,
 )
 from engine.builder2_judge_normalization import normalize_judge_candidate
 from engine.builder2_methodology_validation import (
@@ -405,30 +406,11 @@ def collect_judge_structural_errors(
 
 
 def _is_structural_repairable(code: str, field: Optional[str], *, parsed: Optional[Dict[str, Any]] = None) -> bool:
-    if field and is_judge_factual_grounding_gate_field(field):
-        assessment = (parsed or {}).get("factualGroundingAssessment")
-        if isinstance(assessment, dict):
-            leaf = field.split(".")[-1]
-            if isinstance(assessment.get(leaf), bool):
-                return False
-    if code in {
-        "builder2_judge_schema_invalid",
-        "builder2_judge_score_invalid",
-    }:
-        return True
-    if code == "builder2_judge_validation_failed":
-        return is_judge_structural_repair_field(field)
-    return False
+    return is_judge_structural_repairable(code, field, parsed=parsed)
 
 
 def _is_substantive_factual_grounding_failure(field: Optional[str], parsed: Optional[Dict[str, Any]] = None) -> bool:
-    if not field or not is_judge_factual_grounding_gate_field(field):
-        return False
-    assessment = (parsed or {}).get("factualGroundingAssessment")
-    if not isinstance(assessment, dict):
-        return False
-    leaf = field.split(".")[-1]
-    return isinstance(assessment.get(leaf), bool)
+    return is_substantive_factual_grounding_negative(field, parsed)
 
 
 def _response_fingerprint(text: str) -> str:
@@ -652,9 +634,9 @@ def judge_candidate(
     for phase in (("normal",) if single_attempt_only else ("normal", "repair", "retry")):
         if phase == "repair":
             if state is not None:
-                from engine.builder2_judge_circuit_breaker import is_judge_contract_circuit_breaker_tripped
+                from engine.builder2_judge_circuit_breaker import is_current_judge_contract_circuit_breaker_tripped
 
-                if is_judge_contract_circuit_breaker_tripped(state):
+                if is_current_judge_contract_circuit_breaker_tripped(state):
                     break
             if last_exc is None or not _is_structural_repairable(
                 _failure_code(last_exc),
@@ -838,6 +820,7 @@ def judge_candidate(
                     error_paths=paths,
                     after_repair=(phase == "repair"),
                     false_boolean_misclassified=detect_false_boolean_misclassification(paths),
+                    parsed=last_parsed,
                 )
             _log_judge_failure(
                 job_id=job_id,
@@ -887,7 +870,10 @@ def judge_candidate(
                     exc.args[0],
                 )
             if phase == "normal" and _is_structural_repairable(code, field, parsed=last_parsed):
-                collected_structural_failures = collected
+                collected_structural_failures = collect_repairable_structural_failures(
+                    collected or ([str(exc.args[0])] if exc.args else []),
+                    parsed=last_parsed,
+                )
                 continue
             if phase in {"normal", "repair"} and _is_clean_retryable(code, field):
                 continue
@@ -896,6 +882,30 @@ def judge_candidate(
     assert last_exc is not None
     if state is not None:
         state.setdefault("judgeDiagnosticsByCandidate", {})[candidate_id] = dict(diagnostics)
+        if (
+            not repair_attempted
+            and collected_structural_failures
+            and _is_structural_repairable(_failure_code(last_exc), _failure_field(last_exc), parsed=last_parsed)
+        ):
+            from engine.builder2_judge_pending_repair import persist_pending_judge_repair
+
+            ledger = (state.get("judgeResponseLedgerByCandidate") or {}).get(candidate_id) or []
+            normal_entry = next(
+                (
+                    item
+                    for item in reversed(ledger)
+                    if isinstance(item, dict) and str(item.get("callType") or "normal").strip() == "normal"
+                ),
+                None,
+            )
+            if isinstance(normal_entry, dict):
+                persist_pending_judge_repair(
+                    state,
+                    candidate_id=candidate_id,
+                    normal_entry=normal_entry,
+                    structural_failures=collected_structural_failures,
+                    repair_dispatched=repair_attempted,
+                )
         record_judge_unavailable(state)
     final_reason = str(last_exc.args[0])
     logger.error(
@@ -907,3 +917,128 @@ def judge_candidate(
         str(clean_retry_attempted).lower(),
     )
     raise Builder2TournamentError(final_reason)
+
+
+def judge_candidate_structural_repair(
+    *,
+    product_name: str,
+    product_description: str,
+    language: str,
+    strategy_foundation: Dict[str, Any],
+    prototype_id: str,
+    candidate_id: str,
+    candidate: Dict[str, Any],
+    source_judgment_id: str,
+    source_parsed: Dict[str, Any],
+    source_parsed_fingerprint: str,
+    structural_failures: List[str],
+    llm_client: Optional[Any] = None,
+    state: Optional[Dict[str, Any]] = None,
+    judgment_id: Optional[str] = None,
+    compatibility_mode: bool = False,
+) -> Tuple[str, Dict[str, Any], int, Dict[str, int]]:
+    from engine.builder2_judge_pending_repair import (
+        mark_pending_repair_accepted,
+        mark_pending_repair_dispatched,
+        resolve_pending_judge_repair,
+    )
+
+    prototype = require_prototype(prototype_id)
+    pending = resolve_pending_judge_repair(state, candidate_id) if state is not None else None
+    if pending and pending.get("repairResponseAccepted"):
+        raise Builder2TournamentError("builder2_judge_repair_already_accepted")
+    if pending and pending.get("repairDispatched"):
+        ledger = (state or {}).get("judgeResponseLedgerByCandidate", {}).get(candidate_id) or []
+        repair_entry = next(
+            (item for item in ledger if isinstance(item, dict) and str(item.get("callType") or "").strip() == "repair"),
+            None,
+        )
+        if repair_entry and repair_entry.get("parsedResponseAvailable"):
+            parsed = repair_entry.get("parsedResponse") if isinstance(repair_entry.get("parsedResponse"), dict) else {}
+            product_input = None
+            grounding = strategy_foundation.get("strategyEvidenceGrounding")
+            if isinstance(grounding, dict):
+                audit = grounding.get("productInputAudit")
+                if isinstance(audit, dict):
+                    product_input = audit
+            judgment, total, scores = validate_judge_response(
+                parsed,
+                candidate_id=candidate_id,
+                candidate=candidate,
+                strategy_foundation=strategy_foundation,
+                product_input=product_input,
+                compatibility_mode=compatibility_mode,
+            )
+            return str(repair_entry.get("judgmentId") or judgment_id or source_judgment_id), judgment, total, scores
+
+    expected_fingerprint = str(source_parsed_fingerprint or (pending or {}).get("sourceParsedResponseFingerprint") or "").strip()
+    actual_fingerprint = _parsed_response_fingerprint(source_parsed)
+    if expected_fingerprint and expected_fingerprint != actual_fingerprint:
+        raise Builder2TournamentError("builder2_judge_repair_source_fingerprint_mismatch")
+
+    judgment_id = judgment_id or f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
+    model = resolve_builder2_judge_model()
+    failures = collect_repairable_structural_failures(structural_failures, parsed=source_parsed)
+    if not failures:
+        raise Builder2TournamentError("builder2_judge_repair_not_required")
+
+    if state is not None:
+        mark_pending_repair_dispatched(state, candidate_id=candidate_id)
+
+    prompt = build_judge_repair_prompt(
+        product_name=product_name,
+        product_description=product_description,
+        language=language,
+        strategy_foundation=strategy_foundation,
+        prototype=prototype,
+        candidate=candidate,
+        candidate_id=candidate_id,
+        invalid_output=source_parsed,
+        validation_failures=failures,
+    )
+    timer = MetricsTimer()
+    response_text = _invoke_judge_model(prompt=prompt, model=model, llm_client=llm_client, call_type="repair")
+    elapsed = timer.elapsed_ms()
+    if state is not None:
+        record_model_call(
+            state,
+            role="builder2_judge",
+            elapsed_ms=elapsed,
+            repair=True,
+            retry=False,
+        )
+
+    parsed, top_level_keys, schema_version_received = _parse_judge_payload(response_text)
+    product_input = None
+    grounding = strategy_foundation.get("strategyEvidenceGrounding")
+    if isinstance(grounding, dict):
+        audit = grounding.get("productInputAudit")
+        if isinstance(audit, dict):
+            product_input = audit
+    judgment, total, scores = validate_judge_response(
+        parsed,
+        candidate_id=candidate_id,
+        candidate=candidate,
+        strategy_foundation=strategy_foundation,
+        product_input=product_input,
+        compatibility_mode=compatibility_mode,
+    )
+    _persist_judge_response_attempt(
+        state,
+        candidate_id=candidate_id,
+        judgment_id=judgment_id,
+        call_type="repair",
+        response_text=response_text,
+        parsed=judgment,
+        response_available=True,
+    )
+    if state is not None:
+        ledger = state.setdefault("judgeResponseLedgerByCandidate", {}).setdefault(candidate_id, [])
+        if isinstance(ledger, list) and ledger:
+            last = ledger[-1]
+            if isinstance(last, dict) and str(last.get("callType") or "").strip() == "repair":
+                last["repairResponseAccepted"] = True
+                last["sourceJudgmentId"] = source_judgment_id
+                last["sourceParsedResponseFingerprint"] = expected_fingerprint or actual_fingerprint
+        mark_pending_repair_accepted(state, candidate_id=candidate_id)
+    return judgment_id, judgment, total, scores

@@ -17,7 +17,17 @@ from engine.builder2_judge import (
     collect_judge_structural_errors,
     validate_judge_response,
 )
-from engine.builder2_judge_circuit_breaker import is_judge_contract_circuit_breaker_tripped
+from engine.builder2_judge_circuit_breaker import (
+    current_breaker_evidence_count,
+    is_current_judge_contract_circuit_breaker_tripped,
+    legacy_breaker_evidence_excluded_count,
+)
+from engine.builder2_judge_pending_repair import (
+    normal_judge_call_must_not_repeat,
+    repair_dispatch_blocked_reason,
+    resolve_pending_judge_repair,
+)
+from engine.builder2_judge_structural_repair_classifier import classify_judge_structural_repair
 from engine.builder2_judge_core_contract import is_judge_factual_grounding_gate_field
 from engine.builder2_strategy_evidence_grounding_contract import (
     JUDGE_FACTUAL_GROUNDING_GATE_FIELDS,
@@ -173,11 +183,14 @@ def analyze_judge_response_attempt(
         if isinstance(assessment.get(leaf), bool):
             false_boolean_misclassified = True
     repair_necessary = bool(
-        validation_failure_field
-        and _is_structural_repairable(
-            "builder2_judge_validation_failed",
-            validation_failure_field,
-            parsed=parsed,
+        structural_errors
+        and any(
+            _is_structural_repairable(
+                item.split(":", 1)[0] if ":" in item else "builder2_judge_validation_failed",
+                item.split(":", 1)[1] if ":" in item else item,
+                parsed=parsed,
+            )
+            for item in structural_errors
         )
     )
     reported_eligible = parsed.get("eligible")
@@ -213,8 +226,18 @@ def analyze_judge_response_attempt(
 
     breaker = state.get("judgeContractCircuitBreaker") or {}
     repair_dispatched = _repair_dispatched_from_diagnostics(state, candidate_id, entry)
+    pending_repair = resolve_pending_judge_repair(state, candidate_id)
+    classifier = classify_judge_structural_repair(
+        "builder2_judge_validation_failed",
+        validation_failure_field or (structural_errors[0].split(":", 1)[-1] if structural_errors else None),
+        parsed=parsed,
+    )
+    blocked_reason = repair_dispatch_blocked_reason(state, candidate_id=candidate_id, pending=pending_repair)
+    if repair_necessary and repair_dispatched is False and not blocked_reason:
+        blocked_reason = "legacy_circuit_breaker_or_single_attempt_only"
     stamp_creator_evidence_inheritance(candidate, strategy_foundation=strategy_foundation)
     candidate_paths = (breaker.get("candidateFailurePaths") or {}).get(candidate_id) or []
+    current_paths = (breaker.get("currentCandidateFailurePaths") or {}).get(candidate_id) or []
     return {
         "candidateId": candidate_id,
         "prototypeId": _clean(_candidate_record(state, candidate_id).get("prototypeId")),
@@ -232,7 +255,14 @@ def analyze_judge_response_attempt(
         "validationFailureReason": _clean(entry.get("validationFailureReason")) or None,
         "repairDispatched": repair_dispatched,
         "repairNecessaryUnderCorrectedContract": repair_necessary,
-        "circuitBreakerCountedAsStructural": any(
+        "repairDispatchBlockedReason": blocked_reason,
+        "structuralRepairClassifierDecision": classifier.get("decision"),
+        "pendingRepairEligible": bool(pending_repair),
+        "normalCallMustNotRepeat": normal_judge_call_must_not_repeat(state, candidate_id),
+        "currentBreakerEvidenceCount": current_breaker_evidence_count(state),
+        "legacyBreakerEvidenceExcludedCount": legacy_breaker_evidence_excluded_count(state),
+        "currentContractBreakerTripped": is_current_judge_contract_circuit_breaker_tripped(state),
+        "circuitBreakerCountedAsStructural": bool(current_paths) or any(
             validation_failure_field.split(".")[-1] in str(path)
             for path in candidate_paths
             if validation_failure_field
@@ -359,6 +389,9 @@ def inspect_judge_grounding_failures(
         ),
         "historicalCircuitBreakerTriggered": bool(breaker.get("tripped")),
         "historicalCircuitBreakerReason": _clean(breaker.get("trippedReason")) or None,
+        "currentContractBreakerTripped": is_current_judge_contract_circuit_breaker_tripped(state),
+        "currentBreakerEvidenceCount": current_breaker_evidence_count(state),
+        "legacyBreakerEvidenceExcludedCount": legacy_breaker_evidence_excluded_count(state),
         "legacyUnpersistedJudgeResponseCount": legacy_unpersisted,
         "acceptedCreatorCount": accepted_creator_count(state),
         "acceptedJudgmentCount": accepted_judgment_count(state),

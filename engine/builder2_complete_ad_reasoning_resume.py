@@ -58,7 +58,8 @@ from engine.builder2_creator_semantic_bridge_repair_patch import (
     semantic_bridge_repair_env_authorized,
 )
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
-from engine.builder2_judge import judge_candidate
+from engine.builder2_judge import judge_candidate, judge_candidate_structural_repair
+from engine.builder2_judge_pending_repair import normal_judge_call_must_not_repeat, resolve_pending_judge_repair
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_reasoning_failure_diagnostics import (
     log_reasoning_resume_failed,
@@ -769,6 +770,24 @@ def _dispatch_judge_for_prototype(
     if reusable:
         return True, None
 
+    if normal_judge_call_must_not_repeat(state, candidate_id):
+        reason = "builder2_judge_normal_call_blocked_pending_repair"
+        record_process_failure_tag(state, reason)
+        failure_report = _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+            budget=budget,
+            reasoning_role="builder2_judge",
+            prototype_id=prototype_id,
+            validation_rejection_code=reason,
+            redis_mutated=False,
+            lease_acquired=lease_acquired,
+        )
+        return False, failure_report
+
     budget.assert_can_call("builder2_judge")
     ReasoningResumeIsolationGuard.assert_safe_before_judge()
     judgment_id = f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
@@ -791,6 +810,136 @@ def _dispatch_judge_for_prototype(
     except Builder2TournamentError as exc:
         _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
         reason = str(exc.args[0] if exc.args else "builder2_judge_invalid_response")
+        record_process_failure_tag(state, reason)
+        _persist_resumable_failure(
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+        )
+        failure_report = _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+            budget=budget,
+            reasoning_role="builder2_judge",
+            prototype_id=prototype_id,
+            validation_rejection_code=reason,
+            redis_mutated=True,
+            lease_acquired=lease_acquired,
+        )
+        return False, failure_report
+
+    metric_after = _reasoning_call_snapshot(state)
+    judge_delta = metric_after["judge"] - metrics_before["judge"]
+    if judge_delta > 0:
+        budget.judge_calls_this_run += judge_delta
+    else:
+        budget.record("builder2_judge")
+    persist_accepted_judgment(
+        state,
+        candidate_id=candidate_id,
+        prototype_id=prototype_id,
+        judgment_id=judgment_id,
+        judgment=judgment,
+        total=total,
+        scores=scores,
+    )
+    save_tournament_state(job_id, state)
+    return True, None
+
+
+def _dispatch_judge_repair_for_prototype(
+    *,
+    state: Dict[str, Any],
+    job_id: str,
+    report: Dict[str, Any],
+    budget: ControlledReasoningCallBudget,
+    strategy: Dict[str, Any],
+    prototype_id: str,
+    candidate_id: str,
+    creator_output: Dict[str, Any],
+    product_name: str,
+    product_description: str,
+    language: str,
+    compatibility_mode: bool,
+    llm_client: Optional[Any],
+    lease_acquired: bool,
+    pending: Dict[str, Any],
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    reusable, _reuse_reason = audit_reusable_accepted_judgment(
+        state,
+        candidate_id=candidate_id,
+        creator_snapshot={
+            "candidateId": candidate_id,
+            "prototypeId": prototype_id,
+            "creatorOutput": creator_output,
+            "validationStatus": "accepted",
+        },
+        strategy_foundation=strategy,
+        compatibility_mode=compatibility_mode,
+    )
+    if reusable:
+        return True, None
+
+    ledger = (state.get("judgeResponseLedgerByCandidate") or {}).get(candidate_id) or []
+    normal_entry = next(
+        (
+            item
+            for item in reversed(ledger)
+            if isinstance(item, dict) and str(item.get("callType") or "normal").strip() == "normal"
+        ),
+        None,
+    )
+    if not isinstance(normal_entry, dict):
+        reason = "builder2_judge_repair_source_missing"
+        record_process_failure_tag(state, reason)
+        failure_report = _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+            budget=budget,
+            reasoning_role="builder2_judge",
+            prototype_id=prototype_id,
+            validation_rejection_code=reason,
+            redis_mutated=False,
+            lease_acquired=lease_acquired,
+        )
+        return False, failure_report
+
+    source_parsed = normal_entry.get("parsedResponse") if isinstance(normal_entry.get("parsedResponse"), dict) else {}
+    structural_failures = list(pending.get("structuralFailures") or normal_entry.get("structuralErrors") or [])
+    budget.assert_can_call("builder2_judge")
+    ReasoningResumeIsolationGuard.assert_safe_before_judge()
+    judgment_id = f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
+    metrics_before = _reasoning_call_snapshot(state)
+    try:
+        judgment_id, judgment, total, scores = judge_candidate_structural_repair(
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            strategy_foundation=strategy,
+            prototype_id=prototype_id,
+            candidate_id=candidate_id,
+            candidate=creator_output,
+            source_judgment_id=str(pending.get("sourceJudgmentId") or normal_entry.get("judgmentId") or ""),
+            source_parsed=source_parsed,
+            source_parsed_fingerprint=str(
+                pending.get("sourceParsedResponseFingerprint") or normal_entry.get("parsedResponseFingerprint") or ""
+            ),
+            structural_failures=structural_failures,
+            llm_client=llm_client,
+            state=state,
+            judgment_id=judgment_id,
+            compatibility_mode=compatibility_mode,
+        )
+    except Builder2TournamentError as exc:
+        _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+        reason = str(exc.args[0] if exc.args else "builder2_judge_repair_failed")
         record_process_failure_tag(state, reason)
         _persist_resumable_failure(
             state,
@@ -860,6 +1009,7 @@ def _execute_mixed_partial_reasoning_resume(
         for item in resume_plan.values()
         if item.get("judgeAction") in {"dispatch", "dispatch_after_creator"}
     )
+    report["requiredJudgeRepairCalls"] = sum(int(item.get("repairJudgeCalls") or 0) for item in resume_plan.values())
 
     state["status"] = "paused_for_reasoning_resume"
     state["failureReason"] = None
@@ -871,18 +1021,23 @@ def _execute_mixed_partial_reasoning_resume(
     ordered_prototypes = sorted(
         assigned_prototype_ids(state),
         key=lambda prototype_id: {
+            "reuse_repair": -1,
             "reuse_dispatch": 0,
             "reuse_reuse": 1,
             "dispatch_after_creator": 2,
         }[
             (
-                "reuse_dispatch"
-                if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
-                and resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch"
+                "reuse_repair"
+                if resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch_repair"
                 else (
-                    "reuse_reuse"
+                    "reuse_dispatch"
                     if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
-                    else "dispatch_after_creator"
+                    and resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch"
+                    else (
+                        "reuse_reuse"
+                        if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
+                        else "dispatch_after_creator"
+                    )
                 )
             )
         ],
@@ -923,7 +1078,30 @@ def _execute_mixed_partial_reasoning_resume(
                 (state.get("candidates") or {}).get(candidate_id) or {}
             ).get("creatorOutput") or {}
 
-        if judge_action in {"dispatch", "dispatch_after_creator"} and candidate_id and creator_output:
+        if judge_action == "dispatch_repair" and candidate_id and creator_output:
+            pending = resolve_pending_judge_repair(state, candidate_id) or dict(entry.get("pendingJudgeRepair") or {})
+            ok, failure = _dispatch_judge_repair_for_prototype(
+                state=state,
+                job_id=job_id,
+                report=report,
+                budget=budget,
+                strategy=strategy,
+                prototype_id=prototype_id,
+                candidate_id=candidate_id,
+                creator_output=creator_output if isinstance(creator_output, dict) else {},
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                compatibility_mode=compatibility_mode,
+                llm_client=llm_client,
+                lease_acquired=lease_acquired,
+                pending=pending,
+            )
+            if failure is not None:
+                return failure
+            if not ok:
+                continue
+        elif judge_action in {"dispatch", "dispatch_after_creator"} and candidate_id and creator_output:
             ok, failure = _dispatch_judge_for_prototype(
                 state=state,
                 job_id=job_id,

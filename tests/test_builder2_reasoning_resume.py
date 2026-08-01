@@ -14,7 +14,7 @@ from engine.builder2_accepted_judgment_store import (
     audit_reusable_accepted_judgment,
     persist_accepted_judgment,
 )
-from engine.builder2_judge_circuit_breaker import SYSTEMIC_FAILURE_CODE
+from engine.builder2_judge_circuit_breaker import JUDGE_BREAKER_CONTRACT_VERSION, SYSTEMIC_FAILURE_CODE
 from engine.builder2_judge_preflight import DEFAULT_PREFLIGHT_CANDIDATE_ID, DEFAULT_PREFLIGHT_JOB_ID
 from engine.builder2_reasoning_resume import (
     DEFAULT_RESUME_JOB_ID,
@@ -515,11 +515,12 @@ class TestReasoningResumeIsolation(unittest.TestCase):
     def test_systemic_judge_circuit_breaker_stops_remaining_calls(self) -> None:
         state = _historical_resume_state(job_id="job-resume-breaker")
         state["judgeContractCircuitBreaker"] = {
-            "tripped": True,
-            "trippedReason": "contract_failure",
-            "repeatedFieldPaths": ["verbalLayerAssessment"],
+            "contractVersion": JUDGE_BREAKER_CONTRACT_VERSION,
+            "currentContractTripped": True,
+            "currentTrippedReason": "contract_failure",
+            "currentRepeatedFieldPaths": ["verbalLayerAssessment"],
             "postRepairFailures": [],
-            "candidateFailurePaths": {},
+            "currentCandidateFailurePaths": {},
         }
         report = run_one_reasoning_resume(job_id="job-resume-breaker", llm_client=_make_llm(), tournament_state=state)
         self.assertFalse(report["ok"])

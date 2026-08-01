@@ -141,6 +141,19 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         report["maximumAdditionalReasoningCallsWithoutRepairs"] = int(
             canonical_plan.get("maximumAdditionalReasoningCallsWithoutRepairs") or 0
         )
+        report["requiredJudgeRepairCalls"] = int(canonical_plan.get("requiredJudgeRepairCalls") or 0)
+        report["totalNormalCallsBeforeWinner"] = int(canonical_plan.get("totalNormalCallsBeforeWinner") or 0)
+        report["totalRequiredRepairCallsBeforeWinner"] = int(canonical_plan.get("totalRequiredRepairCallsBeforeWinner") or 0)
+        report["totalPaidCallsBeforeWinner"] = int(canonical_plan.get("totalPaidCallsBeforeWinner") or 0)
+        report["conditionalWinnerNormalCalls"] = int(canonical_plan.get("conditionalWinnerNormalCalls") or 0)
+        report["minimumAdditionalPaidReasoningCalls"] = int(canonical_plan.get("minimumAdditionalPaidReasoningCalls") or 0)
+        report["maximumAdditionalPaidReasoningCallsWithoutFutureRepairs"] = int(
+            canonical_plan.get("maximumAdditionalPaidReasoningCallsWithoutFutureRepairs") or 0
+        )
+        report["pendingJudgeRepairCandidateIds"] = list(canonical_plan.get("pendingJudgeRepairCandidateIds") or [])
+        report["pendingJudgeRepairCount"] = int(canonical_plan.get("pendingJudgeRepairCount") or 0)
+        report["perInvocationCallLimit"] = int(canonical_plan.get("perInvocationCallLimit") or 0)
+        report["totalCallsRemainingAcrossInvocations"] = int(canonical_plan.get("totalCallsRemainingAcrossInvocations") or 0)
         report["strategyWouldDispatch"] = bool(canonical_plan.get("strategyWouldDispatch"))
         report["strategyFingerprint"] = canonical_plan.get("strategyFingerprint")
         report["creatorsWouldDispatch"] = bool(canonical_plan.get("creatorsWouldDispatch"))

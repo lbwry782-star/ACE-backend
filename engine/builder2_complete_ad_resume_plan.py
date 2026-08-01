@@ -20,6 +20,11 @@ from engine.builder2_tournament_completion_gate import (
 )
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development
 from engine.builder2_winner_preservation_contract import load_revalidatable_parsed_winner_response
+from engine.builder2_judge_pending_repair import (
+    pending_judge_repair_candidate_ids,
+    pending_judge_repair_prototype_ids,
+    resolve_pending_judge_repair,
+)
 
 
 def _clean(value: Any) -> str:
@@ -164,6 +169,7 @@ RESUME_STAGE_WINNER_DEVELOPMENT = "winner_development"
 RESUME_STAGE_MEDIA_PREREQUISITE = "media_prerequisite_validation"
 RESUME_STAGE_REASONING_COMPLETE = "reasoning_complete"
 RESUME_STAGE_UNSUPPORTED = "unsupported"
+PER_INVOCATION_REASONING_CALL_LIMIT = 3
 
 _FAILED_JOB_STATUSES = frozenset({"failed", "error"})
 
@@ -227,26 +233,49 @@ def build_resume_plan_by_prototype(
     state: Dict[str, Any],
     *,
     read_only: bool = False,
-) -> Dict[str, Dict[str, str]]:
-    plan: Dict[str, Dict[str, str]] = {}
+) -> Dict[str, Dict[str, Any]]:
+    plan: Dict[str, Dict[str, Any]] = {}
     missing_creators = set(missing_creator_prototype_ids(state, read_only=read_only))
     missing_judges = set(missing_judge_prototype_ids(state, read_only=read_only))
     for prototype_id in assigned_prototype_ids(state):
+        candidate_id = accepted_candidate_id_for_prototype(state, prototype_id, read_only=read_only)
+        pending = resolve_pending_judge_repair(state, candidate_id) if candidate_id else None
         has_creator = prototype_id not in missing_creators
         has_judgment = prototype_id not in missing_judges
         if has_judgment:
             creator_action = "reuse"
             judge_action = "reuse"
+            normal_judge_calls = 0
+            repair_judge_calls = 0
+        elif pending:
+            creator_action = "reuse"
+            judge_action = "dispatch_repair"
+            normal_judge_calls = 0
+            repair_judge_calls = 1
         elif has_creator:
             creator_action = "reuse"
             judge_action = "dispatch"
+            normal_judge_calls = 1
+            repair_judge_calls = 0
         else:
             creator_action = "dispatch"
             judge_action = "dispatch_after_creator"
-        plan[prototype_id] = {
+            normal_judge_calls = 1
+            repair_judge_calls = 0
+        entry: Dict[str, Any] = {
             "creatorAction": creator_action,
             "judgeAction": judge_action,
+            "normalJudgeCallRequired": normal_judge_calls > 0,
+            "repairJudgeCallRequired": repair_judge_calls > 0,
+            "normalJudgeCalls": normal_judge_calls,
+            "repairJudgeCalls": repair_judge_calls,
         }
+        if pending:
+            entry["sourceJudgmentId"] = pending.get("sourceJudgmentId")
+            entry["sourceParsedResponseFingerprint"] = pending.get("sourceParsedResponseFingerprint")
+            entry["sourceResponseFingerprint"] = pending.get("sourceResponseFingerprint")
+            entry["pendingJudgeRepair"] = dict(pending)
+        plan[prototype_id] = entry
     return plan
 
 
@@ -254,21 +283,35 @@ def compute_mixed_partial_call_plan(
     *,
     missing_creator_prototype_ids: List[str],
     missing_judgment_prototype_ids: List[str],
+    required_judge_repair_calls: int = 0,
+    per_invocation_call_limit: int = 3,
 ) -> Dict[str, Any]:
     remaining_creator = len(missing_creator_prototype_ids)
-    remaining_judge = len(missing_judgment_prototype_ids)
-    normal_before_winner = remaining_creator + remaining_judge
+    remaining_judge_normal = max(0, len(missing_judgment_prototype_ids) - int(required_judge_repair_calls or 0))
+    required_repairs = int(required_judge_repair_calls or 0)
+    normal_before_winner = remaining_creator + remaining_judge_normal
+    total_paid_before_winner = normal_before_winner + required_repairs
     return {
         "remainingCreatorNormalCalls": remaining_creator,
-        "remainingJudgeNormalCalls": remaining_judge,
+        "remainingJudgeNormalCalls": remaining_judge_normal,
+        "requiredJudgeRepairCalls": required_repairs,
         "normalCallsBeforeWinner": normal_before_winner,
+        "totalNormalCallsBeforeWinner": normal_before_winner,
+        "totalRequiredRepairCallsBeforeWinner": required_repairs,
+        "totalPaidCallsBeforeWinner": total_paid_before_winner,
+        "conditionalWinnerNormalCalls": 1,
         "conditionalWinnerCalls": 1,
         "winnerNormalCallConditional": True,
         "possibleRepairCallsNotIncluded": True,
+        "possibleFutureRepairCallsNotIncluded": True,
         "minimumAdditionalNormalReasoningCalls": normal_before_winner,
         "maximumAdditionalNormalReasoningCalls": normal_before_winner + 1,
         "minimumAdditionalReasoningCallsWithoutRepairs": normal_before_winner,
         "maximumAdditionalReasoningCallsWithoutRepairs": normal_before_winner + 1,
+        "minimumAdditionalPaidReasoningCalls": total_paid_before_winner,
+        "maximumAdditionalPaidReasoningCallsWithoutFutureRepairs": total_paid_before_winner + 1,
+        "perInvocationCallLimit": max(1, int(per_invocation_call_limit or 3)),
+        "totalCallsRemainingAcrossInvocations": total_paid_before_winner,
     }
 
 
@@ -387,9 +430,15 @@ def resolve_complete_ad_canonical_resume_plan(
             rejection_reason = failed_reason
 
     resume_plan_by_prototype = build_resume_plan_by_prototype(state, read_only=read_only)
+    required_judge_repair_calls = sum(
+        int((entry or {}).get("repairJudgeCalls") or 0) for entry in resume_plan_by_prototype.values()
+    )
+    pending_repair_candidate_ids = pending_judge_repair_candidate_ids(state)
     mixed_call_plan = compute_mixed_partial_call_plan(
         missing_creator_prototype_ids=missing_creators,
         missing_judgment_prototype_ids=missing_judges,
+        required_judge_repair_calls=required_judge_repair_calls,
+        per_invocation_call_limit=PER_INVOCATION_REASONING_CALL_LIMIT,
     )
     incomplete_prototypes = sorted(set(missing_creators) | set(missing_judges))
 
@@ -455,6 +504,20 @@ def resolve_complete_ad_canonical_resume_plan(
         "maximumAdditionalNormalReasoningCalls": mixed_call_plan["maximumAdditionalNormalReasoningCalls"],
         "minimumAdditionalReasoningCallsWithoutRepairs": mixed_call_plan["minimumAdditionalReasoningCallsWithoutRepairs"],
         "maximumAdditionalReasoningCallsWithoutRepairs": mixed_call_plan["maximumAdditionalReasoningCallsWithoutRepairs"],
+        "requiredJudgeRepairCalls": mixed_call_plan["requiredJudgeRepairCalls"],
+        "totalNormalCallsBeforeWinner": mixed_call_plan["totalNormalCallsBeforeWinner"],
+        "totalRequiredRepairCallsBeforeWinner": mixed_call_plan["totalRequiredRepairCallsBeforeWinner"],
+        "totalPaidCallsBeforeWinner": mixed_call_plan["totalPaidCallsBeforeWinner"],
+        "conditionalWinnerNormalCalls": mixed_call_plan["conditionalWinnerNormalCalls"],
+        "minimumAdditionalPaidReasoningCalls": mixed_call_plan["minimumAdditionalPaidReasoningCalls"],
+        "maximumAdditionalPaidReasoningCallsWithoutFutureRepairs": mixed_call_plan[
+            "maximumAdditionalPaidReasoningCallsWithoutFutureRepairs"
+        ],
+        "pendingJudgeRepairCandidateIds": pending_repair_candidate_ids,
+        "pendingJudgeRepairCount": len(pending_repair_candidate_ids),
+        "pendingJudgeRepairPrototypeIds": pending_judge_repair_prototype_ids(state),
+        "perInvocationCallLimit": mixed_call_plan["perInvocationCallLimit"],
+        "totalCallsRemainingAcrossInvocations": mixed_call_plan["totalCallsRemainingAcrossInvocations"],
         "creatorsWouldDispatch": creator_calls_planned > 0,
         "winnerWouldDispatch": resolved_stage in {
             RESUME_STAGE_WINNER_SELECTION,
