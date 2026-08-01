@@ -59,6 +59,10 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _strategy_debug_log_response() -> bool:
     raw = (os.environ.get("BUILDER2_STRATEGY_DEBUG_LOG_RESPONSE") or "false").strip().lower()
     return raw in {"1", "true", "yes", "on"}
@@ -139,7 +143,14 @@ def _raise_strategy_error(code: str, *, field: str | None = None) -> None:
     raise Builder2TournamentError(code)
 
 
-def validate_strategy_foundation(raw: Dict[str, Any], *, compatibility_mode: bool = False) -> Dict[str, Any]:
+def validate_strategy_foundation(
+    raw: Dict[str, Any],
+    *,
+    compatibility_mode: bool = False,
+    product_name: str = "",
+    product_description: str = "",
+    target_audience: str = "",
+) -> Dict[str, Any]:
     """
     Validate a parsed strategy object. Raises Builder2TournamentError with a precise code.
     """
@@ -212,6 +223,25 @@ def validate_strategy_foundation(raw: Dict[str, Any], *, compatibility_mode: boo
         _raise_strategy_error("builder2_strategy_schema_invalid", field=_field_from_error(exc))
 
     validate_strategy_methodology(normalized, compatibility_mode=compatibility_mode)
+    from engine.builder2_strategy_evidence_grounding_contract import (
+        apply_strategy_evidence_grounding,
+        validate_strategy_evidence_grounding,
+    )
+
+    if not compatibility_mode:
+        normalized = apply_strategy_evidence_grounding(
+            normalized,
+            product_name=product_name or _clean(normalized.get("productNameResolved")),
+            product_description=product_description,
+            target_audience=target_audience,
+        )
+        validate_strategy_evidence_grounding(
+            normalized,
+            product_name=product_name or _clean(normalized.get("productNameResolved")),
+            product_description=product_description,
+            target_audience=target_audience,
+            compatibility_mode=compatibility_mode,
+        )
     logger.info(
         "BUILDER2_METHODOLOGY_VERSION_SELECTED role=strategy version=%s",
         normalized.get("methodologyVersion") or "legacy",
@@ -414,7 +444,11 @@ def generate_strategy_foundation(
                 repair_attempted=repair_attempted,
                 response_excerpt=_redact_excerpt(response_text) if response_text else None,
             )
-            foundation = validate_strategy_foundation(parsed)
+            foundation = validate_strategy_foundation(
+                parsed,
+                product_name=product_name,
+                product_description=product_description,
+            )
             tournament_id = state.get("tournamentId") or ""
             existing_id = (state.get("strategyFoundation") or {}).get("strategyFoundationId")
             foundation = assign_strategy_foundation_identity(
@@ -423,6 +457,9 @@ def generate_strategy_foundation(
                 existing_id=existing_id,
             )
             state["methodologyVersion"] = METHODOLOGY_VERSION
+            state["strategyEvidenceGroundingContractVersion"] = (
+                foundation.get("strategyEvidenceGrounding") or {}
+            ).get("contractVersion") or "builder2_strategy_evidence_grounding_v1"
             state["methodologyCompatibilityMode"] = False
             _write_strategy_diagnostics(
                 state,

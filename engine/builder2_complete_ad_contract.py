@@ -457,7 +457,11 @@ def apply_semantic_eligibility_rules(judgment: Dict[str, Any]) -> Dict[str, Any]
             out.setdefault("disqualifiers", []).append("slogan_not_specific_to_idea")
     from engine.builder2_advertising_slogan_quality_contract import apply_advertising_slogan_eligibility_rules
 
-    return apply_advertising_slogan_eligibility_rules(out)
+    out = apply_advertising_slogan_eligibility_rules(out)
+    from engine.builder2_strategy_evidence_grounding_contract import apply_factual_grounding_eligibility_rules
+
+    apply_factual_grounding_eligibility_rules(out)
+    return out
 
 
 def validate_winner_slogan_preservation(

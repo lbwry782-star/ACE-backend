@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from engine.builder2_methodology_contract import METHODOLOGY_VERSION
+from engine.builder2_tournament_contracts import STRATEGY_SCHEMA_VERSION
 from engine.builder2_strategy_identity import assign_strategy_foundation_identity, compute_strategy_foundation_digest
 from engine.builder2_complete_ad_contract import (
     build_default_creator_advertising_closure,
@@ -17,6 +18,11 @@ from engine.builder2_advertising_slogan_quality_contract import (
     WINNER_SLOGAN_EVIDENCE_KEY,
     build_default_creator_slogan_formulation,
     build_default_judge_slogan_assessment,
+)
+from engine.builder2_strategy_evidence_grounding_contract import (
+    BUILDER2_STRATEGY_EVIDENCE_GROUNDING_CONTRACT_VERSION,
+    apply_strategy_evidence_grounding,
+    build_default_judge_factual_grounding_assessment,
 )
 
 
@@ -83,6 +89,25 @@ def methodology_strategy_extras(*, tournament_id: str = "test-tournament") -> Di
         },
     }
     return assign_strategy_foundation_identity(base, tournament_id=tournament_id)
+
+
+def methodology_strategy_evidence_extras(
+    *,
+    tournament_id: str = "test-tournament",
+    product_name: str = "ACE Product",
+    product_description: str = "An AI application that creates advertising ideas.",
+) -> Dict[str, Any]:
+    base = methodology_strategy_extras(tournament_id=tournament_id)
+    base["schemaVersion"] = STRATEGY_SCHEMA_VERSION
+    return apply_strategy_evidence_grounding(
+        base,
+        product_name=product_name,
+        product_description=product_description,
+    )
+
+
+def methodology_judge_factual_grounding_extras(*, notes: str = "") -> Dict[str, Any]:
+    return {"factualGroundingAssessment": build_default_judge_factual_grounding_assessment(notes=notes)}
 
 
 def methodology_strategy_identity_for(candidate_strategy: Dict[str, Any]) -> Dict[str, str]:
@@ -576,6 +601,7 @@ def methodology_judgment_extras(*, prototype_id: str = "closest") -> Dict[str, A
         **complete_ad_judgment_extras(prototype_id=prototype_id),
         **advertising_slogan_quality_judge_extras(),
         **metaphorical_embodiment_judge_extras(),
+        **methodology_judge_factual_grounding_extras(),
     }
 
 

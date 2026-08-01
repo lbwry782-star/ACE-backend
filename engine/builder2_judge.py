@@ -198,6 +198,8 @@ def validate_judge_response(
     *,
     candidate_id: str,
     candidate: Optional[Dict[str, Any]] = None,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    product_input: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
 ) -> Tuple[Dict[str, Any], int, Dict[str, int]]:
     normalized, _resolved = normalize_judge_candidate(
@@ -274,7 +276,13 @@ def validate_judge_response(
         out["disqualifiers"] = ["ineligible_without_reason"]
 
     validate_judge_purity(out)
-    validate_judge_methodology(out, candidate=candidate, compatibility_mode=compatibility_mode)
+    validate_judge_methodology(
+        out,
+        candidate=candidate,
+        strategy_foundation=strategy_foundation,
+        product_input=product_input,
+        compatibility_mode=compatibility_mode,
+    )
     from engine.builder2_complete_ad_contract import apply_semantic_eligibility_rules
 
     out = apply_semantic_eligibility_rules(out)
@@ -664,10 +672,18 @@ def judge_candidate(
         try:
             parsed, top_level_keys, schema_version_received = _parse_judge_payload(response_text)
             last_parsed = parsed
+            product_input = None
+            grounding = strategy_foundation.get("strategyEvidenceGrounding")
+            if isinstance(grounding, dict):
+                audit = grounding.get("productInputAudit")
+                if isinstance(audit, dict):
+                    product_input = audit
             judgment, total, scores = validate_judge_response(
                 parsed,
                 candidate_id=candidate_id,
                 candidate=candidate,
+                strategy_foundation=strategy_foundation,
+                product_input=product_input,
                 compatibility_mode=compatibility_mode,
             )
             _write_judge_diagnostics(

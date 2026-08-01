@@ -314,6 +314,13 @@ def validate_creator_methodology(
                 strategy_foundation=strategy_foundation,
                 product_name=str((strategy_foundation or {}).get("productNameResolved") or "").strip(),
             )
+        from engine.builder2_strategy_evidence_grounding_contract import validate_creator_evidence_grounding
+
+        validate_creator_evidence_grounding(
+            candidate,
+            strategy_foundation=strategy_foundation if isinstance(strategy_foundation, dict) else {},
+            compatibility_mode=compatibility_mode,
+        )
 
     anchor = _require_dict(candidate.get("visualAnchor"), field="visualAnchor", code="builder2_creator_schema_invalid")
     if anchor.get("appearsBeforeOrDuringResolution") is not True and not _normalize_text(anchor.get("visualAnchorTiming")):
@@ -816,6 +823,8 @@ def validate_judge_methodology(
     judgment: Dict[str, Any],
     *,
     candidate: Optional[Dict[str, Any]] = None,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    product_input: Optional[Dict[str, Any]] = None,
     compatibility_mode: bool = False,
 ) -> None:
     if compatibility_mode and not uses_full_methodology(judgment):
@@ -849,6 +858,18 @@ def validate_judge_methodology(
 
     if isinstance(judgment.get("logoPolicyAssessment"), dict):
         validate_judge_logo_policy(judgment, candidate=candidate)
+    from engine.builder2_strategy_evidence_grounding_contract import (
+        validate_judge_factual_grounding_assessment,
+    )
+
+    strategy_foundation = strategy_foundation if isinstance(strategy_foundation, dict) else None
+    validate_judge_factual_grounding_assessment(
+        judgment,
+        candidate=candidate,
+        strategy_foundation=strategy_foundation,
+        product_input=product_input,
+        compatibility_mode=compatibility_mode,
+    )
     logger.info("BUILDER2_JUDGE_METHODOLOGY_VALIDATED")
 
 
@@ -937,6 +958,21 @@ def validate_winner_methodology(
             winner_plan,
             winning_candidate=winning_candidate,
             strategy_foundation=strategy_foundation if isinstance(strategy_foundation, dict) else None,
+        )
+    strategy_foundation = tournament_state.get("strategyFoundation") if isinstance(tournament_state, dict) else None
+    if isinstance(strategy_foundation, dict):
+        from engine.builder2_strategy_evidence_grounding_contract import validate_winner_evidence_grounding
+
+        product_input = None
+        grounding = strategy_foundation.get("strategyEvidenceGrounding")
+        if isinstance(grounding, dict):
+            product_input = grounding.get("productInputAudit")
+        validate_winner_evidence_grounding(
+            winner_plan,
+            strategy_foundation=strategy_foundation,
+            winning_candidate=winning_candidate,
+            product_input=product_input if isinstance(product_input, dict) else None,
+            compatibility_mode=compatibility_mode,
         )
     decision = str((winner_plan.get("headlineDecision") or {}).get("decision") or "")
 
