@@ -77,6 +77,19 @@ def _gate_rationales(assessment: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _repair_dispatched_from_diagnostics(state: Dict[str, Any], candidate_id: str, entry: Dict[str, Any]) -> Optional[bool]:
+    if _clean(entry.get("callType")) == "repair":
+        return True
+    if any(_clean(item.get("callType")) == "repair" for item in _ledger_entries(state, candidate_id)):
+        return True
+    diagnostics = _diagnostics_entry(state, candidate_id)
+    if diagnostics.get("repairAttempted") is True:
+        return True
+    if diagnostics.get("repairAttempted") is False:
+        return False
+    return None
+
+
 def analyze_judge_response_attempt(
     *,
     state: Dict[str, Any],
@@ -86,8 +99,57 @@ def analyze_judge_response_attempt(
     compatibility_mode: bool = False,
 ) -> Dict[str, Any]:
     candidate = _creator_payload(state, candidate_id)
+    parsed_available = bool(entry.get("parsedResponseAvailable")) and isinstance(entry.get("parsedResponse"), dict) and bool(entry.get("parsedResponse"))
+    response_available = entry.get("responseAvailable")
+    legacy_not_persisted = bool(response_available) and not parsed_available
     parsed = entry.get("parsedResponse") if isinstance(entry.get("parsedResponse"), dict) else {}
     assessment = parsed.get("factualGroundingAssessment") if isinstance(parsed.get("factualGroundingAssessment"), dict) else {}
+    validation_failure_field = _clean(entry.get("validationFailureField")) or None
+    diagnostics = _diagnostics_entry(state, candidate_id)
+    breaker = state.get("judgeContractCircuitBreaker") or {}
+    repair_dispatched = _repair_dispatched_from_diagnostics(state, candidate_id, entry)
+
+    if legacy_not_persisted or (not parsed_available and not parsed):
+        candidate_paths = (breaker.get("candidateFailurePaths") or {}).get(candidate_id) or []
+        return {
+            "candidateId": candidate_id,
+            "prototypeId": _clean(_candidate_record(state, candidate_id).get("prototypeId")),
+            "judgmentId": _clean(entry.get("judgmentId")),
+            "callType": _clean(entry.get("callType")) or "normal",
+            "responseAvailable": response_available,
+            "parsedResponseAvailable": False,
+            "factualGroundingAssessment": {},
+            "factualGroundingGateRationales": {},
+            "reportedEligible": None,
+            "deterministicEligible": None,
+            "structuralErrors": [],
+            "semanticNegativeAssessmentFields": [],
+            "validationFailureField": validation_failure_field,
+            "validationFailureReason": _clean(entry.get("validationFailureReason")) or _clean(diagnostics.get("failureReason")) or None,
+            "repairDispatched": repair_dispatched,
+            "repairNecessaryUnderCorrectedContract": None,
+            "circuitBreakerCountedAsStructural": bool(candidate_paths),
+            "shouldCountAsStructuralUnderCorrectedContract": None,
+            "candidateCreatorFactuallyGrounded": candidate.get("creatorFactuallyGrounded"),
+            "candidateUnsupportedProductClaims": list(candidate.get("newProductClaimsIntroduced") or []),
+            "candidateNewProductClaimsIntroduced": list(candidate.get("newProductClaimsIntroduced") or []),
+            "responseStructureAssessment": "unknown_parsed_response_not_persisted",
+            "responseStructurallyValidUnderCorrectedContract": None,
+            "judgmentWouldBeEligibleUnderCorrectedContract": None,
+            "offlineRevalidationPossible": False,
+            "offlinePersistencePossible": False,
+            "falseBooleanMisclassifiedAsValidationFailure": None,
+            "falseBooleanMisclassifiedAsStructuralFailure": None,
+            "structuralValidationAttempted": False,
+            "structuralValidationNotRunReason": "parsed_response_unavailable",
+            "legacyResponseNotPersisted": True,
+            "historicalCircuitBreakerTriggered": bool(breaker.get("tripped")),
+            "historicalReason": _clean(breaker.get("trippedReason")) or None,
+            "correctnessUnderCurrentContract": None,
+            "responseFingerprint": _clean(entry.get("responseFingerprint")) or None,
+            "parsedResponseFingerprint": None,
+        }
+
     structural_errors = collect_judge_structural_errors(
         parsed,
         candidate_id=candidate_id,
@@ -105,18 +167,18 @@ def analyze_judge_response_attempt(
         )
     validation_failure_field = _clean(entry.get("validationFailureField"))
     structurally_valid = not structural_errors
-    false_boolean_misclassified = bool(
-        validation_failure_field
-        and is_judge_factual_grounding_gate_field(validation_failure_field)
-        and isinstance(assessment.get(validation_failure_field.split(".")[-1]), bool)
-    )
+    false_boolean_misclassified: Optional[bool] = None
+    if validation_failure_field and is_judge_factual_grounding_gate_field(validation_failure_field):
+        leaf = validation_failure_field.split(".")[-1]
+        if isinstance(assessment.get(leaf), bool):
+            false_boolean_misclassified = True
     repair_necessary = bool(
         validation_failure_field
         and _is_structural_repairable(
             "builder2_judge_validation_failed",
             validation_failure_field,
+            parsed=parsed,
         )
-        and not is_judge_factual_grounding_gate_field(validation_failure_field)
     )
     reported_eligible = parsed.get("eligible")
     deterministic_eligible: Optional[bool] = None
@@ -149,8 +211,9 @@ def analyze_judge_response_attempt(
         apply_factual_grounding_eligibility_rules(trial)
         deterministic_eligible = bool(trial.get("eligible")) if isinstance(trial.get("eligible"), bool) else None
 
-    stamp_creator_evidence_inheritance(candidate, strategy_foundation=strategy_foundation)
     breaker = state.get("judgeContractCircuitBreaker") or {}
+    repair_dispatched = _repair_dispatched_from_diagnostics(state, candidate_id, entry)
+    stamp_creator_evidence_inheritance(candidate, strategy_foundation=strategy_foundation)
     candidate_paths = (breaker.get("candidateFailurePaths") or {}).get(candidate_id) or []
     return {
         "candidateId": candidate_id,
@@ -158,7 +221,7 @@ def analyze_judge_response_attempt(
         "judgmentId": _clean(entry.get("judgmentId")),
         "callType": _clean(entry.get("callType")),
         "responseAvailable": entry.get("responseAvailable"),
-        "parsedResponseAvailable": entry.get("parsedResponseAvailable"),
+        "parsedResponseAvailable": True,
         "factualGroundingAssessment": assessment,
         "factualGroundingGateRationales": _gate_rationales(assessment) if assessment else {},
         "reportedEligible": reported_eligible,
@@ -167,7 +230,7 @@ def analyze_judge_response_attempt(
         "semanticNegativeAssessmentFields": _semantic_negative_fields(assessment) if assessment else [],
         "validationFailureField": validation_failure_field or None,
         "validationFailureReason": _clean(entry.get("validationFailureReason")) or None,
-        "repairDispatched": _clean(entry.get("callType")) == "repair",
+        "repairDispatched": repair_dispatched,
         "repairNecessaryUnderCorrectedContract": repair_necessary,
         "circuitBreakerCountedAsStructural": any(
             validation_failure_field.split(".")[-1] in str(path)
@@ -178,14 +241,21 @@ def analyze_judge_response_attempt(
         "candidateCreatorFactuallyGrounded": candidate.get("creatorFactuallyGrounded"),
         "candidateUnsupportedProductClaims": list(candidate.get("newProductClaimsIntroduced") or []),
         "candidateNewProductClaimsIntroduced": list(candidate.get("newProductClaimsIntroduced") or []),
+        "responseStructureAssessment": "evaluated",
         "responseStructurallyValidUnderCorrectedContract": structurally_valid,
         "judgmentWouldBeEligibleUnderCorrectedContract": deterministic_eligible,
         "offlineRevalidationPossible": offline_revalidation_possible,
         "offlinePersistencePossible": offline_persistence_possible,
         "falseBooleanMisclassifiedAsValidationFailure": false_boolean_misclassified,
         "falseBooleanMisclassifiedAsStructuralFailure": false_boolean_misclassified,
-        "responseFingerprint": _clean(entry.get("responseFingerprint")),
-        "parsedResponseFingerprint": _clean(entry.get("parsedResponseFingerprint")),
+        "structuralValidationAttempted": True,
+        "structuralValidationNotRunReason": None,
+        "legacyResponseNotPersisted": False,
+        "historicalCircuitBreakerTriggered": bool(breaker.get("tripped")),
+        "historicalReason": _clean(breaker.get("trippedReason")) or None,
+        "correctnessUnderCurrentContract": structurally_valid if structurally_valid is not None else None,
+        "responseFingerprint": _clean(entry.get("responseFingerprint")) or None,
+        "parsedResponseFingerprint": _clean(entry.get("parsedResponseFingerprint")) or None,
     }
 
 
@@ -200,9 +270,13 @@ def inspect_judge_grounding_failures(
     candidate_ids = sorted(
         {
             cid
-            for cid in (state.get("candidates") or {})
-            if _candidate_record(state, cid).get("creatorAcceptanceStatus") == "accepted"
-            or _candidate_record(state, cid).get("validationStatus") == "accepted"
+            for cid, record in (state.get("candidates") or {}).items()
+            if isinstance(record, dict)
+            and (
+                record.get("creatorAcceptanceStatus") == "accepted"
+                or record.get("validationStatus") == "accepted"
+                or record.get("judgeStatus") in {"unavailable", "pending", "accepted"}
+            )
         }
     )
     for candidate_id in candidate_ids:
@@ -244,14 +318,20 @@ def inspect_judge_grounding_failures(
 
     normal_count = sum(1 for item in attempts if item.get("callType") == "normal")
     repair_count = sum(1 for item in attempts if item.get("callType") == "repair")
-    structurally_invalid = sum(1 for item in attempts if item.get("responseStructurallyValidUnderCorrectedContract") is False)
+    structurally_invalid = sum(
+        1 for item in attempts if item.get("responseStructurallyValidUnderCorrectedContract") is False
+    )
     valid_negative = sum(
         1
         for item in attempts
         if item.get("responseStructurallyValidUnderCorrectedContract")
         and item.get("judgmentWouldBeEligibleUnderCorrectedContract") is False
     )
-    false_misclassified = sum(1 for item in attempts if item.get("falseBooleanMisclassifiedAsValidationFailure"))
+    false_misclassified = sum(
+        1 for item in attempts if item.get("falseBooleanMisclassifiedAsValidationFailure") is True
+    )
+    legacy_unpersisted = sum(1 for item in attempts if item.get("legacyResponseNotPersisted"))
+    breaker = state.get("judgeContractCircuitBreaker") or {}
     missing_judgments = [
         cid
         for cid in candidate_ids
@@ -275,15 +355,18 @@ def inspect_judge_grounding_failures(
         "falseBooleanMisclassifiedAsValidationFailure": false_misclassified,
         "falseBooleanMisclassifiedAsStructuralFailure": false_misclassified,
         "circuitBreakerTriggeredIncorrectly": bool(
-            is_judge_contract_circuit_breaker_tripped(state) and false_misclassified
+            breaker.get("tripped") and legacy_unpersisted and false_misclassified
         ),
+        "historicalCircuitBreakerTriggered": bool(breaker.get("tripped")),
+        "historicalCircuitBreakerReason": _clean(breaker.get("trippedReason")) or None,
+        "legacyUnpersistedJudgeResponseCount": legacy_unpersisted,
         "acceptedCreatorCount": accepted_creator_count(state),
         "acceptedJudgmentCount": accepted_judgment_count(state),
         "missingJudgmentCandidateIds": missing_judgments,
         "cheapestSafeResumeStage": "judge_offline_recovery" if recoverable else "judge",
         "additionalPaidCallsRequiredMinimum": paid_min,
         "additionalPaidCallsRequiredMaximum": paid_max,
-        "judgeContractCircuitBreaker": state.get("judgeContractCircuitBreaker") or {},
+        "judgeContractCircuitBreaker": breaker,
         "paidCalls": 0,
         "openAICalls": 0,
         "stateMutated": False,

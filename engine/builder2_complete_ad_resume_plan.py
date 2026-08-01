@@ -158,11 +158,136 @@ def parsed_winner_reusable_for_candidate(
 RESUME_STAGE_STRATEGY = "strategy"
 RESUME_STAGE_CREATOR_GENERATION = "creator_generation"
 RESUME_STAGE_JUDGE_GENERATION = "judge_generation"
+RESUME_STAGE_MIXED_PARTIAL = "mixed_partial_reasoning"
 RESUME_STAGE_WINNER_SELECTION = "winner_selection"
 RESUME_STAGE_WINNER_DEVELOPMENT = "winner_development"
 RESUME_STAGE_MEDIA_PREREQUISITE = "media_prerequisite_validation"
 RESUME_STAGE_REASONING_COMPLETE = "reasoning_complete"
 RESUME_STAGE_UNSUPPORTED = "unsupported"
+
+_FAILED_JOB_STATUSES = frozenset({"failed", "error"})
+
+
+def accepted_candidate_id_for_prototype(
+    state: Dict[str, Any],
+    prototype_id: str,
+    *,
+    read_only: bool = False,
+) -> str:
+    from engine.builder2_accepted_creator_store import ACCEPTED_CREATOR_INDEX_KEY, backfill_accepted_creator_index
+
+    if not read_only:
+        backfill_accepted_creator_index(state)
+    index = state.get(ACCEPTED_CREATOR_INDEX_KEY) or {}
+    for candidate_id, rec in index.items():
+        if isinstance(rec, dict) and _clean(rec.get("prototypeId")) == prototype_id:
+            return str(candidate_id)
+    for candidate_id, rec in (state.get("candidates") or {}).items():
+        if not isinstance(rec, dict) or _clean(rec.get("prototypeId")) != prototype_id:
+            continue
+        if rec.get("validationStatus") == "accepted" or rec.get("creatorAcceptanceStatus") == "accepted":
+            return str(candidate_id)
+    return ""
+
+
+def is_mixed_partial_resume_pattern(
+    *,
+    accepted_creator_count: int,
+    accepted_judgment_count: int,
+    missing_creator_prototype_ids: List[str],
+    missing_judgment_prototype_ids: List[str],
+    assigned_prototype_count: int,
+) -> bool:
+    if assigned_prototype_count < 6:
+        return False
+    if accepted_creator_count == 6 and accepted_judgment_count == 6:
+        return False
+    if accepted_creator_count == 6 and not missing_creator_prototype_ids and accepted_judgment_count < 6:
+        return False
+    if accepted_creator_count == 5 and accepted_judgment_count == 5 and len(missing_creator_prototype_ids) == 1:
+        return False
+    if accepted_creator_count == 6 and missing_creator_prototype_ids:
+        return False
+    if accepted_creator_count <= 0:
+        return False
+    if accepted_judgment_count > accepted_creator_count:
+        return False
+    if (
+        accepted_creator_count == accepted_judgment_count
+        and 0 < accepted_creator_count < 6
+        and accepted_creator_count != 5
+    ):
+        return False
+    if accepted_creator_count < 6 or accepted_judgment_count < 6:
+        return True
+    return False
+
+
+def build_resume_plan_by_prototype(
+    state: Dict[str, Any],
+    *,
+    read_only: bool = False,
+) -> Dict[str, Dict[str, str]]:
+    plan: Dict[str, Dict[str, str]] = {}
+    missing_creators = set(missing_creator_prototype_ids(state, read_only=read_only))
+    missing_judges = set(missing_judge_prototype_ids(state, read_only=read_only))
+    for prototype_id in assigned_prototype_ids(state):
+        has_creator = prototype_id not in missing_creators
+        has_judgment = prototype_id not in missing_judges
+        if has_judgment:
+            creator_action = "reuse"
+            judge_action = "reuse"
+        elif has_creator:
+            creator_action = "reuse"
+            judge_action = "dispatch"
+        else:
+            creator_action = "dispatch"
+            judge_action = "dispatch_after_creator"
+        plan[prototype_id] = {
+            "creatorAction": creator_action,
+            "judgeAction": judge_action,
+        }
+    return plan
+
+
+def compute_mixed_partial_call_plan(
+    *,
+    missing_creator_prototype_ids: List[str],
+    missing_judgment_prototype_ids: List[str],
+) -> Dict[str, Any]:
+    remaining_creator = len(missing_creator_prototype_ids)
+    remaining_judge = len(missing_judgment_prototype_ids)
+    normal_before_winner = remaining_creator + remaining_judge
+    return {
+        "remainingCreatorNormalCalls": remaining_creator,
+        "remainingJudgeNormalCalls": remaining_judge,
+        "normalCallsBeforeWinner": normal_before_winner,
+        "conditionalWinnerCalls": 1,
+        "winnerNormalCallConditional": True,
+        "possibleRepairCallsNotIncluded": True,
+        "minimumAdditionalNormalReasoningCalls": normal_before_winner,
+        "maximumAdditionalNormalReasoningCalls": normal_before_winner + 1,
+        "minimumAdditionalReasoningCallsWithoutRepairs": normal_before_winner,
+        "maximumAdditionalReasoningCallsWithoutRepairs": normal_before_winner + 1,
+    }
+
+
+def _guarded_failed_job_resume_allowed(state: Dict[str, Any], *, resume_eligible: bool) -> tuple[bool, str]:
+    status = _clean(state.get("status")).lower()
+    if status not in _FAILED_JOB_STATUSES:
+        return True, ""
+    if not resume_eligible:
+        return False, "builder2_complete_ad_reasoning_resume_failed_status_inconsistent_state"
+    if _media_started(state):
+        return False, "builder2_complete_ad_reasoning_resume_failed_status_media_started"
+    if _clean(state.get("winnerCandidateId")):
+        return False, "builder2_complete_ad_reasoning_resume_failed_status_winner_present"
+    if is_valid_persisted_winner_development(state):
+        return False, "builder2_complete_ad_reasoning_resume_failed_status_winner_development_present"
+    strategy = state.get("strategyFoundation")
+    if not isinstance(strategy, dict) or not strategy:
+        return False, "builder2_complete_ad_reasoning_resume_failed_status_strategy_missing"
+    return True, ""
 
 
 def _media_started(state: Dict[str, Any]) -> bool:
@@ -243,20 +368,45 @@ def resolve_complete_ad_canonical_resume_plan(
     elif accepted_creators == 6 and accepted_judgments < 6 and not missing_judges:
         resume_eligible = False
         rejection_reason = "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
+    elif is_mixed_partial_resume_pattern(
+        accepted_creator_count=accepted_creators,
+        accepted_judgment_count=accepted_judgments,
+        missing_creator_prototype_ids=missing_creators,
+        missing_judgment_prototype_ids=missing_judges,
+        assigned_prototype_count=len(assigned),
+    ):
+        resolved_stage = RESUME_STAGE_MIXED_PARTIAL
     elif accepted_creators != 5 or accepted_judgments != 5:
         resume_eligible = False
         rejection_reason = "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
 
-    judge_calls_planned = len(missing_judges) if resolved_stage == RESUME_STAGE_JUDGE_GENERATION else 0
-    creator_calls_planned = 1 if resolved_stage == RESUME_STAGE_CREATOR_GENERATION and missing_creators else 0
+    if resume_eligible:
+        failed_ok, failed_reason = _guarded_failed_job_resume_allowed(state, resume_eligible=resume_eligible)
+        if not failed_ok:
+            resume_eligible = False
+            rejection_reason = failed_reason
 
-    strategy_would_dispatch = resolved_stage == RESUME_STAGE_STRATEGY
-    creators_would_dispatch = creator_calls_planned > 0
-    winner_would_dispatch = resolved_stage in {
-        RESUME_STAGE_WINNER_SELECTION,
-        RESUME_STAGE_WINNER_DEVELOPMENT,
-    }
-    media_would_dispatch = resolved_stage == RESUME_STAGE_MEDIA_PREREQUISITE
+    resume_plan_by_prototype = build_resume_plan_by_prototype(state, read_only=read_only)
+    mixed_call_plan = compute_mixed_partial_call_plan(
+        missing_creator_prototype_ids=missing_creators,
+        missing_judgment_prototype_ids=missing_judges,
+    )
+    incomplete_prototypes = sorted(set(missing_creators) | set(missing_judges))
+
+    from engine.builder2_strategy_evidence_grounding_contract import strategy_fingerprint
+
+    strategy_fingerprint_value = strategy_fingerprint(strategy) if strategy_present and isinstance(strategy, dict) else ""
+
+    judge_calls_planned = (
+        mixed_call_plan["remainingJudgeNormalCalls"]
+        if resolved_stage == RESUME_STAGE_MIXED_PARTIAL
+        else (len(missing_judges) if resolved_stage == RESUME_STAGE_JUDGE_GENERATION else 0)
+    )
+    creator_calls_planned = (
+        mixed_call_plan["remainingCreatorNormalCalls"]
+        if resolved_stage == RESUME_STAGE_MIXED_PARTIAL
+        else (1 if resolved_stage == RESUME_STAGE_CREATOR_GENERATION and missing_creators else 0)
+    )
 
     ready_for_winner_development = (
         accepted_creators == 6
@@ -273,11 +423,15 @@ def resolve_complete_ad_canonical_resume_plan(
         "progressStage": _clean(state.get("progressStage")) or None,
         "strategyPresent": strategy_present,
         "strategyReusable": strategy_present,
+        "strategyFingerprint": strategy_fingerprint_value or None,
+        "strategyWouldDispatch": False if strategy_present else resolved_stage == RESUME_STAGE_STRATEGY,
         "acceptedCreatorCount": accepted_creators,
         "acceptedJudgmentCount": accepted_judgments,
         "missingCreatorPrototypeIds": missing_creators,
         "missingJudgmentPrototypeIds": missing_judges,
-        "missingPrototypeIds": sorted(set(missing_creators) | set(missing_judges)),
+        "incompletePrototypeIds": incomplete_prototypes,
+        "missingPrototypeIds": incomplete_prototypes,
+        "resumePlanByPrototype": resume_plan_by_prototype,
         "resolvedResumeStage": resolved_stage,
         "resumeEligible": resume_eligible,
         "executorWouldAcceptState": resume_eligible,
@@ -291,10 +445,22 @@ def resolve_complete_ad_canonical_resume_plan(
         "expectedNextReasoningRoles": list(role_plan.get("expectedNextReasoningRoles") or []),
         "judgeCallsPlanned": judge_calls_planned,
         "creatorCallsPlanned": creator_calls_planned,
-        "strategyWouldDispatch": strategy_would_dispatch,
-        "creatorsWouldDispatch": creators_would_dispatch,
-        "winnerWouldDispatch": winner_would_dispatch,
-        "mediaWouldDispatch": media_would_dispatch,
+        "remainingCreatorNormalCalls": mixed_call_plan["remainingCreatorNormalCalls"],
+        "remainingJudgeNormalCalls": mixed_call_plan["remainingJudgeNormalCalls"],
+        "normalCallsBeforeWinner": mixed_call_plan["normalCallsBeforeWinner"],
+        "conditionalWinnerCalls": mixed_call_plan["conditionalWinnerCalls"],
+        "winnerNormalCallConditional": mixed_call_plan["winnerNormalCallConditional"],
+        "possibleRepairCallsNotIncluded": mixed_call_plan["possibleRepairCallsNotIncluded"],
+        "minimumAdditionalNormalReasoningCalls": mixed_call_plan["minimumAdditionalNormalReasoningCalls"],
+        "maximumAdditionalNormalReasoningCalls": mixed_call_plan["maximumAdditionalNormalReasoningCalls"],
+        "minimumAdditionalReasoningCallsWithoutRepairs": mixed_call_plan["minimumAdditionalReasoningCallsWithoutRepairs"],
+        "maximumAdditionalReasoningCallsWithoutRepairs": mixed_call_plan["maximumAdditionalReasoningCallsWithoutRepairs"],
+        "creatorsWouldDispatch": creator_calls_planned > 0,
+        "winnerWouldDispatch": resolved_stage in {
+            RESUME_STAGE_WINNER_SELECTION,
+            RESUME_STAGE_WINNER_DEVELOPMENT,
+        },
+        "mediaWouldDispatch": resolved_stage == RESUME_STAGE_MEDIA_PREREQUISITE,
         "summary": summary,
         "rolePlan": role_plan,
     }

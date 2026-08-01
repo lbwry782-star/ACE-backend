@@ -37,6 +37,8 @@ from engine.builder2_complete_ad_creator_recovery import (
 )
 from engine.builder2_complete_ad_resume_plan import (
     RESUME_STAGE_JUDGE_GENERATION,
+    RESUME_STAGE_MIXED_PARTIAL,
+    build_resume_plan_by_prototype,
     parsed_winner_reusable_for_candidate,
     resolve_complete_ad_canonical_resume_plan,
 )
@@ -276,6 +278,9 @@ def validate_controlled_complete_ad_preconditions(
         return True, None
 
     if stage == RESUME_STAGE_JUDGE_GENERATION and accepted_creators == 6 and not missing_creators:
+        return True, None
+
+    if stage == RESUME_STAGE_MIXED_PARTIAL:
         return True, None
 
     if accepted_creators != 5 or accepted_judgments != 5:
@@ -648,6 +653,346 @@ def _execute_judge_generation_resume(
     return report
 
 
+def _dispatch_creator_for_prototype(
+    *,
+    state: Dict[str, Any],
+    job_id: str,
+    report: Dict[str, Any],
+    budget: ControlledReasoningCallBudget,
+    strategy: Dict[str, Any],
+    prototype_id: str,
+    product_name: str,
+    product_description: str,
+    language: str,
+    runway_mode: str,
+    compatibility_mode: bool,
+    llm_client: Optional[Any],
+    lease_acquired: bool,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    if _candidate_id_for_prototype(state, prototype_id):
+        candidate_id = _candidate_id_for_prototype(state, prototype_id)
+        snapshot = (state.get(ACCEPTED_CREATOR_INDEX_KEY) or {}).get(candidate_id) or {}
+        creator_output = (snapshot.get("creatorOutput") if isinstance(snapshot, dict) else None) or (
+            (state.get("candidates") or {}).get(candidate_id) or {}
+        ).get("creatorOutput") or {}
+        return candidate_id, creator_output if isinstance(creator_output, dict) else None, None
+
+    budget.assert_can_call("builder2_creator")
+    metrics_before = _reasoning_call_snapshot(state)
+    candidate_id = f"cand-1-{prototype_id}-1-{uuid.uuid4().hex[:8]}"
+    try:
+        candidate_id, candidate = generate_creator_candidate(
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            strategy_foundation=strategy,
+            prototype_id=prototype_id,
+            round_index=1,
+            attempt_number=1,
+            runway_mode=runway_mode,
+            llm_client=llm_client,
+            state=state,
+            candidate_id=candidate_id,
+            compatibility_mode=compatibility_mode,
+            single_attempt_only=True,
+        )
+    except Builder2TournamentError as exc:
+        _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+        reason = str(exc.args[0] if exc.args else "builder2_creator_validation_failed")
+        record_process_failure_tag(state, reason)
+        _persist_resumable_failure(
+            state,
+            job_id=job_id,
+            failure_stage="creator_generation",
+            failure_reason=reason,
+        )
+        failure_report = _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage="creator_generation",
+            failure_reason=reason,
+            budget=budget,
+            reasoning_role="builder2_creator",
+            prototype_id=prototype_id,
+            validation_rejection_code=reason,
+            redis_mutated=True,
+            lease_acquired=lease_acquired,
+        )
+        return None, None, failure_report
+
+    _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+    if budget.creator_calls_this_run == metrics_before["creator"]:
+        budget.record("builder2_creator")
+    persist_accepted_creator_candidate(
+        state,
+        candidate_id=candidate_id,
+        prototype_id=prototype_id,
+        round_index=1,
+        attempt_number=1,
+        creator_output=candidate,
+        strategy_foundation=strategy,
+    )
+    save_tournament_state(job_id, state)
+    return candidate_id, candidate, None
+
+
+def _dispatch_judge_for_prototype(
+    *,
+    state: Dict[str, Any],
+    job_id: str,
+    report: Dict[str, Any],
+    budget: ControlledReasoningCallBudget,
+    strategy: Dict[str, Any],
+    prototype_id: str,
+    candidate_id: str,
+    creator_output: Dict[str, Any],
+    product_name: str,
+    product_description: str,
+    language: str,
+    compatibility_mode: bool,
+    llm_client: Optional[Any],
+    lease_acquired: bool,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    reusable, _reuse_reason = audit_reusable_accepted_judgment(
+        state,
+        candidate_id=candidate_id,
+        creator_snapshot={
+            "candidateId": candidate_id,
+            "prototypeId": prototype_id,
+            "creatorOutput": creator_output,
+            "validationStatus": "accepted",
+        },
+        strategy_foundation=strategy,
+        compatibility_mode=compatibility_mode,
+    )
+    if reusable:
+        return True, None
+
+    budget.assert_can_call("builder2_judge")
+    ReasoningResumeIsolationGuard.assert_safe_before_judge()
+    judgment_id = f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
+    metrics_before = _reasoning_call_snapshot(state)
+    try:
+        judgment_id, judgment, total, scores = judge_candidate(
+            product_name=product_name,
+            product_description=product_description,
+            language=language,
+            strategy_foundation=strategy,
+            prototype_id=prototype_id,
+            candidate_id=candidate_id,
+            candidate=creator_output,
+            llm_client=llm_client,
+            state=state,
+            judgment_id=judgment_id,
+            compatibility_mode=compatibility_mode,
+            single_attempt_only=True,
+        )
+    except Builder2TournamentError as exc:
+        _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+        reason = str(exc.args[0] if exc.args else "builder2_judge_invalid_response")
+        record_process_failure_tag(state, reason)
+        _persist_resumable_failure(
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+        )
+        failure_report = _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+            budget=budget,
+            reasoning_role="builder2_judge",
+            prototype_id=prototype_id,
+            validation_rejection_code=reason,
+            redis_mutated=True,
+            lease_acquired=lease_acquired,
+        )
+        return False, failure_report
+
+    metric_after = _reasoning_call_snapshot(state)
+    judge_delta = metric_after["judge"] - metrics_before["judge"]
+    if judge_delta > 0:
+        budget.judge_calls_this_run += judge_delta
+    else:
+        budget.record("builder2_judge")
+    persist_accepted_judgment(
+        state,
+        candidate_id=candidate_id,
+        prototype_id=prototype_id,
+        judgment_id=judgment_id,
+        judgment=judgment,
+        total=total,
+        scores=scores,
+    )
+    save_tournament_state(job_id, state)
+    return True, None
+
+
+def _execute_mixed_partial_reasoning_resume(
+    *,
+    state: Dict[str, Any],
+    job_id: str,
+    report: Dict[str, Any],
+    budget: ControlledReasoningCallBudget,
+    strategy: Dict[str, Any],
+    product_name: str,
+    product_description: str,
+    language: str,
+    compatibility_mode: bool,
+    llm_client: Optional[Any],
+    lease_acquired: bool,
+    stop_before_media: bool,
+    runway_mode: str,
+) -> Dict[str, Any]:
+    backfill_accepted_creator_index(state)
+    backfill_accepted_judgment_index(state)
+    resume_plan = build_resume_plan_by_prototype(state)
+    report["resumePlanByPrototype"] = resume_plan
+    report["remainingCreatorNormalCalls"] = sum(
+        1 for item in resume_plan.values() if item.get("creatorAction") == "dispatch"
+    )
+    report["remainingJudgeNormalCalls"] = sum(
+        1
+        for item in resume_plan.values()
+        if item.get("judgeAction") in {"dispatch", "dispatch_after_creator"}
+    )
+
+    state["status"] = "paused_for_reasoning_resume"
+    state["failureReason"] = None
+    state["failureStage"] = None
+    state["progressStage"] = RESUME_STAGE_MIXED_PARTIAL
+    state["canResume"] = True
+    save_tournament_state(job_id, state)
+
+    ordered_prototypes = sorted(
+        assigned_prototype_ids(state),
+        key=lambda prototype_id: {
+            "reuse_dispatch": 0,
+            "reuse_reuse": 1,
+            "dispatch_after_creator": 2,
+        }[
+            (
+                "reuse_dispatch"
+                if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
+                and resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch"
+                else (
+                    "reuse_reuse"
+                    if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
+                    else "dispatch_after_creator"
+                )
+            )
+        ],
+    )
+
+    for prototype_id in ordered_prototypes:
+        if budget.total_this_run >= budget.max_calls:
+            report["callBudgetExhausted"] = True
+            break
+        entry = resume_plan.get(prototype_id) or {}
+        creator_action = _clean(entry.get("creatorAction"))
+        judge_action = _clean(entry.get("judgeAction"))
+        candidate_id = _candidate_id_for_prototype(state, prototype_id)
+        creator_output: Dict[str, Any] = {}
+
+        if creator_action == "dispatch":
+            candidate_id, creator_payload, failure = _dispatch_creator_for_prototype(
+                state=state,
+                job_id=job_id,
+                report=report,
+                budget=budget,
+                strategy=strategy,
+                prototype_id=prototype_id,
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                runway_mode=runway_mode,
+                compatibility_mode=compatibility_mode,
+                llm_client=llm_client,
+                lease_acquired=lease_acquired,
+            )
+            if failure is not None:
+                return failure
+            creator_output = creator_payload or {}
+        elif candidate_id:
+            snapshot = (state.get(ACCEPTED_CREATOR_INDEX_KEY) or {}).get(candidate_id) or {}
+            creator_output = (snapshot.get("creatorOutput") if isinstance(snapshot, dict) else None) or (
+                (state.get("candidates") or {}).get(candidate_id) or {}
+            ).get("creatorOutput") or {}
+
+        if judge_action in {"dispatch", "dispatch_after_creator"} and candidate_id and creator_output:
+            ok, failure = _dispatch_judge_for_prototype(
+                state=state,
+                job_id=job_id,
+                report=report,
+                budget=budget,
+                strategy=strategy,
+                prototype_id=prototype_id,
+                candidate_id=candidate_id,
+                creator_output=creator_output if isinstance(creator_output, dict) else {},
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                compatibility_mode=compatibility_mode,
+                llm_client=llm_client,
+                lease_acquired=lease_acquired,
+            )
+            if failure is not None:
+                return failure
+            if not ok:
+                continue
+
+    _populate_report_accepted_counts(report, state)
+    _populate_report_reasoning_calls(report, budget)
+    report["remainingMissingJudgmentPrototypeIds"] = missing_judge_prototype_ids(state)
+    report["remainingMissingCreatorPrototypeIds"] = missing_creator_prototype_ids(state)
+
+    all_complete = accepted_creator_count(state) == 6 and accepted_judgment_count(state) == 6
+    if not all_complete:
+        _finalize_judge_stage_pause(state, job_id=job_id, all_judges_complete=False)
+        report["ok"] = True
+        report["reasoningResumeCompleted"] = False
+        report["stoppedBeforeMedia"] = True
+        report["nextStage"] = RESUME_STAGE_MIXED_PARTIAL
+        report["strategyReused"] = True
+        return report
+
+    if stop_before_media:
+        try:
+            winner_id = select_global_winner(state)
+        except Builder2TournamentError as exc:
+            reason = str(exc.args[0] if exc.args else "builder2_no_factually_eligible_candidate")
+            state["status"] = "paused_for_reasoning_resume"
+            state["completionReason"] = reason
+            state["tournamentBlockingReason"] = reason
+            state["requiresRicherProductInformation"] = reason == "builder2_no_factually_eligible_candidate"
+            state["canResume"] = True
+            save_tournament_state(job_id, state)
+            report["ok"] = True
+            report["reasoningResumeCompleted"] = False
+            report["stoppedBeforeMedia"] = True
+            report["nextStage"] = reason
+            report["strategyReused"] = True
+            report["failureReason"] = reason
+            return report
+        mark_authoritative_winner_selection(state, winner_id=winner_id)
+        save_tournament_state(job_id, state)
+        _finalize_judge_stage_pause(state, job_id=job_id, all_judges_complete=True)
+        report["ok"] = True
+        report["reasoningResumeCompleted"] = False
+        report["stoppedBeforeMedia"] = True
+        report["nextStage"] = "winner_development"
+        report["readyForWinnerDevelopment"] = True
+        report["strategyReused"] = True
+        report["finalWinnerCandidateId"] = winner_id
+        return report
+
+    return report
+
+
 def run_controlled_complete_ad_reasoning_resume(
     *,
     job_id: str,
@@ -730,6 +1075,28 @@ def run_controlled_complete_ad_reasoning_resume(
                 llm_client=llm_client,
                 lease_acquired=lease_acquired,
                 stop_after_judges=True,
+            )
+
+        if canonical_plan.get("resolvedResumeStage") == RESUME_STAGE_MIXED_PARTIAL:
+            current_stage = RESUME_STAGE_MIXED_PARTIAL
+            product_name = _clean(strategy.get("productNameResolved") or state.get("productNameResolved") or "Product")
+            product_description = _clean(state.get("productDescription") or "Product description")
+            language = _clean(state.get("contentLanguage") or state.get("language") or strategy.get("language") or "he")
+            runway_mode = builder2_runway_generation_mode(resolve_builder2_runway_video_model())
+            return _execute_mixed_partial_reasoning_resume(
+                state=state,
+                job_id=job_id,
+                report=report,
+                budget=budget,
+                strategy=strategy,
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                compatibility_mode=compatibility_mode,
+                llm_client=llm_client,
+                lease_acquired=lease_acquired,
+                stop_before_media=stop_before_media,
+                runway_mode=runway_mode,
             )
 
         if _controlled_reasoning_already_complete(state):

@@ -118,13 +118,31 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         report["acceptedJudgmentCount"] = summary["acceptedJudgmentCount"]
         report["missingCreatorPrototypeIds"] = list(canonical_plan.get("missingCreatorPrototypeIds") or [])
         report["missingJudgmentPrototypeIds"] = list(canonical_plan.get("missingJudgmentPrototypeIds") or [])
-        report["missingPrototypeIds"] = list(canonical_plan.get("missingPrototypeIds") or [])
+        report["incompletePrototypeIds"] = list(canonical_plan.get("incompletePrototypeIds") or [])
+        report["missingPrototypeIds"] = list(canonical_plan.get("incompletePrototypeIds") or [])
+        report["resumePlanByPrototype"] = dict(canonical_plan.get("resumePlanByPrototype") or {})
         report["resolvedResumeStage"] = canonical_plan.get("resolvedResumeStage") or resolved_stage or resolver.get("resumeFromStage")
         report["resumeEligible"] = bool(canonical_plan.get("resumeEligible"))
         report["executorWouldAcceptState"] = bool(canonical_plan.get("executorWouldAcceptState"))
         report["executorRejectionReason"] = canonical_plan.get("executorRejectionReason")
         report["judgeCallsPlanned"] = int(canonical_plan.get("judgeCallsPlanned") or 0)
+        report["creatorCallsPlanned"] = int(canonical_plan.get("creatorCallsPlanned") or 0)
+        report["remainingCreatorNormalCalls"] = int(canonical_plan.get("remainingCreatorNormalCalls") or 0)
+        report["remainingJudgeNormalCalls"] = int(canonical_plan.get("remainingJudgeNormalCalls") or 0)
+        report["normalCallsBeforeWinner"] = int(canonical_plan.get("normalCallsBeforeWinner") or 0)
+        report["conditionalWinnerCalls"] = int(canonical_plan.get("conditionalWinnerCalls") or 0)
+        report["winnerNormalCallConditional"] = bool(canonical_plan.get("winnerNormalCallConditional"))
+        report["possibleRepairCallsNotIncluded"] = bool(canonical_plan.get("possibleRepairCallsNotIncluded"))
+        report["minimumAdditionalNormalReasoningCalls"] = int(canonical_plan.get("minimumAdditionalNormalReasoningCalls") or 0)
+        report["maximumAdditionalNormalReasoningCalls"] = int(canonical_plan.get("maximumAdditionalNormalReasoningCalls") or 0)
+        report["minimumAdditionalReasoningCallsWithoutRepairs"] = int(
+            canonical_plan.get("minimumAdditionalReasoningCallsWithoutRepairs") or 0
+        )
+        report["maximumAdditionalReasoningCallsWithoutRepairs"] = int(
+            canonical_plan.get("maximumAdditionalReasoningCallsWithoutRepairs") or 0
+        )
         report["strategyWouldDispatch"] = bool(canonical_plan.get("strategyWouldDispatch"))
+        report["strategyFingerprint"] = canonical_plan.get("strategyFingerprint")
         report["creatorsWouldDispatch"] = bool(canonical_plan.get("creatorsWouldDispatch"))
         report["winnerWouldDispatch"] = bool(canonical_plan.get("winnerWouldDispatch"))
         report["mediaWouldDispatch"] = bool(canonical_plan.get("mediaWouldDispatch"))
