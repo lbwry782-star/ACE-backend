@@ -25,8 +25,10 @@ from engine.builder2_tournament_contracts import (
 from engine.builder2_winner_downstream import (
     Builder2WinnerDownstreamError,
     compose_builder2_headline_text,
+    extract_builder2_sequence_stage_text,
     get_scene_variation_descriptions,
     get_visual_anchor_description,
+    normalize_builder2_sequence_stages,
     normalize_builder2_winner_downstream,
 )
 from engine.video_planning import (
@@ -69,6 +71,11 @@ def _validate_visual_anchor(raw: Dict[str, Any]) -> Any:
     raise Builder2TournamentError("builder2_winner_schema_invalid:visualAnchor")
 
 
+def _sequence_stage_texts(sequence: Dict[str, Any]) -> List[str]:
+    normalized = normalize_builder2_sequence_stages(sequence)
+    return [normalized["beginning"], normalized["development"], normalized["resolution"]]
+
+
 def _clean_scene_variations(raw: Any, *, structure: str, sequence: Dict[str, Any]) -> List[str]:
     if not isinstance(raw, list):
         raw = []
@@ -91,11 +98,7 @@ def _clean_scene_variations(raw: Any, *, structure: str, sequence: Dict[str, Any
         if not cleaned:
             return []
         if len(cleaned) not in {0, 3}:
-            return [
-                sequence["beginning"],
-                sequence["development"],
-                sequence["resolution"],
-            ]
+            return _sequence_stage_texts(sequence)
         return cleaned
     return cleaned
 
@@ -145,17 +148,22 @@ def validate_builder2_winner_plan(
         require_non_empty_str(raw.get("headlineCoreKeyword"), field="headlineCoreKeyword")
     require_non_empty_str(raw.get("coreVisualIdea"), field="coreVisualIdea")
     sequence = require_dict(raw.get("sequence"), field="sequence")
+    try:
+        normalized_sequence = normalize_builder2_sequence_stages(sequence)
+    except Builder2WinnerDownstreamError as exc:
+        raise Builder2TournamentError(exc.code) from exc
     for key in ("beginning", "development", "resolution"):
-        require_non_empty_str(sequence.get(key), field=f"sequence.{key}")
+        require_non_empty_str(normalized_sequence.get(key), field=f"sequence.{key}")
     _validate_visual_anchor(raw)
     require_non_empty_str(raw.get("openingFrameDescription"), field="openingFrameDescription")
     require_non_empty_str(raw.get("videoPrompt"), field="videoPrompt")
 
     out = dict(raw)
+    out["sequence"] = normalized_sequence
     variations = out.get("sceneVariations")
 
     if structure == "continuous_event":
-        cleaned = _clean_scene_variations(variations, structure=structure, sequence=sequence)
+        cleaned = _clean_scene_variations(variations, structure=structure, sequence=normalized_sequence)
         out["sceneVariations"] = cleaned
         out["sceneSequenceSemantics"] = "temporal_beats"
         vp = out["videoPrompt"]
@@ -163,7 +171,7 @@ def validate_builder2_winner_plan(
             raise Builder2TournamentError("builder2_winner_development_failed")
         logger.info("BUILDER2_CONTINUOUS_EVENT_PLAN_VALIDATED prototypeId=%s", out.get("prototypeId"))
     elif structure == "variation_montage":
-        cleaned = _clean_scene_variations(variations, structure=structure, sequence=sequence)
+        cleaned = _clean_scene_variations(variations, structure=structure, sequence=normalized_sequence)
         if len(cleaned) < 2 or len(cleaned) > 4:
             raise Builder2TournamentError("builder2_winner_development_failed")
         out["sceneVariations"] = cleaned
@@ -202,15 +210,12 @@ def validate_and_normalize_builder2_winner_plan(
     variations = validated.get("sceneVariations") or []
 
     if structure == "continuous_event":
+        stage_texts = _sequence_stage_texts(sequence)
         if variations:
             scene = " → ".join(variations)
         else:
-            scene = " → ".join([sequence["beginning"], sequence["development"], sequence["resolution"]])
-        legacy_variations = variations or [
-            sequence["beginning"],
-            sequence["development"],
-            sequence["resolution"],
-        ]
+            scene = " → ".join(stage_texts)
+        legacy_variations = variations or stage_texts
     else:
         scene = " | ".join(variations)
         legacy_variations = variations
@@ -333,8 +338,7 @@ def _normalize_continuous_event_plan(
             raise Builder2TournamentError("planning_failed_invalid_keyword")
 
     scene = data.get("sceneConcept") or " → ".join(
-        variations
-        or [sequence.get("beginning", ""), sequence.get("development", ""), sequence.get("resolution", "")]
+        variations or _sequence_stage_texts(sequence if isinstance(sequence, dict) else {})
     )
     pn_for_headline = (product_name or "").strip() or pn
     if omit_headline:
@@ -342,7 +346,13 @@ def _normalize_continuous_event_plan(
         headline_rem_out = ""
     else:
         headline_full, headline_rem_out = compose_builder2_headline_text(pn_for_headline, headline_rem)
-    opening_fd = (data.get("openingFrameDescription") or sequence.get("beginning") or core_visual)[:400]
+    opening_beginning = ""
+    if isinstance(sequence, dict):
+        try:
+            opening_beginning = extract_builder2_sequence_stage_text(sequence.get("beginning"), "sequence.beginning")
+        except Builder2WinnerDownstreamError:
+            opening_beginning = ""
+    opening_fd = (data.get("openingFrameDescription") or opening_beginning or core_visual)[:400]
     headline_decision_value = "omit" if omit_headline else "include"
 
     return {

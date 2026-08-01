@@ -65,6 +65,39 @@ def _optional_text(value: Any) -> str:
     return ""
 
 
+_SEQUENCE_STAGE_TEXT_KEYS = ("description", "scene", "action", "visual", "purpose")
+
+
+def extract_builder2_sequence_stage_text(value: Any, field_path: str) -> str:
+    """
+    Canonical text for one continuous-event sequence stage (beginning/development/resolution).
+    Accepts plain strings or structured dict stages with a canonical text field.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+        _invalid(field_path)
+    if isinstance(value, dict):
+        for key in _SEQUENCE_STAGE_TEXT_KEYS:
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                text = candidate.strip()
+                if text:
+                    return text
+        _invalid(field_path)
+    _invalid(field_path)
+
+
+def normalize_builder2_sequence_stages(sequence: Dict[str, Any]) -> Dict[str, str]:
+    if not isinstance(sequence, dict):
+        _invalid("sequence")
+    return {
+        key: extract_builder2_sequence_stage_text(sequence.get(key), f"sequence.{key}")
+        for key in ("beginning", "development", "resolution")
+    }
+
+
 def get_headline_decision(plan: Dict[str, Any]) -> str:
     return get_normalized_headline_decision(plan)
 
@@ -91,21 +124,21 @@ def get_sequence_beginning(plan: Dict[str, Any]) -> str:
     sequence = plan.get("sequence")
     if not isinstance(sequence, dict):
         _invalid("sequence")
-    return _require_non_empty_text(sequence.get("beginning"), "sequence.beginning")
+    return extract_builder2_sequence_stage_text(sequence.get("beginning"), "sequence.beginning")
 
 
 def get_sequence_development(plan: Dict[str, Any]) -> str:
     sequence = plan.get("sequence")
     if not isinstance(sequence, dict):
         _invalid("sequence")
-    return _require_non_empty_text(sequence.get("development"), "sequence.development")
+    return extract_builder2_sequence_stage_text(sequence.get("development"), "sequence.development")
 
 
 def get_sequence_resolution(plan: Dict[str, Any]) -> str:
     sequence = plan.get("sequence")
     if not isinstance(sequence, dict):
         _invalid("sequence")
-    return _require_non_empty_text(sequence.get("resolution"), "sequence.resolution")
+    return extract_builder2_sequence_stage_text(sequence.get("resolution"), "sequence.resolution")
 
 
 def get_visual_family_definition(plan: Dict[str, Any]) -> str:
@@ -336,6 +369,9 @@ def normalize_builder2_winner_downstream(
         if not single_slogan_forces_headline_omit(plan=out):
             apply_builder2_headline_composition(out)
         ensure_builder2_schema_metadata(out, compatibility_mode=compatibility_mode)
+        sequence = out.get("sequence")
+        if isinstance(sequence, dict):
+            out["sequence"] = normalize_builder2_sequence_stages(sequence)
         out["sceneVariations"] = get_scene_variation_descriptions(out)
         structure = (out.get("structureType") or "").strip()
         if structure == "continuous_event":
