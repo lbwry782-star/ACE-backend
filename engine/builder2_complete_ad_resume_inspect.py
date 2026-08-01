@@ -17,7 +17,12 @@ from engine.builder2_complete_ad_creator_recovery import (
     REJECTED_CREATOR_PARSED_INDEX_KEY,
     can_offline_revalidate_rejected_creator,
 )
-from engine.builder2_complete_ad_resume_plan import plan_complete_ad_reasoning_roles, resolve_complete_ad_resume_stage
+from engine.builder2_complete_ad_resume_plan import (
+    evaluate_complete_ad_reasoning_executor_preconditions,
+    plan_complete_ad_reasoning_roles,
+    resolve_complete_ad_canonical_resume_plan,
+    resolve_complete_ad_resume_stage,
+)
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_read_only_inspection import read_only_builder2_inspection
 from engine.builder2_resume_contract import BUILDER2_RESUME_CONTRACT_VERSION
@@ -102,14 +107,34 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         summary = tournament_resolution_summary(state, read_only=True)
         role_plan = plan_complete_ad_reasoning_roles(state, read_only=True)
         resolved_stage = resolve_complete_ad_resume_stage(state, read_only=True)
+        canonical_plan = resolve_complete_ad_canonical_resume_plan(state, read_only=True, job_raw=job_raw)
+        _executor_ok, executor_reason, _executor_plan = evaluate_complete_ad_reasoning_executor_preconditions(
+            state,
+            job_raw,
+        )
 
         report["strategyReusable"] = isinstance(state.get("strategyFoundation"), dict) and bool(state.get("strategyFoundation"))
         report["acceptedCreatorCount"] = summary["acceptedCreatorCount"]
         report["acceptedJudgmentCount"] = summary["acceptedJudgmentCount"]
-        report["missingPrototypeIds"] = sorted(
-            set(summary.get("missingCreatorPrototypeIds") or []) | set(summary.get("missingJudgePrototypeIds") or [])
-        )
-        report["resolvedResumeStage"] = resolved_stage or resolver.get("resumeFromStage")
+        report["missingCreatorPrototypeIds"] = list(canonical_plan.get("missingCreatorPrototypeIds") or [])
+        report["missingJudgmentPrototypeIds"] = list(canonical_plan.get("missingJudgmentPrototypeIds") or [])
+        report["missingPrototypeIds"] = list(canonical_plan.get("missingPrototypeIds") or [])
+        report["resolvedResumeStage"] = canonical_plan.get("resolvedResumeStage") or resolved_stage or resolver.get("resumeFromStage")
+        report["resumeEligible"] = bool(canonical_plan.get("resumeEligible"))
+        report["executorWouldAcceptState"] = bool(canonical_plan.get("executorWouldAcceptState"))
+        report["executorRejectionReason"] = canonical_plan.get("executorRejectionReason")
+        report["judgeCallsPlanned"] = int(canonical_plan.get("judgeCallsPlanned") or 0)
+        report["strategyWouldDispatch"] = bool(canonical_plan.get("strategyWouldDispatch"))
+        report["creatorsWouldDispatch"] = bool(canonical_plan.get("creatorsWouldDispatch"))
+        report["winnerWouldDispatch"] = bool(canonical_plan.get("winnerWouldDispatch"))
+        report["mediaWouldDispatch"] = bool(canonical_plan.get("mediaWouldDispatch"))
+        report["jobStatus"] = canonical_plan.get("jobStatus")
+        report["pauseReason"] = canonical_plan.get("pauseReason")
+        report["progressStage"] = canonical_plan.get("progressStage")
+        report["tournamentId"] = canonical_plan.get("tournamentId")
+        report["readyForWinnerDevelopment"] = bool(canonical_plan.get("readyForWinnerDevelopment"))
+        report["paidCalls"] = 0
+        report["stateMutated"] = False
         report["provisionalWinnerPresent"] = bool(_clean(state.get("provisionalWinnerCandidateId")))
         report["provisionalWinnerCandidateId"] = _clean(state.get("provisionalWinnerCandidateId")) or None
         report["finalWinnerReady"] = bool(summary.get("readyForAuthoritativeWinnerSelection")) and bool(

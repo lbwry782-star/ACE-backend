@@ -380,8 +380,14 @@ def run_offline_creator_recovery_batch(
         state["offlineCreatorRecoveryVersion"] = "builder2_literal_symbol_disposition_v1"
         missing = missing_creator_prototype_ids(state)
         if not missing:
+            from engine.builder2_complete_ad_resume_plan import RESUME_STAGE_JUDGE_GENERATION
+
             state["status"] = "paused_for_reasoning_resume"
             state["lastCompletedStep"] = "creator_complete"
+            state["progressStage"] = RESUME_STAGE_JUDGE_GENERATION
+            state["failureReason"] = None
+            state["failureStage"] = None
+            state["canResume"] = True
             report["readyForJudges"] = True
             report["reasoningResumePossible"] = True
         report["stateMutated"] = True

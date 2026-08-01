@@ -153,3 +153,158 @@ def parsed_winner_reusable_for_candidate(
     if not parsed:
         return False
     return _clean(parsed.get("candidateId")) == _clean(winner_candidate_id)
+
+
+RESUME_STAGE_STRATEGY = "strategy"
+RESUME_STAGE_CREATOR_GENERATION = "creator_generation"
+RESUME_STAGE_JUDGE_GENERATION = "judge_generation"
+RESUME_STAGE_WINNER_SELECTION = "winner_selection"
+RESUME_STAGE_WINNER_DEVELOPMENT = "winner_development"
+RESUME_STAGE_MEDIA_PREREQUISITE = "media_prerequisite_validation"
+RESUME_STAGE_REASONING_COMPLETE = "reasoning_complete"
+RESUME_STAGE_UNSUPPORTED = "unsupported"
+
+
+def _media_started(state: Dict[str, Any]) -> bool:
+    if bool(state.get("mediaStarted")):
+        return True
+    media = state.get("mediaResume")
+    if not isinstance(media, dict):
+        return False
+    return bool(_clean(media.get("startImageArtifact")) or _clean(media.get("runwayTaskId")))
+
+
+def resolve_complete_ad_canonical_resume_plan(
+    state: Dict[str, Any],
+    *,
+    read_only: bool = False,
+    job_raw: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Single side-effect-free resume plan shared by inspectors and executors.
+    """
+    from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
+    from engine.builder2_resume_contract import BUILDER2_RESUME_CONTRACT_VERSION
+
+    job_id = _clean(state.get("jobId"))
+    tournament_id = _clean(state.get("tournamentId"))
+    summary = tournament_resolution_summary(state, read_only=read_only)
+    role_plan = plan_complete_ad_reasoning_roles(state, read_only=read_only)
+    resolved_stage = resolve_complete_ad_resume_stage(state, read_only=read_only)
+    missing_creators = list(summary.get("missingCreatorPrototypeIds") or [])
+    missing_judges = list(summary.get("missingJudgePrototypeIds") or [])
+    accepted_creators = int(summary.get("acceptedCreatorCount") or 0)
+    accepted_judgments = int(summary.get("acceptedJudgmentCount") or 0)
+    assigned = assigned_prototype_ids(state)
+
+    strategy = state.get("strategyFoundation")
+    strategy_present = isinstance(strategy, dict) and bool(strategy)
+
+    resume_version = _clean(state.get("builder2ResumeContractVersion") or (job_raw or {}).get("builder2ResumeContractVersion"))
+    new_format = _clean(state.get("builder2NewFormatVersion") or (job_raw or {}).get("builder2NewFormatVersion"))
+
+    rejection_reason = ""
+    resume_eligible = True
+
+    if not job_id:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_job_id_missing"
+    elif not tournament_id:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_tournament_id_missing"
+    elif resume_version and resume_version != BUILDER2_RESUME_CONTRACT_VERSION:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_contract_mismatch"
+    elif new_format and new_format != BUILDER2_NEW_FORMAT_VERSION:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_new_format_mismatch"
+    elif not strategy_present:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_strategy_missing"
+    elif len(assigned) < 6:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_not_six_way"
+    elif accepted_creators > 6 or accepted_judgments > 6:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_invalid_counts"
+    elif _media_started(state):
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_media_already_started"
+    elif accepted_creators == 6 and accepted_judgments == 6:
+        if not is_valid_persisted_winner_development(state):
+            resolved_stage = RESUME_STAGE_WINNER_DEVELOPMENT if _clean(state.get("winnerCandidateId")) else RESUME_STAGE_WINNER_SELECTION
+    elif accepted_creators == 6 and not missing_creators and missing_judges:
+        resolved_stage = RESUME_STAGE_JUDGE_GENERATION
+    elif accepted_creators == 5 and accepted_judgments == 5 and len(missing_creators) == 1:
+        resolved_stage = RESUME_STAGE_CREATOR_GENERATION
+    elif accepted_creators == 6 and accepted_judgments < 6 and missing_creators:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_unexpected_missing_creator"
+    elif accepted_creators == 6 and accepted_judgments < 6 and not missing_judges:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
+    elif accepted_creators != 5 or accepted_judgments != 5:
+        resume_eligible = False
+        rejection_reason = "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
+
+    judge_calls_planned = len(missing_judges) if resolved_stage == RESUME_STAGE_JUDGE_GENERATION else 0
+    creator_calls_planned = 1 if resolved_stage == RESUME_STAGE_CREATOR_GENERATION and missing_creators else 0
+
+    strategy_would_dispatch = resolved_stage == RESUME_STAGE_STRATEGY
+    creators_would_dispatch = creator_calls_planned > 0
+    winner_would_dispatch = resolved_stage in {
+        RESUME_STAGE_WINNER_SELECTION,
+        RESUME_STAGE_WINNER_DEVELOPMENT,
+    }
+    media_would_dispatch = resolved_stage == RESUME_STAGE_MEDIA_PREREQUISITE
+
+    ready_for_winner_development = (
+        accepted_creators == 6
+        and accepted_judgments == 6
+        and bool(summary.get("readyForAuthoritativeWinnerSelection"))
+    )
+
+    return {
+        "jobId": job_id or None,
+        "tournamentId": tournament_id or None,
+        "jobStatus": _clean(state.get("status")) or None,
+        "pauseReason": _clean(state.get("failureReason")) or None,
+        "failureStage": _clean(state.get("failureStage")) or None,
+        "progressStage": _clean(state.get("progressStage")) or None,
+        "strategyPresent": strategy_present,
+        "strategyReusable": strategy_present,
+        "acceptedCreatorCount": accepted_creators,
+        "acceptedJudgmentCount": accepted_judgments,
+        "missingCreatorPrototypeIds": missing_creators,
+        "missingJudgmentPrototypeIds": missing_judges,
+        "missingPrototypeIds": sorted(set(missing_creators) | set(missing_judges)),
+        "resolvedResumeStage": resolved_stage,
+        "resumeEligible": resume_eligible,
+        "executorWouldAcceptState": resume_eligible,
+        "executorRejectionReason": rejection_reason or None,
+        "readyForJudges": accepted_creators == 6 and not missing_creators and bool(missing_judges),
+        "readyForWinnerDevelopment": ready_for_winner_development,
+        "winnerDevelopmentStarted": is_valid_persisted_winner_development(state),
+        "reasoningComplete": bool(state.get("reasoningComplete")),
+        "mediaStarted": _media_started(state),
+        "requiredNextReasoningRoles": list(role_plan.get("requiredNextReasoningRoles") or []),
+        "expectedNextReasoningRoles": list(role_plan.get("expectedNextReasoningRoles") or []),
+        "judgeCallsPlanned": judge_calls_planned,
+        "creatorCallsPlanned": creator_calls_planned,
+        "strategyWouldDispatch": strategy_would_dispatch,
+        "creatorsWouldDispatch": creators_would_dispatch,
+        "winnerWouldDispatch": winner_would_dispatch,
+        "mediaWouldDispatch": media_would_dispatch,
+        "summary": summary,
+        "rolePlan": role_plan,
+    }
+
+
+def evaluate_complete_ad_reasoning_executor_preconditions(
+    state: Dict[str, Any],
+    job_raw: Optional[Dict[str, Any]] = None,
+) -> tuple[bool, Optional[str], Dict[str, Any]]:
+    plan = resolve_complete_ad_canonical_resume_plan(state, read_only=False, job_raw=job_raw)
+    if not plan["executorWouldAcceptState"]:
+        return False, plan["executorRejectionReason"], plan
+    return True, None, plan

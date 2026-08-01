@@ -35,7 +35,11 @@ from engine.builder2_complete_ad_creator_recovery import (
     find_rejected_creator_for_prototype,
     try_offline_recover_rejected_creator_for_prototype,
 )
-from engine.builder2_complete_ad_resume_plan import parsed_winner_reusable_for_candidate
+from engine.builder2_complete_ad_resume_plan import (
+    RESUME_STAGE_JUDGE_GENERATION,
+    parsed_winner_reusable_for_candidate,
+    resolve_complete_ad_canonical_resume_plan,
+)
 from engine.builder2_creator import generate_creator_candidate, is_slogan_word_limit_failure
 from engine.builder2_creator_slogan_repair_patch import (
     additional_paid_slogan_repair_allowed,
@@ -255,40 +259,26 @@ def validate_controlled_complete_ad_preconditions(
     *,
     expected_missing_prototype: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    job_id = _clean(state.get("jobId"))
-    if not job_id:
-        return False, "builder2_complete_ad_reasoning_resume_job_id_missing"
-    tournament_id = _clean(state.get("tournamentId"))
-    if not tournament_id:
-        return False, "builder2_complete_ad_reasoning_resume_tournament_id_missing"
+    from engine.builder2_complete_ad_resume_plan import evaluate_complete_ad_reasoning_executor_preconditions
 
-    resume_version = _clean(state.get("builder2ResumeContractVersion") or (job_raw or {}).get("builder2ResumeContractVersion"))
-    if resume_version and resume_version != BUILDER2_RESUME_CONTRACT_VERSION:
-        return False, "builder2_complete_ad_reasoning_resume_contract_mismatch"
+    ok, reason, plan = evaluate_complete_ad_reasoning_executor_preconditions(state, job_raw)
+    if not ok:
+        return False, reason
 
-    new_format = _clean(state.get("builder2NewFormatVersion") or (job_raw or {}).get("builder2NewFormatVersion"))
-    if new_format and new_format != BUILDER2_NEW_FORMAT_VERSION:
-        return False, "builder2_complete_ad_reasoning_resume_new_format_mismatch"
+    summary = plan.get("summary") or {}
+    missing_creators = list(plan.get("missingCreatorPrototypeIds") or [])
+    missing_judges = list(plan.get("missingJudgmentPrototypeIds") or [])
+    accepted_creators = int(plan.get("acceptedCreatorCount") or 0)
+    accepted_judgments = int(plan.get("acceptedJudgmentCount") or 0)
+    stage = _clean(plan.get("resolvedResumeStage"))
 
-    strategy = state.get("strategyFoundation")
-    if not isinstance(strategy, dict) or not strategy:
-        return False, "builder2_complete_ad_reasoning_resume_strategy_missing"
-
-    summary = tournament_resolution_summary(state)
-    assigned = assigned_prototype_ids(state)
-    if len(assigned) < 6:
-        return False, "builder2_complete_ad_reasoning_resume_not_six_way"
-
-    missing_creators = list(summary.get("missingCreatorPrototypeIds") or [])
-    missing_judges = list(summary.get("missingJudgePrototypeIds") or [])
-
-    if summary["acceptedCreatorCount"] > 6 or summary["acceptedJudgmentCount"] > 6:
-        return False, "builder2_complete_ad_reasoning_resume_invalid_counts"
-
-    if summary["acceptedCreatorCount"] == 6 and summary["acceptedJudgmentCount"] == 6:
+    if accepted_creators == 6 and accepted_judgments == 6:
         return True, None
 
-    if summary["acceptedCreatorCount"] != 5 or summary["acceptedJudgmentCount"] != 5:
+    if stage == RESUME_STAGE_JUDGE_GENERATION and accepted_creators == 6 and not missing_creators:
+        return True, None
+
+    if accepted_creators != 5 or accepted_judgments != 5:
         return False, "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
 
     if expected_missing_prototype is None:
@@ -300,10 +290,6 @@ def validate_controlled_complete_ad_preconditions(
         return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_creator"
     if expected_missing_prototype not in missing_judges:
         return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_judge"
-
-    media = _media_bucket(state)
-    if _clean(media.get("startImageArtifact")) or _clean(media.get("runwayTaskId")):
-        return False, "builder2_complete_ad_reasoning_resume_media_already_started"
 
     return True, None
 
@@ -470,6 +456,198 @@ def _finalize_stop_before_media(state: Dict[str, Any], *, job_id: str) -> None:
     save_tournament_state(job_id, state)
 
 
+def _finalize_judge_stage_pause(
+    state: Dict[str, Any],
+    *,
+    job_id: str,
+    all_judges_complete: bool,
+) -> None:
+    state["status"] = "paused_for_reasoning_resume"
+    state["canResume"] = True
+    state["failureReason"] = None
+    state["failureStage"] = None
+    if all_judges_complete:
+        state["lastCompletedStep"] = "judge_complete"
+        state["progressStage"] = "winner_selection"
+    else:
+        state["lastCompletedStep"] = "judge_generation"
+        state["progressStage"] = RESUME_STAGE_JUDGE_GENERATION
+    save_tournament_state(job_id, state)
+
+
+def _execute_judge_generation_resume(
+    *,
+    state: Dict[str, Any],
+    job_id: str,
+    report: Dict[str, Any],
+    budget: ControlledReasoningCallBudget,
+    strategy: Dict[str, Any],
+    product_name: str,
+    product_description: str,
+    language: str,
+    compatibility_mode: bool,
+    llm_client: Optional[Any],
+    lease_acquired: bool,
+    stop_after_judges: bool = True,
+) -> Dict[str, Any]:
+    backfill_accepted_creator_index(state)
+    backfill_accepted_judgment_index(state)
+    missing_judges = list(missing_judge_prototype_ids(state))
+    report["judgeCallsPlanned"] = len(missing_judges)
+    report["remainingMissingJudgmentPrototypeIds"] = list(missing_judges)
+    judge_calls_accepted = 0
+    judge_calls_rejected = 0
+
+    for prototype_id in missing_judges:
+        if budget.total_this_run >= budget.max_calls:
+            report["callBudgetExhausted"] = True
+            break
+        candidate_id = _candidate_id_for_prototype(state, prototype_id)
+        if not candidate_id:
+            reason = "builder2_judge_only_resume_missing_accepted_creator"
+            record_process_failure_tag(state, reason)
+            _persist_resumable_failure(
+                state,
+                job_id=job_id,
+                failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+                failure_reason=f"{reason}:{prototype_id}",
+            )
+            return _emit_resume_stage_failure(
+                report,
+                state,
+                job_id=job_id,
+                failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+                failure_reason=f"{reason}:{prototype_id}",
+                budget=budget,
+                reasoning_role="builder2_judge",
+                prototype_id=prototype_id,
+                redis_mutated=True,
+                lease_acquired=lease_acquired,
+            )
+
+        snapshot = (state.get(ACCEPTED_CREATOR_INDEX_KEY) or {}).get(candidate_id) or {}
+        creator_output = (snapshot.get("creatorOutput") if isinstance(snapshot, dict) else None) or (
+            (state.get("candidates") or {}).get(candidate_id) or {}
+        ).get("creatorOutput") or {}
+
+        reusable, _reuse_reason = audit_reusable_accepted_judgment(
+            state,
+            candidate_id=candidate_id,
+            creator_snapshot={
+                "candidateId": candidate_id,
+                "prototypeId": prototype_id,
+                "creatorOutput": creator_output,
+                "validationStatus": "accepted",
+            },
+            strategy_foundation=strategy,
+            compatibility_mode=compatibility_mode,
+        )
+        if reusable:
+            continue
+
+        budget.assert_can_call("builder2_judge")
+        ReasoningResumeIsolationGuard.assert_safe_before_judge()
+        judgment_id = f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
+        metrics_before = _reasoning_call_snapshot(state)
+        try:
+            judgment_id, judgment, total, scores = judge_candidate(
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                strategy_foundation=strategy,
+                prototype_id=prototype_id,
+                candidate_id=candidate_id,
+                candidate=creator_output,
+                llm_client=llm_client,
+                state=state,
+                judgment_id=judgment_id,
+                compatibility_mode=compatibility_mode,
+                single_attempt_only=True,
+            )
+        except Builder2TournamentError as exc:
+            _sync_budget_from_metrics_delta(budget, baseline=metrics_before, state=state)
+            judge_calls_rejected += 1
+            reason = str(exc.args[0] if exc.args else "builder2_judge_invalid_response")
+            record_process_failure_tag(state, reason)
+            _persist_resumable_failure(
+                state,
+                job_id=job_id,
+                failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+                failure_reason=reason,
+            )
+            report["judgeCallsRejected"] = judge_calls_rejected
+            return _emit_resume_stage_failure(
+                report,
+                state,
+                job_id=job_id,
+                failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+                failure_reason=reason,
+                budget=budget,
+                reasoning_role="builder2_judge",
+                prototype_id=prototype_id,
+                validation_rejection_code=reason,
+                redis_mutated=True,
+                lease_acquired=lease_acquired,
+            )
+
+        metric_after = _reasoning_call_snapshot(state)
+        judge_delta = metric_after["judge"] - metrics_before["judge"]
+        if judge_delta > 0:
+            budget.judge_calls_this_run += judge_delta
+        else:
+            budget.record("builder2_judge")
+        persist_accepted_judgment(
+            state,
+            candidate_id=candidate_id,
+            prototype_id=prototype_id,
+            judgment_id=judgment_id,
+            judgment=judgment,
+            total=total,
+            scores=scores,
+        )
+        judge_calls_accepted += 1
+        save_tournament_state(job_id, state)
+
+    report["judgeCallsAccepted"] = judge_calls_accepted
+    report["judgeCallsRejected"] = judge_calls_rejected
+    report["judgeCallsDispatched"] = budget.judge_calls_this_run
+    _populate_report_accepted_counts(report, state)
+    _populate_report_reasoning_calls(report, budget)
+    report["remainingMissingJudgmentPrototypeIds"] = missing_judge_prototype_ids(state)
+
+    all_complete = accepted_creator_count(state) == 6 and accepted_judgment_count(state) == 6
+    if stop_after_judges:
+        _finalize_judge_stage_pause(state, job_id=job_id, all_judges_complete=all_complete)
+        report["ok"] = all_complete or bool(judge_calls_accepted)
+        report["reasoningResumeCompleted"] = False
+        report["stoppedBeforeMedia"] = True
+        report["nextStage"] = "winner_selection" if all_complete else RESUME_STAGE_JUDGE_GENERATION
+        report["readyForWinnerDevelopment"] = all_complete
+        report["winnerDevelopmentStarted"] = False
+        report["strategyReused"] = True
+        return report
+
+    if not all_complete:
+        reason = "builder2_complete_ad_reasoning_resume_six_way_incomplete"
+        _persist_resumable_failure(
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+        )
+        return _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+            budget=budget,
+            redis_mutated=True,
+            lease_acquired=lease_acquired,
+        )
+    return report
+
+
 def run_controlled_complete_ad_reasoning_resume(
     *,
     job_id: str,
@@ -504,7 +682,21 @@ def run_controlled_complete_ad_reasoning_resume(
         ok, pre_reason = validate_controlled_complete_ad_preconditions(state, job_raw)
         if not ok:
             report["failureReason"] = pre_reason
+            report["tournamentId"] = _clean(state.get("tournamentId")) or None
+            _populate_report_accepted_counts(report, state)
+            plan = resolve_complete_ad_canonical_resume_plan(state, job_raw=job_raw)
+            report["missingPrototypeIds"] = list(plan.get("missingPrototypeIds") or [])
+            report["resolvedResumeStage"] = plan.get("resolvedResumeStage")
+            report["missingCreatorPrototypeIds"] = list(plan.get("missingCreatorPrototypeIds") or [])
+            report["missingJudgmentPrototypeIds"] = list(plan.get("missingJudgmentPrototypeIds") or [])
             return report
+
+        report["tournamentId"] = _clean(state.get("tournamentId")) or None
+        canonical_plan = resolve_complete_ad_canonical_resume_plan(state, job_raw=job_raw)
+        report["resolvedResumeStage"] = canonical_plan.get("resolvedResumeStage")
+        report["missingCreatorPrototypeIds"] = list(canonical_plan.get("missingCreatorPrototypeIds") or [])
+        report["missingJudgmentPrototypeIds"] = list(canonical_plan.get("missingJudgmentPrototypeIds") or [])
+        report["judgeCallsPlanned"] = int(canonical_plan.get("judgeCallsPlanned") or 0)
 
         if acquire_lease and not acquire_job_lease(job_id, worker_token):
             report["failureReason"] = "builder2_complete_ad_reasoning_resume_lease_unavailable"
@@ -516,6 +708,29 @@ def run_controlled_complete_ad_reasoning_resume(
         compatibility_mode = bool(state.get("methodologyCompatibilityMode"))
         strategy = state["strategyFoundation"]
         report["strategyReused"] = True
+
+        if (
+            canonical_plan.get("resolvedResumeStage") == RESUME_STAGE_JUDGE_GENERATION
+            and not canonical_plan.get("missingCreatorPrototypeIds")
+        ):
+            current_stage = RESUME_STAGE_JUDGE_GENERATION
+            product_name = _clean(strategy.get("productNameResolved") or state.get("productNameResolved") or "Product")
+            product_description = _clean(state.get("productDescription") or "Product description")
+            language = _clean(state.get("contentLanguage") or state.get("language") or strategy.get("language") or "he")
+            return _execute_judge_generation_resume(
+                state=state,
+                job_id=job_id,
+                report=report,
+                budget=budget,
+                strategy=strategy,
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                compatibility_mode=compatibility_mode,
+                llm_client=llm_client,
+                lease_acquired=lease_acquired,
+                stop_after_judges=True,
+            )
 
         if _controlled_reasoning_already_complete(state):
             winner_id = _clean(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId"))
