@@ -53,6 +53,41 @@ HEADLINE_OMIT_EXCLUDED_FIELD_PREFIXES = frozenset(
     }
 )
 
+_SCOPE_RESET_PATTERN = re.compile(
+    r"(?i)(?:[,;]\s*)?\b(?:but|however|instead|although|though|yet)\b"
+)
+_WHILE_POSITIVE_DISPLAY = re.compile(
+    r"(?i)\bwhile\s+(?:the\s+)?(?:title card|caption|headline|overlay|text|sign|subtitle)\b"
+)
+_POSITIVE_DISPLAY_IN_SEGMENT = re.compile(
+    r"(?i)\b(?:then|after that|at the end,?\s*)?"
+    r"(?:display|show|render|superimpose|burn(?:-in)?|include|add|feature|present|place|put|write)\b"
+)
+_INDEPENDENT_POSITIVE_CLAUSE_IN_PREFIX = re.compile(
+    r"(?i)(?:,\s*|\s+)(?:then|at the end,?\s*)?"
+    r"(?:(?:the\s+)?(?:viewer|audience)\s+(?:must\s+)?(?:read|reads|reading)|"
+    r"(?:display|show|render|superimpose)\b)"
+)
+_LIST_CONJUNCTION = re.compile(r"(?i)\b(?:and|or|nor)\b")
+_MODIFIER_ONLY_PREFIX = re.compile(
+    r"(?i)^(?:(?:any|visible|readable|written|an?|the|a)\s+)+$"
+)
+_GOVERNING_NEGATIVE_AT_CLAUSE_START = (
+    (
+        re.compile(
+            r"(?is)^(do not|don't|don`t)\s+"
+            r"(show|display|render|include|add|superimpose|use|feature|present|write|place|put)\b"
+        ),
+        "do_not_action",
+    ),
+    (re.compile(r"(?i)^(without|avoid|exclude|never|ban|forbidden|prohibited)\b"), "without"),
+    (re.compile(r"(?i)^neither\b"), "neither"),
+    (re.compile(r"(?i)^no\b"), "no"),
+    (re.compile(r"(?i)^not\b"), "not"),
+)
+_MAX_COORDINATED_LIST_ITEMS = 8
+_MAX_COORDINATED_LIST_ITEM_CHARS = 64
+_MAX_CONTAINING_SENTENCE_CHARS = 320
 _NEGATION_WINDOW_CHARS = 96
 _CONTEXT_SNIPPET_CHARS = 48
 
@@ -165,6 +200,166 @@ def _safe_context_snippet(text: str, start: int, end: int) -> tuple[str, str]:
     return before, after
 
 
+def _truncate_for_inspector(text: str, *, max_chars: int) -> str:
+    cleaned = re.sub(r"\s+", " ", text.strip())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[: max_chars - 3] + "..."
+
+
+def _absolute_sentence_bounds(text: str, pos: int) -> tuple[int, int]:
+    sent_start = 0
+    for match in re.finditer(r"[.!?]\s+", text):
+        if match.end() <= pos:
+            sent_start = match.end()
+        else:
+            break
+    sent_end = len(text)
+    tail = re.search(r"[.!?](?:\s+|$)", text[pos:])
+    if tail:
+        sent_end = pos + tail.end()
+    return sent_start, sent_end
+
+
+def _absolute_clause_bounds(text: str, pos: int) -> tuple[int, int]:
+    clause_start = 0
+    for match in re.finditer(r"[.!?;]\s*", text):
+        if match.end() <= pos:
+            clause_start = match.end()
+        else:
+            break
+    clause_end = len(text)
+    tail = re.search(r"[.!?;]", text[pos:])
+    if tail:
+        idx = pos + tail.start()
+        if text[idx] == ";":
+            clause_end = idx
+        else:
+            clause_end = pos + tail.end()
+    return clause_start, clause_end
+
+
+def _scope_reset_in_segment(segment: str) -> bool:
+    if _SCOPE_RESET_PATTERN.search(segment):
+        return True
+    return bool(_WHILE_POSITIVE_DISPLAY.search(segment))
+
+
+def _positive_display_in_segment(segment: str) -> bool:
+    return bool(_POSITIVE_DISPLAY_IN_SEGMENT.search(segment))
+
+
+def _find_governing_negative_phrase(clause: str, *, clause_start: int) -> Optional[Dict[str, Any]]:
+    leading = len(clause) - len(clause.lstrip())
+    stripped = clause.lstrip()
+    for pattern, token in _GOVERNING_NEGATIVE_AT_CLAUSE_START:
+        match = pattern.match(stripped)
+        if not match:
+            continue
+        abs_start = clause_start + leading + match.start()
+        abs_end = clause_start + leading + match.end()
+        return {
+            "governingPolarityPhrase": match.group(0).strip(),
+            "governingPolarityStart": abs_start,
+            "governingPolarityEnd": abs_end,
+            "negationToken": token,
+        }
+    return None
+
+
+def _extract_bounded_list_items(list_text: str) -> list[str]:
+    parts = re.split(r"(?i)\s*,\s*|\s+(?:and|or|nor)\s+", list_text)
+    items: list[str] = []
+    for part in parts:
+        item = _truncate_for_inspector(part, max_chars=_MAX_COORDINATED_LIST_ITEM_CHARS)
+        if not item:
+            continue
+        items.append(item)
+        if len(items) >= _MAX_COORDINATED_LIST_ITEMS:
+            break
+    return items
+
+
+def _empty_scope_inspector_fields(*, text: str, start: int, end: int) -> Dict[str, Any]:
+    sent_start, sent_end = _absolute_sentence_bounds(text, start)
+    clause_start, clause_end = _absolute_clause_bounds(text, start)
+    return {
+        "containingSentence": _truncate_for_inspector(
+            text[sent_start:sent_end],
+            max_chars=_MAX_CONTAINING_SENTENCE_CHARS,
+        ),
+        "containingClause": _truncate_for_inspector(
+            text[clause_start:clause_end],
+            max_chars=_MAX_CONTAINING_SENTENCE_CHARS,
+        ),
+        "governingPolarityPhrase": "",
+        "governingPolarityStart": None,
+        "governingPolarityEnd": None,
+        "coordinatedListDetected": False,
+        "coordinatedListItems": [],
+        "conjunctionBeforeMatch": "",
+        "scopeTerminationReason": "",
+        "classificationReason": "",
+    }
+
+
+def _detect_coordinated_prohibition(text: str, start: int, end: int) -> Optional[Dict[str, Any]]:
+    clause_start, clause_end = _absolute_clause_bounds(text, start)
+    sent_start, sent_end = _absolute_sentence_bounds(text, start)
+    clause = text[clause_start:clause_end]
+    rel_match = start - clause_start
+
+    governing = _find_governing_negative_phrase(clause, clause_start=clause_start)
+    if not governing:
+        return None
+
+    rel_gov_end = governing["governingPolarityEnd"] - clause_start
+    prefix = clause[rel_gov_end:rel_match]
+    if rel_gov_end > rel_match:
+        return None
+
+    if _scope_reset_in_segment(prefix):
+        return None
+    if _positive_display_in_segment(prefix):
+        return None
+    if _INDEPENDENT_POSITIVE_CLAUSE_IN_PREFIX.search(prefix):
+        return None
+    if re.search(r"[.!?;]", prefix):
+        return None
+
+    stripped_prefix = prefix.strip()
+    if not stripped_prefix:
+        return None
+
+    coordinated = "," in stripped_prefix or bool(_LIST_CONJUNCTION.search(stripped_prefix))
+    if not coordinated and not _MODIFIER_ONLY_PREFIX.match(stripped_prefix):
+        return None
+
+    conjunction = ""
+    conjunction_matches = list(_LIST_CONJUNCTION.finditer(prefix))
+    if conjunction_matches:
+        conjunction = conjunction_matches[-1].group(0).lower()
+
+    list_text = clause[rel_gov_end: end - clause_start]
+    return {
+        "containingSentence": _truncate_for_inspector(
+            text[sent_start:sent_end],
+            max_chars=_MAX_CONTAINING_SENTENCE_CHARS,
+        ),
+        "containingClause": _truncate_for_inspector(clause, max_chars=_MAX_CONTAINING_SENTENCE_CHARS),
+        "governingPolarityPhrase": governing["governingPolarityPhrase"],
+        "governingPolarityStart": governing["governingPolarityStart"],
+        "governingPolarityEnd": governing["governingPolarityEnd"],
+        "coordinatedListDetected": True,
+        "coordinatedListItems": _extract_bounded_list_items(list_text),
+        "conjunctionBeforeMatch": conjunction,
+        "scopeTerminationReason": "",
+        "classificationReason": "coordinated_prohibition",
+        "negationToken": governing["negationToken"],
+        "negationDistance": start - governing["governingPolarityStart"],
+    }
+
+
 def _detect_negation_before_match(text: str, start: int) -> tuple[bool, str, Optional[int]]:
     before = text[max(0, start - _NEGATION_WINDOW_CHARS): start]
     normalized_before = before.rstrip()
@@ -210,28 +405,54 @@ def _classify_textual_dependency_match(
     matched_text = match.group(0)
     normalized_matched = re.sub(r"\s+", " ", matched_text.strip().lower())
     context_before, context_after = _safe_context_snippet(text, start, end)
+    scope_fields = _empty_scope_inspector_fields(text=text, start=start, end=end)
+    coordinated = _detect_coordinated_prohibition(text, start, end)
+    if coordinated and category in _INHERENTLY_POSITIVE_CATEGORIES:
+        coordinated = None
     negated, negation_token, negation_distance = _detect_negation_before_match(text, start)
     positive_action_verb = _positive_action_verb_before_match(text, start)
-    if negated and _headline_requirement_overrides_negation(text, start, category):
+    classification_reason = ""
+    scope_termination_reason = ""
+
+    if coordinated:
+        scope_fields.update(coordinated)
+        negated = True
+        negation_token = coordinated["negationToken"]
+        negation_distance = coordinated["negationDistance"]
+        classification_reason = coordinated["classificationReason"]
+    elif negated and _headline_requirement_overrides_negation(text, start, category):
         negated = False
         negation_token = ""
         negation_distance = None
+        classification_reason = "requirement_overrides_negation"
+    elif not negated and not positive_action_verb:
+        sent_start, sent_end = _absolute_sentence_bounds(text, start)
+        clause_start, clause_end = _absolute_clause_bounds(text, start)
+        prefix = text[clause_start:start]
+        if _scope_reset_in_segment(prefix):
+            scope_termination_reason = "contrast_marker"
+        elif _positive_display_in_segment(prefix):
+            scope_termination_reason = "positive_display_verb"
 
     if negated:
         polarity = "negative_instruction"
         requests_rendered = False
         counts_as_dependency = False
-        exclusion_reason = "negative_instruction"
+        exclusion_reason = coordinated["classificationReason"] if coordinated else "negative_instruction"
+        if not classification_reason:
+            classification_reason = exclusion_reason
     elif category in _INHERENTLY_POSITIVE_CATEGORIES or positive_action_verb:
         polarity = "positive_instruction"
         requests_rendered = True
         counts_as_dependency = True
         exclusion_reason = ""
+        classification_reason = "positive_display_instruction"
     else:
         polarity = "ambiguous"
         requests_rendered = True
         counts_as_dependency = True
         exclusion_reason = ""
+        classification_reason = "unresolved_textual_display_phrase"
 
     return {
         "sourceField": field_path,
@@ -253,6 +474,9 @@ def _classify_textual_dependency_match(
         "countsAsPreClosureDependency": counts_as_dependency,
         "prohibitionOnly": polarity == "negative_instruction",
         "exclusionReason": exclusion_reason,
+        "classificationReason": classification_reason,
+        **scope_fields,
+        "scopeTerminationReason": scope_termination_reason or scope_fields.get("scopeTerminationReason", ""),
     }
 
 

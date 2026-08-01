@@ -153,6 +153,11 @@ MIXED_PROMPT = (
     "At the end of the generated scene, display the headline over the object."
 )
 
+PRODUCTION_COORDINATED_LIST_PROMPT = (
+    "No logos, recognizable faces, graphs, advertising symbols, branding or "
+    "on-screen text during the pottery shot. Natural clay texture, warm light."
+)
+
 
 class TestHeadlineOmitPolarityAnalysis(unittest.TestCase):
     def _analyze(self, video_prompt: str) -> Dict[str, Any]:
@@ -244,6 +249,79 @@ class TestHeadlineOmitPolarityAnalysis(unittest.TestCase):
             report["videoPromptRequestsRenderedText"],
             analysis["videoPromptRequestsRenderedText"],
         )
+
+
+class TestCoordinatedProhibitionList(unittest.TestCase):
+    def _analyze(self, video_prompt: str) -> Dict[str, Any]:
+        plan = _production_summer_fan_parsed_plan(video_prompt=video_prompt)
+        return analyze_headline_omit_textual_dependency(plan)
+
+    def test_production_coordinated_list_on_screen_text_is_negative(self) -> None:
+        analysis = self._analyze(PRODUCTION_COORDINATED_LIST_PROMPT)
+        self.assertFalse(analysis["dependencyBeforeClosure"])
+        self.assertEqual(analysis["ambiguousTextualDependencyMatches"], [])
+        match = analysis["negativeTextualDependencyMatches"][0]
+        self.assertEqual(match["category"], "on_screen_text")
+        self.assertEqual(match["matchedText"], "on-screen text")
+        self.assertEqual(match["polarity"], "negative_instruction")
+        self.assertEqual(match["exclusionReason"], "coordinated_prohibition")
+        self.assertEqual(match["classificationReason"], "coordinated_prohibition")
+        self.assertEqual(match["governingPolarityPhrase"], "No")
+        self.assertTrue(match["coordinatedListDetected"])
+        self.assertEqual(match["conjunctionBeforeMatch"], "or")
+        self.assertIn("on-screen text", match["containingSentence"])
+
+    def test_coordinated_list_examples_are_negative(self) -> None:
+        prompts = (
+            "No logos, captions, branding, or on-screen text.",
+            "Without labels, written words, captions, or title cards.",
+            "Avoid logos, interfaces, text overlays, and subtitles.",
+            "Exclude graphs, numbers, labels and on-screen text.",
+            "Do not include logos, branding, captions or written words.",
+            "Neither labels nor captions appear.",
+            "No text, captions, title cards, or other written material.",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                analysis = self._analyze(prompt)
+                self.assertFalse(analysis["dependencyBeforeClosure"], prompt)
+
+    def test_contrast_resets_coordinated_scope(self) -> None:
+        analysis = self._analyze("No logos or branding, but display on-screen text.")
+        self.assertTrue(analysis["dependencyBeforeClosure"])
+        self.assertTrue(analysis["videoPromptPositiveRenderedTextRequest"])
+
+    def test_semicolon_clause_boundary_blocks_cross_clause_negation(self) -> None:
+        analysis = self._analyze("Avoid captions in the opening; at the end, show the headline.")
+        self.assertTrue(analysis["dependencyBeforeClosure"])
+
+    def test_unresolved_phrases_remain_ambiguous(self) -> None:
+        for prompt in (
+            "on-screen text during the final movement",
+            "caption at the end",
+        ):
+            with self.subTest(prompt=prompt):
+                analysis = self._analyze(prompt)
+                self.assertTrue(analysis["dependencyBeforeClosure"])
+                self.assertEqual(analysis["ambiguousTextualDependencyMatches"][0]["polarity"], "ambiguous")
+
+    def test_independent_positive_clause_after_comma_is_not_negated(self) -> None:
+        analysis = self._analyze("Without branding, the viewer reads the written sign.")
+        self.assertTrue(analysis["dependencyBeforeClosure"])
+        self.assertEqual(analysis["positiveTextualDependencyMatches"][0]["category"], "viewer_reads")
+
+    def test_production_coordinated_list_inspector_matches_validator(self) -> None:
+        state = _production_summer_fan_state(video_prompt=PRODUCTION_COORDINATED_LIST_PROMPT)
+        report = inspect_offline_winner_salvage_preconditions(state)
+        analysis = self._analyze(PRODUCTION_COORDINATED_LIST_PROMPT)
+        self.assertEqual(report["dependencyBeforeClosure"], analysis["dependencyBeforeClosure"])
+        self.assertTrue(report["wouldPassCorrectedHeadlineContract"])
+        self.assertTrue(report["offlineWinnerSalvagePossible"])
+        match = report["negativeTextualDependencyMatches"][0]
+        self.assertEqual(match["classificationReason"], "coordinated_prohibition")
+        self.assertTrue(match["coordinatedListDetected"])
+        self.assertEqual(report["openAICalls"], 0)
+        self.assertFalse(report["stateMutated"])
 
 
 class TestHeadlineOmitDependencyAnalyzer(unittest.TestCase):
