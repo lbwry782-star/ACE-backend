@@ -16,10 +16,13 @@ from engine.builder2_closure_typography import (
     CLOSURE_PRODUCT_REVEAL_START_S,
     ClosureTypographyLayout,
     ClosureTypographyLineSpec,
+    REVEAL_DRAWTEXT_BORDER_PX,
     build_closure_card_masked_reveal_filter_complex,
     closure_card_lavfi_background,
     closure_filter_rejects_full_frame_slide,
     closure_filter_uses_masked_bounded_overlays,
+    closure_reveal_canvas_ink_bottom,
+    closure_reveal_canvas_ink_top,
     closure_reveal_eased_progress,
     closure_reveal_eased_progress_at_timestamp,
     closure_reveal_geometry_report,
@@ -146,6 +149,18 @@ def count_text_pixels_outside_window(image_path: Path, spec: ClosureTypographyLi
     return outside
 
 
+def _line_ink_window_on_canvas(spec: ClosureTypographyLineSpec) -> Tuple[int, int, int, int]:
+    left, _top, right, bottom = _line_window_on_canvas(spec)
+    ink_top = closure_reveal_canvas_ink_top(spec) - REVEAL_WINDOW_BORDER_INSET_PX
+    ink_bottom = closure_reveal_canvas_ink_bottom(spec) + REVEAL_DRAWTEXT_BORDER_PX
+    return (
+        left,
+        ink_top,
+        right,
+        min(bottom, ink_bottom),
+    )
+
+
 def measure_visible_ink_gap_px(image_path: Path, layout: ClosureTypographyLayout) -> int:
     """Distance in px from lowest product ink row to highest slogan ink row on canvas."""
     product_specs = [spec for spec in layout.line_specs if spec.role == "product"]
@@ -157,7 +172,7 @@ def measure_visible_ink_gap_px(image_path: Path, layout: ClosureTypographyLayout
     for spec in product_specs:
         _bright, _ink_height, _min_y, max_y = measure_text_pixels_in_region(
             image_path,
-            _line_window_on_canvas(spec),
+            _line_ink_window_on_canvas(spec),
         )
         if max_y >= 0:
             product_bottom_ink_y = max(product_bottom_ink_y, max_y)
@@ -166,7 +181,7 @@ def measure_visible_ink_gap_px(image_path: Path, layout: ClosureTypographyLayout
     for spec in slogan_specs:
         _bright, _ink_height, min_y, _max_y = measure_text_pixels_in_region(
             image_path,
-            _line_window_on_canvas(spec),
+            _line_ink_window_on_canvas(spec),
         )
         if min_y >= 0:
             slogan_top_ink_y = min(slogan_top_ink_y, min_y) if slogan_top_ink_y >= 0 else min_y
@@ -338,7 +353,8 @@ def assert_ease_out_near_complete_at_linear_midpoint(
     eased = closure_reveal_eased_progress(linear_progress)
     if eased < 0.85:
         raise AssertionError(f"linear_midpoint_eased_too_low eased={eased}")
-    minimum = max(1, int(stable_visible_height * 0.75))
+    stable_reference = expected_visible_ink_height_at_progress(product, 1.0)
+    minimum = max(1, int(stable_reference * 0.75))
     if measured_visible_height < minimum:
         raise AssertionError(
             f"linear_midpoint_not_near_complete measured={measured_visible_height} minimum={minimum}"

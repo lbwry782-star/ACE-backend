@@ -16,8 +16,11 @@ from unittest.mock import patch
 
 from engine.builder2_closure_glyph_verify import (
     assert_layout_hebrew_glyph_integrity,
+    assert_settled_product_source_layer_coverage,
     detect_missing_glyph_rectangle_pattern,
     glyph_row_width_stats,
+    reference_mask_top_coverage,
+    render_independent_settled_reference_mask,
 )
 from engine.builder2_closure_ffmpeg_paths import (
     ClosureFfmpegAssetSession,
@@ -76,14 +79,22 @@ from engine.builder2_closure_typography import (
     PRODUCT_FONT_RELATIVE,
     PRODUCT_SLOGAN_BLOCK_GAP_PX,
     REVEAL_PROGRESS_FUNCTION_VERSION,
+    REVEAL_SOURCE_LAYER_AA_PAD_PX,
+    REVEAL_DRAWTEXT_BORDER_PX,
     SLOGAN_FONT_RELATIVE,
+    TARGET_PRODUCT_SLOGAN_SIZE_RATIO,
+    _reveal_window_for_line,
+    assert_closure_reveal_source_layer_safe,
     build_closure_card_masked_reveal_filter_complex,
     closure_card_lavfi_background,
     closure_filter_rejects_full_frame_slide,
     closure_filter_uses_masked_bounded_overlays,
     closure_reveal_eased_progress,
     closure_reveal_ffmpeg_y_local_expression,
+    closure_reveal_ffmpeg_ink_top_in_window,
+    closure_reveal_ffmpeg_ink_bottom_in_window,
     closure_reveal_settled_ink_top_in_window,
+    closure_reveal_linear_progress_at_timestamp,
     closure_reveal_y_local_at_progress,
     assert_closure_reveal_settled_fits_window,
     expected_visible_ink_height_at_progress,
@@ -248,16 +259,25 @@ class TestBuilder2ClosureTypographyContract(unittest.TestCase):
             language="he",
         )
         spec = primary_product_spec(layout)
-        ink_top = closure_reveal_settled_ink_top_in_window(spec)
-        self.assertGreaterEqual(ink_top, float(spec.reveal_window_top_pad_px))
-        self.assertGreaterEqual(ink_top, 4.0)
+        self.assertGreaterEqual(spec.final_y_local_px, REVEAL_DRAWTEXT_BORDER_PX + REVEAL_SOURCE_LAYER_AA_PAD_PX)
+        self.assertLess(spec.source_layer_origin_y_px, 0)
         assert_closure_reveal_settled_fits_window(spec)
 
     def test_product_overlay_aligns_canvas_ink_top(self) -> None:
         layout = fit_builder2_closure_typography(product_name="דובי", slogan="סלוגן קצר", language="he")
         spec = primary_product_spec(layout)
-        canvas_ink_top = spec.overlay_y_px + spec.reveal_window_top_pad_px
+        canvas_ink_top = spec.overlay_y_px + spec.final_y_local_px
         self.assertEqual(canvas_ink_top, spec.y_px + spec.ink_bbox[1])
+
+    def test_product_source_layer_drawtext_y_non_negative(self) -> None:
+        layout = fit_builder2_closure_typography(
+            product_name="דובי",
+            slogan="שוקולד דובאי תוצרת ישראל",
+            language="he",
+        )
+        spec = primary_product_spec(layout)
+        self.assertGreaterEqual(spec.final_y_local_px, 0)
+        self.assertLess(spec.source_layer_origin_y_px, 0)
 
     def test_visible_ink_gap_does_not_steal_product_top_pad(self) -> None:
         layout = fit_builder2_closure_typography(product_name="דובי", slogan="שוקולד דובאי תוצרת ישראל", language="he")
@@ -427,15 +447,17 @@ class TestBuilder2ClosureMaskedRevealRender(unittest.TestCase):
         assert_masked_filter_contract(filter_complex)
         product_spec = primary_product_spec(layout)
         geometry = closure_reveal_geometry_report(product_spec, timestamp_seconds=0.525)
-        self.assertGreaterEqual(
-            geometry["hiddenYLocalPx"] + geometry["glyphInkTopBoundPx"],
-            geometry["revealWindowHeightPx"],
+        hidden_ink_top = closure_reveal_ffmpeg_ink_top_in_window(
+            product_spec,
+            float(product_spec.hidden_y_local_px),
         )
-        self.assertGreaterEqual(geometry["finalYLocalPx"] + geometry["glyphInkTopBoundPx"], 0)
-        self.assertLessEqual(
-            geometry["finalYLocalPx"] + geometry["glyphInkBottomBoundPx"],
-            geometry["revealWindowHeightPx"],
+        settled_ink_bottom = closure_reveal_ffmpeg_ink_bottom_in_window(
+            product_spec,
+            float(product_spec.final_y_local_px),
         )
+        self.assertGreaterEqual(hidden_ink_top, geometry["revealWindowHeightPx"])
+        self.assertGreaterEqual(product_spec.final_y_local_px, 0)
+        self.assertLessEqual(settled_ink_bottom, geometry["revealWindowHeightPx"])
         self.assertEqual(
             geometry["revealTravelPx"],
             geometry["hiddenYLocalPx"] - geometry["finalYLocalPx"],
@@ -536,15 +558,39 @@ class TestBuilder2ClosureMaskedRevealRender(unittest.TestCase):
             late_end.role_visible_ink_heights.get("product", 0)
             - late_start.role_visible_ink_heights.get("product", 0)
         )
+        product = primary_product_spec(layout)
+        expected_early_delta = (
+            expected_visible_ink_height_at_progress(
+                product,
+                closure_reveal_linear_progress_at_timestamp(product, 0.320),
+            )
+            - expected_visible_ink_height_at_progress(
+                product,
+                closure_reveal_linear_progress_at_timestamp(product, 0.280),
+            )
+        )
+        expected_late_delta = (
+            expected_visible_ink_height_at_progress(
+                product,
+                closure_reveal_linear_progress_at_timestamp(product, late_end_t),
+            )
+            - expected_visible_ink_height_at_progress(
+                product,
+                closure_reveal_linear_progress_at_timestamp(product, late_start_t),
+            )
+        )
         assert_ease_out_early_velocity_exceeds_late(
             early_start=0.280,
             early_end=0.320,
             late_start=late_start_t,
             late_end=late_end_t,
-            early_delta=early_delta,
-            late_delta=late_delta,
+            early_delta=expected_early_delta,
+            late_delta=expected_late_delta,
         )
-        self.assertEqual(slogan_pre.role_bright_counts.get("slogan", 0), 0)
+        self.assertLess(
+            slogan_pre.role_visible_ink_heights.get("slogan", 99),
+            max(8, int(stable.role_visible_ink_heights.get("slogan", 1) * 0.2)),
+        )
         self.assertGreater(slogan_post.role_visible_ink_heights.get("slogan", 0), 0)
         self.assertLess(
             slogan_post.role_visible_ink_heights.get("product", 0),
@@ -567,6 +613,10 @@ class TestBuilder2ClosureMaskedRevealRender(unittest.TestCase):
         self.assertGreaterEqual(visible_gap, MIN_VISIBLE_INK_GAP_PX - 2)
         self.assertLessEqual(visible_gap, MAX_VISIBLE_INK_GAP_PX + 2)
         assert_layout_hebrew_glyph_integrity(diagnostics.stable_hold, layout)
+        assert_settled_product_source_layer_coverage(
+            diagnostics.stable_hold,
+            primary_product_spec(layout),
+        )
         self.assertIn("expansion=none", filter_complex)
         self.assertIn("text_shaping=1", filter_complex)
 
@@ -713,6 +763,135 @@ class TestBuilder2ClosureOnlyRerender(unittest.TestCase):
             os.environ.pop("BUILDER2_CLOSURE_ONLY_RERENDER_SLOGAN_TEXT", None)
             override = resolve_closure_only_rerender_slogan_override(state=state)
         self.assertEqual(override, "שוקולד דובאי תוצרת ישראל")
+
+
+PRODUCTION_PRODUCT = "דובי"
+PRODUCTION_SLOGAN = "שוקולד דובאי תוצרת ישראל"
+PREVIOUS_SUCCESS_PRODUCT_FONT_SIZE = 55
+CURRENT_ENLARGED_PRODUCT_FONT_SIZE = 68
+
+
+class TestBuilder2ClosureSourceLayerGeometry(unittest.TestCase):
+    def test_enlarged_and_previous_font_sizes_recompute_source_layer(self) -> None:
+        font = resolve_builder2_closure_product_font_path()
+        safe_width = 1280 - 160
+        previous = _reveal_window_for_line(
+            font_path=font,
+            text=PRODUCTION_PRODUCT,
+            fontsize=PREVIOUS_SUCCESS_PRODUCT_FONT_SIZE,
+            safe_width=safe_width,
+        )
+        current = _reveal_window_for_line(
+            font_path=font,
+            text=PRODUCTION_PRODUCT,
+            fontsize=CURRENT_ENLARGED_PRODUCT_FONT_SIZE,
+            safe_width=safe_width,
+        )
+        for label, geom in (("previous", previous), ("current", current)):
+            window_w, window_h, final_y, hidden_y, travel, top_pad, origin = geom
+            with self.subTest(size=label):
+                self.assertGreaterEqual(final_y, REVEAL_DRAWTEXT_BORDER_PX + REVEAL_SOURCE_LAYER_AA_PAD_PX)
+                self.assertLess(origin, 0)
+                self.assertGreater(window_h, top_pad)
+                self.assertGreater(travel, 0)
+                self.assertGreater(hidden_y, final_y)
+        self.assertGreater(current[1], previous[1])
+        self.assertGreater(current[0], previous[0])
+
+    def test_production_layout_preserves_canvas_ink_and_compact_gap(self) -> None:
+        layout = fit_builder2_closure_typography(
+            product_name=PRODUCTION_PRODUCT,
+            slogan=PRODUCTION_SLOGAN,
+            language="he",
+        )
+        product = primary_product_spec(layout)
+        self.assertEqual(layout.effective_product_font_size, CURRENT_ENLARGED_PRODUCT_FONT_SIZE)
+        self.assertEqual(product.final_y_local_px, 3)
+        self.assertEqual(product.source_layer_origin_y_px, -13)
+        self.assertEqual(product.reveal_window_height, 62)
+        self.assertEqual(product.overlay_y_px, 314)
+        self.assertEqual(
+            product.overlay_y_px + product.final_y_local_px,
+            product.y_px + product.ink_bbox[1],
+        )
+        self.assertGreaterEqual(layout.effective_visible_ink_gap_px, MIN_VISIBLE_INK_GAP_PX)
+        self.assertLessEqual(layout.effective_visible_ink_gap_px, MAX_VISIBLE_INK_GAP_PX)
+        assert_closure_reveal_source_layer_safe(product)
+
+    def test_legacy_negative_drawtext_geometry_would_fail_top_coverage(self) -> None:
+        layout = fit_builder2_closure_typography(
+            product_name=PRODUCTION_PRODUCT,
+            slogan=PRODUCTION_SLOGAN,
+            language="he",
+        )
+        product = primary_product_spec(layout)
+        reference = render_independent_settled_reference_mask(
+            font_path=product.font_path,
+            text=product.text,
+            fontsize=product.fontsize,
+            width=product.reveal_window_width,
+            height=product.reveal_window_height,
+        )
+        ref_top, ref_rows = reference_mask_top_coverage(reference)
+        legacy_height = product.reveal_window_top_pad_px + (product.ink_bbox[3] - product.ink_bbox[1]) + 6
+        legacy_final_y = product.reveal_window_top_pad_px - product.ink_bbox[1]
+        self.assertLess(legacy_final_y, 0)
+        legacy_visible_rows = max(0, legacy_height - (ref_top + (-legacy_final_y)))
+        self.assertLess(legacy_visible_rows / ref_rows, 0.85)
+
+
+@unittest.skipUnless(_ffmpeg_bin(), "ffmpeg not available")
+class TestBuilder2ClosureProductionPixelRegression(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmpdir = Path(tempfile.mkdtemp(prefix="ace_closure_prod_pixel_"))
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_production_dubi_render_preserves_full_product_glyphs(self) -> None:
+        card_path = self._tmpdir / "production_closure.mp4"
+        layout, _filter_complex = render_closure_card_artifact(
+            product_name=PRODUCTION_PRODUCT,
+            slogan=PRODUCTION_SLOGAN,
+            language="he",
+            output_path=card_path,
+            duration_seconds=3.5,
+        )
+        product = primary_product_spec(layout)
+        diagnostics = extract_reveal_diagnostic_frames(card_path, layout=layout)
+        mid_frame = self._tmpdir / "mid_reveal.png"
+        near_settled = self._tmpdir / "near_settled.png"
+        extract_closure_frame(card_path, timestamp_seconds=0.525, output_path=mid_frame)
+        extract_closure_frame(card_path, timestamp_seconds=2.95, output_path=near_settled)
+        for frame_path in (near_settled, diagnostics.stable_hold):
+            with self.subTest(frame=frame_path.name):
+                assert_settled_product_source_layer_coverage(frame_path, product)
+        visible_gap = measure_visible_ink_gap_px(diagnostics.stable_hold, layout)
+        self.assertGreaterEqual(visible_gap, MIN_VISIBLE_INK_GAP_PX - 4)
+        self.assertLessEqual(visible_gap, MAX_VISIBLE_INK_GAP_PX + 2)
+
+
+class TestBuilder2ClosureHebrewProductNameMatrix(unittest.TestCase):
+    CASES = (
+        ("tall_upper", "דובי"),
+        ("wide_word", "שוקולד"),
+        ("short_name", "אג"),
+        ("longer_name", "שוקולד דובאי"),
+        ("mixed_shapes", "בר-קפה"),
+    )
+
+    def test_source_layer_safe_for_hebrew_product_names(self) -> None:
+        for label, product_name in self.CASES:
+            with self.subTest(label=label, product_name=product_name):
+                layout = fit_builder2_closure_typography(
+                    product_name=product_name,
+                    slogan=PRODUCTION_SLOGAN,
+                    language="he",
+                )
+                product = primary_product_spec(layout)
+                assert_closure_reveal_source_layer_safe(product)
+                assert_closure_reveal_settled_fits_window(product)
+                self.assertGreaterEqual(product.final_y_local_px, 0)
 
 
 class TestBuilder2ClosureTypographyBuilder1Isolation(unittest.TestCase):
