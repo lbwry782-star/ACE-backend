@@ -4,6 +4,9 @@ Builder2 Winner headline omit dependency and offline salvage — production-shap
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
+import re
 import unittest
 from copy import deepcopy
 from typing import Any, Dict
@@ -12,10 +15,15 @@ from unittest.mock import patch
 from engine.builder2_headline_decision_contract import (
     analyze_headline_omit_textual_dependency,
     validate_headline_decision_methodology,
+    winner_plan_has_pre_closure_textual_dependency,
 )
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_tournament_metrics import ensure_metrics
-from engine.builder2_single_slogan_contract import stamp_single_slogan_contract
+from engine.builder2_single_slogan_contract import (
+    BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION,
+    stamp_single_slogan_contract,
+    validate_single_slogan_plan_contract,
+)
 from engine.builder2_tournament_contracts import Builder2TournamentError, TOURNAMENT_STATE_SCHEMA_VERSION
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store
 from engine.builder2_winner_offline_salvage import (
@@ -135,6 +143,109 @@ def _production_summer_fan_state(*, video_prompt: str) -> Dict[str, Any]:
     return state
 
 
+NEGATIVE_ONLY_PROMPT = (
+    "Continuous realistic event: a hand waves quickly, the cooling absence becomes readable. "
+    "No on-screen text during the scene. No text overlay. Purely pictorial motion."
+)
+
+MIXED_PROMPT = (
+    "No on-screen text in the opening. "
+    "At the end of the generated scene, display the headline over the object."
+)
+
+
+class TestHeadlineOmitPolarityAnalysis(unittest.TestCase):
+    def _analyze(self, video_prompt: str) -> Dict[str, Any]:
+        plan = _production_summer_fan_parsed_plan(video_prompt=video_prompt)
+        return analyze_headline_omit_textual_dependency(plan)
+
+    def test_no_on_screen_text_is_negative_only(self) -> None:
+        analysis = self._analyze("No on-screen text during the scene.")
+        self.assertFalse(analysis["dependencyBeforeClosure"])
+        self.assertEqual(analysis["positiveTextualDependencyMatches"], [])
+        self.assertTrue(analysis["negativeTextualDependencyMatches"])
+
+    def test_no_text_overlay_is_negative_only(self) -> None:
+        analysis = self._analyze("Silent motion. No text overlay.")
+        self.assertFalse(analysis["dependencyBeforeClosure"])
+        self.assertTrue(analysis["videoPromptNegativeTextInstructionOnly"])
+
+    def test_do_not_display_captions_is_negative_only(self) -> None:
+        analysis = self._analyze("Do not display captions during the scene.")
+        self.assertFalse(analysis["dependencyBeforeClosure"])
+
+    def test_without_written_words_is_negative_only(self) -> None:
+        analysis = self._analyze("Without any written words in the scene.")
+        self.assertFalse(analysis["dependencyBeforeClosure"])
+
+    def test_avoid_title_cards_is_negative_only(self) -> None:
+        analysis = self._analyze("Avoid title cards throughout.")
+        self.assertFalse(analysis["dependencyBeforeClosure"])
+
+    def test_display_the_headline_counts(self) -> None:
+        analysis = self._analyze("At the end, display the headline over the object.")
+        self.assertTrue(analysis["dependencyBeforeClosure"])
+        self.assertTrue(analysis["videoPromptPositiveRenderedTextRequest"])
+
+    def test_caption_says_counts(self) -> None:
+        analysis = self._analyze("The caption says the offer ends tonight.")
+        self.assertTrue(analysis["dependencyBeforeClosure"])
+
+    def test_text_overlay_reveals_counts(self) -> None:
+        analysis = self._analyze("A text overlay reveals the message before the beat lands.")
+        self.assertTrue(analysis["dependencyBeforeClosure"])
+
+    def test_mixed_negative_and_positive_remains_rejected(self) -> None:
+        analysis = self._analyze(MIXED_PROMPT)
+        self.assertTrue(analysis["dependencyBeforeClosure"])
+        self.assertTrue(analysis["videoPromptPositiveRenderedTextRequest"])
+        self.assertFalse(analysis["videoPromptNegativeTextInstructionOnly"])
+
+    def test_unrelated_negation_does_not_clear_later_positive(self) -> None:
+        analysis = self._analyze(MIXED_PROMPT)
+        positive = analysis["positiveTextualDependencyMatches"]
+        self.assertTrue(any(match.get("matchedText") == "display the headline" for match in positive))
+
+    def test_case_and_punctuation_variants(self) -> None:
+        for prompt in (
+            "NO ON-SCREEN TEXT during the scene.",
+            "No text overlay!!!",
+            "Do NOT show on-screen text.",
+        ):
+            with self.subTest(prompt=prompt):
+                analysis = self._analyze(prompt)
+                self.assertFalse(analysis["dependencyBeforeClosure"])
+
+    def test_hebrew_negative_instruction(self) -> None:
+        analysis = self._analyze("ללא on-screen text במהלך הסצנה.")
+        self.assertFalse(analysis["dependencyBeforeClosure"])
+        self.assertEqual(analysis["negativeTextualDependencyMatches"][0]["negationToken"], "hebrew_without")
+
+    def test_match_records_include_polarity_and_offsets(self) -> None:
+        analysis = self._analyze("No on-screen text during the scene.")
+        match = analysis["negativeTextualDependencyMatches"][0]
+        self.assertEqual(match["polarity"], "negative_instruction")
+        self.assertFalse(match["requestsRenderedText"])
+        self.assertFalse(match["countsAsPreClosureDependency"])
+        self.assertEqual(match["sourceField"], "videoPrompt")
+        self.assertIn("contextBefore", match)
+        self.assertIn("characterStart", match)
+        self.assertEqual(match["exclusionReason"], "negative_instruction")
+
+    def test_validator_and_inspector_share_canonical_analysis(self) -> None:
+        plan = _production_summer_fan_parsed_plan(video_prompt=NEGATIVE_ONLY_PROMPT)
+        analysis = analyze_headline_omit_textual_dependency(plan)
+        self.assertFalse(winner_plan_has_pre_closure_textual_dependency(plan))
+        validate_headline_decision_methodology(plan)
+        state = _production_summer_fan_state(video_prompt=NEGATIVE_ONLY_PROMPT)
+        report = inspect_offline_winner_salvage_preconditions(state)
+        self.assertEqual(report["dependencyBeforeClosure"], analysis["dependencyBeforeClosure"])
+        self.assertEqual(
+            report["videoPromptRequestsRenderedText"],
+            analysis["videoPromptRequestsRenderedText"],
+        )
+
+
 class TestHeadlineOmitDependencyAnalyzer(unittest.TestCase):
     def test_silent_policy_prohibition_does_not_trigger_dependency(self) -> None:
         plan = _production_summer_fan_parsed_plan(
@@ -185,12 +296,7 @@ class TestProductionShapedSummerFanWinner(unittest.TestCase):
         disable_memory_store()
 
     def test_production_shaped_plan_passes_after_dependency_fix(self) -> None:
-        state = _production_summer_fan_state(
-            video_prompt=(
-                "Continuous realistic event: a hand waves quickly, the cooling absence becomes readable. "
-                "No on-screen text during the scene. No text overlay. Purely pictorial motion."
-            )
-        )
+        state = _production_summer_fan_state(video_prompt=NEGATIVE_ONLY_PROMPT)
         winner_id = _summer_fan_winner_id(state)
         winner_rec = state["candidates"][winner_id]
         candidate = winner_rec["creatorOutput"]
@@ -211,22 +317,32 @@ class TestProductionShapedSummerFanWinner(unittest.TestCase):
         self.assertEqual(result.get("sceneVariations"), [])
 
     def test_inspector_reports_salvage_possible_for_production_shape(self) -> None:
-        state = _production_summer_fan_state(
-            video_prompt="Silent continuous motion. No on-screen text during the scene."
-        )
+        state = _production_summer_fan_state(video_prompt=NEGATIVE_ONLY_PROMPT)
         report = inspect_offline_winner_salvage_preconditions(state)
         self.assertTrue(report["wouldPassCorrectedHeadlineContract"])
         self.assertTrue(report["offlineWinnerSalvagePossible"])
         self.assertFalse(report["dependencyBeforeClosure"])
+        self.assertEqual(report["positiveTextualDependencyMatches"], [])
+        self.assertEqual(len(report["negativeTextualDependencyMatches"]), 2)
+        self.assertFalse(report["videoPromptRequestsRenderedText"])
         self.assertEqual(report["openAICalls"], 0)
         self.assertEqual(report["paidCalls"], 0)
+        self.assertFalse(report["stateMutated"])
+        self.assertEqual(report["singleSloganContractEvaluationStatus"], "passed")
+        self.assertTrue(report["singleSloganContractSatisfied"])
+
+    def test_inspector_reports_mixed_prompt_blocked(self) -> None:
+        state = _production_summer_fan_state(video_prompt=MIXED_PROMPT)
+        report = inspect_offline_winner_salvage_preconditions(state)
+        self.assertFalse(report["wouldPassCorrectedHeadlineContract"])
+        self.assertFalse(report["offlineWinnerSalvagePossible"])
+        self.assertTrue(report["videoPromptRequestsRenderedText"])
+        self.assertEqual(report["singleSloganContractEvaluationStatus"], "not_reached")
+        self.assertIsNone(report["singleSloganContractSatisfied"])
 
     def test_offline_salvage_zero_openai_calls_and_idempotent(self) -> None:
-        state = _production_summer_fan_state(
-            video_prompt="Silent continuous motion. No on-screen text during the scene."
-        )
+        state = _production_summer_fan_state(video_prompt=NEGATIVE_ONLY_PROMPT)
         winner_id = _summer_fan_winner_id(state)
-        winner_rec = state["candidates"][winner_id]
         with patch("engine.builder2_winner_development.call_builder2_role_json_with_text") as mock_call:
             first = run_offline_winner_salvage_for_job(
                 state["jobId"],
@@ -237,6 +353,14 @@ class TestProductionShapedSummerFanWinner(unittest.TestCase):
         self.assertTrue(first["ok"])
         self.assertTrue(is_valid_persisted_winner_development(state))
         fingerprint_before = first["winnerResponseFingerprint"]
+        self.assertEqual(len(fingerprint_before), 64)
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", fingerprint_before or ""))
+        self.assertEqual(first["winnerResponseCharacterCount"], 7459)
+        parsed = state[PARSED_WINNER_RESPONSE_KEY]["parsed"]
+        expected_parsed = hashlib.sha256(
+            json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(first["winnerParsedResponseFingerprint"], expected_parsed)
         second = run_offline_winner_salvage_for_job(
             state["jobId"],
             tournament_state=state,
@@ -264,6 +388,16 @@ class TestProductionShapedSummerFanWinner(unittest.TestCase):
                 winning_candidate=winner_rec["creatorOutput"],
                 winning_judgment=state["judgments"][winner_rec["judgmentId"]]["judgment"],
             )
+
+    def test_single_slogan_contract_rejects_separate_headline_message(self) -> None:
+        state = _production_summer_fan_state(video_prompt=NEGATIVE_ONLY_PROMPT)
+        plan = _production_summer_fan_parsed_plan(video_prompt=NEGATIVE_ONLY_PROMPT)
+        plan["copyContractVersion"] = BUILDER2_SINGLE_SLOGAN_COPY_CONTRACT_VERSION
+        plan["headline"] = "Second slogan line"
+        plan["headlineCompatibilityAlias"] = False
+        ok, failures = validate_single_slogan_plan_contract(plan, state=state)
+        self.assertFalse(ok)
+        self.assertIn("separate_headline_message_present", failures)
 
 
 class TestContinuousEventNormalizationOrdering(unittest.TestCase):

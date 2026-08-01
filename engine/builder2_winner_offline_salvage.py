@@ -9,6 +9,7 @@ Run offline salvage:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -173,8 +174,19 @@ def inspect_winner_development_recovery_state(
         plan_for_inspect = dict(parsed)
     slogan = resolve_canonical_slogan_text(plan=plan_for_inspect, state=state)
     product = _clean((plan_for_inspect.get("advertisingClosure") or {}).get("productNameText"))
-    ok, _failures = (
-        validate_single_slogan_plan_contract(plan_for_inspect, state=state) if plan_for_inspect else (False, [])
+    inspect_plan = plan_for_inspect if plan_for_inspect else parsed
+    dependency_for_slogan = analyze_headline_omit_textual_dependency(
+        inspect_plan,
+        winning_judgment=judgment if isinstance(judgment, dict) else None,
+    )
+    headline_decision = get_normalized_headline_decision(inspect_plan) if inspect_plan else ""
+    headline_validation_blocked = bool(
+        headline_decision == "omit" and dependency_for_slogan.get("dependencyBeforeClosure")
+    )
+    slogan_status = _evaluate_single_slogan_inspection_status(
+        inspect_plan,
+        state=state,
+        headline_validation_blocked=headline_validation_blocked,
     )
     mirror_status = compatibility_headline_mirror_status(plan_for_inspect, state=state) if plan_for_inspect else "not_required"
     return {
@@ -204,8 +216,7 @@ def inspect_winner_development_recovery_state(
         "headlineDecision": get_normalized_headline_decision(plan_for_inspect) if plan_for_inspect else "",
         "separateHeadlinePresent": separate_headline_present(plan_for_inspect) if plan_for_inspect else False,
         "compatibilityHeadlineMirrorsSlogan": mirror_status,
-        "singleSloganContractSatisfied": ok,
-        "canonicalCopySatisfiedBy": _clean(plan_for_inspect.get("canonicalCopySatisfiedBy")),
+        **slogan_status,
         "offlineSalvageAttempted": bool(offline_salvage_attempted),
         "offlineSalvageValidationPassed": bool(offline_salvage_validation_passed),
         "offlineSalvageFailureField": _clean(offline_salvage_failure_field),
@@ -309,6 +320,30 @@ def attempt_offline_winner_development_salvage(
     return deepcopy(state.get("winnerDevelopmentPlan") or {}), meta
 
 
+def _winner_parsed_response_fingerprint(parsed: Dict[str, Any]) -> str:
+    payload = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _winner_response_identity_fingerprint(state: Dict[str, Any], payload: Dict[str, Any], parsed: Dict[str, Any]) -> str:
+    identity = {
+        "candidateId": _clean(payload.get("candidateId")),
+        "prototypeId": _clean(payload.get("prototypeId")),
+        "topLevelKeyCount": payload.get("topLevelKeyCount"),
+        "topLevelKeys": payload.get("topLevelKeys"),
+        "parsedFingerprint": _winner_parsed_response_fingerprint(parsed),
+    }
+    serialized = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _winner_response_character_count(payload: Dict[str, Any], parsed: Dict[str, Any]) -> int:
+    stored = payload.get("responseCharCount")
+    if isinstance(stored, int) and stored > 0:
+        return stored
+    return len(json.dumps(parsed, ensure_ascii=False, sort_keys=True))
+
+
 def _response_fingerprint(state: Dict[str, Any]) -> Optional[str]:
     payload = load_revalidatable_parsed_winner_response(state)
     if not payload:
@@ -316,7 +351,53 @@ def _response_fingerprint(state: Dict[str, Any]) -> Optional[str]:
     parsed = payload.get("parsed")
     if not isinstance(parsed, dict):
         return None
-    return str(payload.get("responseCharCount") or len(json.dumps(parsed, ensure_ascii=False, sort_keys=True)))
+    return _winner_response_identity_fingerprint(state, payload, parsed)
+
+
+def _parsed_response_fingerprint(state: Dict[str, Any]) -> Optional[str]:
+    payload = load_revalidatable_parsed_winner_response(state)
+    if not payload:
+        return None
+    parsed = payload.get("parsed")
+    if not isinstance(parsed, dict):
+        return None
+    return _winner_parsed_response_fingerprint(parsed)
+
+
+def _evaluate_single_slogan_inspection_status(
+    plan: Dict[str, Any],
+    *,
+    state: Dict[str, Any],
+    headline_validation_blocked: bool,
+) -> Dict[str, Any]:
+    if not plan:
+        return {
+            "singleSloganContractEvaluationStatus": "not_reached",
+            "singleSloganContractFailureReason": "plan_unavailable",
+            "singleSloganContractSatisfied": None,
+            "canonicalCopySatisfiedBy": "",
+        }
+    if headline_validation_blocked:
+        return {
+            "singleSloganContractEvaluationStatus": "not_reached",
+            "singleSloganContractFailureReason": "headline_decision_validation_blocked",
+            "singleSloganContractSatisfied": None,
+            "canonicalCopySatisfiedBy": _clean(plan.get("canonicalCopySatisfiedBy")),
+        }
+    ok, failures = validate_single_slogan_plan_contract(plan, state=state)
+    if ok:
+        return {
+            "singleSloganContractEvaluationStatus": "passed",
+            "singleSloganContractFailureReason": "",
+            "singleSloganContractSatisfied": True,
+            "canonicalCopySatisfiedBy": _clean(plan.get("canonicalCopySatisfiedBy")),
+        }
+    return {
+        "singleSloganContractEvaluationStatus": "failed",
+        "singleSloganContractFailureReason": failures[0] if failures else "builder2_single_slogan_contract_failed",
+        "singleSloganContractSatisfied": False,
+        "canonicalCopySatisfiedBy": _clean(plan.get("canonicalCopySatisfiedBy")),
+    }
 
 
 def _prepare_inspection_plan(
@@ -368,6 +449,8 @@ def inspect_offline_winner_salvage_preconditions(state: Dict[str, Any]) -> Dict[
     winning_judgment = ((state.get("judgments") or {}).get(judgment_id) or {}).get("judgment") or {}
     winning_candidate = winner_rec.get("creatorSnapshot") or winner_rec.get("creatorOutput") or {}
     dependency = analyze_headline_omit_textual_dependency(parsed, winning_judgment=winning_judgment)
+    parsed_payload_dict = parsed_payload if isinstance(parsed_payload, dict) else {}
+    winner_response_character_count = _winner_response_character_count(parsed_payload_dict, parsed) if parsed else 0
     structure = _clean(parsed.get("structureType"))
     scene_meta = parsed.get("continuousEventSceneVariationsNormalization")
     if not isinstance(scene_meta, dict) and structure == "continuous_event":
@@ -402,9 +485,21 @@ def inspect_offline_winner_salvage_preconditions(state: Dict[str, Any]) -> Dict[
     report.update(
         {
             "textualDependencySourceFields": dependency.get("textualDependencySourceFields") or [],
-            "textualDependencySafeCategories": dependency.get("textualDependencySafeCategories") or [],
+            "exactDependencySourceFields": dependency.get("exactDependencySourceFields") or [],
+            "textualDependencyMatchCategories": dependency.get("textualDependencyMatchCategories") or [],
+            "textualDependencySafeCategories": dependency.get("textualDependencyMatchCategories") or [],
+            "textualDependencyMatches": dependency.get("allTextualDependencyMatches") or [],
+            "positiveTextualDependencyMatches": dependency.get("positiveTextualDependencyMatches") or [],
+            "negativeTextualDependencyMatches": dependency.get("negativeTextualDependencyMatches") or [],
+            "ambiguousTextualDependencyMatches": dependency.get("ambiguousTextualDependencyMatches") or [],
             "dependencyBeforeClosure": bool(dependency.get("dependencyBeforeClosure")),
             "dependencyOnlyOnClosureSlogan": bool(dependency.get("dependencyOnlyOnClosureSlogan")),
+            "videoPromptPositiveRenderedTextRequest": bool(
+                dependency.get("videoPromptPositiveRenderedTextRequest")
+            ),
+            "videoPromptNegativeTextInstructionOnly": bool(
+                dependency.get("videoPromptNegativeTextInstructionOnly")
+            ),
             "videoPromptRequestsRenderedText": bool(dependency.get("videoPromptRequestsRenderedText")),
             "silentVisualUnderstandable": bool(dependency.get("silentVisualUnderstandable")),
             "headlineFieldsRequired": bool(dependency.get("headlineFieldsRequired")),
@@ -414,7 +509,9 @@ def inspect_offline_winner_salvage_preconditions(state: Dict[str, Any]) -> Dict[
             "wouldPassCorrectedHeadlineContract": not bool(dependency.get("dependencyBeforeClosure")),
             "offlineWinnerSalvagePossible": would_pass and not is_valid_persisted_winner_development(state),
             "offlineWinnerSalvageBlockedReason": blocked_reason or None,
+            "winnerResponseCharacterCount": winner_response_character_count,
             "winnerResponseFingerprint": _response_fingerprint(state),
+            "winnerParsedResponseFingerprint": _parsed_response_fingerprint(state),
             "winnerPaidCallCount": int(bucket.get("paidDispatchCount") or 0),
             "openAICalls": 0,
             "stateMutated": False,

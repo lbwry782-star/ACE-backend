@@ -19,25 +19,26 @@ HEADLINE_DECISION_ALIASES = {"include": "use"}
 VALID_HEADLINE_DECISION_INPUTS = CANONICAL_HEADLINE_DECISIONS | frozenset(HEADLINE_DECISION_ALIASES.keys())
 VALID_HEADLINE_REASON_SOURCES = frozenset({"model", "judge", "server_derived", "not_required"})
 
-_TEXTUAL_HEADLINE_DEPENDENCY = re.compile(
-    r"\b(read the headline|headline text|on-screen text|title card|caption says|text overlay)\b",
-    re.IGNORECASE,
-)
-
 HEADLINE_OMIT_DEPENDENCY_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\bread the headline\b", "headline_read_requirement"),
     (r"\bheadline text\b", "in_video_headline_text"),
     (r"\bon-screen text\b", "on_screen_text"),
-    (r"\btitle card\b", "title_card"),
+    (r"\bonscreen text\b", "on_screen_text"),
+    (r"\btitle cards?\b", "title_card"),
     (r"\bcaption says\b", "caption_says"),
-    (r"\btext overlay\b", "text_overlay"),
-    (r"\bwritten caption\b", "written_caption"),
+    (r"\btext overlays?\b", "text_overlay"),
+    (r"\btext overlay reveals\b", "text_overlay_reveals"),
+    (r"\bwritten captions?\b", "written_caption"),
+    (r"\bcaptions?\b", "captions"),
     (r"\b(read|reads|reading)\s+(?:the\s+)?(?:sign|label|caption|subtitle)\b", "readable_sign_or_caption"),
+    (r"\b(?:the\s+)?viewer\s+(?:must\s+)?(?:read|reads|reading)\b", "viewer_reads"),
     (r"\b(?:sign|label|screen)\s+(?:reads|displays|shows)\b", "sign_or_screen_copy"),
     (
-        r"\b(?:display|show|render|burn(?:s|-in)?|superimpose)\s+(?:an?\s+)?(?:headline|caption|subtitle|overlay)\b",
+        r"\b(?:display|show|render|burn(?:s|-in)?|superimpose)\s+(?:the\s+|an?\s+)?(?:headline|caption|subtitle|overlay)\b",
         "render_text_instruction",
     ),
+    (r"\bsuperimpose(?:s)?\s+(?:the\s+)?words\b", "superimpose_words"),
+    (r"\btitle card appears\b", "title_card_appears"),
 )
 
 HEADLINE_OMIT_EXCLUDED_FIELD_PREFIXES = frozenset(
@@ -52,9 +53,65 @@ HEADLINE_OMIT_EXCLUDED_FIELD_PREFIXES = frozenset(
     }
 )
 
-_PROHIBITION_BEFORE_MATCH = re.compile(
-    r"(?:^|[\W_])(?:no|without|avoid|never|not|none|forbidden|prohibited|exclude|ban)\s+(?:any\s+|visible\s+|readable\s+|an?\s+)?$",
-    re.IGNORECASE,
+_NEGATION_WINDOW_CHARS = 96
+_CONTEXT_SNIPPET_CHARS = 48
+
+_INHERENTLY_POSITIVE_CATEGORIES = frozenset(
+    {
+        "headline_read_requirement",
+        "caption_says",
+        "sign_or_screen_copy",
+        "render_text_instruction",
+        "text_overlay_reveals",
+        "superimpose_words",
+        "title_card_appears",
+        "viewer_reads",
+    }
+)
+
+_NEGATION_SUFFIX_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"(?i)(?:^|[\W_])(?:do not|don't|don`t)\s+"
+            r"(?:show|display|render|include|add|superimpose|use|feature|present|write|place|put)"
+            r"(?:\s+(?:any|visible|readable|written|an?|the|a))*$"
+        ),
+        "do_not_action",
+    ),
+    (
+        re.compile(
+            r"(?i)(?:^|[\W_])(?:without|avoid|exclude|never|ban|forbidden|prohibited)"
+            r"(?:\s+(?:any|visible|readable|written|an?|the|a))*$"
+        ),
+        "without",
+    ),
+    (re.compile(r"(?i)(?:^|[\W_])no(?:\s+(?:any|visible|readable|written|an?|the|a))*$"), "no"),
+    (re.compile(r"(?i)(?:^|[\W_])not(?:\s+(?:any|visible|readable|written|an?|the|a))*$"), "not"),
+    (re.compile(r"(?i)(?:^|[\W_])none(?:\s+(?:of|the))?$"), "none"),
+    (
+        re.compile(
+            r"(?:^|[\W_])(?:ללא|בלי|אין)(?:\s+[\u0590-\u05FF\s.,!?-]+)*$"
+        ),
+        "hebrew_without",
+    ),
+    (
+        re.compile(
+            r"(?:^|[\W_])(?:אל|לא)\s+(?:להציג|להוסיף|לכתוב|להציגו)(?:\s+[\u0590-\u05FF\s.,!?-]+)*$"
+        ),
+        "hebrew_do_not_show",
+    ),
+)
+
+_NEGATION_PHRASE_ANYWHERE = (
+    (re.compile(r"(?i)\btext-free\b"), "text_free"),
+    (re.compile(r"(?i)\bpurely visual(?:,\s*no text)?\b"), "purely_visual"),
+)
+
+_POSITIVE_ACTION_BEFORE_MATCH = re.compile(
+    r"(?i)(?:^|[\W_])"
+    r"(?:must|needs to|required to|have to|should|viewer(?:s)?\s+(?:must|need to|should)|"
+    r"display|show|render|superimpose|burn(?:-in)?|include|add|feature|present|place|put|write)"
+    r"(?:\s+\w+){0,4}$"
 )
 
 _REQUIREMENT_BEFORE_MATCH = re.compile(
@@ -102,37 +159,134 @@ def collect_headline_omit_runway_execution_field_texts(plan: Dict[str, Any]) -> 
     return texts
 
 
-def _dependency_match_is_prohibition_only(text: str, match: re.Match[str]) -> bool:
-    start = match.start()
-    before = text[max(0, start - 64): start]
-    if _PROHIBITION_BEFORE_MATCH.search(before):
-        return True
+def _safe_context_snippet(text: str, start: int, end: int) -> tuple[str, str]:
+    before = text[max(0, start - _CONTEXT_SNIPPET_CHARS): start]
+    after = text[end: min(len(text), end + _CONTEXT_SNIPPET_CHARS)]
+    return before, after
+
+
+def _detect_negation_before_match(text: str, start: int) -> tuple[bool, str, Optional[int]]:
+    before = text[max(0, start - _NEGATION_WINDOW_CHARS): start]
+    normalized_before = before.rstrip()
+    for pattern, token in _NEGATION_SUFFIX_PATTERNS:
+        match = pattern.search(normalized_before)
+        if match:
+            return True, token, len(normalized_before) - match.start()
+    scan_window = text[max(0, start - _NEGATION_WINDOW_CHARS): start]
+    for pattern, token in _NEGATION_PHRASE_ANYWHERE:
+        if pattern.search(scan_window):
+            return True, token, None
     policy_window = text[max(0, start - 160): start].lower()
     if "visual policy" in policy_window and re.search(r"\bno\b[^.]{0,40}$", before.lower()):
+        return True, "visual_policy_no", len(before)
+    return False, "", None
+
+
+def _positive_action_verb_before_match(text: str, start: int) -> str:
+    before = text[max(0, start - _NEGATION_WINDOW_CHARS): start]
+    match = _POSITIVE_ACTION_BEFORE_MATCH.search(before.rstrip())
+    if not match:
+        return ""
+    fragment = match.group(0).strip()
+    tokens = fragment.split()
+    return tokens[-1].lower() if tokens else ""
+
+
+def _headline_requirement_overrides_negation(text: str, start: int, category: str) -> bool:
+    if category not in {"headline_read_requirement", "in_video_headline_text"}:
+        return False
+    req_window = text[max(0, start - 32): start]
+    return bool(_REQUIREMENT_BEFORE_MATCH.search(req_window))
+
+
+def _classify_textual_dependency_match(
+    text: str,
+    match: re.Match[str],
+    *,
+    field_path: str,
+    category: str,
+) -> Dict[str, Any]:
+    start, end = match.start(), match.end()
+    matched_text = match.group(0)
+    normalized_matched = re.sub(r"\s+", " ", matched_text.strip().lower())
+    context_before, context_after = _safe_context_snippet(text, start, end)
+    negated, negation_token, negation_distance = _detect_negation_before_match(text, start)
+    positive_action_verb = _positive_action_verb_before_match(text, start)
+    if negated and _headline_requirement_overrides_negation(text, start, category):
+        negated = False
+        negation_token = ""
+        negation_distance = None
+
+    if negated:
+        polarity = "negative_instruction"
+        requests_rendered = False
+        counts_as_dependency = False
+        exclusion_reason = "negative_instruction"
+    elif category in _INHERENTLY_POSITIVE_CATEGORIES or positive_action_verb:
+        polarity = "positive_instruction"
+        requests_rendered = True
+        counts_as_dependency = True
+        exclusion_reason = ""
+    else:
+        polarity = "ambiguous"
+        requests_rendered = True
+        counts_as_dependency = True
+        exclusion_reason = ""
+
+    return {
+        "sourceField": field_path,
+        "fieldPath": field_path,
+        "category": category,
+        "safeCategory": category,
+        "matchedText": matched_text,
+        "matchedPhrase": matched_text,
+        "normalizedMatchedText": normalized_matched,
+        "contextBefore": context_before,
+        "contextAfter": context_after,
+        "characterStart": start,
+        "characterEnd": end,
+        "polarity": polarity,
+        "negationToken": negation_token,
+        "negationDistance": negation_distance,
+        "positiveActionVerb": positive_action_verb,
+        "requestsRenderedText": requests_rendered,
+        "countsAsPreClosureDependency": counts_as_dependency,
+        "prohibitionOnly": polarity == "negative_instruction",
+        "exclusionReason": exclusion_reason,
+    }
+
+
+def _field_has_active_textual_dependency(matches: list[Dict[str, Any]]) -> bool:
+    if any(match.get("polarity") == "positive_instruction" and match.get("requestsRenderedText") for match in matches):
         return True
-    phrase = match.group(0).lower()
-    if phrase in {"read the headline", "headline text"}:
-        req_window = text[max(0, start - 32): start]
-        if _REQUIREMENT_BEFORE_MATCH.search(req_window):
-            return False
-    return False
+    return any(
+        match.get("polarity") == "ambiguous" and match.get("countsAsPreClosureDependency")
+        for match in matches
+    )
 
 
 def _scan_field_for_headline_omit_dependency(field_path: str, text: str) -> list[Dict[str, Any]]:
     hits: list[Dict[str, Any]] = []
     for pattern, category in HEADLINE_OMIT_DEPENDENCY_PATTERNS:
         for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            prohibited_only = _dependency_match_is_prohibition_only(text, match)
             hits.append(
-                {
-                    "fieldPath": field_path,
-                    "matchedPhrase": match.group(0),
-                    "safeCategory": category,
-                    "prohibitionOnly": prohibited_only,
-                    "countsAsPreClosureDependency": not prohibited_only,
-                }
+                _classify_textual_dependency_match(
+                    text,
+                    match,
+                    field_path=field_path,
+                    category=category,
+                )
             )
     return hits
+
+
+def _partition_textual_dependency_matches(
+    matches: list[Dict[str, Any]],
+) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]], list[Dict[str, Any]]]:
+    positive = [match for match in matches if match.get("polarity") == "positive_instruction"]
+    negative = [match for match in matches if match.get("polarity") == "negative_instruction"]
+    ambiguous = [match for match in matches if match.get("polarity") == "ambiguous"]
+    return positive, negative, ambiguous
 
 
 def analyze_headline_omit_textual_dependency(
@@ -147,20 +301,56 @@ def analyze_headline_omit_textual_dependency(
     for field_path, text in collect_headline_omit_runway_execution_field_texts(winner_plan):
         all_hits.extend(_scan_field_for_headline_omit_dependency(field_path, text))
 
-    active_hits = [hit for hit in all_hits if hit["countsAsPreClosureDependency"]]
-    source_fields = sorted({hit["fieldPath"] for hit in active_hits})
-    categories = sorted({hit["safeCategory"] for hit in active_hits})
-    video_prompt = _clean(winner_plan.get("videoPrompt") or winner_plan.get("videoPromptCore"))
-    video_hits = [hit for hit in active_hits if hit["fieldPath"] in {"videoPrompt", "videoPromptCore"}]
+    positive_matches, negative_matches, ambiguous_matches = _partition_textual_dependency_matches(all_hits)
+    active_hits: list[Dict[str, Any]] = []
+    for field_path in sorted({hit.get("sourceField") for hit in all_hits if hit.get("sourceField")}):
+        field_matches = [hit for hit in all_hits if hit.get("sourceField") == field_path]
+        if not _field_has_active_textual_dependency(field_matches):
+            continue
+        active_hits.extend(
+            hit
+            for hit in field_matches
+            if hit.get("polarity") in {"positive_instruction", "ambiguous"}
+        )
+    source_fields = sorted(
+        {
+            field_path
+            for field_path in {hit.get("sourceField") for hit in all_hits}
+            if field_path
+            and _field_has_active_textual_dependency([hit for hit in all_hits if hit.get("sourceField") == field_path])
+        }
+    )
+    categories = sorted({hit["category"] for hit in active_hits})
+    video_prompt_fields = {"videoPrompt", "videoPromptCore"}
+    video_prompt_matches = [hit for hit in all_hits if hit.get("sourceField") in video_prompt_fields]
+    video_positive = [
+        hit
+        for hit in video_prompt_matches
+        if hit.get("polarity") == "positive_instruction"
+        and _field_has_active_textual_dependency(
+            [match for match in video_prompt_matches if match.get("sourceField") == hit.get("sourceField")]
+        )
+    ]
+    video_negative_only = bool(video_prompt_matches) and not video_positive and all(
+        hit.get("polarity") == "negative_instruction" for hit in video_prompt_matches
+    )
 
     return {
         "headlineDecision": decision or None,
         "textualDependencySourceFields": source_fields,
+        "exactDependencySourceFields": source_fields,
+        "textualDependencyMatchCategories": categories,
         "textualDependencySafeCategories": categories,
         "textualDependencyMatches": active_hits,
-        "dependencyBeforeClosure": bool(active_hits),
-        "dependencyOnlyOnClosureSlogan": not bool(active_hits),
-        "videoPromptRequestsRenderedText": bool(video_hits),
+        "allTextualDependencyMatches": all_hits,
+        "positiveTextualDependencyMatches": positive_matches,
+        "negativeTextualDependencyMatches": negative_matches,
+        "ambiguousTextualDependencyMatches": ambiguous_matches,
+        "dependencyBeforeClosure": bool(source_fields),
+        "dependencyOnlyOnClosureSlogan": not bool(source_fields),
+        "videoPromptPositiveRenderedTextRequest": bool(video_positive),
+        "videoPromptNegativeTextInstructionOnly": video_negative_only,
+        "videoPromptRequestsRenderedText": bool(video_positive),
         "silentVisualUnderstandable": validate_silent_visual_understanding(
             winner_plan=winner_plan,
             winning_judgment=winning_judgment,
