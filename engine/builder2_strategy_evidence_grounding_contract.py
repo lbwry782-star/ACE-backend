@@ -522,6 +522,9 @@ def collect_judge_factual_grounding_structural_errors(
     if not isinstance(assessment, dict):
         errors.append("builder2_judge_validation_failed:factualGroundingAssessment")
         return errors
+    if not assessment:
+        errors.append("builder2_judge_validation_failed:factualGroundingAssessment")
+        return errors
     for key in JUDGE_FACTUAL_GROUNDING_GATE_FIELDS:
         if not isinstance(assessment.get(key), bool):
             errors.append(f"builder2_judge_validation_failed:factualGroundingAssessment.{key}")

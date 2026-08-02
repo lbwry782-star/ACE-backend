@@ -214,7 +214,26 @@ def build_judge_example_json(*, candidate_id: str = "cand-example") -> Dict[str,
             "applicationRequiresRetrospectiveExplanation": False,
             "prototypeFitScore": 12,
         },
+        "factualGroundingAssessment": _default_factual_grounding_example(),
     }
+
+
+def _default_factual_grounding_example() -> Dict[str, Any]:
+    from engine.builder2_strategy_evidence_grounding_contract import build_default_judge_factual_grounding_assessment
+
+    return build_default_judge_factual_grounding_assessment()
+
+
+def build_judge_factual_grounding_prompt_text() -> str:
+    gates = ", ".join(JUDGE_FACTUAL_GROUNDING_GATE_FIELDS)
+    return (
+        "factualGroundingAssessment is mandatory and must never be {} or omitted.\n"
+        f"Return all five boolean gates ({gates}) plus notes.\n"
+        "Every gate must be JSON boolean true or false — false is valid when the candidate is not factually grounded.\n"
+        "notes must be a non-empty string explaining the factual-grounding assessment.\n"
+        "Never omit factualGroundingAssessment merely because eligible=false.\n"
+        "Compare product claims against the original product description and Strategy evidence ledger."
+    )
 
 
 def build_judge_required_keys_prompt_text(*, creator_verbal_decision: str, candidate_id: str) -> str:
@@ -247,6 +266,7 @@ def build_judge_required_keys_prompt_text(*, creator_verbal_decision: str, candi
         "Do not reject merely because the product is visible or because no external metaphorical world exists.\n"
         "Reject ordinary product demonstrations, untransformed dashboards/graphs/reports, and executions whose "
         "meaning exists only in the report or slogan.\n"
+        f"{build_judge_factual_grounding_prompt_text()}\n"
         "logoPolicyAssessment must include logoDetectedInPlan, logoDependentMeaning, advertisedLogoRequested, "
         "thirdPartyBrandingDetected, inventedLogoDetected, brandedObjectRiskAccepted, plainTextIdentificationOnly, "
         "logoFreeExecutionAccepted, logoPolicySatisfied (booleans), and rejectionReason (null when accepted). "

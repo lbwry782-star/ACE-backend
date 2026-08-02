@@ -29,6 +29,13 @@ from engine.builder2_judge_pending_repair import (
 )
 from engine.builder2_judge_structural_repair_classifier import classify_judge_structural_repair
 from engine.builder2_judge_core_contract import is_judge_factual_grounding_gate_field
+from engine.builder2_judge_factual_grounding_output_schema import (
+    actual_factual_grounding_field_names,
+    factual_grounding_object_empty,
+    judge_schema_contract_metadata,
+    schema_contract_mismatch_detected,
+)
+from engine.builder2_judge_response_ledger import resolve_parsed_response_fingerprint
 from engine.builder2_strategy_evidence_grounding_contract import (
     JUDGE_FACTUAL_GROUNDING_GATE_FIELDS,
     apply_factual_grounding_eligibility_rules,
@@ -70,6 +77,44 @@ def _diagnostics_entry(state: Dict[str, Any], candidate_id: str) -> Dict[str, An
     by_candidate = state.get("judgeDiagnosticsByCandidate") or {}
     entry = by_candidate.get(candidate_id) or _candidate_record(state, candidate_id).get("judgeDiagnostics") or {}
     return entry if isinstance(entry, dict) else {}
+
+
+def _schema_and_fingerprint_inspection(
+    *,
+    entry: Dict[str, Any],
+    parsed: Dict[str, Any],
+    strategy_foundation: Dict[str, Any],
+    compatibility_mode: bool,
+    pending_repair: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    factual_grounding_required = requires_strategy_evidence_grounding(
+        strategy=strategy_foundation,
+        compatibility_mode=compatibility_mode,
+    )
+    fingerprint = resolve_parsed_response_fingerprint(entry)
+    pending = pending_repair or {}
+    source_fp = _clean(pending.get("sourceParsedResponseFingerprint")) or _clean(fingerprint.get("effective"))
+    source_fp_complete = bool(source_fp)
+    if not source_fp_complete and isinstance(parsed, dict) and parsed:
+        source_fp = _clean(fingerprint.get("derived"))
+        source_fp_complete = bool(source_fp)
+    return {
+        **judge_schema_contract_metadata(factual_grounding_required=factual_grounding_required),
+        "actualFactualGroundingFieldNames": actual_factual_grounding_field_names(parsed),
+        "factualGroundingObjectEmpty": factual_grounding_object_empty(parsed),
+        "parsedFingerprintStored": bool(fingerprint.get("storedPresent")),
+        "parsedFingerprintDerived": _clean(fingerprint.get("derived")) or None,
+        "parsedFingerprintDerivationPossible": bool(fingerprint.get("derivationPossible")),
+        "pendingRepairSourceFingerprintsComplete": bool(
+            _clean(pending.get("sourceResponseFingerprint")) and source_fp_complete
+        ),
+        "pendingRepairBlockedByMissingFingerprint": bool(pending.get("repairRequired"))
+        and not source_fp_complete,
+        "schemaContractMismatchDetected": schema_contract_mismatch_detected(
+            parsed,
+            factual_grounding_required=factual_grounding_required,
+        ),
+    }
 
 
 def _semantic_negative_fields(assessment: Dict[str, Any]) -> List[str]:
@@ -158,6 +203,12 @@ def analyze_judge_response_attempt(
             "correctnessUnderCurrentContract": None,
             "responseFingerprint": _clean(entry.get("responseFingerprint")) or None,
             "parsedResponseFingerprint": None,
+            **_schema_and_fingerprint_inspection(
+                entry=entry,
+                parsed={},
+                strategy_foundation=strategy_foundation,
+                compatibility_mode=compatibility_mode,
+            ),
         }
 
     structural_errors = collect_judge_structural_errors(
@@ -285,7 +336,14 @@ def analyze_judge_response_attempt(
         "historicalReason": _clean(breaker.get("trippedReason")) or None,
         "correctnessUnderCurrentContract": structurally_valid if structurally_valid is not None else None,
         "responseFingerprint": _clean(entry.get("responseFingerprint")) or None,
-        "parsedResponseFingerprint": _clean(entry.get("parsedResponseFingerprint")) or None,
+        "parsedResponseFingerprint": _clean(resolve_parsed_response_fingerprint(entry).get("effective")) or None,
+        **_schema_and_fingerprint_inspection(
+            entry=entry,
+            parsed=parsed,
+            strategy_foundation=strategy_foundation,
+            compatibility_mode=compatibility_mode,
+            pending_repair=pending_repair,
+        ),
     }
 
 
@@ -400,11 +458,13 @@ def inspect_judge_grounding_failures(
     recoverable = [item for item in attempts if item.get("offlinePersistencePossible")]
     paid_min = 0 if recoverable else len(missing_judgments)
     paid_max = len(missing_judgments)
+    schema_meta = judge_schema_contract_metadata(factual_grounding_required=not compatibility_mode)
     return {
         "jobId": _clean(state.get("jobId")),
         "tournamentId": _clean(state.get("tournamentId")),
         "strategyEvidenceGroundingContractVersion": _clean((strategy.get("strategyEvidenceGrounding") or {}).get("contractVersion"))
         or "legacy_unknown",
+        **schema_meta,
         "attempts": attempts,
         "attemptedJudgeCount": len(attempts),
         "normalJudgeResponseCount": normal_count,

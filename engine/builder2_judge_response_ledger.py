@@ -28,6 +28,29 @@ def parsed_response_fingerprint(parsed: Dict[str, Any]) -> str:
     return response_fingerprint(json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
 
 
+def resolve_parsed_response_fingerprint(entry: Dict[str, Any]) -> Dict[str, Any]:
+    stored = _clean(entry.get("parsedResponseFingerprint"))
+    parsed = entry.get("parsedResponse") if isinstance(entry.get("parsedResponse"), dict) else {}
+    derived = parsed_response_fingerprint(parsed) if parsed else ""
+    effective = stored or derived
+    return {
+        "stored": stored or None,
+        "derived": derived or None,
+        "effective": effective or None,
+        "storedPresent": bool(stored),
+        "derivationPossible": bool(parsed) and bool(derived),
+        "derivedMatchesStored": bool(stored and derived and stored == derived),
+    }
+
+
+def backfill_parsed_response_fingerprint(entry: Dict[str, Any]) -> str:
+    resolved = resolve_parsed_response_fingerprint(entry)
+    effective = _clean(resolved.get("effective"))
+    if effective and not _clean(entry.get("parsedResponseFingerprint")):
+        entry["parsedResponseFingerprint"] = effective
+    return effective
+
+
 def ledger_entries(state: Dict[str, Any], candidate_id: str) -> List[Dict[str, Any]]:
     ledger = state.get(JUDGE_RESPONSE_LEDGER_KEY) or {}
     entries = ledger.get(candidate_id) or []
@@ -78,8 +101,8 @@ def append_judge_response_attempt(
         "responseCharacterCount": len(response_text or ""),
         "responseAvailable": bool(response_available),
         "responseFingerprint": response_fingerprint(response_text),
-        "parsedResponseAvailable": bool(parsed),
-        "parsedResponseFingerprint": parsed_response_fingerprint(parsed) if parsed else "",
+        "parsedResponseAvailable": isinstance(parsed, dict),
+        "parsedResponseFingerprint": parsed_response_fingerprint(parsed) if isinstance(parsed, dict) else "",
         "parsedResponse": dict(parsed) if isinstance(parsed, dict) else {},
         "structuralValidationAttempted": False,
         "structuralValidationAccepted": False,
@@ -128,7 +151,13 @@ def finalize_judge_response_validation(
     deterministic_eligible: Optional[bool] = None,
     accepted: bool = False,
 ) -> None:
-    parsed = judgment if isinstance(judgment, dict) else None
+    existing = find_attempt_by_id(state, candidate_id=candidate_id, attempt_id=attempt_id) or {}
+    parsed_source = judgment if isinstance(judgment, dict) else existing.get("parsedResponse")
+    if not isinstance(parsed_source, dict):
+        parsed_source = {}
+    stored_fingerprint = _clean(existing.get("parsedResponseFingerprint"))
+    computed_fingerprint = parsed_response_fingerprint(parsed_source) if isinstance(parsed_source, dict) else ""
+    fingerprint = computed_fingerprint or stored_fingerprint
     update_judge_response_attempt(
         state,
         candidate_id=candidate_id,
@@ -136,14 +165,14 @@ def finalize_judge_response_validation(
         structuralValidationAttempted=True,
         structuralValidationAccepted=accepted,
         substantiveEligibilityApplied=accepted or deterministic_eligible is not None,
-        reportedEligible=parsed.get("eligible") if isinstance(parsed, dict) and isinstance(parsed.get("eligible"), bool) else None,
+        reportedEligible=parsed_source.get("eligible") if isinstance(parsed_source.get("eligible"), bool) else None,
         deterministicEligible=deterministic_eligible,
         validationFailureField=validation_failure_field,
         validationFailureReason=validation_failure_reason,
         structuralErrors=list(structural_errors or []),
         accepted=accepted,
-        parsedResponse=dict(parsed) if isinstance(parsed, dict) else find_attempt_by_id(state, candidate_id=candidate_id, attempt_id=attempt_id).get("parsedResponse"),
-        parsedResponseFingerprint=parsed_response_fingerprint(parsed) if isinstance(parsed, dict) and parsed else None,
+        parsedResponse=dict(parsed_source) if isinstance(parsed_source, dict) else existing.get("parsedResponse"),
+        parsedResponseFingerprint=fingerprint,
     )
 
 

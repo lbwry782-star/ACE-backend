@@ -526,7 +526,14 @@ def _invoke_judge_model(
     model: str,
     llm_client: Optional[Any],
     call_type: str,
+    strategy_foundation: Optional[Dict[str, Any]] = None,
+    compatibility_mode: bool = False,
 ) -> str:
+    from engine.builder2_judge_factual_grounding_output_schema import (
+        BUILDER2_JUDGE_FACTUAL_GROUNDING_OUTPUT_SCHEMA_V1,
+        build_judge_responses_api_text_format,
+    )
+
     log_builder2_model_selected(role="builder2_judge", call_type=call_type)
     if llm_client is not None:
         raw = llm_client(role="builder2_judge", model=model, prompt=prompt)
@@ -540,8 +547,23 @@ def _invoke_judge_model(
     timeout = float((os.environ.get("BUILDER2_TOURNAMENT_TIMEOUT_SECONDS") or "150").strip() or "150")
     client = OpenAI(api_key=api_key, timeout=httpx.Timeout(timeout), max_retries=0)
     reasoning = build_builder2_reasoning_payload()
+    kwargs: Dict[str, Any] = {"model": model, "input": prompt, "reasoning": reasoning}
+    text_format = build_judge_responses_api_text_format(
+        strategy_foundation=strategy_foundation,
+        compatibility_mode=compatibility_mode,
+        call_type=call_type,
+    )
+    if text_format:
+        kwargs["text"] = text_format
+        logger.info(
+            "BUILDER2_JUDGE_OUTPUT_SCHEMA callType=%s version=%s enabled=true",
+            call_type,
+            BUILDER2_JUDGE_FACTUAL_GROUNDING_OUTPUT_SCHEMA_V1,
+        )
+    else:
+        logger.info("BUILDER2_JUDGE_OUTPUT_SCHEMA callType=%s enabled=false", call_type)
     response = openai_retry.openai_call_with_retry(
-        lambda: client.responses.create(model=model, input=prompt, reasoning=reasoning),
+        lambda: client.responses.create(**kwargs),
         endpoint="responses",
     )
     return extract_responses_output_text(response)
@@ -700,7 +722,14 @@ def judge_candidate(
             call_type = "normal"
 
         timer = MetricsTimer()
-        response_text = _invoke_judge_model(prompt=prompt, model=model, llm_client=llm_client, call_type=call_type)
+        response_text = _invoke_judge_model(
+            prompt=prompt,
+            model=model,
+            llm_client=llm_client,
+            call_type=call_type,
+            strategy_foundation=strategy_foundation,
+            compatibility_mode=compatibility_mode,
+        )
         elapsed = timer.elapsed_ms()
         if state is not None:
             record_model_call(
@@ -734,6 +763,19 @@ def judge_candidate(
         try:
             parsed, top_level_keys, schema_version_received = _parse_judge_payload(response_text)
             last_parsed = parsed
+            attempt_id = ""
+            if state is not None:
+                from engine.builder2_judge_response_ledger import append_judge_response_attempt
+
+                attempt_id = append_judge_response_attempt(
+                    state,
+                    candidate_id=candidate_id,
+                    judgment_id=judgment_id,
+                    call_type=call_type,
+                    response_text=response_text,
+                    parsed=parsed,
+                    response_available=True,
+                )
             product_input = None
             grounding = strategy_foundation.get("strategyEvidenceGrounding")
             if isinstance(grounding, dict):
@@ -778,15 +820,17 @@ def judge_candidate(
             )
             if state is not None:
                 state.setdefault("judgeDiagnosticsByCandidate", {})[candidate_id] = dict(diagnostics)
-            _persist_judge_response_attempt(
-                state,
-                candidate_id=candidate_id,
-                judgment_id=judgment_id,
-                call_type=call_type,
-                response_text=response_text,
-                parsed=judgment,
-                response_available=True,
-            )
+                if attempt_id:
+                    from engine.builder2_judge_response_ledger import finalize_judge_response_validation
+
+                    finalize_judge_response_validation(
+                        state,
+                        candidate_id=candidate_id,
+                        attempt_id=attempt_id,
+                        judgment=judgment,
+                        deterministic_eligible=bool(judgment.get("eligible")),
+                        accepted=True,
+                    )
             return judgment_id, judgment, total, scores
         except Builder2TournamentError as exc:
             last_exc = exc
@@ -1012,10 +1056,19 @@ def judge_candidate_structural_repair(
         )
         return str(repair.get("judgmentId") or judgment_id or source_judgment_id), judgment, total, scores
 
+    source_attempt = find_latest_attempt(state, candidate_id, call_type="normal") if state is not None else None
     expected_fingerprint = str(source_parsed_fingerprint or pending.get("sourceParsedResponseFingerprint") or "").strip()
+    if not expected_fingerprint and source_attempt is not None:
+        from engine.builder2_judge_response_ledger import backfill_parsed_response_fingerprint
+
+        expected_fingerprint = backfill_parsed_response_fingerprint(source_attempt)
+    if not expected_fingerprint and isinstance(source_parsed, dict) and source_parsed:
+        expected_fingerprint = _parsed_response_fingerprint(source_parsed)
     actual_fingerprint = _parsed_response_fingerprint(source_parsed)
-    if expected_fingerprint and expected_fingerprint != actual_fingerprint:
+    if expected_fingerprint and actual_fingerprint and expected_fingerprint != actual_fingerprint:
         raise Builder2TournamentError("builder2_judge_repair_source_fingerprint_mismatch")
+    if not expected_fingerprint and actual_fingerprint:
+        expected_fingerprint = actual_fingerprint
 
     judgment_id = judgment_id or f"judge-{candidate_id}-{uuid.uuid4().hex[:8]}"
     model = resolve_builder2_judge_model()
@@ -1023,7 +1076,6 @@ def judge_candidate_structural_repair(
     if not failures:
         raise Builder2TournamentError("builder2_judge_repair_not_required")
 
-    source_attempt = find_latest_attempt(state, candidate_id, call_type="normal") if state is not None else None
     source_attempt_id = _clean((source_attempt or {}).get("attemptId")) or _clean(pending.get("sourceAttemptId"))
 
     if state is not None:
@@ -1045,7 +1097,14 @@ def judge_candidate_structural_repair(
         validation_failures=failures,
     )
     timer = MetricsTimer()
-    response_text = _invoke_judge_model(prompt=prompt, model=model, llm_client=llm_client, call_type="repair")
+    response_text = _invoke_judge_model(
+        prompt=prompt,
+        model=model,
+        llm_client=llm_client,
+        call_type="repair",
+        strategy_foundation=strategy_foundation,
+        compatibility_mode=compatibility_mode,
+    )
     elapsed = timer.elapsed_ms()
     if state is not None:
         record_model_call(

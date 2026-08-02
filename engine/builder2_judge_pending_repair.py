@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from engine.builder2_judge_response_ledger import (
+    backfill_parsed_response_fingerprint,
     find_latest_attempt,
     ledger_entries,
     normal_attempts,
@@ -98,6 +99,7 @@ def build_pending_judge_repair_state(
     lifecycle_stage: Optional[str] = None,
 ) -> Dict[str, Any]:
     parsed = normal_entry.get("parsedResponse") if isinstance(normal_entry.get("parsedResponse"), dict) else {}
+    backfill_parsed_response_fingerprint(normal_entry)
     stage = lifecycle_stage or (
         REPAIR_STAGE_REPAIR_ACCEPTED
         if repair_response_accepted

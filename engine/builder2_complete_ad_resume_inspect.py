@@ -23,6 +23,9 @@ from engine.builder2_complete_ad_resume_plan import (
     resolve_complete_ad_canonical_resume_plan,
     resolve_complete_ad_resume_stage,
 )
+from engine.builder2_judge_factual_grounding_output_schema import judge_schema_contract_metadata
+from engine.builder2_judge_grounding_failure_inspect import inspect_judge_grounding_failures
+from engine.builder2_strategy_evidence_grounding_contract import requires_strategy_evidence_grounding
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_read_only_inspection import read_only_builder2_inspection
 from engine.builder2_resume_contract import BUILDER2_RESUME_CONTRACT_VERSION
@@ -164,6 +167,33 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         report["unresolvedRepairCandidateIds"] = list(canonical_plan.get("unresolvedRepairCandidateIds") or [])
         report["perInvocationCallLimit"] = int(canonical_plan.get("perInvocationCallLimit") or 0)
         report["totalCallsRemainingAcrossInvocations"] = int(canonical_plan.get("totalCallsRemainingAcrossInvocations") or 0)
+        strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
+        compatibility_mode = not requires_strategy_evidence_grounding(strategy=strategy)
+        report.update(judge_schema_contract_metadata(factual_grounding_required=not compatibility_mode))
+        grounding_report = inspect_judge_grounding_failures(state)
+        think_small_attempt = next(
+            (
+                item
+                for item in grounding_report.get("attempts") or []
+                if _clean(item.get("prototypeId")) == "think_small" and _clean(item.get("callType") or "normal") == "normal"
+            ),
+            None,
+        )
+        if isinstance(think_small_attempt, dict):
+            for key in (
+                "parsedFingerprintStored",
+                "parsedFingerprintDerived",
+                "parsedFingerprintDerivationPossible",
+                "pendingRepairSourceFingerprintsComplete",
+                "pendingRepairBlockedByMissingFingerprint",
+                "schemaContractMismatchDetected",
+                "factualGroundingObjectEmpty",
+                "actualFactualGroundingFieldNames",
+            ):
+                report[f"thinkSmall{key[0].upper()}{key[1:]}"] = think_small_attempt.get(key)
+            report["thinkSmallPendingRepairEligible"] = think_small_attempt.get("pendingRepairEligible")
+            report["thinkSmallNormalCallMustNotRepeat"] = think_small_attempt.get("normalCallMustNotRepeat")
+            report["thinkSmallCurrentContractBreakerTripped"] = think_small_attempt.get("currentContractBreakerTripped")
         report["strategyWouldDispatch"] = bool(canonical_plan.get("strategyWouldDispatch"))
         report["strategyFingerprint"] = canonical_plan.get("strategyFingerprint")
         report["creatorsWouldDispatch"] = bool(canonical_plan.get("creatorsWouldDispatch"))

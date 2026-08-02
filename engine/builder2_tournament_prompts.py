@@ -20,6 +20,7 @@ from engine.builder2_methodology_contract import (
     prompt_enum_list,
 )
 from engine.builder2_judge_core_contract import (
+    build_judge_factual_grounding_prompt_text,
     build_judge_required_keys_prompt_text,
     resolve_creator_verbal_decision,
 )
@@ -407,9 +408,7 @@ def build_judge_prompt(
         "prototypeMethodAssessment, visualMechanismAssessment, participationAssessment, visualFamilyAssessment, "
         "silentMovieAssessment, verbalLayerAssessment, headlineNecessityAssessment, advertisingCompletionAssessment, "
         "factualGroundingAssessment.\n"
-        "factualGroundingAssessment must compare product claims against the original product description and "
-        "Strategy evidence ledger, not merely Strategy consistency. Reject feedback, revision, optimization, "
-        "learning, or improvement workflows unless explicitly supplied in the product description.\n"
+        f"{build_judge_factual_grounding_prompt_text()}\n"
         "Independently test creative embodiment: reject literal graph/report/dashboard/interface execution unless "
         "meaningfully transformed; require metaphoricalEmbodimentAssessment and visualBridgeAssessment with "
         "dependsOnEarlierCopy=false. Do not require leaving the business domain. "
@@ -436,6 +435,9 @@ def build_judge_repair_prompt(
         "You are the Builder2 Judge repair role.\n"
         "Repair ONLY the listed structural defects. Preserve the substantive judgment.\n"
         "Do NOT redesign the candidate or change eligibility merely to satisfy schema.\n"
+        "When factualGroundingAssessment is structurally defective, complete ONLY that object while preserving "
+        "scores, verdict, strengths, weaknesses, confidence, and all other already-valid assessments.\n"
+        f"{build_judge_factual_grounding_prompt_text()}\n"
         f"Candidate ID: {candidate_id}\n\n"
         "Original Judge instructions:\n"
         f"{build_judge_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate=candidate, candidate_id=candidate_id)}\n\n"
