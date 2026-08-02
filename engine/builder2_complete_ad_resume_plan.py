@@ -123,7 +123,15 @@ def plan_complete_ad_reasoning_roles(
     ):
         conditional.append("builder2_winner")
     elif parsed_winner and not winner_dev_valid:
-        conditional.append("builder2_winner")
+        winner_id = _clean(state.get("winnerCandidateId"))
+        parsed_candidate = _clean(parsed_winner.get("candidateId"))
+        if winner_id and parsed_candidate == winner_id:
+            pass
+        elif winner_id and parsed_candidate != winner_id:
+            if "builder2_winner" not in required:
+                required.append("builder2_winner")
+        else:
+            conditional.append("builder2_winner")
     elif _clean(state.get("winnerCandidateId")) and not winner_dev_valid and not winner_ready:
         conditional.append("builder2_winner")
 
@@ -185,12 +193,51 @@ def parsed_winner_reusable_for_candidate(
     return _clean(parsed.get("candidateId")) == _clean(winner_candidate_id)
 
 
+def resolve_winner_development_action(
+    state: Dict[str, Any],
+    *,
+    winner_candidate_id: str = "",
+) -> Dict[str, Any]:
+    winner_id = _clean(winner_candidate_id or state.get("winnerCandidateId"))
+    parsed_reusable = parsed_winner_reusable_for_candidate(state, winner_candidate_id=winner_id)
+    accepted = is_valid_persisted_winner_development(state)
+    ready = bool(winner_id) and is_reasoning_complete_for_winner_selection(state)
+    dispatch_required = (
+        ready
+        and not accepted
+        and not parsed_reusable
+    )
+    if accepted:
+        action = "accepted"
+    elif parsed_reusable and not accepted:
+        action = "offline_revalidate"
+    elif dispatch_required:
+        action = "dispatch_normal"
+    else:
+        action = "none"
+    return {
+        "winnerAction": action,
+        "winnerOfflineRevalidationRequired": action == "offline_revalidate",
+        "winnerDevelopmentCallRequired": action == "dispatch_normal",
+        "winnerWouldDispatch": action == "dispatch_normal",
+        "winnerNormalCallsPlanned": 1 if action == "dispatch_normal" else 0,
+        "winnerPaidNormalCallMustNotRepeat": parsed_reusable or accepted or has_failed_winner_attempt_after_paid_call(state),
+    }
+
+
+def has_failed_winner_attempt_after_paid_call(state: Dict[str, Any]) -> bool:
+    from engine.builder2_winner_persistence import has_failed_winner_attempt_after_paid_call as _has_failed
+
+    return _has_failed(state)
+
+
 RESUME_STAGE_STRATEGY = "strategy"
 RESUME_STAGE_CREATOR_GENERATION = "creator_generation"
 RESUME_STAGE_JUDGE_GENERATION = "judge_generation"
 RESUME_STAGE_MIXED_PARTIAL = "mixed_partial_reasoning"
 RESUME_STAGE_WINNER_SELECTION = "winner_selection"
 RESUME_STAGE_WINNER_DEVELOPMENT = "winner_development"
+RESUME_STAGE_WINNER_OFFLINE_REVALIDATION = "winner_offline_revalidation"
 RESUME_STAGE_MEDIA_PREREQUISITE = "media_prerequisite_validation"
 RESUME_STAGE_REASONING_COMPLETE = "reasoning_complete"
 RESUME_STAGE_UNSUPPORTED = "unsupported"
@@ -460,14 +507,30 @@ def resolve_complete_ad_canonical_resume_plan(
         rejection_reason = "builder2_complete_ad_reasoning_resume_media_already_started"
     elif is_reasoning_complete_for_winner_selection(state, read_only=read_only):
         if not is_valid_persisted_winner_development(state):
-            resolved_stage = (
-                RESUME_STAGE_WINNER_DEVELOPMENT
-                if _clean(state.get("winnerCandidateId"))
-                else RESUME_STAGE_WINNER_SELECTION
-            )
+            if parsed_winner_reusable_for_candidate(
+                state,
+                winner_candidate_id=_clean(state.get("winnerCandidateId")),
+            ):
+                resolved_stage = RESUME_STAGE_WINNER_OFFLINE_REVALIDATION
+            else:
+                resolved_stage = (
+                    RESUME_STAGE_WINNER_DEVELOPMENT
+                    if _clean(state.get("winnerCandidateId"))
+                    else RESUME_STAGE_WINNER_SELECTION
+                )
     elif accepted_creators == 6 and accepted_judgments == 6:
         if not is_valid_persisted_winner_development(state):
-            resolved_stage = RESUME_STAGE_WINNER_DEVELOPMENT if _clean(state.get("winnerCandidateId")) else RESUME_STAGE_WINNER_SELECTION
+            if parsed_winner_reusable_for_candidate(
+                state,
+                winner_candidate_id=_clean(state.get("winnerCandidateId")),
+            ):
+                resolved_stage = RESUME_STAGE_WINNER_OFFLINE_REVALIDATION
+            else:
+                resolved_stage = (
+                    RESUME_STAGE_WINNER_DEVELOPMENT
+                    if _clean(state.get("winnerCandidateId"))
+                    else RESUME_STAGE_WINNER_SELECTION
+                )
     elif accepted_creators == 6 and not missing_creators and missing_actionable_judges:
         resolved_stage = RESUME_STAGE_JUDGE_GENERATION
     elif accepted_creators == 5 and accepted_judgments == 5 and len(missing_creators) == 1:
@@ -543,18 +606,12 @@ def resolve_complete_ad_canonical_resume_plan(
         if resolved_stage == RESUME_STAGE_MIXED_PARTIAL
         else (1 if resolved_stage == RESUME_STAGE_CREATOR_GENERATION and missing_creators else 0)
     )
-    winner_normal_calls_planned = (
-        1
-        if resolved_stage == RESUME_STAGE_WINNER_DEVELOPMENT
-        and ready_for_winner_development
-        and not is_valid_persisted_winner_development(state)
-        and not parsed_winner_reusable_for_candidate(
-            state,
-            winner_candidate_id=_clean(state.get("winnerCandidateId")),
-        )
-        else 0
+    winner_action = resolve_winner_development_action(
+        state,
+        winner_candidate_id=_clean(state.get("winnerCandidateId")),
     )
-    winner_development_call_required = winner_normal_calls_planned == 1
+    winner_normal_calls_planned = int(winner_action.get("winnerNormalCallsPlanned") or 0)
+    winner_development_call_required = bool(winner_action.get("winnerDevelopmentCallRequired"))
     winner_development_call_reason = (
         "accepted_winner_development_missing"
         if winner_development_call_required
@@ -567,13 +624,17 @@ def resolve_complete_ad_canonical_resume_plan(
             else None
         )
     )
-    reasoning_budget_required_for_next_invocation = max(
-        1,
-        winner_normal_calls_planned or judge_calls_planned or creator_calls_planned or 1,
-    )
-    if winner_development_call_required:
-        reasoning_budget_required_for_next_invocation = 1
-    recommended_next_invocation_max_calls = reasoning_budget_required_for_next_invocation
+    if winner_action.get("winnerOfflineRevalidationRequired"):
+        reasoning_budget_required_for_next_invocation = 0
+        recommended_next_invocation_max_calls = 0
+    else:
+        reasoning_budget_required_for_next_invocation = max(
+            1,
+            winner_normal_calls_planned or judge_calls_planned or creator_calls_planned or 1,
+        )
+        if winner_development_call_required:
+            reasoning_budget_required_for_next_invocation = 1
+        recommended_next_invocation_max_calls = reasoning_budget_required_for_next_invocation
     raw_missing_judges = list(missing_judges)
     actionable_missing_judges_list = list(missing_actionable_judges)
     resolved_unavailable_ids = resolved_unavailable_judge_prototype_ids(state, read_only=read_only)
@@ -583,10 +644,21 @@ def resolve_complete_ad_canonical_resume_plan(
     winner_response_location = None
     winner_response_fingerprint = None
     winner_parsed_response_fingerprint = None
+    winner_parsed_response_fingerprint_derived = None
+    winner_fingerprint_derivation_possible = False
     if parsed_winner and winner_candidate_id and _clean(parsed_winner.get("candidateId")) == winner_candidate_id:
-        winner_response_location = PARSED_WINNER_RESPONSE_KEY if state.get(PARSED_WINNER_RESPONSE_KEY) else "parsedWinnerResponse"
-        winner_response_fingerprint = _clean(parsed_winner.get("responseFingerprint")) or None
-        winner_parsed_response_fingerprint = _clean(parsed_winner.get("parsedResponseFingerprint")) or None
+        from engine.builder2_winner_response_ledger import (
+            resolve_winner_parsed_response_fingerprint,
+            resolve_winner_response_fingerprint,
+        )
+
+        winner_response_location = _clean(parsed_winner.get("responseLocation")) or PARSED_WINNER_RESPONSE_KEY
+        raw_fp = resolve_winner_response_fingerprint(parsed_winner)
+        parsed_fp = resolve_winner_parsed_response_fingerprint(parsed_winner)
+        winner_response_fingerprint = raw_fp.get("effective")
+        winner_parsed_response_fingerprint = parsed_fp.get("effective")
+        winner_parsed_response_fingerprint_derived = parsed_fp.get("derived")
+        winner_fingerprint_derivation_possible = bool(parsed_fp.get("derivationPossible"))
     creator_closure_present = False
     accepted_winner_closure_present = False
     if winner_candidate_id:
@@ -628,10 +700,15 @@ def resolve_complete_ad_canonical_resume_plan(
         "readyForWinnerDevelopment": ready_for_winner_development,
         "winnerDevelopmentCallRequired": winner_development_call_required,
         "winnerDevelopmentCallReason": winner_development_call_reason,
+        "winnerAction": winner_action.get("winnerAction"),
+        "winnerOfflineRevalidationRequired": bool(winner_action.get("winnerOfflineRevalidationRequired")),
+        "winnerPaidNormalCallMustNotRepeat": bool(winner_action.get("winnerPaidNormalCallMustNotRepeat")),
         "winnerNormalCallsPlanned": winner_normal_calls_planned,
         "winnerResponseLocation": winner_response_location,
         "winnerResponseFingerprint": winner_response_fingerprint,
         "winnerParsedResponseFingerprint": winner_parsed_response_fingerprint,
+        "winnerParsedResponseFingerprintDerived": winner_parsed_response_fingerprint_derived,
+        "winnerFingerprintDerivationPossible": winner_fingerprint_derivation_possible,
         "creatorClosurePresent": creator_closure_present,
         "acceptedWinnerClosurePresent": accepted_winner_closure_present,
         "reasoningBudgetRequiredForNextInvocation": reasoning_budget_required_for_next_invocation,
@@ -639,8 +716,16 @@ def resolve_complete_ad_canonical_resume_plan(
         "winnerDevelopmentStarted": is_valid_persisted_winner_development(state),
         "reasoningComplete": bool(state.get("reasoningComplete")),
         "mediaStarted": _media_started(state),
-        "requiredNextReasoningRoles": list(role_plan.get("requiredNextReasoningRoles") or []),
-        "expectedNextReasoningRoles": list(role_plan.get("expectedNextReasoningRoles") or []),
+        "requiredNextReasoningRoles": (
+            []
+            if winner_action.get("winnerOfflineRevalidationRequired")
+            else list(role_plan.get("requiredNextReasoningRoles") or [])
+        ),
+        "expectedNextReasoningRoles": (
+            []
+            if winner_action.get("winnerOfflineRevalidationRequired")
+            else list(role_plan.get("expectedNextReasoningRoles") or [])
+        ),
         "judgeCallsPlanned": judge_calls_planned,
         "creatorCallsPlanned": creator_calls_planned,
         "remainingCreatorNormalCalls": mixed_call_plan["remainingCreatorNormalCalls"],
@@ -674,17 +759,16 @@ def resolve_complete_ad_canonical_resume_plan(
         "operatorResolutionContractVersion": BUILDER2_JUDGE_UNAVAILABLE_RESOLUTION_CONTRACT_VERSION,
         "perInvocationCallLimit": mixed_call_plan["perInvocationCallLimit"],
         "totalCallsRemainingAcrossInvocations": (
-            1
-            if winner_development_call_required
-            else mixed_call_plan["totalCallsRemainingAcrossInvocations"]
+            0
+            if winner_action.get("winnerOfflineRevalidationRequired")
+            else (
+                1
+                if winner_development_call_required
+                else mixed_call_plan["totalCallsRemainingAcrossInvocations"]
+            )
         ),
         "creatorsWouldDispatch": creator_calls_planned > 0,
-        "winnerWouldDispatch": winner_development_call_required
-        or resolved_stage
-        in {
-            RESUME_STAGE_WINNER_SELECTION,
-            RESUME_STAGE_WINNER_DEVELOPMENT,
-        },
+        "winnerWouldDispatch": bool(winner_action.get("winnerWouldDispatch")),
         "mediaWouldDispatch": resolved_stage == RESUME_STAGE_MEDIA_PREREQUISITE,
         "summary": summary,
         "rolePlan": role_plan,

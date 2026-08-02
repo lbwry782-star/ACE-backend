@@ -216,6 +216,63 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         report["winnerResponseLocation"] = canonical_plan.get("winnerResponseLocation")
         report["winnerResponseFingerprint"] = canonical_plan.get("winnerResponseFingerprint")
         report["winnerParsedResponseFingerprint"] = canonical_plan.get("winnerParsedResponseFingerprint")
+        report["winnerAction"] = canonical_plan.get("winnerAction")
+        report["winnerOfflineRevalidationRequired"] = bool(canonical_plan.get("winnerOfflineRevalidationRequired"))
+        report["winnerPaidNormalCallMustNotRepeat"] = bool(canonical_plan.get("winnerPaidNormalCallMustNotRepeat"))
+        report["winnerParsedResponseFingerprintDerived"] = canonical_plan.get("winnerParsedResponseFingerprintDerived")
+        report["winnerFingerprintDerivationPossible"] = bool(canonical_plan.get("winnerFingerprintDerivationPossible"))
+        failure = state.get("winnerDevelopmentFailure") if isinstance(state.get("winnerDevelopmentFailure"), dict) else {}
+        report["winnerValidationFailureStage"] = _clean(failure.get("stage")) or None
+        report["winnerValidationFailureFieldPath"] = _clean(failure.get("fieldPath")) or None
+        report["winnerValidationFailureReason"] = _clean(failure.get("preciseReason")) or None
+        parsed_payload = load_revalidatable_parsed_winner_response(state)
+        report["winnerResponseAvailable"] = bool(parsed_payload)
+        report["winnerParsedResponseAvailable"] = bool(parsed_payload and isinstance(parsed_payload.get("parsed"), dict))
+        from engine.builder2_winner_response_ledger import (
+            resolve_winner_parsed_response_fingerprint,
+            resolve_winner_response_fingerprint,
+        )
+        from engine.builder2_winner_validation_replay import replay_prepare_and_validate
+        from engine.builder2_winner_preservation_contract import build_server_owned_winner_source_reference
+
+        if isinstance(parsed_payload, dict):
+            raw_fp = resolve_winner_response_fingerprint(parsed_payload)
+            parsed_fp = resolve_winner_parsed_response_fingerprint(parsed_payload)
+            report["winnerResponseFingerprintStored"] = bool(raw_fp.get("storedPresent"))
+            report["winnerParsedResponseFingerprintStored"] = bool(parsed_fp.get("storedPresent"))
+        else:
+            report["winnerResponseFingerprintStored"] = False
+            report["winnerParsedResponseFingerprintStored"] = False
+        winner_id_for_replay = _clean(state.get("winnerCandidateId"))
+        winner_rec_for_replay = (state.get("candidates") or {}).get(winner_id_for_replay) or {}
+        if parsed_payload and winner_id_for_replay:
+            winning_candidate = winner_rec_for_replay.get("creatorSnapshot") or winner_rec_for_replay.get("creatorOutput") or {}
+            judgment_id = _clean(winner_rec_for_replay.get("judgmentId"))
+            winning_judgment = ((state.get("judgments") or {}).get(judgment_id) or {}).get("judgment") or {}
+            strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
+            source_reference = build_server_owned_winner_source_reference(
+                strategy_foundation=strategy,
+                winning_candidate=winning_candidate if isinstance(winning_candidate, dict) else {},
+                candidate_id=winner_id_for_replay,
+            )
+            replay = replay_prepare_and_validate(
+                dict(parsed_payload.get("parsed") or {}),
+                source_reference=source_reference,
+                winning_candidate=winning_candidate if isinstance(winning_candidate, dict) else {},
+                winning_judgment=winning_judgment if isinstance(winning_judgment, dict) else None,
+                tournament_state=state,
+                job_id=_clean(state.get("jobId")),
+                tournament_id=_clean(state.get("tournamentId")),
+            )
+            report["winnerOfflineRevalidationPossible"] = bool(replay.get("accepted"))
+        else:
+            report["winnerOfflineRevalidationPossible"] = False
+        if report.get("winnerOfflineRevalidationRequired") and report.get("winnerPaidNormalCallMustNotRepeat"):
+            report["winnerRecoveryBlockedReason"] = None
+        elif report.get("winnerOfflineRevalidationRequired") and not report.get("winnerOfflineRevalidationPossible"):
+            report["winnerRecoveryBlockedReason"] = "offline_revalidation_validation_failed"
+        else:
+            report["winnerRecoveryBlockedReason"] = None
         report["creatorClosurePresent"] = bool(canonical_plan.get("creatorClosurePresent"))
         report["acceptedWinnerClosurePresent"] = bool(canonical_plan.get("acceptedWinnerClosurePresent"))
         report["reasoningBudgetRequiredForNextInvocation"] = int(
@@ -244,15 +301,24 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
             report["parsedWinnerResponseAvailable"] = True
             report["parsedWinnerCandidateId"] = _clean(parsed_winner.get("candidateId")) or None
 
-        report["requiredNextReasoningRoles"] = list(role_plan.get("requiredNextReasoningRoles") or [])
+        report["requiredNextReasoningRoles"] = list(canonical_plan.get("requiredNextReasoningRoles") or role_plan.get("requiredNextReasoningRoles") or [])
+        if canonical_plan.get("winnerOfflineRevalidationRequired"):
+            report["requiredNextReasoningRoles"] = []
         report["conditionalNextReasoningRoles"] = list(role_plan.get("conditionalNextReasoningRoles") or [])
-        report["expectedNextReasoningRoles"] = list(role_plan.get("expectedNextReasoningRoles") or [])
+        report["expectedNextReasoningRoles"] = (
+            []
+            if canonical_plan.get("winnerOfflineRevalidationRequired")
+            else list(role_plan.get("expectedNextReasoningRoles") or [])
+        )
         report["minimumAdditionalReasoningCalls"] = int(role_plan.get("minimumAdditionalReasoningCalls") or 0)
         report["maximumAdditionalReasoningCalls"] = int(role_plan.get("maximumAdditionalReasoningCalls") or 0)
 
         report["reasoningComplete"] = bool(state.get("reasoningComplete"))
         report["mediaStarted"] = bool(state.get("mediaStarted"))
-        report["resolvedNextStage"] = resolve_complete_ad_resume_stage(state, read_only=True)
+        report["resolvedNextStage"] = (
+            canonical_plan.get("resolvedResumeStage")
+            or resolve_complete_ad_resume_stage(state, read_only=True)
+        )
         winner_id = _clean(state.get("winnerCandidateId") or state.get("winnerDevelopmentCandidateId")) or None
         report["finalWinnerCandidateId"] = winner_id
         winner_rec = (state.get("candidates") or {}).get(winner_id or "") or {}

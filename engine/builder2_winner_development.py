@@ -213,6 +213,7 @@ def develop_builder2_winning_candidate(
             prototype_id=prototype_id,
             top_level_keys=top_level_keys,
             response_char_count=len(response_text),
+            response_text=response_text,
         )
 
     try:
@@ -232,6 +233,18 @@ def develop_builder2_winning_candidate(
         stage = STAGE_METHODOLOGY_VALIDATION if reason.startswith(
             ("builder2_winner_validation_failed", "builder2_winner_source_identity_mismatch", "builder2_winner_preservation_contract_missing")
         ) else STAGE_VALIDATION
+        if state is not None:
+            from engine.builder2_winner_response_ledger import record_winner_validation_outcome
+
+            record_winner_validation_outcome(
+                state,
+                candidate_id=resolved_candidate_id,
+                accepted=False,
+                failure_stage=stage,
+                failure_field_path=str(exc.args[0]).split(":", 1)[-1] if ":" in reason else None,
+                failure_reason=reason,
+                exception_class=exc.__class__.__name__,
+            )
         raise_public_winner_failure(
             exc,
             state=state,
@@ -240,12 +253,30 @@ def develop_builder2_winning_candidate(
             top_level_keys=top_level_keys,
         )
     except Exception as exc:
+        field_path = None
+        stage = STAGE_VALIDATION
+        if state is not None:
+            from engine.builder2_winner_validation_replay import infer_typeerror_failure
+            from engine.builder2_winner_response_ledger import record_winner_validation_outcome
+
+            inferred_field, _, _ = infer_typeerror_failure(exc, plan=raw)
+            field_path = inferred_field
+            record_winner_validation_outcome(
+                state,
+                candidate_id=resolved_candidate_id,
+                accepted=False,
+                failure_stage=stage,
+                failure_field_path=field_path,
+                failure_reason=str(exc),
+                exception_class=exc.__class__.__name__,
+            )
         raise_public_winner_failure(
             exc,
             state=state,
-            stage=STAGE_VALIDATION,
+            stage=stage,
             response_char_count=len(response_text),
             top_level_keys=top_level_keys,
+            failure_field_path=field_path,
         )
 
     log_winner_development_validation_ok(

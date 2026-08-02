@@ -66,6 +66,7 @@ def _optional_text(value: Any) -> str:
 
 
 _SEQUENCE_STAGE_TEXT_KEYS = ("description", "scene", "action", "visual", "purpose")
+_VIDEO_PROMPT_TEXT_KEYS = ("promptText", "prompt", "description", "text", "core", "videoPromptCore")
 
 
 def extract_builder2_sequence_stage_text(value: Any, field_path: str) -> str:
@@ -80,6 +81,27 @@ def extract_builder2_sequence_stage_text(value: Any, field_path: str) -> str:
         _invalid(field_path)
     if isinstance(value, dict):
         for key in _SEQUENCE_STAGE_TEXT_KEYS:
+            candidate = value.get(key)
+            if isinstance(candidate, str):
+                text = candidate.strip()
+                if text:
+                    return text
+        _invalid(field_path)
+    _invalid(field_path)
+
+
+def extract_builder2_video_prompt_text(value: Any, field_path: str = "videoPrompt") -> str:
+    """
+    Canonical Runway-facing text for Winner videoPrompt.
+    Accepts plain strings or structured dict prompts with a canonical text field.
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            return text
+        _invalid(field_path)
+    if isinstance(value, dict):
+        for key in _VIDEO_PROMPT_TEXT_KEYS:
             candidate = value.get(key)
             if isinstance(candidate, str):
                 text = candidate.strip()

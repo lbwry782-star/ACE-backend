@@ -44,13 +44,20 @@ def classify_winner_failure(
     response_char_count: int = 0,
     top_level_keys: Optional[List[str]] = None,
     repair_attempted: bool = False,
+    failure_field_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     code = _failure_code(exc)
-    field_path = _failure_field(exc)
+    field_path = failure_field_path or _failure_field(exc)
     category = "structural"
     precise_reason = code
 
-    if stage == STAGE_EXTRACTION:
+    if exc.__class__.__name__ == "TypeError":
+        category = "structural"
+        stage = STAGE_VALIDATION
+        precise_reason = str(exc.args[0] if exc.args else exc)
+        if not field_path and "expected string or bytes-like object" in precise_reason:
+            field_path = "videoPrompt"
+    elif stage == STAGE_EXTRACTION:
         category = "structural"
         precise_reason = str(exc.args[0] if exc.args else exc)
     elif code.startswith("builder2_winner_source_identity_mismatch"):
@@ -212,6 +219,7 @@ def raise_public_winner_failure(
     response_char_count: int = 0,
     top_level_keys: Optional[List[str]] = None,
     repair_attempted: bool = False,
+    failure_field_path: Optional[str] = None,
 ) -> None:
     diagnostics = classify_winner_failure(
         exc,
@@ -219,6 +227,7 @@ def raise_public_winner_failure(
         response_char_count=response_char_count,
         top_level_keys=top_level_keys,
         repair_attempted=repair_attempted,
+        failure_field_path=failure_field_path,
     )
     persist_winner_failure_diagnostics(state, diagnostics)
     log_winner_development_failed(

@@ -26,6 +26,7 @@ from engine.builder2_winner_downstream import (
     Builder2WinnerDownstreamError,
     compose_builder2_headline_text,
     extract_builder2_sequence_stage_text,
+    extract_builder2_video_prompt_text,
     get_scene_variation_descriptions,
     get_visual_anchor_description,
     normalize_builder2_sequence_stages,
@@ -174,7 +175,10 @@ def validate_builder2_winner_plan(
         require_non_empty_str(normalized_sequence.get(key), field=f"sequence.{key}")
     _validate_visual_anchor(raw)
     require_non_empty_str(raw.get("openingFrameDescription"), field="openingFrameDescription")
-    require_non_empty_str(raw.get("videoPrompt"), field="videoPrompt")
+    try:
+        out["videoPrompt"] = extract_builder2_video_prompt_text(raw.get("videoPrompt"), "videoPrompt")
+    except Builder2WinnerDownstreamError as exc:
+        raise Builder2TournamentError(exc.code) from exc
 
     out["sequence"] = normalized_sequence
     variations = out.get("sceneVariations")
@@ -183,8 +187,7 @@ def validate_builder2_winner_plan(
         cleaned = _clean_scene_variations(variations, structure=structure, sequence=normalized_sequence)
         out["sceneVariations"] = cleaned
         out["sceneSequenceSemantics"] = "temporal_beats"
-        vp = out["videoPrompt"]
-        if _MONTAGE_LANGUAGE.search(vp):
+        if _MONTAGE_LANGUAGE.search(out["videoPrompt"]):
             raise Builder2TournamentError("builder2_winner_development_failed")
         logger.info("BUILDER2_CONTINUOUS_EVENT_PLAN_VALIDATED prototypeId=%s", out.get("prototypeId"))
     elif structure == "variation_montage":

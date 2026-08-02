@@ -1376,6 +1376,7 @@ def _dispatch_winner_development_for_selected_winner(
             )
         except Builder2TournamentError as exc:
             reason = str(exc.args[0] if exc.args else "builder2_winner_development_failed")
+            populate_winner_development_call_report(state, report)
             _persist_resumable_failure(
                 state,
                 job_id=job_id,

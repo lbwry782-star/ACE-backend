@@ -114,10 +114,21 @@ def populate_winner_development_call_report(state: Dict[str, Any], report: Dict[
     parsed = load_revalidatable_parsed_winner_response(state)
     failure = state.get("winnerDevelopmentFailure") if isinstance(state.get("winnerDevelopmentFailure"), dict) else {}
     paid_dispatch = int(bucket.get("paidDispatchCount") or 0)
-    response_received = bool(parsed) or bool(bucket.get("responseReceived")) or paid_dispatch >= 1
+    response_received = (
+        bool(state.get("winnerDevelopmentResponseReceived"))
+        or bool(parsed)
+        or bool(bucket.get("responseReceived"))
+        or paid_dispatch >= 1
+    )
+    parsed_flag = (
+        bool(state.get("winnerDevelopmentParsed"))
+        or bool(parsed)
+        or bool(bucket.get("parsed"))
+        or paid_dispatch >= 1
+    )
     report["winnerDevelopmentDispatchCalls"] = paid_dispatch
     report["winnerDevelopmentResponseReceived"] = response_received
-    report["winnerDevelopmentParsed"] = bool(parsed) or bool(bucket.get("parsed")) or paid_dispatch >= 1
+    report["winnerDevelopmentParsed"] = parsed_flag
     report["winnerDevelopmentAccepted"] = is_valid_persisted_winner_development(state)
     report["winnerDevelopmentAdditionalPaidCallAllowed"] = additional_paid_winner_development_allowed(state)
     report["acceptedCreatorsCount"] = accepted_creator_count(state)

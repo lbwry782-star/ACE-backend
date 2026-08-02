@@ -421,15 +421,21 @@ def persist_parsed_winner_response(
     prototype_id: str,
     top_level_keys: Optional[List[str]] = None,
     response_char_count: int = 0,
+    response_text: str = "",
+    call_type: str = "normal",
 ) -> None:
-    state[PARSED_WINNER_RESPONSE_KEY] = {
-        "parsed": deepcopy(parsed),
-        "candidateId": candidate_id,
-        "prototypeId": prototype_id,
-        "topLevelKeys": list(top_level_keys or sorted(parsed.keys())),
-        "topLevelKeyCount": len(parsed),
-        "responseCharCount": response_char_count,
-    }
+    from engine.builder2_winner_response_ledger import record_winner_parsed_response_received
+
+    record_winner_parsed_response_received(
+        state,
+        parsed=parsed,
+        candidate_id=candidate_id,
+        prototype_id=prototype_id,
+        top_level_keys=top_level_keys,
+        response_char_count=response_char_count,
+        response_text=response_text,
+        call_type=call_type,
+    )
 
 
 def load_revalidatable_parsed_winner_response(state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
