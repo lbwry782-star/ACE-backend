@@ -14,6 +14,8 @@ from engine.builder2_creator import validate_creator_candidate
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
 REJECTED_CREATOR_PARSED_INDEX_KEY = "rejectedCreatorParsedResponses"
+REJECTED_CREATOR_RESPONSE_HISTORY_KEY = "rejectedCreatorResponseHistory"
+CREATOR_GROUNDING_OFFLINE_RECOVERY_LEDGER_KEY = "creatorGroundingOfflineRecovery"
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +226,18 @@ def offline_revalidate_and_accept_rejected_creator(
         creator_output=candidate,
         strategy_foundation=strategy,
     )
+    history = state.setdefault(REJECTED_CREATOR_RESPONSE_HISTORY_KEY, {})
+    if not isinstance(history, dict):
+        history = {}
+        state[REJECTED_CREATOR_RESPONSE_HISTORY_KEY] = history
+    history[candidate_id] = {
+        "candidateId": candidate_id,
+        "prototypeId": prototype_id,
+        "originalFailureReason": _clean(payload.get("failureReason")),
+        "storedAt": payload.get("storedAt"),
+        "recoveredAt": _utc_now_iso(),
+        "rejectedPayload": deepcopy(payload),
+    }
     rec = state.setdefault("candidates", {}).setdefault(candidate_id, {})
     rec.update(
         {

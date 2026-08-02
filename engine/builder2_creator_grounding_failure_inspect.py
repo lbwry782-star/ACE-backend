@@ -27,11 +27,14 @@ from engine.builder2_complete_ad_resume_plan import resolve_complete_ad_canonica
 from engine.builder2_creator import collect_creator_structural_errors, validate_creator_candidate
 from engine.builder2_strategy_evidence_grounding_contract import (
     BUILDER2_STRATEGY_EVIDENCE_GROUNDING_CONTRACT_VERSION,
+    CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION,
     build_product_input_audit,
     collect_creator_text_fields,
     compare_creator_relative_advantage_to_strategy,
     contract_version,
+    detect_capabilities_in_text,
     requires_strategy_evidence_grounding,
+    scan_capability_occurrences,
     scan_texts_for_unsupported_capabilities,
     stamp_creator_evidence_inheritance,
 )
@@ -63,6 +66,7 @@ _CONCLUSION_GROUNDED_RA = "false_positive_grounded_relative_advantage"
 _CONCLUSION_SELF_REPORT = "creator_self_report_contradiction"
 _CONCLUSION_UNAVAILABLE = "response_unavailable"
 _CONCLUSION_INSUFFICIENT = "insufficient_persisted_evidence"
+_CONCLUSION_NEGATED_CAPABILITY = "false_positive_negated_capability_mention"
 
 
 def _clean(value: Any) -> str:
@@ -292,6 +296,19 @@ def _resolve_primary_payload(
     return None, None
 
 
+def _infer_original_rejection_component(
+    *,
+    original_failure_reason: str,
+    creator_self_report: List[str],
+) -> str:
+    original_field = _failure_field(original_failure_reason)
+    if original_field != "newProductClaimsIntroduced":
+        return "other_validation_rule" if original_field else "none"
+    if creator_self_report:
+        return "creator_self_report_only"
+    return "server_scanner"
+
+
 def replay_creator_grounding_validation(
     state: Dict[str, Any],
     *,
@@ -352,7 +369,10 @@ def replay_creator_grounding_validation(
             rejection_component = "other_validation_rule"
     else:
         rejection_component = "accepted"
-    original_field = _failure_field(original_failure_reason)
+    original_rejection_component = _infer_original_rejection_component(
+        original_failure_reason=original_failure_reason,
+        creator_self_report=creator_self_report,
+    )
     return {
         "structuralValidationAccepted": structural_accepted,
         "factualGroundingValidationAccepted": factual_accepted,
@@ -362,9 +382,9 @@ def replay_creator_grounding_validation(
         "currentValidationFailureField": current_failure_field,
         "currentValidationFailureReason": current_failure_reason,
         "rejectionStillValidUnderCurrentContract": bool(current_failure_reason),
-        "rejectionReasonChangedSinceOriginalRun": bool(original_failure_reason)
-        and _clean(original_failure_reason) != _clean(current_failure_reason or ""),
+        "rejectionReasonChangedSinceOriginalRun": bool(original_failure_reason) and not bool(current_failure_reason),
         "rejectionComponent": rejection_component,
+        "originalRejectionComponent": original_rejection_component,
         "creatorProvidedNewProductClaimsIntroduced": creator_self_report,
         "scannerDerivedNewProductClaimsIntroduced": scanner_introduced,
         "structuralErrors": structural_errors,
@@ -380,12 +400,17 @@ def inspect_creator_grounding_failure(
     job_record: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     record = _candidate_record(state, candidate_id)
-    prototype_id = prototype_id or _clean(record.get("prototypeId"))
+    sources = discover_rejected_creator_sources(state, candidate_id=candidate_id, prototype_id=prototype_id)
+    payload, response_location = _resolve_primary_payload(state, candidate_id=candidate_id, prototype_id=prototype_id)
+    prototype_id = (
+        prototype_id
+        or _clean(record.get("prototypeId"))
+        or _clean((payload or {}).get("prototypeId"))
+        or _clean(((payload or {}).get("parsed") or {}).get("prototypeId") if isinstance((payload or {}).get("parsed"), dict) else "")
+    )
     strategy = state.get("strategyFoundation") if isinstance(state.get("strategyFoundation"), dict) else {}
     product_input = _load_product_input(state, job_record)
     compatibility_mode = not requires_strategy_evidence_grounding(state=state, strategy=strategy)
-    sources = discover_rejected_creator_sources(state, candidate_id=candidate_id, prototype_id=prototype_id)
-    payload, response_location = _resolve_primary_payload(state, candidate_id=candidate_id, prototype_id=prototype_id)
     diagnostics = _diagnostics_entry(state, candidate_id)
     parsed: Optional[Dict[str, Any]] = None
     raw_text = ""
@@ -426,10 +451,23 @@ def inspect_creator_grounding_failure(
     ra = strategy.get("relativeAdvantage") if isinstance(strategy.get("relativeAdvantage"), dict) else {}
     allowed_capabilities = list(block.get("allowedCapabilities") or product_input.get("explicitCapabilitiesSupplied") or [])
     unsupported_hits: List[Dict[str, Any]] = []
+    capability_occurrences: List[Dict[str, Any]] = []
+    lexical_tokens: List[str] = []
     introduced: List[str] = []
     if parsed_response_available and parsed is not None:
+        creator_fields = collect_creator_text_fields(parsed)
+        for field_path, text in creator_fields:
+            lexical_tokens.extend(detect_capabilities_in_text(text))
+            capability_occurrences.extend(
+                scan_capability_occurrences(
+                    text,
+                    allowed_capabilities=allowed_capabilities,
+                    field_path=field_path,
+                )
+            )
+        lexical_tokens = sorted(set(lexical_tokens))
         unsupported_hits = scan_texts_for_unsupported_capabilities(
-            collect_creator_text_fields(parsed),
+            creator_fields,
             allowed_capabilities=allowed_capabilities,
         )
         trial = copy.deepcopy(parsed)
@@ -446,16 +484,46 @@ def inspect_creator_grounding_failure(
         for capability in introduced
     ]
     if not claim_analyses and rejection_field == "newProductClaimsIntroduced" and parsed_response_available:
-        claim_analyses = [
-            _analyze_claim(
-                capability,
-                hits=unsupported_hits,
-                strategy=strategy,
-                product_input=product_input,
-                allowed_capabilities=allowed_capabilities,
-            )
-            for capability in sorted({hit["capability"] for hit in unsupported_hits})
+        negated_only = [
+            item
+            for item in capability_occurrences
+            if item.get("occurrenceClassification") == CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION
         ]
+        if negated_only and not introduced:
+            claim_analyses = [
+                {
+                    "claimText": item.get("capability"),
+                    "normalizedClaimText": str(item.get("capability") or "").replace("_", " "),
+                    "fieldPath": item.get("fieldPath"),
+                    "sourceCategory": _field_category(_clean(item.get("fieldPath"))),
+                    "supportingSubstring": item.get("matchedSpan"),
+                    "scannerRule": "scan_texts_for_unsupported_capabilities",
+                    "scannerPatterns": _capability_patterns_for(str(item.get("capability") or "")),
+                    "whyConsideredNew": "Lexical capability token matched, but occurrence is an explicit negation or truth-boundary denial.",
+                    "matchesExplicitProductFact": False,
+                    "matchesAllowedCapability": False,
+                    "isCategoryConventionOnly": False,
+                    "isVisualMetaphorNotProductAssertion": False,
+                    "matchesGroundedRelativeAdvantage": False,
+                    "violatesProductionTruthBoundary": False,
+                    "occurrenceClassification": CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION,
+                    "productClaimEmitted": False,
+                    "classification": _CONCLUSION_NEGATED_CAPABILITY,
+                    "allMatchingFieldPaths": [_clean(item.get("fieldPath"))] if _clean(item.get("fieldPath")) else [],
+                }
+                for item in negated_only
+            ]
+        elif unsupported_hits:
+            claim_analyses = [
+                _analyze_claim(
+                    capability,
+                    hits=unsupported_hits,
+                    strategy=strategy,
+                    product_input=product_input,
+                    allowed_capabilities=allowed_capabilities,
+                )
+                for capability in sorted({hit["capability"] for hit in unsupported_hits})
+            ]
     offline_ok, offline_blocked = (
         can_offline_revalidate_rejected_creator(
             state,
@@ -470,10 +538,15 @@ def inspect_creator_grounding_failure(
     prototype_plan = (plan.get("resumePlanByPrototype") or {}).get(prototype_id) or {}
     replacement_planned = _clean(prototype_plan.get("creatorAction")) == "dispatch"
     classifications = [item.get("classification") for item in claim_analyses]
+    negated_lexical_only = bool(capability_occurrences) and not introduced and not unsupported_hits and any(
+        item.get("occurrenceClassification") == CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION for item in capability_occurrences
+    )
     if not parsed_response_available:
         inspection_conclusion = _CONCLUSION_UNAVAILABLE
     elif not payload:
         inspection_conclusion = _CONCLUSION_INSUFFICIENT
+    elif negated_lexical_only and rejection_field == "newProductClaimsIntroduced" and not replay.get("rejectionStillValidUnderCurrentContract"):
+        inspection_conclusion = _CONCLUSION_NEGATED_CAPABILITY
     elif all(item.get("classification") == _CONCLUSION_GROUNDED_RA for item in claim_analyses) and claim_analyses:
         inspection_conclusion = _CONCLUSION_GROUNDED_RA
     elif any(item.get("classification") == _CONCLUSION_VISUAL_METAPHOR for item in claim_analyses) and not any(
@@ -505,10 +578,14 @@ def inspect_creator_grounding_failure(
         "responseCharacterCount": response_chars if response_chars else None,
         "rejectionField": rejection_field or None,
         "rejectionReason": rejection_reason or None,
+        "originalRejectionReason": rejection_reason or None,
+        "originalRejectionComponent": replay.get("originalRejectionComponent"),
         "structuralErrors": replay.get("structuralErrors") or [],
         "structuralErrorCount": replay.get("structuralErrorCount"),
         "responseStructurallyValidUnderCurrentContract": replay.get("structuralValidationAccepted"),
         "productCapabilityClaimsDetected": sorted({hit["capability"] for hit in unsupported_hits}),
+        "lexicalCapabilityTokensDetected": lexical_tokens if parsed_response_available else None,
+        "capabilityOccurrences": capability_occurrences if parsed_response_available else None,
         "unsupportedProductClaims": unsupported_hits,
         "newProductClaimsIntroduced": introduced if parsed_response_available else None,
         "inheritedProductFacts": list((copy.deepcopy(parsed) if parsed else {}).get("inheritedProductFacts") or []) if parsed_response_available else None,

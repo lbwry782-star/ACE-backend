@@ -91,13 +91,52 @@ _CAPABILITY_PATTERNS: Dict[str, Tuple[re.Pattern[str], ...]] = {
         re.compile(r"מדיד(?:ת|ה)\s+(?:קמפיין|ביצועים)"),
     ),
     "collaborative_iteration": (
-        re.compile(r"\b(?:work(?:s|ing)?\s+with\s+(?:the\s+)?(?:client|user)\s+(?:to|on)\s+(?:revise|refine|improve))\b", re.I),
+        re.compile(
+            r"\b(?:work(?:s|ing)?\s+with\s+(?:the\s+)?(?:client|user)\s+(?:to|on)\s+(?:revise|refine|improve))\b",
+            re.I,
+        ),
         re.compile(r"\bongoing\s+(?:account|client)\s+management\b", re.I),
         re.compile(r"ניהול\s+לקוח\s+שוטף"),
+        re.compile(r"ליווי\s+שוטף"),
     ),
 }
 
-_EXPLICIT_POSITIVE_PATTERNS: Dict[str, Tuple[re.Pattern[str], ...]] = _CAPABILITY_PATTERNS
+CAPABILITY_OCCURRENCE_POSITIVE_ASSERTION = "positive_assertion"
+CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION = "explicit_negation"
+CAPABILITY_OCCURRENCE_UNCERTAINTY = "uncertainty_or_no_evidence"
+CAPABILITY_OCCURRENCE_CATEGORY_CONVENTION = "category_convention_only"
+CAPABILITY_OCCURRENCE_VISUAL_METAPHOR = "visual_metaphor"
+CAPABILITY_OCCURRENCE_UNKNOWN = "unknown"
+
+_NEGATION_WINDOW_CHARS = 120
+_SCOPE_BOUNDARY = re.compile(r"[.!?;]\s*")
+_CONTRAST_RESET = re.compile(r"(?:^|[.!?;]\s*|\s+)(?:אך|אולם|אבל|however|but|instead)\s+", re.I)
+_COORDINATED_ATTRIBUTION_NEGATION = re.compile(r"אינ[והםן]\s+מייחס")
+_POSITIVE_ACTION_BEFORE_MATCH = re.compile(
+    r"(?:"
+    r"מבצע|משפר(?:ת)?|כולל(?:ת)?|מספק(?:ת)?|מנהל(?:ת)?|לומד(?:ת)?|"
+    r"provides|performs|includes|improves|optimizes|learns|accepts|delivers"
+    r")\b[\s\S]{0,48}$",
+    re.I,
+)
+_NEGATION_PREFIX_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"אינ[והםן]\s+מייחס\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"אינ[והםן]\s+מבטיח\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"לא\s+נטען\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"לא\s+כולל\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"(?:^|[\s,])בלי\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"(?:^|[\s,])ללא\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"\bwithout\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"\bdo\s+not\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"\bdoes\s+not\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"\bdon't\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"(?:^|[\s,])לא\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+    (re.compile(r"(?:^|[\s,])אין\b"), CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION),
+)
+_UNCERTAINTY_PREFIX_PATTERNS: Tuple[Tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"אין\s+מידע\s+שמוכיח"), CAPABILITY_OCCURRENCE_UNCERTAINTY),
+    (re.compile(r"no\s+evidence\s+(?:that|to)\b", re.I), CAPABILITY_OCCURRENCE_UNCERTAINTY),
+)
 
 _GENERIC_UNGROUNDED_ADVANTAGE_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsmarter\s+advertis", re.I),
@@ -307,13 +346,155 @@ def _collect_strategy_text(strategy: Dict[str, Any]) -> List[Tuple[str, str]]:
     return texts
 
 
+def _absolute_clause_bounds(text: str, pos: int) -> Tuple[int, int]:
+    start = 0
+    for match in _SCOPE_BOUNDARY.finditer(text[:pos]):
+        start = match.end()
+    end = len(text)
+    for match in _SCOPE_BOUNDARY.finditer(text[pos:]):
+        end = pos + match.start()
+        break
+    return start, end
+
+
+def _last_scope_reset_pos(prefix: str) -> int:
+    last = -1
+    for match in _SCOPE_BOUNDARY.finditer(prefix):
+        last = match.end() - 1
+    for match in _CONTRAST_RESET.finditer(prefix):
+        if match.start() > last:
+            last = match.end() - 1
+    return last
+
+
+def _iter_capability_matches(text: str, capability: str) -> List[Tuple[int, int, str]]:
+    patterns = _CAPABILITY_PATTERNS.get(capability) or ()
+    matches: List[Tuple[int, int, str]] = []
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            matches.append((match.start(), match.end(), match.group(0)))
+    matches.sort(key=lambda item: item[0])
+    return matches
+
+
+def _is_coordinated_attribution_negation(clause: str, rel_pos: int) -> bool:
+    for match in _COORDINATED_ATTRIBUTION_NEGATION.finditer(clause):
+        list_start = match.end()
+        if rel_pos < list_start:
+            continue
+        between = clause[list_start:rel_pos]
+        if _CONTRAST_RESET.search(between):
+            continue
+        if _SCOPE_BOUNDARY.search(between):
+            continue
+        return True
+    return False
+
+
+def classify_capability_occurrence(
+    text: str,
+    capability: str,
+    *,
+    match_start: int,
+    match_end: int,
+    field_path: str = "",
+) -> str:
+    del field_path, match_end
+    clause_start, clause_end = _absolute_clause_bounds(text, match_start)
+    clause = text[clause_start:clause_end]
+    rel_start = match_start - clause_start
+    prefix = clause[:rel_start]
+    reset_pos = _last_scope_reset_pos(prefix)
+    governed_prefix = prefix[reset_pos + 1 :] if reset_pos >= 0 else prefix
+
+    if _is_coordinated_attribution_negation(clause, rel_start):
+        return CAPABILITY_OCCURRENCE_EXPLICIT_NEGATION
+
+    for pattern, classification in _UNCERTAINTY_PREFIX_PATTERNS:
+        if pattern.search(governed_prefix):
+            return classification
+
+    for pattern, classification in _NEGATION_PREFIX_PATTERNS:
+        if pattern.search(governed_prefix):
+            return classification
+
+    if _POSITIVE_ACTION_BEFORE_MATCH.search(governed_prefix):
+        return CAPABILITY_OCCURRENCE_POSITIVE_ASSERTION
+
+    return CAPABILITY_OCCURRENCE_POSITIVE_ASSERTION
+
+
+def has_positive_capability_claim(
+    text: str,
+    capability: str,
+    *,
+    field_path: str = "",
+) -> bool:
+    if capability not in detect_capabilities_in_text(text):
+        return False
+    for start, end, _matched in _iter_capability_matches(text, capability):
+        if (
+            classify_capability_occurrence(
+                text,
+                capability,
+                match_start=start,
+                match_end=end,
+                field_path=field_path,
+            )
+            == CAPABILITY_OCCURRENCE_POSITIVE_ASSERTION
+        ):
+            return True
+    return False
+
+
+def scan_capability_occurrences(
+    text: str,
+    *,
+    allowed_capabilities: Sequence[str],
+    field_path: str = "",
+) -> List[Dict[str, Any]]:
+    allowed = set(allowed_capabilities)
+    occurrences: List[Dict[str, Any]] = []
+    for capability in DISPUTED_CAPABILITY_KEYS:
+        if capability in allowed:
+            continue
+        for start, end, matched in _iter_capability_matches(text, capability):
+            classification = classify_capability_occurrence(
+                text,
+                capability,
+                match_start=start,
+                match_end=end,
+                field_path=field_path,
+            )
+            occurrences.append(
+                {
+                    "fieldPath": field_path,
+                    "capability": capability,
+                    "matchedText": text,
+                    "matchedSpan": matched,
+                    "matchStart": start,
+                    "matchEnd": end,
+                    "occurrenceClassification": classification,
+                    "productClaimEmitted": classification == CAPABILITY_OCCURRENCE_POSITIVE_ASSERTION,
+                }
+            )
+    return occurrences
+
+
 def find_unsupported_capability_claims(
     text: str,
     *,
     allowed_capabilities: Sequence[str],
+    field_path: str = "",
 ) -> List[str]:
     allowed = set(allowed_capabilities)
-    return [cap for cap in detect_capabilities_in_text(text) if cap not in allowed]
+    claims: List[str] = []
+    for capability in detect_capabilities_in_text(text):
+        if capability in allowed:
+            continue
+        if has_positive_capability_claim(text, capability, field_path=field_path):
+            claims.append(capability)
+    return list(dict.fromkeys(claims))
 
 
 def scan_texts_for_unsupported_capabilities(
@@ -323,13 +504,31 @@ def scan_texts_for_unsupported_capabilities(
 ) -> List[Dict[str, Any]]:
     hits: List[Dict[str, Any]] = []
     for field_path, text in texts:
-        unsupported = find_unsupported_capability_claims(text, allowed_capabilities=allowed_capabilities)
+        unsupported = find_unsupported_capability_claims(
+            text,
+            allowed_capabilities=allowed_capabilities,
+            field_path=field_path,
+        )
         for capability in unsupported:
+            positive_matches = [
+                item
+                for item in scan_capability_occurrences(
+                    text,
+                    allowed_capabilities=allowed_capabilities,
+                    field_path=field_path,
+                )
+                if item["capability"] == capability and item["productClaimEmitted"]
+            ]
+            primary = positive_matches[0] if positive_matches else {}
             hits.append(
                 {
                     "fieldPath": field_path,
                     "capability": capability,
                     "matchedText": text,
+                    "matchedSpan": primary.get("matchedSpan"),
+                    "occurrenceClassification": primary.get("occurrenceClassification")
+                    or CAPABILITY_OCCURRENCE_POSITIVE_ASSERTION,
+                    "productClaimEmitted": True,
                 }
             )
     return hits
