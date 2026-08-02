@@ -121,6 +121,12 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         report["acceptedJudgmentCount"] = summary["acceptedJudgmentCount"]
         report["missingCreatorPrototypeIds"] = list(canonical_plan.get("missingCreatorPrototypeIds") or [])
         report["missingJudgmentPrototypeIds"] = list(canonical_plan.get("missingJudgmentPrototypeIds") or [])
+        report["rawMissingJudgmentPrototypeIds"] = list(canonical_plan.get("rawMissingJudgmentPrototypeIds") or [])
+        report["actionableMissingJudgmentPrototypeIds"] = list(
+            canonical_plan.get("actionableMissingJudgmentPrototypeIds") or []
+        )
+        report["resolvedUnavailablePrototypeIds"] = list(canonical_plan.get("resolvedUnavailablePrototypeIds") or [])
+        report["unresolvedJudgmentPrototypeIds"] = list(canonical_plan.get("unresolvedJudgmentPrototypeIds") or [])
         report["incompletePrototypeIds"] = list(canonical_plan.get("incompletePrototypeIds") or [])
         report["missingPrototypeIds"] = list(canonical_plan.get("incompletePrototypeIds") or [])
         report["resumePlanByPrototype"] = dict(canonical_plan.get("resumePlanByPrototype") or {})
@@ -204,6 +210,18 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         report["progressStage"] = canonical_plan.get("progressStage")
         report["tournamentId"] = canonical_plan.get("tournamentId")
         report["readyForWinnerDevelopment"] = bool(canonical_plan.get("readyForWinnerDevelopment"))
+        report["winnerDevelopmentCallRequired"] = bool(canonical_plan.get("winnerDevelopmentCallRequired"))
+        report["winnerDevelopmentCallReason"] = canonical_plan.get("winnerDevelopmentCallReason")
+        report["winnerNormalCallsPlanned"] = int(canonical_plan.get("winnerNormalCallsPlanned") or 0)
+        report["winnerResponseLocation"] = canonical_plan.get("winnerResponseLocation")
+        report["winnerResponseFingerprint"] = canonical_plan.get("winnerResponseFingerprint")
+        report["winnerParsedResponseFingerprint"] = canonical_plan.get("winnerParsedResponseFingerprint")
+        report["creatorClosurePresent"] = bool(canonical_plan.get("creatorClosurePresent"))
+        report["acceptedWinnerClosurePresent"] = bool(canonical_plan.get("acceptedWinnerClosurePresent"))
+        report["reasoningBudgetRequiredForNextInvocation"] = int(
+            canonical_plan.get("reasoningBudgetRequiredForNextInvocation") or 0
+        )
+        report["recommendedNextInvocationMaxCalls"] = int(canonical_plan.get("recommendedNextInvocationMaxCalls") or 0)
         report["paidCalls"] = 0
         report["stateMutated"] = False
         report["provisionalWinnerPresent"] = bool(_clean(state.get("provisionalWinnerCandidateId")))
@@ -250,6 +268,18 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         if not closure and isinstance(winner_rec.get("creatorOutput"), dict):
             closure = (winner_rec["creatorOutput"].get("advertisingClosure") or {})
         report["advertisingClosurePresent"] = bool(closure.get("sloganText"))
+        report["creatorClosurePresent"] = report.get("creatorClosurePresent", False) or bool(
+            ((winner_rec.get("creatorOutput") or {}).get("advertisingClosure") or {}).get("sloganText")
+            if isinstance(winner_rec.get("creatorOutput"), dict)
+            else False
+        )
+        report["acceptedWinnerClosurePresent"] = bool(
+            report.get("acceptedWinnerClosurePresent", False)
+            or (
+                is_valid_persisted_winner_development(state)
+                and bool((state.get("advertisingClosure") or {}).get("sloganText"))
+            )
+        )
         report["productNamePresent"] = bool(closure.get("productNameText"))
         slogan = _clean(closure.get("sloganText"))
         report["sloganPresent"] = bool(slogan)

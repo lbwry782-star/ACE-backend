@@ -154,6 +154,22 @@ def missing_actionable_judge_prototype_ids(state: Dict[str, Any], *, read_only: 
     return [pid for pid in assigned if pid not in judged and pid not in excluded]
 
 
+def resolved_unavailable_judge_prototype_ids(state: Dict[str, Any], *, read_only: bool = False) -> List[str]:
+    from engine.builder2_judge_unavailable_resolution_contract import (
+        has_operator_judgment_unavailable_resolution,
+        prototype_id_for_candidate,
+    )
+
+    resolved: List[str] = []
+    for candidate_id in (state.get("candidates") or {}).keys():
+        candidate_key = str(candidate_id)
+        if has_operator_judgment_unavailable_resolution(state, candidate_key):
+            prototype_id = prototype_id_for_candidate(state, candidate_key)
+            if prototype_id:
+                resolved.append(prototype_id)
+    return sorted(set(resolved))
+
+
 def structurally_rejected_creator_prototype_ids(state: Dict[str, Any]) -> List[str]:
     rejected: List[str] = []
     assigned = set(assigned_prototype_ids(state))

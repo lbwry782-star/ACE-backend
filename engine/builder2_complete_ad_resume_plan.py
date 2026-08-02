@@ -14,12 +14,18 @@ from engine.builder2_complete_ad_creator_recovery import (
 from engine.builder2_tournament_completion_gate import (
     assigned_prototype_ids,
     is_tournament_ready_for_winner_selection,
+    missing_actionable_judge_prototype_ids,
     missing_creator_prototype_ids,
     missing_judge_prototype_ids,
+    resolved_unavailable_judge_prototype_ids,
     tournament_resolution_summary,
+    unresolved_judge_prototype_ids,
 )
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development
-from engine.builder2_winner_preservation_contract import load_revalidatable_parsed_winner_response
+from engine.builder2_winner_preservation_contract import (
+    PARSED_WINNER_RESPONSE_KEY,
+    load_revalidatable_parsed_winner_response,
+)
 from engine.builder2_judge_pending_repair import (
     RESUME_BLOCKED_REPAIR_UNAVAILABLE,
     pending_judge_repair_candidate_ids,
@@ -52,12 +58,14 @@ def resolve_complete_ad_resume_stage(state: Dict[str, Any], *, read_only: bool =
     if missing_creator_prototype_ids(state, read_only=read_only):
         return "creator_generation"
 
-    if missing_judge_prototype_ids(state, read_only=read_only):
+    if missing_actionable_judge_prototype_ids(state, read_only=read_only):
         return "judge_generation"
 
     if not is_tournament_ready_for_winner_selection(state, read_only=read_only):
         if missing_creator_prototype_ids(state, read_only=read_only):
             return "creator_generation"
+        if missing_actionable_judge_prototype_ids(state, read_only=read_only):
+            return "judge_generation"
         return "judge_generation"
 
     if not _clean(state.get("winnerCandidateId")):
@@ -78,6 +86,7 @@ def plan_complete_ad_reasoning_roles(
     assigned_count = len(assigned_prototype_ids(state))
     missing_creators = list(summary.get("missingCreatorPrototypeIds") or [])
     missing_judges = list(summary.get("missingJudgePrototypeIds") or [])
+    missing_actionable_judges = missing_actionable_judge_prototype_ids(state, read_only=read_only)
 
     required: List[str] = []
     conditional: List[str] = []
@@ -92,7 +101,7 @@ def plan_complete_ad_reasoning_roles(
         if "builder2_creator" not in required:
             required.append("builder2_creator")
 
-    pending_judge_prototypes = set(missing_judges)
+    pending_judge_prototypes = set(missing_actionable_judges)
     pending_judge_prototypes.update(missing_creators)
     if pending_judge_prototypes and "builder2_judge" not in required:
         required.append("builder2_judge")
@@ -104,7 +113,10 @@ def plan_complete_ad_reasoning_roles(
         _clean(state.get("winnerCandidateId"))
     )
 
-    if (
+    if winner_ready and not winner_dev_valid and not parsed_winner:
+        if "builder2_winner" not in required:
+            required.append("builder2_winner")
+    elif (
         summary.get("readyForAuthoritativeWinnerSelection")
         and not winner_ready
         and not winner_dev_valid
@@ -112,7 +124,7 @@ def plan_complete_ad_reasoning_roles(
         conditional.append("builder2_winner")
     elif parsed_winner and not winner_dev_valid:
         conditional.append("builder2_winner")
-    elif _clean(state.get("winnerCandidateId")) and not winner_dev_valid:
+    elif _clean(state.get("winnerCandidateId")) and not winner_dev_valid and not winner_ready:
         conditional.append("builder2_winner")
 
     expected: List[str] = list(required)
@@ -408,8 +420,6 @@ def resolve_complete_ad_canonical_resume_plan(
     resolved_stage = resolve_complete_ad_resume_stage(state, read_only=read_only)
     missing_creators = list(summary.get("missingCreatorPrototypeIds") or [])
     missing_judges = list(summary.get("missingJudgePrototypeIds") or [])
-    from engine.builder2_tournament_completion_gate import missing_actionable_judge_prototype_ids
-
     missing_actionable_judges = missing_actionable_judge_prototype_ids(state, read_only=read_only)
     accepted_creators = int(summary.get("acceptedCreatorCount") or 0)
     accepted_judgments = int(summary.get("acceptedJudgmentCount") or 0)
@@ -448,17 +458,29 @@ def resolve_complete_ad_canonical_resume_plan(
     elif _media_started(state):
         resume_eligible = False
         rejection_reason = "builder2_complete_ad_reasoning_resume_media_already_started"
+    elif is_reasoning_complete_for_winner_selection(state, read_only=read_only):
+        if not is_valid_persisted_winner_development(state):
+            resolved_stage = (
+                RESUME_STAGE_WINNER_DEVELOPMENT
+                if _clean(state.get("winnerCandidateId"))
+                else RESUME_STAGE_WINNER_SELECTION
+            )
     elif accepted_creators == 6 and accepted_judgments == 6:
         if not is_valid_persisted_winner_development(state):
             resolved_stage = RESUME_STAGE_WINNER_DEVELOPMENT if _clean(state.get("winnerCandidateId")) else RESUME_STAGE_WINNER_SELECTION
-    elif accepted_creators == 6 and not missing_creators and missing_judges:
+    elif accepted_creators == 6 and not missing_creators and missing_actionable_judges:
         resolved_stage = RESUME_STAGE_JUDGE_GENERATION
     elif accepted_creators == 5 and accepted_judgments == 5 and len(missing_creators) == 1:
         resolved_stage = RESUME_STAGE_CREATOR_GENERATION
     elif accepted_creators == 6 and accepted_judgments < 6 and missing_creators:
         resume_eligible = False
         rejection_reason = "builder2_complete_ad_reasoning_resume_unexpected_missing_creator"
-    elif accepted_creators == 6 and accepted_judgments < 6 and not missing_judges:
+    elif (
+        accepted_creators == 6
+        and accepted_judgments < 6
+        and not missing_actionable_judges
+        and not is_reasoning_complete_for_winner_selection(state, read_only=read_only)
+    ):
         resume_eligible = False
         rejection_reason = "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
     elif is_mixed_partial_resume_pattern(
@@ -506,21 +528,75 @@ def resolve_complete_ad_canonical_resume_plan(
 
     strategy_fingerprint_value = strategy_fingerprint(strategy) if strategy_present and isinstance(strategy, dict) else ""
 
+    ready_for_winner_development = (
+        is_reasoning_complete_for_winner_selection(state, read_only=read_only)
+        and bool(_clean(state.get("winnerCandidateId")))
+    )
+
     judge_calls_planned = (
         mixed_call_plan["remainingJudgeNormalCalls"]
         if resolved_stage == RESUME_STAGE_MIXED_PARTIAL
-        else (len(missing_judges) if resolved_stage == RESUME_STAGE_JUDGE_GENERATION else 0)
+        else (len(missing_actionable_judges) if resolved_stage == RESUME_STAGE_JUDGE_GENERATION else 0)
     )
     creator_calls_planned = (
         mixed_call_plan["remainingCreatorNormalCalls"]
         if resolved_stage == RESUME_STAGE_MIXED_PARTIAL
         else (1 if resolved_stage == RESUME_STAGE_CREATOR_GENERATION and missing_creators else 0)
     )
-
-    ready_for_winner_development = (
-        is_reasoning_complete_for_winner_selection(state, read_only=read_only)
-        and bool(_clean(state.get("winnerCandidateId")))
+    winner_normal_calls_planned = (
+        1
+        if resolved_stage == RESUME_STAGE_WINNER_DEVELOPMENT
+        and ready_for_winner_development
+        and not is_valid_persisted_winner_development(state)
+        and not parsed_winner_reusable_for_candidate(
+            state,
+            winner_candidate_id=_clean(state.get("winnerCandidateId")),
+        )
+        else 0
     )
+    winner_development_call_required = winner_normal_calls_planned == 1
+    winner_development_call_reason = (
+        "accepted_winner_development_missing"
+        if winner_development_call_required
+        else (
+            "parsed_winner_reusable"
+            if parsed_winner_reusable_for_candidate(
+                state,
+                winner_candidate_id=_clean(state.get("winnerCandidateId")),
+            )
+            else None
+        )
+    )
+    reasoning_budget_required_for_next_invocation = max(
+        1,
+        winner_normal_calls_planned or judge_calls_planned or creator_calls_planned or 1,
+    )
+    if winner_development_call_required:
+        reasoning_budget_required_for_next_invocation = 1
+    recommended_next_invocation_max_calls = reasoning_budget_required_for_next_invocation
+    raw_missing_judges = list(missing_judges)
+    actionable_missing_judges_list = list(missing_actionable_judges)
+    resolved_unavailable_ids = resolved_unavailable_judge_prototype_ids(state, read_only=read_only)
+    unresolved_judge_ids = unresolved_judge_prototype_ids(state, read_only=read_only)
+    parsed_winner = load_revalidatable_parsed_winner_response(state)
+    winner_candidate_id = _clean(state.get("winnerCandidateId"))
+    winner_response_location = None
+    winner_response_fingerprint = None
+    winner_parsed_response_fingerprint = None
+    if parsed_winner and winner_candidate_id and _clean(parsed_winner.get("candidateId")) == winner_candidate_id:
+        winner_response_location = PARSED_WINNER_RESPONSE_KEY if state.get(PARSED_WINNER_RESPONSE_KEY) else "parsedWinnerResponse"
+        winner_response_fingerprint = _clean(parsed_winner.get("responseFingerprint")) or None
+        winner_parsed_response_fingerprint = _clean(parsed_winner.get("parsedResponseFingerprint")) or None
+    creator_closure_present = False
+    accepted_winner_closure_present = False
+    if winner_candidate_id:
+        winner_rec = (state.get("candidates") or {}).get(winner_candidate_id) or {}
+        creator_output = winner_rec.get("creatorOutput") if isinstance(winner_rec.get("creatorOutput"), dict) else {}
+        creator_closure = (creator_output.get("advertisingClosure") or {}) if isinstance(creator_output, dict) else {}
+        creator_closure_present = bool(_clean(creator_closure.get("sloganText")))
+    if is_valid_persisted_winner_development(state):
+        winner_closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
+        accepted_winner_closure_present = bool(_clean(winner_closure.get("sloganText")))
 
     return {
         "jobId": job_id or None,
@@ -537,6 +613,10 @@ def resolve_complete_ad_canonical_resume_plan(
         "acceptedJudgmentCount": accepted_judgments,
         "missingCreatorPrototypeIds": missing_creators,
         "missingJudgmentPrototypeIds": missing_judges,
+        "rawMissingJudgmentPrototypeIds": raw_missing_judges,
+        "actionableMissingJudgmentPrototypeIds": actionable_missing_judges_list,
+        "resolvedUnavailablePrototypeIds": resolved_unavailable_ids,
+        "unresolvedJudgmentPrototypeIds": unresolved_judge_ids,
         "incompletePrototypeIds": incomplete_prototypes,
         "missingPrototypeIds": incomplete_prototypes,
         "resumePlanByPrototype": resume_plan_by_prototype,
@@ -544,8 +624,18 @@ def resolve_complete_ad_canonical_resume_plan(
         "resumeEligible": resume_eligible,
         "executorWouldAcceptState": resume_eligible,
         "executorRejectionReason": rejection_reason or None,
-        "readyForJudges": accepted_creators == 6 and not missing_creators and bool(missing_judges),
+        "readyForJudges": accepted_creators == 6 and not missing_creators and bool(missing_actionable_judges),
         "readyForWinnerDevelopment": ready_for_winner_development,
+        "winnerDevelopmentCallRequired": winner_development_call_required,
+        "winnerDevelopmentCallReason": winner_development_call_reason,
+        "winnerNormalCallsPlanned": winner_normal_calls_planned,
+        "winnerResponseLocation": winner_response_location,
+        "winnerResponseFingerprint": winner_response_fingerprint,
+        "winnerParsedResponseFingerprint": winner_parsed_response_fingerprint,
+        "creatorClosurePresent": creator_closure_present,
+        "acceptedWinnerClosurePresent": accepted_winner_closure_present,
+        "reasoningBudgetRequiredForNextInvocation": reasoning_budget_required_for_next_invocation,
+        "recommendedNextInvocationMaxCalls": recommended_next_invocation_max_calls,
         "winnerDevelopmentStarted": is_valid_persisted_winner_development(state),
         "reasoningComplete": bool(state.get("reasoningComplete")),
         "mediaStarted": _media_started(state),
@@ -583,9 +673,15 @@ def resolve_complete_ad_canonical_resume_plan(
         "excludedFromWinnerCandidateIds": excluded_from_winner_candidate_ids(state),
         "operatorResolutionContractVersion": BUILDER2_JUDGE_UNAVAILABLE_RESOLUTION_CONTRACT_VERSION,
         "perInvocationCallLimit": mixed_call_plan["perInvocationCallLimit"],
-        "totalCallsRemainingAcrossInvocations": mixed_call_plan["totalCallsRemainingAcrossInvocations"],
+        "totalCallsRemainingAcrossInvocations": (
+            1
+            if winner_development_call_required
+            else mixed_call_plan["totalCallsRemainingAcrossInvocations"]
+        ),
         "creatorsWouldDispatch": creator_calls_planned > 0,
-        "winnerWouldDispatch": resolved_stage in {
+        "winnerWouldDispatch": winner_development_call_required
+        or resolved_stage
+        in {
             RESUME_STAGE_WINNER_SELECTION,
             RESUME_STAGE_WINNER_DEVELOPMENT,
         },
