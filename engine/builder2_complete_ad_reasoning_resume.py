@@ -59,7 +59,8 @@ from engine.builder2_creator_semantic_bridge_repair_patch import (
 )
 from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_judge import judge_candidate, judge_candidate_structural_repair
-from engine.builder2_judge_pending_repair import normal_judge_call_must_not_repeat, resolve_pending_judge_repair
+from engine.builder2_judge_pending_repair import normal_judge_call_must_not_repeat, repair_judge_call_must_not_repeat, resolve_pending_judge_repair
+from engine.builder2_judge_repair_offline_salvage import salvage_repair_judgment_offline
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_reasoning_failure_diagnostics import (
     log_reasoning_resume_failed,
@@ -884,6 +885,24 @@ def _dispatch_judge_repair_for_prototype(
     if reusable:
         return True, None
 
+    if repair_judge_call_must_not_repeat(state, candidate_id):
+        reason = "builder2_judge_repair_call_blocked"
+        record_process_failure_tag(state, reason)
+        failure_report = _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage=RESUME_STAGE_JUDGE_GENERATION,
+            failure_reason=reason,
+            budget=budget,
+            reasoning_role="builder2_judge",
+            prototype_id=prototype_id,
+            validation_rejection_code=reason,
+            redis_mutated=False,
+            lease_acquired=lease_acquired,
+        )
+        return False, failure_report
+
     ledger = (state.get("judgeResponseLedgerByCandidate") or {}).get(candidate_id) or []
     normal_entry = next(
         (
@@ -1021,22 +1040,33 @@ def _execute_mixed_partial_reasoning_resume(
     ordered_prototypes = sorted(
         assigned_prototype_ids(state),
         key=lambda prototype_id: {
+            "offline_salvage": -2,
             "reuse_repair": -1,
             "reuse_dispatch": 0,
-            "reuse_reuse": 1,
-            "dispatch_after_creator": 2,
+            "blocked": 1,
+            "reuse_reuse": 2,
+            "dispatch_after_creator": 3,
         }[
             (
-                "reuse_repair"
-                if resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch_repair"
+                "offline_salvage"
+                if resume_plan.get(prototype_id, {}).get("judgeAction") == "offline_salvage_repair"
                 else (
-                    "reuse_dispatch"
-                    if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
-                    and resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch"
+                    "reuse_repair"
+                    if resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch_repair"
                     else (
-                        "reuse_reuse"
-                        if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
-                        else "dispatch_after_creator"
+                        "blocked"
+                        if resume_plan.get(prototype_id, {}).get("judgeAction")
+                        in {"repair_response_unrecoverable", "repair_failed_requires_operator_decision"}
+                        else (
+                            "reuse_dispatch"
+                            if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
+                            and resume_plan.get(prototype_id, {}).get("judgeAction") == "dispatch"
+                            else (
+                                "reuse_reuse"
+                                if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
+                                else "dispatch_after_creator"
+                            )
+                        )
                     )
                 )
             )
@@ -1078,6 +1108,18 @@ def _execute_mixed_partial_reasoning_resume(
                 (state.get("candidates") or {}).get(candidate_id) or {}
             ).get("creatorOutput") or {}
 
+        if judge_action == "offline_salvage_repair" and candidate_id and creator_output:
+            salvage = salvage_repair_judgment_offline(state, candidate_id=candidate_id, dry_run=False)
+            if salvage.get("salvaged"):
+                save_tournament_state(job_id, state)
+            else:
+                report.setdefault("offlineSalvageFailures", []).append(
+                    {"candidateId": candidate_id, "prototypeId": prototype_id, "reason": salvage.get("reason")}
+                )
+            continue
+        if judge_action in {"repair_response_unrecoverable", "repair_failed_requires_operator_decision"}:
+            report.setdefault("blockedJudgePrototypeIds", []).append(prototype_id)
+            continue
         if judge_action == "dispatch_repair" and candidate_id and creator_output:
             pending = resolve_pending_judge_repair(state, candidate_id) or dict(entry.get("pendingJudgeRepair") or {})
             ok, failure = _dispatch_judge_repair_for_prototype(

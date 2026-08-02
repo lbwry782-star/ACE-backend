@@ -58,6 +58,10 @@ _CREATIVE_RETRY_FIELDS = frozenset(
 )
 
 
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
+
+
 def _utc_now_iso() -> str:
     from datetime import datetime, timezone
 
@@ -435,30 +439,35 @@ def _persist_judge_response_attempt(
     validation_failure_reason: Optional[str] = None,
     structural_errors: Optional[List[str]] = None,
     response_available: bool = True,
-) -> None:
+    source_judgment_id: Optional[str] = None,
+    source_attempt_id: Optional[str] = None,
+) -> str:
+    from engine.builder2_judge_response_ledger import append_judge_response_attempt, finalize_judge_response_validation
+
     if state is None:
-        return
-    ledger = state.setdefault("judgeResponseLedgerByCandidate", {})
-    entries = ledger.setdefault(candidate_id, [])
-    if not isinstance(entries, list):
-        entries = []
-        ledger[candidate_id] = entries
-    entries.append(
-        {
-            "candidateId": candidate_id,
-            "judgmentId": judgment_id,
-            "callType": call_type,
-            "responseAvailable": response_available,
-            "parsedResponseAvailable": bool(parsed),
-            "parsedResponse": dict(parsed) if isinstance(parsed, dict) else {},
-            "responseFingerprint": _response_fingerprint(response_text),
-            "parsedResponseFingerprint": _parsed_response_fingerprint(parsed) if parsed else "",
-            "validationFailureField": validation_failure_field,
-            "validationFailureReason": validation_failure_reason,
-            "structuralErrors": list(structural_errors or []),
-            "recordedAt": _utc_now_iso(),
-        }
+        return ""
+    attempt_id = append_judge_response_attempt(
+        state,
+        candidate_id=candidate_id,
+        judgment_id=judgment_id,
+        call_type=call_type,
+        response_text=response_text,
+        parsed=parsed if isinstance(parsed, dict) else {},
+        source_judgment_id=source_judgment_id,
+        source_attempt_id=source_attempt_id,
+        response_available=response_available,
     )
+    if validation_failure_field or validation_failure_reason or structural_errors:
+        finalize_judge_response_validation(
+            state,
+            candidate_id=candidate_id,
+            attempt_id=attempt_id,
+            validation_failure_field=validation_failure_field,
+            validation_failure_reason=validation_failure_reason,
+            structural_errors=list(structural_errors or []),
+            accepted=False,
+        )
+    return attempt_id
 
 
 def _is_clean_retryable(code: str, field: Optional[str]) -> bool:
@@ -940,38 +949,70 @@ def judge_candidate_structural_repair(
     from engine.builder2_judge_pending_repair import (
         mark_pending_repair_accepted,
         mark_pending_repair_dispatched,
-        resolve_pending_judge_repair,
+        mark_pending_repair_failed,
+        mark_pending_repair_response_parsed,
+        mark_pending_repair_response_received,
+        repair_judge_call_must_not_repeat,
+        resolve_judge_repair_resume_context,
     )
+    from engine.builder2_judge_response_ledger import (
+        find_latest_attempt,
+        finalize_judge_response_validation,
+    )
+    from engine.builder2_judge_structural_repair_classifier import is_substantive_factual_grounding_negative
+
+    if state is not None and repair_judge_call_must_not_repeat(state, candidate_id):
+        ctx = resolve_judge_repair_resume_context(state, candidate_id)
+        if ctx.get("kind") == "unresolved_salvageable":
+            from engine.builder2_judge_repair_offline_salvage import salvage_repair_judgment_offline
+
+            salvage = salvage_repair_judgment_offline(state, candidate_id=candidate_id, dry_run=False)
+            if salvage.get("salvaged"):
+                repair = find_latest_attempt(state, candidate_id=candidate_id, call_type="repair")
+                parsed = (repair or {}).get("parsedResponse") if isinstance((repair or {}).get("parsedResponse"), dict) else {}
+                product_input = None
+                grounding = strategy_foundation.get("strategyEvidenceGrounding")
+                if isinstance(grounding, dict):
+                    audit = grounding.get("productInputAudit")
+                    if isinstance(audit, dict):
+                        product_input = audit
+                judgment, total, scores = validate_judge_response(
+                    dict(parsed),
+                    candidate_id=candidate_id,
+                    candidate=candidate,
+                    strategy_foundation=strategy_foundation,
+                    product_input=product_input,
+                    compatibility_mode=compatibility_mode,
+                )
+                return str(salvage.get("judgmentId") or judgment_id or source_judgment_id), judgment, total, scores
+        raise Builder2TournamentError("builder2_judge_repair_call_blocked")
 
     prototype = require_prototype(prototype_id)
-    pending = resolve_pending_judge_repair(state, candidate_id) if state is not None else None
-    if pending and pending.get("repairResponseAccepted"):
+    ctx = resolve_judge_repair_resume_context(state, candidate_id) if state is not None else {"kind": "pending_dispatch"}
+    pending = (ctx or {}).get("pending") or {}
+    if pending.get("repairResponseAccepted"):
         raise Builder2TournamentError("builder2_judge_repair_already_accepted")
-    if pending and pending.get("repairDispatched"):
-        ledger = (state or {}).get("judgeResponseLedgerByCandidate", {}).get(candidate_id) or []
-        repair_entry = next(
-            (item for item in ledger if isinstance(item, dict) and str(item.get("callType") or "").strip() == "repair"),
-            None,
-        )
-        if repair_entry and repair_entry.get("parsedResponseAvailable"):
-            parsed = repair_entry.get("parsedResponse") if isinstance(repair_entry.get("parsedResponse"), dict) else {}
-            product_input = None
-            grounding = strategy_foundation.get("strategyEvidenceGrounding")
-            if isinstance(grounding, dict):
-                audit = grounding.get("productInputAudit")
-                if isinstance(audit, dict):
-                    product_input = audit
-            judgment, total, scores = validate_judge_response(
-                parsed,
-                candidate_id=candidate_id,
-                candidate=candidate,
-                strategy_foundation=strategy_foundation,
-                product_input=product_input,
-                compatibility_mode=compatibility_mode,
-            )
-            return str(repair_entry.get("judgmentId") or judgment_id or source_judgment_id), judgment, total, scores
 
-    expected_fingerprint = str(source_parsed_fingerprint or (pending or {}).get("sourceParsedResponseFingerprint") or "").strip()
+    repair = find_latest_attempt(state, candidate_id, call_type="repair") if state is not None else None
+    if repair and repair.get("accepted"):
+        parsed = repair.get("parsedResponse") if isinstance(repair.get("parsedResponse"), dict) else {}
+        product_input = None
+        grounding = strategy_foundation.get("strategyEvidenceGrounding")
+        if isinstance(grounding, dict):
+            audit = grounding.get("productInputAudit")
+            if isinstance(audit, dict):
+                product_input = audit
+        judgment, total, scores = validate_judge_response(
+            parsed,
+            candidate_id=candidate_id,
+            candidate=candidate,
+            strategy_foundation=strategy_foundation,
+            product_input=product_input,
+            compatibility_mode=compatibility_mode,
+        )
+        return str(repair.get("judgmentId") or judgment_id or source_judgment_id), judgment, total, scores
+
+    expected_fingerprint = str(source_parsed_fingerprint or pending.get("sourceParsedResponseFingerprint") or "").strip()
     actual_fingerprint = _parsed_response_fingerprint(source_parsed)
     if expected_fingerprint and expected_fingerprint != actual_fingerprint:
         raise Builder2TournamentError("builder2_judge_repair_source_fingerprint_mismatch")
@@ -982,8 +1023,15 @@ def judge_candidate_structural_repair(
     if not failures:
         raise Builder2TournamentError("builder2_judge_repair_not_required")
 
+    source_attempt = find_latest_attempt(state, candidate_id, call_type="normal") if state is not None else None
+    source_attempt_id = _clean((source_attempt or {}).get("attemptId")) or _clean(pending.get("sourceAttemptId"))
+
     if state is not None:
-        mark_pending_repair_dispatched(state, candidate_id=candidate_id)
+        mark_pending_repair_dispatched(
+            state,
+            candidate_id=candidate_id,
+            repair_judgment_id=judgment_id,
+        )
 
     prompt = build_judge_repair_prompt(
         product_name=product_name,
@@ -1008,37 +1056,113 @@ def judge_candidate_structural_repair(
             retry=False,
         )
 
-    parsed, top_level_keys, schema_version_received = _parse_judge_payload(response_text)
+    parsed_raw, _top_level_keys, _schema_version_received = _parse_judge_payload(response_text)
+    attempt_id = _persist_judge_response_attempt(
+        state,
+        candidate_id=candidate_id,
+        judgment_id=judgment_id,
+        call_type="repair",
+        response_text=response_text,
+        parsed=parsed_raw,
+        source_judgment_id=source_judgment_id,
+        source_attempt_id=source_attempt_id or None,
+        response_available=True,
+    )
+    if state is not None:
+        mark_pending_repair_response_received(
+            state,
+            candidate_id=candidate_id,
+            repair_attempt_id=attempt_id,
+            repair_judgment_id=judgment_id,
+        )
+        mark_pending_repair_response_parsed(state, candidate_id=candidate_id)
+        mark_pending_repair_dispatched(
+            state,
+            candidate_id=candidate_id,
+            repair_attempt_id=attempt_id,
+            repair_judgment_id=judgment_id,
+        )
+
     product_input = None
     grounding = strategy_foundation.get("strategyEvidenceGrounding")
     if isinstance(grounding, dict):
         audit = grounding.get("productInputAudit")
         if isinstance(audit, dict):
             product_input = audit
-    judgment, total, scores = validate_judge_response(
-        parsed,
-        candidate_id=candidate_id,
-        candidate=candidate,
-        strategy_foundation=strategy_foundation,
-        product_input=product_input,
-        compatibility_mode=compatibility_mode,
-    )
-    _persist_judge_response_attempt(
-        state,
-        candidate_id=candidate_id,
-        judgment_id=judgment_id,
-        call_type="repair",
-        response_text=response_text,
-        parsed=judgment,
-        response_available=True,
-    )
+    try:
+        judgment, total, scores = validate_judge_response(
+            parsed_raw,
+            candidate_id=candidate_id,
+            candidate=candidate,
+            strategy_foundation=strategy_foundation,
+            product_input=product_input,
+            compatibility_mode=compatibility_mode,
+        )
+    except Builder2TournamentError as exc:
+        field = _failure_field(exc)
+        reason = str(exc.args[0] if exc.args else "builder2_judge_validation_failed")
+        structural_errors = collect_judge_structural_errors(
+            parsed_raw,
+            candidate_id=candidate_id,
+            candidate=candidate,
+            strategy_foundation=strategy_foundation,
+            compatibility_mode=compatibility_mode,
+            job_id=(state or {}).get("jobId") or "",
+            tournament_id=(state or {}).get("tournamentId") or "",
+        )
+        if state is not None:
+            finalize_judge_response_validation(
+                state,
+                candidate_id=candidate_id,
+                attempt_id=attempt_id,
+                validation_failure_field=field,
+                validation_failure_reason=reason,
+                structural_errors=structural_errors,
+                accepted=False,
+            )
+            if field and is_substantive_factual_grounding_negative(field, parsed_raw):
+                from engine.builder2_judge_repair_offline_salvage import (
+                    assess_repair_attempt_salvage,
+                    salvage_repair_judgment_offline,
+                )
+
+                salvage = assess_repair_attempt_salvage(
+                    state,
+                    candidate_id=candidate_id,
+                    entry=find_latest_attempt(state, candidate_id, call_type="repair"),
+                )
+                if salvage.get("offlineSalvagePossible"):
+                    salvage_result = salvage_repair_judgment_offline(state, candidate_id=candidate_id, dry_run=False)
+                    if salvage_result.get("salvaged"):
+                        judgment, total, scores = validate_judge_response(
+                            parsed_raw,
+                            candidate_id=candidate_id,
+                            candidate=candidate,
+                            strategy_foundation=strategy_foundation,
+                            product_input=product_input,
+                            compatibility_mode=compatibility_mode,
+                        )
+                        return str(salvage_result.get("judgmentId") or judgment_id), judgment, total, scores
+            mark_pending_repair_failed(
+                state,
+                candidate_id=candidate_id,
+                validation_failure_field=field,
+                validation_failure_reason=reason,
+            )
+        raise
     if state is not None:
-        ledger = state.setdefault("judgeResponseLedgerByCandidate", {}).setdefault(candidate_id, [])
-        if isinstance(ledger, list) and ledger:
-            last = ledger[-1]
-            if isinstance(last, dict) and str(last.get("callType") or "").strip() == "repair":
-                last["repairResponseAccepted"] = True
-                last["sourceJudgmentId"] = source_judgment_id
-                last["sourceParsedResponseFingerprint"] = expected_fingerprint or actual_fingerprint
+        finalize_judge_response_validation(
+            state,
+            candidate_id=candidate_id,
+            attempt_id=attempt_id,
+            judgment=judgment,
+            deterministic_eligible=bool(judgment.get("eligible")),
+            accepted=True,
+        )
+        repair_entry = find_latest_attempt(state, candidate_id, call_type="repair")
+        if isinstance(repair_entry, dict):
+            repair_entry["repairResponseAccepted"] = True
+            repair_entry["sourceJudgmentId"] = source_judgment_id
+            repair_entry["sourceParsedResponseFingerprint"] = expected_fingerprint or actual_fingerprint
         mark_pending_repair_accepted(state, candidate_id=candidate_id)
     return judgment_id, judgment, total, scores

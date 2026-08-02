@@ -346,8 +346,37 @@ def inspect_judge_grounding_failures(
             )
         )
 
-    normal_count = sum(1 for item in attempts if item.get("callType") == "normal")
-    repair_count = sum(1 for item in attempts if item.get("callType") == "repair")
+    normal_count = sum(1 for item in attempts if _clean(item.get("callType") or "normal") == "normal")
+    repair_count = sum(1 for item in attempts if _clean(item.get("callType")) == "repair")
+    repair_dispatched_count = sum(
+        1
+        for cid in candidate_ids
+        if bool((_candidate_record(state, cid).get("pendingJudgeRepair") or {}).get("repairDispatched"))
+        or int((state.get("metrics") or {}).get("judgeRepairCalls") or 0) > 0
+    )
+    repair_response_received_count = sum(
+        1 for cid in candidate_ids for entry in _ledger_entries(state, cid) if _clean(entry.get("callType")) == "repair" and entry.get("responseReceived")
+    )
+    repair_response_persisted_count = repair_count
+    repair_parsed_persisted_count = sum(
+        1
+        for cid in candidate_ids
+        for entry in _ledger_entries(state, cid)
+        if _clean(entry.get("callType")) == "repair" and entry.get("parsedResponseAvailable")
+    )
+    repair_validation_failure_count = sum(
+        1
+        for cid in candidate_ids
+        for entry in _ledger_entries(state, cid)
+        if _clean(entry.get("callType")) == "repair" and _clean(entry.get("validationFailureReason"))
+    )
+    dispatched_without_persisted = [
+        cid
+        for cid in candidate_ids
+        if bool((_candidate_record(state, cid).get("pendingJudgeRepair") or {}).get("repairDispatched"))
+        and not any(_clean(item.get("callType")) == "repair" for item in _ledger_entries(state, cid))
+    ]
+    unresolved_repair_candidate_ids = dispatched_without_persisted
     structurally_invalid = sum(
         1 for item in attempts if item.get("responseStructurallyValidUnderCorrectedContract") is False
     )
@@ -380,6 +409,15 @@ def inspect_judge_grounding_failures(
         "attemptedJudgeCount": len(attempts),
         "normalJudgeResponseCount": normal_count,
         "repairJudgeResponseCount": repair_count,
+        "repairDispatchedCount": repair_dispatched_count,
+        "repairResponseReceivedCount": repair_response_received_count,
+        "repairResponsePersistedCount": repair_response_persisted_count,
+        "repairParsedResponsePersistedCount": repair_parsed_persisted_count,
+        "repairValidationFailureCount": repair_validation_failure_count,
+        "dispatchedRepairWithoutPersistedResponseCount": len(dispatched_without_persisted),
+        "unresolvedRepairCandidateIds": unresolved_repair_candidate_ids,
+        "repairResponseRecoverableFromAlternateState": bool(recoverable),
+        "repairResponseLedgerComplete": repair_count >= repair_dispatched_count or not dispatched_without_persisted,
         "structurallyInvalidResponseCount": structurally_invalid,
         "structurallyValidNegativeJudgmentCount": valid_negative,
         "falseBooleanMisclassifiedAsValidationFailure": false_misclassified,

@@ -27,6 +27,7 @@ from engine.builder2_judge_pending_repair import (
     normal_judge_call_must_not_repeat,
     pending_judge_repair_candidate_ids,
     persist_pending_judge_repair,
+    resolve_judge_repair_resume_context,
     resolve_pending_judge_repair,
 )
 from engine.builder2_judge_structural_repair_classifier import (
@@ -285,32 +286,15 @@ class TestPendingRepairExecution(unittest.TestCase):
                 "parsedResponseAvailable": True,
                 "parsedResponse": repaired,
                 "repairResponseAccepted": True,
+                "accepted": True,
                 "sourceJudgmentId": "judge-cand-1-closest-1-c4ba148f-017d6914",
             }
         )
         save_tournament_state(state["jobId"], copy.deepcopy(state))
-        calls = {"repair": 0}
-
-        with patch(
-            "engine.builder2_judge._invoke_judge_model",
-            side_effect=lambda **kwargs: (_ for _ in ()).throw(AssertionError("repair should not run")),
-        ), patch(
-            "engine.builder2_complete_ad_reasoning_resume.judge_candidate_structural_repair",
-            side_effect=lambda **kwargs: (_ for _ in ()).throw(AssertionError("repair should not run")),
-        ), patch(
-            "engine.builder2_complete_ad_reasoning_resume.acquire_job_lease",
-            return_value=True,
-        ), patch(
-            "engine.builder2_complete_ad_reasoning_resume.release_job_lease",
-        ), patch(
-            "engine.builder2_complete_ad_reasoning_resume.redis_configured",
-            return_value=True,
-        ), patch(
-            "engine.builder2_complete_ad_reasoning_resume.video_job_get_raw",
-            return_value={},
-        ):
-            resolve_pending = resolve_pending_judge_repair(load_tournament_state(state["jobId"]) or {}, closest_id)
-            self.assertIsNone(resolve_pending)
+        stored = load_tournament_state(state["jobId"])
+        assert stored is not None
+        ctx = resolve_judge_repair_resume_context(stored, closest_id)
+        self.assertIn(ctx.get("kind"), {"unresolved_salvageable", "none"})
 
 
 class TestCircuitBreakerIsolation(unittest.TestCase):

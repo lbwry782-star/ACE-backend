@@ -21,9 +21,12 @@ from engine.builder2_tournament_completion_gate import (
 from engine.builder2_winner_persistence import is_valid_persisted_winner_development
 from engine.builder2_winner_preservation_contract import load_revalidatable_parsed_winner_response
 from engine.builder2_judge_pending_repair import (
+    RESUME_BLOCKED_REPAIR_UNAVAILABLE,
     pending_judge_repair_candidate_ids,
     pending_judge_repair_prototype_ids,
+    resolve_judge_repair_resume_context,
     resolve_pending_judge_repair,
+    resolve_unresolved_judge_repair,
 )
 
 
@@ -239,7 +242,8 @@ def build_resume_plan_by_prototype(
     missing_judges = set(missing_judge_prototype_ids(state, read_only=read_only))
     for prototype_id in assigned_prototype_ids(state):
         candidate_id = accepted_candidate_id_for_prototype(state, prototype_id, read_only=read_only)
-        pending = resolve_pending_judge_repair(state, candidate_id) if candidate_id else None
+        repair_ctx = resolve_judge_repair_resume_context(state, candidate_id) if candidate_id else {"kind": "none"}
+        pending = repair_ctx.get("pending") or (resolve_pending_judge_repair(state, candidate_id) if candidate_id else None)
         has_creator = prototype_id not in missing_creators
         has_judgment = prototype_id not in missing_judges
         if has_judgment:
@@ -247,7 +251,22 @@ def build_resume_plan_by_prototype(
             judge_action = "reuse"
             normal_judge_calls = 0
             repair_judge_calls = 0
-        elif pending:
+        elif repair_ctx.get("kind") == "unresolved_salvageable":
+            creator_action = "reuse"
+            judge_action = "offline_salvage_repair"
+            normal_judge_calls = 0
+            repair_judge_calls = 0
+        elif repair_ctx.get("kind") == "unresolved_failed":
+            creator_action = "reuse"
+            judge_action = "repair_failed_requires_operator_decision"
+            normal_judge_calls = 0
+            repair_judge_calls = 0
+        elif repair_ctx.get("kind") == "unrecoverable":
+            creator_action = "reuse"
+            judge_action = "repair_response_unrecoverable"
+            normal_judge_calls = 0
+            repair_judge_calls = 0
+        elif repair_ctx.get("kind") == "pending_dispatch":
             creator_action = "reuse"
             judge_action = "dispatch_repair"
             normal_judge_calls = 0
@@ -269,12 +288,15 @@ def build_resume_plan_by_prototype(
             "repairJudgeCallRequired": repair_judge_calls > 0,
             "normalJudgeCalls": normal_judge_calls,
             "repairJudgeCalls": repair_judge_calls,
+            "repairResumeKind": repair_ctx.get("kind"),
         }
         if pending:
             entry["sourceJudgmentId"] = pending.get("sourceJudgmentId")
             entry["sourceParsedResponseFingerprint"] = pending.get("sourceParsedResponseFingerprint")
             entry["sourceResponseFingerprint"] = pending.get("sourceResponseFingerprint")
             entry["pendingJudgeRepair"] = dict(pending)
+        if repair_ctx.get("resumeBlockedReason"):
+            entry["resumeBlockedReason"] = repair_ctx.get("resumeBlockedReason")
         plan[prototype_id] = entry
     return plan
 
@@ -430,6 +452,15 @@ def resolve_complete_ad_canonical_resume_plan(
             rejection_reason = failed_reason
 
     resume_plan_by_prototype = build_resume_plan_by_prototype(state, read_only=read_only)
+    unresolved_repair_candidate_ids = [
+        _clean(accepted_candidate_id_for_prototype(state, prototype_id, read_only=read_only))
+        for prototype_id, entry in resume_plan_by_prototype.items()
+        if _clean((entry or {}).get("judgeAction")) == "repair_response_unrecoverable"
+    ]
+    unresolved_repair_candidate_ids = [item for item in unresolved_repair_candidate_ids if item]
+    if unresolved_repair_candidate_ids and resume_eligible:
+        resume_eligible = False
+        rejection_reason = RESUME_BLOCKED_REPAIR_UNAVAILABLE
     required_judge_repair_calls = sum(
         int((entry or {}).get("repairJudgeCalls") or 0) for entry in resume_plan_by_prototype.values()
     )
@@ -516,6 +547,7 @@ def resolve_complete_ad_canonical_resume_plan(
         "pendingJudgeRepairCandidateIds": pending_repair_candidate_ids,
         "pendingJudgeRepairCount": len(pending_repair_candidate_ids),
         "pendingJudgeRepairPrototypeIds": pending_judge_repair_prototype_ids(state),
+        "unresolvedRepairCandidateIds": unresolved_repair_candidate_ids,
         "perInvocationCallLimit": mixed_call_plan["perInvocationCallLimit"],
         "totalCallsRemainingAcrossInvocations": mixed_call_plan["totalCallsRemainingAcrossInvocations"],
         "creatorsWouldDispatch": creator_calls_planned > 0,
