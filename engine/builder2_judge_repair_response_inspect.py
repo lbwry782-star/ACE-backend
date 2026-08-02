@@ -107,6 +107,11 @@ def inspect_judge_repair_response(
         "searchedLocations": [],
         "paidCalls": 0,
         "stateMutated": False,
+        "operatorResolutionEligible": False,
+        "operatorResolutionAlreadyApplied": False,
+        "operatorResolutionReason": None,
+        "additionalPaidCallAutomaticallyAuthorized": False,
+        "recommendedOperatorPolicy": "exclude_candidate_and_continue",
     }
     if not target:
         report["unavailableReason"] = "builder2_judge_repair_response_inspect_candidate_missing"
@@ -154,6 +159,26 @@ def inspect_judge_repair_response(
             report["repairResponseRecoverableFromAlternateState"] = False
     elif repair and not report["parsedRepairResponseAvailable"]:
         report["unavailableReason"] = "builder2_judge_repair_parsed_response_missing"
+    from engine.builder2_judge_unavailable_resolution_contract import (
+        OPERATOR_DECISION_EXCLUDE_AND_CONTINUE,
+        RESOLUTION_REASON_REPAIR_UNAVAILABLE,
+        has_operator_judgment_unavailable_resolution,
+        pending_repair_is_unrecoverable,
+    )
+
+    report["operatorResolutionAlreadyApplied"] = has_operator_judgment_unavailable_resolution(state, target)
+    report["operatorResolutionEligible"] = bool(
+        report.get("repairOutcomeUnrecoverable")
+        and not report.get("offlineSalvagePossible")
+        and pending_repair_is_unrecoverable(state, target)
+    ) or report["operatorResolutionAlreadyApplied"]
+    report["operatorResolutionReason"] = (
+        RESOLUTION_REASON_REPAIR_UNAVAILABLE
+        if report.get("repairOutcomeUnrecoverable")
+        or report.get("unavailableReason") == "builder2_judge_repair_response_unavailable"
+        else None
+    )
+    report["recommendedOperatorPolicy"] = OPERATOR_DECISION_EXCLUDE_AND_CONTINUE
     return report
 
 

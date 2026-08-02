@@ -121,6 +121,17 @@ def _closest_empty_assessment_state() -> Dict[str, Any]:
         normal_entry=state["judgeResponseLedgerByCandidate"][closest_id][0],
         structural_failures=["builder2_judge_validation_failed:factualGroundingAssessment"],
     )
+    closest_record = state["candidates"][closest_id]
+    closest_record["validationStatus"] = "accepted"
+    closest_record["status"] = "accepted"
+    closest_record["judgeStatus"] = "pending"
+    closest_record.pop("judgeFailure", None)
+    for candidate_id, record in (state.get("candidates") or {}).items():
+        if isinstance(record, dict) and record.get("prototypeId") == "think_small":
+            record["validationStatus"] = "accepted"
+            record["status"] = "accepted"
+            record["judgeStatus"] = "pending"
+            record.pop("judgeFailure", None)
     state["candidates"][closest_id]["judgeDiagnostics"] = {
         "responseReceived": True,
         "repairAttempted": False,

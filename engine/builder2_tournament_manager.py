@@ -169,7 +169,12 @@ def select_global_winner(state: Dict[str, Any]) -> str:
         if _creator_was_accepted(cand, state=state)
     ]
     judged = [cand for cand in creator_accepted if _has_valid_judgment(cand)]
-    if judged and len(judged) == len(creator_accepted):
+    terminal_unavailable = [
+        cand
+        for cand in creator_accepted
+        if cand.get("validationStatus") == "judge_unavailable" or cand.get("judgeStatus") == "unavailable"
+    ]
+    if judged and len(judged) + len(terminal_unavailable) == len(creator_accepted):
         raise Builder2TournamentError("builder2_no_factually_eligible_candidate")
     raise Builder2TournamentError("builder2_tournament_no_valid_candidate")
 

@@ -283,8 +283,16 @@ def resolve_unresolved_judge_repair(state: Dict[str, Any], candidate_id: str) ->
 
 
 def resolve_judge_repair_resume_context(state: Dict[str, Any], candidate_id: str) -> Dict[str, Any]:
+    from engine.builder2_judge_unavailable_resolution_contract import has_operator_judgment_unavailable_resolution
+
     if _accepted_judgment_exists(state, candidate_id):
         return {"kind": "none", "candidateId": candidate_id}
+    if has_operator_judgment_unavailable_resolution(state, candidate_id):
+        return {
+            "kind": "none",
+            "candidateId": candidate_id,
+            "operatorResolutionApplied": True,
+        }
     unresolved = resolve_unresolved_judge_repair(state, candidate_id)
     if unresolved:
         outcome = _clean(unresolved.get("repairOutcome"))

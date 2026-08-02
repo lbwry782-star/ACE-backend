@@ -61,6 +61,7 @@ from engine.builder2_execution_lease import acquire_job_lease, release_job_lease
 from engine.builder2_judge import judge_candidate, judge_candidate_structural_repair
 from engine.builder2_judge_pending_repair import normal_judge_call_must_not_repeat, repair_judge_call_must_not_repeat, resolve_pending_judge_repair
 from engine.builder2_judge_repair_offline_salvage import salvage_repair_judgment_offline
+from engine.builder2_judge_unavailable_resolution_contract import is_reasoning_complete_for_winner_selection
 from engine.builder2_new_format_config import BUILDER2_NEW_FORMAT_VERSION
 from engine.builder2_reasoning_failure_diagnostics import (
     log_reasoning_resume_failed,
@@ -622,7 +623,7 @@ def _execute_judge_generation_resume(
     _populate_report_reasoning_calls(report, budget)
     report["remainingMissingJudgmentPrototypeIds"] = missing_judge_prototype_ids(state)
 
-    all_complete = accepted_creator_count(state) == 6 and accepted_judgment_count(state) == 6
+    all_complete = is_reasoning_complete_for_winner_selection(state)
     if stop_after_judges:
         _finalize_judge_stage_pause(state, job_id=job_id, all_judges_complete=all_complete)
         report["ok"] = all_complete or bool(judge_calls_accepted)
@@ -1064,6 +1065,8 @@ def _execute_mixed_partial_reasoning_resume(
                             else (
                                 "reuse_reuse"
                                 if resume_plan.get(prototype_id, {}).get("creatorAction") == "reuse"
+                                and resume_plan.get(prototype_id, {}).get("judgeAction")
+                                in {"reuse", "resolved_unavailable"}
                                 else "dispatch_after_creator"
                             )
                         )
@@ -1120,6 +1123,8 @@ def _execute_mixed_partial_reasoning_resume(
         if judge_action in {"repair_response_unrecoverable", "repair_failed_requires_operator_decision"}:
             report.setdefault("blockedJudgePrototypeIds", []).append(prototype_id)
             continue
+        if judge_action == "resolved_unavailable":
+            continue
         if judge_action == "dispatch_repair" and candidate_id and creator_output:
             pending = resolve_pending_judge_repair(state, candidate_id) or dict(entry.get("pendingJudgeRepair") or {})
             ok, failure = _dispatch_judge_repair_for_prototype(
@@ -1170,7 +1175,7 @@ def _execute_mixed_partial_reasoning_resume(
     report["remainingMissingJudgmentPrototypeIds"] = missing_judge_prototype_ids(state)
     report["remainingMissingCreatorPrototypeIds"] = missing_creator_prototype_ids(state)
 
-    all_complete = accepted_creator_count(state) == 6 and accepted_judgment_count(state) == 6
+    all_complete = is_reasoning_complete_for_winner_selection(state)
     if not all_complete:
         _finalize_judge_stage_pause(state, job_id=job_id, all_judges_complete=False)
         report["ok"] = True

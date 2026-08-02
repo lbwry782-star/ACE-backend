@@ -97,20 +97,23 @@ def _production_mixed_partial_state(*, status: str = "failed") -> Dict[str, Any]
             "prototypeId": prototype_id,
             "creatorAcceptanceStatus": "accepted",
             "validationStatus": "accepted",
-            "judgeStatus": "unavailable",
-            "status": "judge_unavailable",
+            "status": "accepted",
+            "judgeStatus": "pending",
             "creatorOutput": candidate,
             "creatorSnapshot": candidate,
             "creatorFactuallyGrounded": True,
             "newProductClaimsIntroduced": [],
             "judgmentId": None,
             "eligible": False,
-            "judgeFailure": "builder2_judge_validation_failed:factualGroundingAssessment.productClaimFactuallyGrounded",
             "judgeDiagnostics": {
-                "responseReceived": True,
+                "responseReceived": prototype_id == "closest",
                 "repairAttempted": prototype_id == "closest",
-                "failureFieldPaths": ["factualGroundingAssessment.productClaimFactuallyGrounded"],
-                "failureReason": "builder2_judge_validation_failed:factualGroundingAssessment.productClaimFactuallyGrounded",
+                "failureFieldPaths": ["factualGroundingAssessment.productClaimFactuallyGrounded"]
+                if prototype_id == "closest"
+                else [],
+                "failureReason": "builder2_judge_validation_failed:factualGroundingAssessment.productClaimFactuallyGrounded"
+                if prototype_id == "closest"
+                else None,
             },
         }
         state["judgeDiagnosticsByCandidate"][candidate_id] = dict(state["candidates"][candidate_id]["judgeDiagnostics"])

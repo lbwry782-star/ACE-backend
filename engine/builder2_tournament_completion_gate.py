@@ -18,6 +18,10 @@ from engine.builder2_accepted_judgment_store import (
     backfill_accepted_judgment_index,
     derive_accepted_judgment_index,
 )
+from engine.builder2_judge_unavailable_resolution_contract import (
+    unavailable_judgment_count,
+    resolved_judgment_outcome_count,
+)
 from engine.builder2_tournament_config import resolve_builder2_active_prototype_ids
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
@@ -132,6 +136,24 @@ def missing_judge_prototype_ids(state: Dict[str, Any], *, read_only: bool = Fals
     return [pid for pid in assigned if pid not in judged]
 
 
+def missing_actionable_judge_prototype_ids(state: Dict[str, Any], *, read_only: bool = False) -> List[str]:
+    from engine.builder2_judge_unavailable_resolution_contract import (
+        has_operator_judgment_unavailable_resolution,
+        prototype_id_for_candidate,
+    )
+
+    assigned = assigned_prototype_ids(state)
+    judged = prototype_ids_with_accepted_judgments(state, read_only=read_only)
+    terminal = terminal_judge_prototype_ids(state)
+    excluded = set(terminal)
+    for candidate_id in (state.get("candidates") or {}).keys():
+        if has_operator_judgment_unavailable_resolution(state, str(candidate_id)):
+            prototype_id = prototype_id_for_candidate(state, str(candidate_id))
+            if prototype_id:
+                excluded.add(prototype_id)
+    return [pid for pid in assigned if pid not in judged and pid not in excluded]
+
+
 def structurally_rejected_creator_prototype_ids(state: Dict[str, Any]) -> List[str]:
     rejected: List[str] = []
     assigned = set(assigned_prototype_ids(state))
@@ -209,6 +231,8 @@ def tournament_resolution_summary(state: Dict[str, Any], *, read_only: bool = Fa
         "assignedPrototypeCount": len(assigned),
         "acceptedCreatorCount": accepted_creator_count(state, read_only=read_only),
         "acceptedJudgmentCount": accepted_judgment_count(state, read_only=read_only),
+        "unavailableJudgmentCount": unavailable_judgment_count(state, read_only=read_only),
+        "resolvedJudgmentOutcomeCount": resolved_judgment_outcome_count(state, read_only=read_only),
         "missingCreatorPrototypeIds": missing_creators,
         "missingJudgePrototypeIds": missing_judges,
         "structurallyRejectedCreatorPrototypeIds": rejected,

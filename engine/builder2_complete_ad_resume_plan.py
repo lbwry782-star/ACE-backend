@@ -28,6 +28,16 @@ from engine.builder2_judge_pending_repair import (
     resolve_pending_judge_repair,
     resolve_unresolved_judge_repair,
 )
+from engine.builder2_judge_unavailable_resolution_contract import (
+    BUILDER2_JUDGE_UNAVAILABLE_RESOLUTION_CONTRACT_VERSION,
+    excluded_from_winner_candidate_ids,
+    has_operator_judgment_unavailable_resolution,
+    is_reasoning_complete_for_winner_selection,
+    judgment_unavailable_candidate_ids,
+    operator_resolution_required_candidate_ids,
+    unavailable_judgment_count,
+    resolved_judgment_outcome_count,
+)
 
 
 def _clean(value: Any) -> str:
@@ -242,6 +252,21 @@ def build_resume_plan_by_prototype(
     missing_judges = set(missing_judge_prototype_ids(state, read_only=read_only))
     for prototype_id in assigned_prototype_ids(state):
         candidate_id = accepted_candidate_id_for_prototype(state, prototype_id, read_only=read_only)
+        if candidate_id and has_operator_judgment_unavailable_resolution(state, candidate_id):
+            resolution = (state.get("candidateJudgmentResolutionByCandidate") or {}).get(candidate_id) or {}
+            plan[prototype_id] = {
+                "creatorAction": "reuse",
+                "judgeAction": "resolved_unavailable",
+                "normalJudgeCallRequired": False,
+                "repairJudgeCallRequired": False,
+                "normalJudgeCalls": 0,
+                "repairJudgeCalls": 0,
+                "excludedFromWinnerSelection": True,
+                "operatorResolutionApplied": True,
+                "operatorDecision": resolution.get("operatorDecision"),
+                "resolutionReason": resolution.get("resolutionReason"),
+            }
+            continue
         repair_ctx = resolve_judge_repair_resume_context(state, candidate_id) if candidate_id else {"kind": "none"}
         pending = repair_ctx.get("pending") or (resolve_pending_judge_repair(state, candidate_id) if candidate_id else None)
         has_creator = prototype_id not in missing_creators
@@ -249,6 +274,11 @@ def build_resume_plan_by_prototype(
         if has_judgment:
             creator_action = "reuse"
             judge_action = "reuse"
+            normal_judge_calls = 0
+            repair_judge_calls = 0
+        elif repair_ctx.get("kind") == "unrecoverable":
+            creator_action = "reuse"
+            judge_action = "repair_response_unrecoverable"
             normal_judge_calls = 0
             repair_judge_calls = 0
         elif repair_ctx.get("kind") == "unresolved_salvageable":
@@ -259,11 +289,6 @@ def build_resume_plan_by_prototype(
         elif repair_ctx.get("kind") == "unresolved_failed":
             creator_action = "reuse"
             judge_action = "repair_failed_requires_operator_decision"
-            normal_judge_calls = 0
-            repair_judge_calls = 0
-        elif repair_ctx.get("kind") == "unrecoverable":
-            creator_action = "reuse"
-            judge_action = "repair_response_unrecoverable"
             normal_judge_calls = 0
             repair_judge_calls = 0
         elif repair_ctx.get("kind") == "pending_dispatch":
@@ -383,6 +408,9 @@ def resolve_complete_ad_canonical_resume_plan(
     resolved_stage = resolve_complete_ad_resume_stage(state, read_only=read_only)
     missing_creators = list(summary.get("missingCreatorPrototypeIds") or [])
     missing_judges = list(summary.get("missingJudgePrototypeIds") or [])
+    from engine.builder2_tournament_completion_gate import missing_actionable_judge_prototype_ids
+
+    missing_actionable_judges = missing_actionable_judge_prototype_ids(state, read_only=read_only)
     accepted_creators = int(summary.get("acceptedCreatorCount") or 0)
     accepted_judgments = int(summary.get("acceptedJudgmentCount") or 0)
     assigned = assigned_prototype_ids(state)
@@ -458,6 +486,7 @@ def resolve_complete_ad_canonical_resume_plan(
         if _clean((entry or {}).get("judgeAction")) == "repair_response_unrecoverable"
     ]
     unresolved_repair_candidate_ids = [item for item in unresolved_repair_candidate_ids if item]
+    operator_resolution_required_ids = operator_resolution_required_candidate_ids(state)
     if unresolved_repair_candidate_ids and resume_eligible:
         resume_eligible = False
         rejection_reason = RESUME_BLOCKED_REPAIR_UNAVAILABLE
@@ -467,11 +496,11 @@ def resolve_complete_ad_canonical_resume_plan(
     pending_repair_candidate_ids = pending_judge_repair_candidate_ids(state)
     mixed_call_plan = compute_mixed_partial_call_plan(
         missing_creator_prototype_ids=missing_creators,
-        missing_judgment_prototype_ids=missing_judges,
+        missing_judgment_prototype_ids=missing_actionable_judges,
         required_judge_repair_calls=required_judge_repair_calls,
         per_invocation_call_limit=PER_INVOCATION_REASONING_CALL_LIMIT,
     )
-    incomplete_prototypes = sorted(set(missing_creators) | set(missing_judges))
+    incomplete_prototypes = sorted(set(missing_creators) | set(missing_actionable_judges))
 
     from engine.builder2_strategy_evidence_grounding_contract import strategy_fingerprint
 
@@ -489,9 +518,8 @@ def resolve_complete_ad_canonical_resume_plan(
     )
 
     ready_for_winner_development = (
-        accepted_creators == 6
-        and accepted_judgments == 6
-        and bool(summary.get("readyForAuthoritativeWinnerSelection"))
+        is_reasoning_complete_for_winner_selection(state, read_only=read_only)
+        and bool(_clean(state.get("winnerCandidateId")))
     )
 
     return {
@@ -548,6 +576,12 @@ def resolve_complete_ad_canonical_resume_plan(
         "pendingJudgeRepairCount": len(pending_repair_candidate_ids),
         "pendingJudgeRepairPrototypeIds": pending_judge_repair_prototype_ids(state),
         "unresolvedRepairCandidateIds": unresolved_repair_candidate_ids,
+        "operatorResolutionRequiredCandidateIds": operator_resolution_required_ids,
+        "judgmentUnavailableCandidateIds": judgment_unavailable_candidate_ids(state),
+        "unavailableJudgmentCount": unavailable_judgment_count(state, read_only=read_only),
+        "resolvedJudgmentOutcomeCount": resolved_judgment_outcome_count(state, read_only=read_only),
+        "excludedFromWinnerCandidateIds": excluded_from_winner_candidate_ids(state),
+        "operatorResolutionContractVersion": BUILDER2_JUDGE_UNAVAILABLE_RESOLUTION_CONTRACT_VERSION,
         "perInvocationCallLimit": mixed_call_plan["perInvocationCallLimit"],
         "totalCallsRemainingAcrossInvocations": mixed_call_plan["totalCallsRemainingAcrossInvocations"],
         "creatorsWouldDispatch": creator_calls_planned > 0,

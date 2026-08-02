@@ -152,6 +152,16 @@ def inspect_builder2_complete_ad_resume(job_id: str = "", *, raw_job_reader: Opt
         )
         report["pendingJudgeRepairCandidateIds"] = list(canonical_plan.get("pendingJudgeRepairCandidateIds") or [])
         report["pendingJudgeRepairCount"] = int(canonical_plan.get("pendingJudgeRepairCount") or 0)
+        report["operatorResolutionRequiredCandidateIds"] = list(
+            canonical_plan.get("operatorResolutionRequiredCandidateIds") or []
+        )
+        report["judgmentUnavailableCandidateIds"] = list(canonical_plan.get("judgmentUnavailableCandidateIds") or [])
+        report["unavailableJudgmentCount"] = int(canonical_plan.get("unavailableJudgmentCount") or 0)
+        report["resolvedJudgmentOutcomeCount"] = int(canonical_plan.get("resolvedJudgmentOutcomeCount") or 0)
+        report["excludedFromWinnerCandidateIds"] = list(canonical_plan.get("excludedFromWinnerCandidateIds") or [])
+        report["operatorResolutionContractVersion"] = canonical_plan.get("operatorResolutionContractVersion")
+        report["resumeBlockedReason"] = canonical_plan.get("executorRejectionReason")
+        report["unresolvedRepairCandidateIds"] = list(canonical_plan.get("unresolvedRepairCandidateIds") or [])
         report["perInvocationCallLimit"] = int(canonical_plan.get("perInvocationCallLimit") or 0)
         report["totalCallsRemainingAcrossInvocations"] = int(canonical_plan.get("totalCallsRemainingAcrossInvocations") or 0)
         report["strategyWouldDispatch"] = bool(canonical_plan.get("strategyWouldDispatch"))
