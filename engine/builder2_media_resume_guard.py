@@ -26,6 +26,7 @@ class MediaResumeIsolationGuard:
     start_image_enabled: bool = False
     runway_enabled: bool = False
     ffmpeg_enabled: bool = False
+    lyria_enabled: bool = False
     zip_generation_enabled: bool = False
     active: bool = False
     reasoning_counters: MediaResumeReasoningCounters = MediaResumeReasoningCounters()
@@ -42,6 +43,7 @@ class MediaResumeIsolationGuard:
         cls.start_image_enabled = False
         cls.runway_enabled = False
         cls.ffmpeg_enabled = False
+        cls.lyria_enabled = False
         cls.zip_generation_enabled = False
         cls.reasoning_counters = MediaResumeReasoningCounters()
         cls.active = True
@@ -61,6 +63,10 @@ class MediaResumeIsolationGuard:
     @classmethod
     def enable_ffmpeg(cls) -> None:
         cls.ffmpeg_enabled = True
+
+    @classmethod
+    def enable_lyria(cls) -> None:
+        cls.lyria_enabled = True
 
     @classmethod
     def all_reasoning_roles_blocked(cls) -> bool:
@@ -127,6 +133,14 @@ class MediaResumeIsolationGuard:
         cls.assert_reasoning_isolated()
         if not cls.ffmpeg_enabled:
             raise Builder2TournamentError(f"{MEDIA_RESUME_ISOLATION_ERROR}:ffmpegDisabled")
+
+    @classmethod
+    def assert_safe_before_lyria(cls) -> None:
+        if not cls.active:
+            return
+        cls.assert_reasoning_isolated()
+        if not cls.lyria_enabled:
+            raise Builder2TournamentError(f"{MEDIA_RESUME_ISOLATION_ERROR}:lyriaDisabled")
 
     @classmethod
     def assert_delivery_is_model_free(cls, *, compose_marketing_copy_uses_model: bool) -> None:

@@ -195,7 +195,36 @@ def _infer_resume_stage(state: Mapping[str, Any], job_state: Optional[Mapping[st
         return "video_download"
 
     if _clean(media.get("postprocessStatus")) != "completed" and _clean((job_state or {}).get("postprocessRan")) != "1":
-        return "postprocessing"
+        headline_done = _clean(media.get("headlinePostprocessStatus")) in {
+            "completed",
+            "skipped_single_slogan_contract",
+            "reused",
+        } or bool(_clean(media.get("headlineArtifactUrl")))
+        if not headline_done:
+            return "postprocessing"
+
+    from engine.builder2_lyria_config import resolve_builder2_lyria_enabled
+
+    if resolve_builder2_lyria_enabled():
+        headline_ready = (
+            _clean(media.get("postprocessStatus")) == "completed"
+            or _clean((job_state or {}).get("postprocessRan")) == "1"
+            or _clean(media.get("headlinePostprocessStatus")) in {
+                "completed",
+                "skipped_single_slogan_contract",
+                "reused",
+            }
+            or bool(_clean(media.get("headlineArtifactUrl")))
+        )
+        if headline_ready:
+            music_status = _clean(media.get("musicGenerationStatus")).lower()
+            music_durable = _clean(media.get("musicArtifactUrl"))
+            from engine.builder2_lyria import music_artifact_is_valid
+
+            music_local_ok = music_artifact_is_valid(_clean(media.get("musicArtifactPath")))
+            music_complete = music_status == "succeeded" and (music_durable or music_local_ok)
+            if not music_complete:
+                return "generating_music"
 
     closure_url = _clean(media.get("finalVideoWithClosureUrl"))
     plan_dict = plan if isinstance(plan, dict) else {}
@@ -229,6 +258,10 @@ def _reusable_artifacts(state: Mapping[str, Any]) -> List[str]:
     output = _clean(media.get("runwayOutputUrl") or media.get("runwayVideoUrl"))
     if output:
         refs.append("runwayOutputUrl")
+    music_path = _clean(media.get("musicArtifactPath"))
+    music_url = _clean(media.get("musicArtifactUrl"))
+    if str(media.get("musicGenerationStatus") or "").lower() == "succeeded" and (music_url or music_path):
+        refs.append("musicArtifactUrl" if music_url else "musicArtifactPath")
     final_url = _final_video_url(None, state)
     if final_url:
         refs.append("finalPublicUrl")

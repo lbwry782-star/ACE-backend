@@ -207,6 +207,12 @@ def validate_builder2_winner_plan(
             compatibility_mode=compatibility_mode,
             tournament_state=tournament_state,
         )
+    from engine.builder2_music_direction import validate_music_direction_shape
+
+    if raw.get("musicDirection") is not None:
+        normalized_music = validate_music_direction_shape(raw.get("musicDirection"))
+        if normalized_music is not None:
+            out["musicDirection"] = normalized_music
     return out
 
 

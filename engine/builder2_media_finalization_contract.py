@@ -337,6 +337,14 @@ def validate_builder2_media_completion_contract(
             media=media,
         )
     )
+    from engine.builder2_music_artifact_publication import durable_music_reference_present
+
+    if durable_music_reference_present(media) or (
+        str(media.get("musicGenerationStatus") or "").lower() == "succeeded"
+        and _clean(media.get("musicArtifactUrl"))
+    ):
+        if media.get("finalVideoHasAudioStream") is not True:
+            failures.append("builder2_final_video_missing_audio_stream")
     if failures:
         return False, failures[0], failures
     return True, "", []

@@ -36,6 +36,7 @@ MEDIA_PROGRESS_STAGES = (
     "waiting_for_runway",
     "downloading_video",
     "postprocessing_video",
+    "generating_music",
     "rendering_advertising_closure",
     "publishing_final_video",
     "completed",
@@ -59,6 +60,8 @@ class MediaPipelineCounters:
     runway_polling_calls: int = 0
     runway_polling_resumed: bool = False
     ffmpeg_calls: int = 0
+    lyria_calls: int = 0
+    lyria_reused: bool = False
     media_reused: bool = False
 
     def sync_legacy_start_image_calls(self) -> None:
@@ -77,6 +80,7 @@ class MediaPipelineCounters:
             "runwaySubmissionCalls": self.runway_submission_calls,
             "runwayTaskCreatedCount": self.runway_task_created_count,
             "runwayPollingCalls": self.runway_polling_calls,
+            "lyriaCalls": self.lyria_calls,
         }
 
 
@@ -615,6 +619,44 @@ def execute_builder2_media_pipeline(
         media["headlinePostprocessStatus"] = "skipped_single_slogan_contract"
         plan["headlineOverlaySkipped"] = True
 
+    from engine.builder2_lyria_config import resolve_builder2_lyria_enabled
+
+    lyria_enabled = resolve_builder2_lyria_enabled()
+    lyria_audio_path = ""
+    if lyria_enabled:
+        from engine.builder2_lyria import Builder2LyriaError, generate_builder2_music
+
+        _update_media_progress(state, "generating_music")
+        MediaResumeIsolationGuard.assert_safe_before_lyria()
+        try:
+            lyria_result = generate_builder2_music(
+                job_id=job_id,
+                state=state,
+                plan=plan,
+                public_base_url=public_base_url,
+            )
+        except Builder2LyriaError as exc:
+            media["musicGenerationStatus"] = media.get("musicGenerationStatus") or "failed"
+            if not media.get("musicFailure"):
+                media["musicFailure"] = {
+                    "failureStage": "music_generation",
+                    "failureReason": str(exc.args[0] if exc.args else "builder2_lyria_failed"),
+                    "failureClass": getattr(exc, "failure_class", "Builder2LyriaError"),
+                }
+            raise Builder2TournamentError(str(exc.args[0] if exc.args else "builder2_lyria_failed")) from exc
+        lyria_audio_path = lyria_result.artifact_path
+        if lyria_result.reused:
+            counters.lyria_reused = True
+            counters.media_reused = True
+        else:
+            counters.lyria_calls += 1
+        media["musicGenerationStatus"] = "succeeded"
+        media["musicArtifactPath"] = lyria_audio_path
+        media["musicArtifactUrl"] = lyria_result.artifact_url
+        media["musicModel"] = lyria_result.model
+        media["musicPrompt"] = lyria_result.prompt
+        media["musicAudioDurationSeconds"] = lyria_result.audio_duration_seconds
+
     closure_url = str(media.get("finalVideoWithClosureUrl") or "").strip()
     valid_existing_closure = closure_inclusive_artifact_valid(
         state=state,
@@ -642,6 +684,7 @@ def execute_builder2_media_pipeline(
                     float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None
                 ),
                 job_id=job_id,
+                lyria_audio_path=lyria_audio_path,
             )
             counters.ffmpeg_calls += 1
             media = _media_bucket(state)
@@ -654,6 +697,12 @@ def execute_builder2_media_pipeline(
                     "typographyContractVersion"
                 )
             media["actualFinalVideoDurationSeconds"] = render_result.measured_duration_seconds
+            if lyria_enabled and lyria_audio_path and output_path.is_file():
+                from engine.video_headline_postprocess import _input_has_audio
+
+                media["finalVideoHasAudioStream"] = bool(
+                    _input_has_audio(output_path, float(os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30"))
+                )
             from engine.builder2_closure_duration_contract import resolve_expected_final_video_duration_seconds
 
             media["endCardDurationSeconds"] = resolve_builder2_effective_closure_segment_duration_seconds()

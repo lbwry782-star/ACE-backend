@@ -144,7 +144,11 @@ def _video_headline_artifact_incoming_trace():
         p = request.path or ""
     except Exception:
         return
-    if "video-headline-artifact" not in p and "builder2-final-video-artifact" not in p:
+    if (
+        "video-headline-artifact" not in p
+        and "builder2-final-video-artifact" not in p
+        and "builder2-music-artifact" not in p
+    ):
         return
     logger.info(
         "VIDEO_HEADLINE_UPLOAD_INCOMING method=%s path=%s url_rule=%s",
@@ -368,6 +372,71 @@ def serve_builder2_final_video(token):
         mimetype="video/mp4",
         as_attachment=False,
         download_name="ace-builder2-final.mp4",
+    )
+
+
+@app.route("/api/builder2-music-artifact", methods=["POST"], strict_slashes=False)
+@app.route("/builder2-music-artifact", methods=["POST"], strict_slashes=False)
+@app.route("/api/internal/builder2-music-artifact", methods=["POST"], strict_slashes=False)
+@app.route("/internal/builder2-music-artifact", methods=["POST"], strict_slashes=False)
+def internal_builder2_music_artifact():
+    """Background worker POSTs Builder2 Lyria MP3 for durable disk-backed serving."""
+    from engine.builder2_music_artifact_web_storage import persist_builder2_music_artifact
+
+    logger.info("BUILDER2_MUSIC_ARTIFACT_UPLOAD_ENDPOINT_HIT path=%s", request.path)
+    secret = (os.environ.get("ACE_VIDEO_HEADLINE_UPLOAD_SECRET") or "").strip()
+    if not secret:
+        return jsonify({"ok": False, "failureCode": "builder2_web_storage_not_configured"}), 503
+    if (request.headers.get("X-ACE-Video-Headline-Upload-Secret") or "").strip() != secret:
+        logger.warning("BUILDER2_MUSIC_ARTIFACT_UPLOAD_REJECT reason=bad_secret")
+        return jsonify({"ok": False, "failureCode": "unauthorized"}), 401
+    _max_raw = (os.environ.get("BUILDER2_MUSIC_ARTIFACT_MAX_UPLOAD_BYTES") or "").strip()
+    if _max_raw:
+        max_bytes = int(_max_raw)
+    else:
+        max_bytes = 50 * 1024 * 1024
+    if request.content_length is not None and request.content_length > max_bytes:
+        return jsonify({"ok": False, "failureCode": "too_large"}), 413
+    token = (request.form.get("token") or "").strip()
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "failureCode": "missing_file"}), 400
+    data = upload.stream.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        return jsonify({"ok": False, "failureCode": "too_large"}), 413
+    source_fingerprint = (request.form.get("sourceFingerprint") or "").strip()
+    result = persist_builder2_music_artifact(token, data, source_fingerprint=source_fingerprint)
+    payload = result.to_upload_response_dict()
+    if not result.ok:
+        logger.warning(
+            "BUILDER2_MUSIC_ARTIFACT_UPLOAD_REJECT reason=%s token_prefix=%s",
+            result.failure_code,
+            (token[:8] if len(token) >= 8 else ""),
+        )
+        return jsonify(payload), 400
+    return jsonify(payload), 200
+
+
+@app.route("/api/builder2-music-artifact/<token>", methods=["GET"], strict_slashes=False)
+@app.route("/builder2-music-artifact/<token>", methods=["GET"], strict_slashes=False)
+def serve_builder2_music_artifact(token):
+    """Serve Builder2 Lyria MP3 from durable disk-backed store."""
+    from engine.builder2_music_artifact_store import get_builder2_music_artifact_path
+    from engine.builder2_music_artifact_web_storage import log_builder2_music_artifact_served
+
+    path = get_builder2_music_artifact_path((token or "").strip())
+    if not path or not path.is_file():
+        log_builder2_music_artifact_served(stored_byte_count=0, request_accepted=False)
+        logger.info("BUILDER2_MUSIC_ARTIFACT_SERVE miss lookup=disk")
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    stored_byte_count = int(path.stat().st_size)
+    log_builder2_music_artifact_served(stored_byte_count=stored_byte_count, request_accepted=True)
+    logger.info("BUILDER2_MUSIC_ARTIFACT_SERVE hit lookup=disk")
+    return send_file(
+        str(path),
+        mimetype="audio/mpeg",
+        as_attachment=False,
+        download_name="ace-builder2-soundtrack.mp3",
     )
 
 

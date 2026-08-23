@@ -195,6 +195,16 @@ def run_builder2_closure_only_rerender(
     output_path = tmp / "builder2_closure_rerender_final.mp4"
     try:
         require_builder2_web_storage_capability(base_url)
+        from engine.builder2_lyria_artifact import job_requires_lyria_soundtrack, resolve_lyria_audio_for_render
+
+        lyria_audio_path = ""
+        if job_requires_lyria_soundtrack(state):
+            lyria_audio_path = resolve_lyria_audio_for_render(
+                job_id=job_id,
+                state=state,
+                public_base_url=base_url,
+            )
+
         render_result = render_builder2_advertising_closure_endcard(
             raw_url,
             product_name=product_name,
@@ -203,6 +213,7 @@ def run_builder2_closure_only_rerender(
             language=language,
             duration_seconds=duration_seconds,
             job_id=job_id,
+            lyria_audio_path=lyria_audio_path,
         )
         report["ffmpegCalls"] = 1
         report["rawRunwayReused"] = True

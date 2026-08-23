@@ -620,6 +620,21 @@ def _execute_finalization_render_pipeline(
 
         output_path = tmp / "builder2_final.mp4"
         source_for_closure = str(closure_input)
+        media_bucket = state.get("mediaResume") if isinstance(state.get("mediaResume"), dict) else {}
+        lyria_audio_path = ""
+        from engine.builder2_lyria_artifact import job_requires_lyria_soundtrack, resolve_lyria_audio_for_render
+
+        if job_requires_lyria_soundtrack(state):
+            try:
+                lyria_audio_path = resolve_lyria_audio_for_render(
+                    job_id=job_id,
+                    state=state,
+                    public_base_url=public_base_url,
+                )
+            except Builder2TournamentError as exc:
+                report["failureStage"] = "music_generation"
+                report["failureReason"] = str(exc.args[0] if exc.args else "builder2_lyria_succeeded_artifact_missing")
+                return None
         report["closureRenderAttempted"] = True
         report["closureRenderAttempts"] = 1
         render_result: Optional[ClosureRenderResult] = None
@@ -634,6 +649,7 @@ def _execute_finalization_render_pipeline(
                     float(closure.get("durationSeconds")) if closure.get("durationSeconds") is not None else None
                 ),
                 job_id=job_id,
+                lyria_audio_path=lyria_audio_path,
             )
         except Builder2ClosureRenderError as exc:
             preserve_original_failure(report, exc)

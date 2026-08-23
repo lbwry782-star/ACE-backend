@@ -78,6 +78,8 @@ def _initial_report(*, job_id: str, dry_run: bool = False) -> Dict[str, Any]:
         "runwayPollingCalls": 0,
         "runwayPollingResumed": False,
         "ffmpegCalls": 0,
+        "lyriaCalls": 0,
+        "lyriaReused": False,
         "dryRun": dry_run,
         "readyForMediaResume": False,
         "mediaReused": False,
@@ -268,6 +270,10 @@ def run_one_media_resume(
             MediaResumeIsolationGuard.enable_start_image()
             MediaResumeIsolationGuard.assert_safe_before_start_image()
         MediaResumeIsolationGuard.enable_runway()
+        from engine.builder2_lyria_config import resolve_builder2_lyria_enabled
+
+        if resolve_builder2_lyria_enabled():
+            MediaResumeIsolationGuard.enable_lyria()
         if ffmpeg_required:
             MediaResumeIsolationGuard.enable_ffmpeg()
 
@@ -293,6 +299,8 @@ def run_one_media_resume(
         report["runwayPollingCalls"] = counters.runway_polling_calls
         report["runwayPollingResumed"] = counters.runway_polling_resumed
         report["ffmpegCalls"] = counters.ffmpeg_calls
+        report["lyriaCalls"] = counters.lyria_calls
+        report["lyriaReused"] = counters.lyria_reused or bool((state.get("mediaResume") or {}).get("musicGenerationStatus") == "succeeded")
         report["mediaReused"] = counters.media_reused
 
         final_url = str((state.get("mediaResume") or {}).get("finalPublicUrl") or "")
@@ -375,6 +383,8 @@ def run_one_media_resume(
             report["failureStage"] = "start_image_postprocess"
         elif reason.startswith("builder2_start_image_runway") or reason.startswith("builder2_start_image_invalid_artifact"):
             report["failureStage"] = "pre_runway_image_validation"
+        elif reason.startswith("builder2_lyria_") or reason.startswith("builder2_media_music_direction"):
+            report["failureStage"] = "music_generation"
         elif reason.startswith("builder2_closure_") or reason.startswith("builder2_media_final_duration"):
             report["failureStage"] = "advertising_closure"
         elif reason.startswith("builder2_media_missing_final_closure"):

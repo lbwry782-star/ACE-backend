@@ -176,6 +176,8 @@ def classify_url_route_family(url: str) -> str:
         return "api/builder2-final-video-artifact"
     if "/api/builder2-final-video/" in path:
         return "api/builder2-final-video"
+    if "/api/builder2-music-artifact" in path:
+        return "api/builder2-music-artifact"
     if "/api/video-headline-artifact" in path:
         return "api/video-headline-artifact"
     if "/api/video-headline/" in path:
@@ -352,6 +354,7 @@ def render_builder2_advertising_closure_endcard(
     public_base_url: str = "",
     publish: bool = False,
     ffmpeg_runner: Optional[Callable[[list[str], str, str], None]] = None,
+    lyria_audio_path: str = "",
 ) -> ClosureRenderResult:
     _ = public_base_url
     if publish:
@@ -481,6 +484,17 @@ def render_builder2_advertising_closure_endcard(
         source_duration = _ffprobe_duration_seconds(inp, _FFPROBE_TIMEOUT)
         closure_ffprobe_calls = 1
         has_audio = _input_has_audio(inp, _FFPROBE_TIMEOUT)
+        lyria_path = (lyria_audio_path or "").strip()
+        use_lyria_audio = bool(lyria_path)
+        if use_lyria_audio:
+            lyria_file = Path(lyria_path)
+            if not lyria_file.is_file():
+                raise Builder2ClosureRenderError(
+                    "builder2_closure_lyria_audio_not_found",
+                    stage="input_validation",
+                    command_category="validation",
+                )
+            has_audio = False
         ffmpeg_session = ClosureFfmpegAssetSession.create()
         try:
             line_files, font_files = ffmpeg_session.prepare_line_assets(typography_layout.line_specs)
@@ -529,8 +543,63 @@ def render_builder2_advertising_closure_endcard(
             except RuntimeError:
                 measured_closure_duration = hold
         effective_hold = float(measured_closure_duration)
+        final_duration = float(source_duration) + effective_hold
+        fade_start = float(source_duration)
 
-        if has_audio:
+        if use_lyria_audio:
+            from engine.builder2_lyria import (
+                Builder2LyriaError,
+                probe_mp3_duration_seconds,
+                validate_lyria_audio_covers_final_duration,
+            )
+
+            try:
+                lyria_duration = probe_mp3_duration_seconds(lyria_file)
+                validate_lyria_audio_covers_final_duration(
+                    audio_duration_seconds=lyria_duration,
+                    required_duration_seconds=final_duration,
+                )
+            except Builder2LyriaError as exc:
+                raise Builder2ClosureRenderError(
+                    str(exc.args[0] if exc.args else "builder2_lyria_audio_invalid"),
+                    stage="lyria_audio_validation",
+                    command_category="validation",
+                ) from exc
+
+            filter_complex = (
+                f"[0:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
+                f"force_original_aspect_ratio=decrease,pad={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
+                f"(ow-iw)/2:(oh-ih)/2,setsar=1,setpts=PTS-STARTPTS[v0];"
+                f"[1:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT},trim=duration={effective_hold:.6f},"
+                f"setsar=1,setpts=PTS-STARTPTS[v1];"
+                f"[v0][v1]concat=n=2:v=1:a=0[vout];"
+                f"[2:a]atrim=0:{final_duration:.6f},asetpts=PTS-STARTPTS,"
+                f"afade=t=out:st={fade_start:.6f}:d={effective_hold:.6f}[aout]"
+            )
+            concat_cmd = [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(inp),
+                "-i",
+                str(card),
+                "-i",
+                lyria_path,
+                "-filter_complex",
+                filter_complex,
+                "-map",
+                "[vout]",
+                "-map",
+                "[aout]",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                str(out_tmp),
+            ]
+        elif has_audio:
             filter_complex = (
                 f"[0:v]fps={_TARGET_FPS},scale={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"
                 f"force_original_aspect_ratio=decrease,pad={_TARGET_WIDTH}:{_TARGET_HEIGHT}:"

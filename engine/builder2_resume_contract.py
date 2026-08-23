@@ -28,6 +28,7 @@ CANONICAL_BUILDER2_STAGES: Tuple[str, ...] = (
     "runway_complete",
     "video_download",
     "postprocessing",
+    "generating_music",
     "rendering_advertising_closure",
     "publishing_final_video",
     "completed",
@@ -46,6 +47,7 @@ _STAGE_ALIASES: Dict[str, str] = {
     "start_image": "start_image_generation",
     "runway": "runway_submission",
     "runway_polling": "runway_waiting",
+    "generating_music": "generating_music",
     "done": "completed",
 }
 
@@ -351,6 +353,31 @@ def sync_builder2_stage_checkpoints_from_state(
 
     if _clean(media.get("postprocessStatus")) == "completed" or _clean(job_state.get("postprocessRan")) == "1":
         upsert_stage_checkpoint(working, "postprocessing", status="completed")
+
+    from engine.builder2_lyria_config import resolve_builder2_lyria_enabled
+    from engine.builder2_lyria import music_artifact_is_valid
+    from engine.builder2_music_artifact_publication import durable_music_reference_present
+
+    if resolve_builder2_lyria_enabled():
+        music_status = _clean(media.get("musicGenerationStatus")).lower()
+        if music_status == "succeeded" and (durable_music_reference_present(media) or music_artifact_is_valid(_clean(media.get("musicArtifactPath")))):
+            upsert_stage_checkpoint(
+                working,
+                "generating_music",
+                status="completed",
+                artifact_ref="musicArtifactUrl" if _clean(media.get("musicArtifactUrl")) else "musicArtifactPath",
+                identity=_clean(media.get("musicArtifactUrl")) or _clean(media.get("musicArtifactPath")),
+            )
+        elif music_status in {"generating", "paid_call_outcome_unknown", "failed"} or (
+            music_status == "succeeded" and not durable_music_reference_present(media)
+        ):
+            upsert_stage_checkpoint(
+                working,
+                "generating_music",
+                status="attempting",
+                artifact_ref="musicGenerationStatus",
+                identity=music_status,
+            )
 
     closure_url = _clean(media.get("finalVideoWithClosureUrl"))
     if closure_url:
