@@ -20,6 +20,7 @@ from engine.builder2_lyria import (
     extract_audio_bytes_from_generate_content_response,
     generate_builder2_music,
     music_artifact_is_valid,
+    summarize_lyria_missing_audio_response,
 )
 from engine.builder2_lyria_config import (
     DEFAULT_BUILDER2_LYRIA_MODEL,
@@ -36,7 +37,12 @@ from engine.builder2_music_direction import (
     validate_music_direction_for_lyria_media,
     validate_music_direction_shape,
 )
-from engine.builder2_tournament_contracts import Builder2TournamentError
+from engine.builder2_tournament_prompts import (
+    build_winner_development_prompt,
+    build_winner_music_direction_prompt_text,
+)
+from engine.builder2_prototypes import require_prototype
+from engine.builder2_winner_preservation_contract import build_winning_candidate_preservation_snapshot
 from engine.builder2_tournament_store import disable_memory_store, enable_memory_store, save_tournament_state
 from engine.builder2_winner_persistence import persist_winner_development_atomically
 from tests.builder2_methodology_fixtures import methodology_winner_extras
@@ -83,6 +89,96 @@ def _winner_plan_with_music() -> Dict[str, Any]:
     return plan
 
 
+def _fake_lyria_response_text_then_audio_payload() -> Dict[str, Any]:
+    return {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {"text": "Generated instrumental track description from Lyria."},
+                        {
+                            "inlineData": {
+                                "mimeType": "audio/mpeg",
+                                "data": base64.b64encode(_fake_mp3_bytes() * 20).decode("ascii"),
+                            }
+                        },
+                    ]
+                }
+            }
+        ],
+        "usageMetadata": {"promptTokenCount": 12},
+        "modelVersion": "lyria-3-pro-preview",
+        "responseId": "fake-response-id",
+    }
+
+
+def _fake_lyria_response_inline_data_snake_payload() -> Dict[str, Any]:
+    return {
+        "candidates": [
+            {
+                "content": {
+                    "parts": [
+                        {
+                            "inline_data": {
+                                "mimeType": "audio/mpeg",
+                                "data": base64.b64encode(_fake_mp3_bytes() * 20).decode("ascii"),
+                            }
+                        }
+                    ]
+                }
+            }
+        ]
+    }
+
+
+class TestWinnerMusicDirectionPromptInstructions(unittest.TestCase):
+    def test_music_direction_instructions_include_short_ad_principles(self) -> None:
+        text = build_winner_music_direction_prompt_text().lower()
+        for phrase in (
+            "very short advertisement",
+            "full arrangement from first beat",
+            "first 1–2 seconds",
+            "first 1-2 seconds",
+            "do not assume later portions",
+            "later build-up",
+            "gradually develops",
+            "gentle",
+            "sparse or thin",
+            "creative appropriateness",
+            "instrumentalonly=true",
+            "immediatestart=true",
+            "no vocals",
+            "no lyrics",
+            "no spoken words",
+            "no long intro",
+        ):
+            self.assertIn(phrase.replace("–", "-") if "1–2" in phrase else phrase, text.replace("–", "-"))
+
+    def test_winner_development_prompt_includes_music_methodology(self) -> None:
+        strategy = _strategy(language="en")
+        candidate = _candidate("summer_fan")
+        snapshot = build_winning_candidate_preservation_snapshot(
+            strategy_foundation=strategy,
+            winning_candidate=candidate,
+            candidate_id="cand-1",
+        )
+        prompt = build_winner_development_prompt(
+            product_name="Product",
+            product_description="desc",
+            language="en",
+            strategy_foundation=strategy,
+            winning_candidate=candidate,
+            winning_judgment={},
+            prototype=require_prototype("summer_fan"),
+            runway_mode="image_to_video",
+            preservation_snapshot=snapshot,
+        ).lower()
+        self.assertIn("full arrangement from first beat", prompt)
+        self.assertIn("very short advertisement", prompt)
+        self.assertIn("instrumentalonly=true", prompt.replace(" ", ""))
+        self.assertIn("10–15 seconds".replace("–", "-"), prompt.replace("–", "-"))
+
+
 class TestLyriaConfig(unittest.TestCase):
     @patch.dict(os.environ, {}, clear=True)
     def test_feature_flag_defaults_false(self) -> None:
@@ -121,8 +217,14 @@ class TestMusicDirection(unittest.TestCase):
     def test_request_builder_adds_safety_constraints(self) -> None:
         creative, combined = build_lyria_request_prompt(_music_direction())
         self.assertIn("Tense minimal", creative)
+        self.assertTrue(combined.startswith("Tense minimal"))
         self.assertIn("Instrumental only", combined)
         self.assertIn("No vocals", combined)
+        self.assertIn("Short-ad soundtrack guardrail", combined)
+        self.assertIn("Full arrangement from the first beat", combined)
+        self.assertIn("opening 1–2 seconds", combined)
+        self.assertLess(combined.index("Tense minimal"), combined.index("Production constraints"))
+        self.assertLess(combined.index("Production constraints"), combined.index("Short-ad soundtrack guardrail"))
 
 
 class TestLyriaRestParsing(unittest.TestCase):
@@ -131,9 +233,63 @@ class TestLyriaRestParsing(unittest.TestCase):
         audio = extract_audio_bytes_from_generate_content_response(payload)
         self.assertTrue(audio.startswith(b"\xff\xfb"))
 
+    def test_extracts_text_part_before_audio_mpeg(self) -> None:
+        payload = _fake_lyria_response_text_then_audio_payload()
+        audio = extract_audio_bytes_from_generate_content_response(payload)
+        self.assertTrue(audio.startswith(b"\xff\xfb"))
+        self.assertGreater(len(audio), len(_fake_mp3_bytes()))
+
+    def test_extracts_mp3_from_inline_data_snake_case(self) -> None:
+        payload = _fake_lyria_response_inline_data_snake_payload()
+        audio = extract_audio_bytes_from_generate_content_response(payload)
+        self.assertTrue(audio.startswith(b"\xff\xfb"))
+
     def test_missing_audio_fails(self) -> None:
         with self.assertRaises(Builder2LyriaError):
             extract_audio_bytes_from_generate_content_response({"candidates": [{"content": {"parts": [{"text": "nope"}]}}]})
+
+    def test_missing_audio_emits_safe_diagnostics_without_audio_bytes(self) -> None:
+        secret_b64 = base64.b64encode(_fake_mp3_bytes() * 5).decode("ascii")
+        payload = {
+            "responseId": "resp-missing-audio-1",
+            "modelVersion": "lyria-3-pro-preview",
+            "usageMetadata": {"promptTokenCount": 7, "totalTokenCount": 9},
+            "promptFeedback": {"blockReason": "SAFETY"},
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {
+                        "parts": [
+                            {"text": "description only"},
+                            {
+                                "inlineData": {
+                                    "mimeType": "text/plain",
+                                    "data": secret_b64,
+                                }
+                            },
+                        ]
+                    },
+                }
+            ],
+        }
+        diagnostics = summarize_lyria_missing_audio_response(payload)
+        self.assertEqual(diagnostics["candidateCount"], 1)
+        self.assertEqual(diagnostics["responseId"], "resp-missing-audio-1")
+        self.assertEqual(diagnostics["candidates"][0]["partsCount"], 2)
+        self.assertEqual(diagnostics["candidates"][0]["parts"][1]["mimeType"], "text/plain")
+        self.assertTrue(diagnostics["candidates"][0]["parts"][1]["dataPresent"])
+        diagnostics_json = json.dumps(diagnostics)
+        self.assertNotIn('"data":', diagnostics_json)
+        self.assertNotIn(secret_b64, diagnostics_json)
+
+        with self.assertLogs("engine.builder2_lyria", level="ERROR") as captured:
+            with self.assertRaises(Builder2LyriaError) as ctx:
+                extract_audio_bytes_from_generate_content_response(payload)
+        self.assertEqual(str(ctx.exception.args[0]), "builder2_lyria_response_missing_audio")
+        joined = "\n".join(captured.output)
+        self.assertIn("BUILDER2_LYRIA_RESPONSE_MISSING_AUDIO", joined)
+        self.assertIn("resp-missing-audio-1", joined)
+        self.assertNotIn(secret_b64, joined)
 
     def test_payload_shape(self) -> None:
         body = build_lyria_generate_content_payload(combined_prompt="test prompt")

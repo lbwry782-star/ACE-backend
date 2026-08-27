@@ -470,6 +470,52 @@ def build_judge_retry_prompt(
     )
 
 
+def build_winner_music_direction_prompt_text() -> str:
+    """Builder2 Winner musicDirection instructions — short-ad soundtrack methodology."""
+    return (
+        "musicDirection object: prompt (non-empty creative direction for instrumental soundtrack), "
+        "instrumentalOnly=true, immediateStart=true.\n"
+        "This is music for a very short advertisement — not a conventional long-form composition.\n"
+        "FULL ARRANGEMENT FROM FIRST BEAT: immediateStart means the music begins at once AND the "
+        "essential full arrangement must already be present from the first beat. "
+        "These are two separate requirements.\n"
+        "Design the soundtrack for what must already be audible in the opening seconds, "
+        "not for a long track that gradually develops. "
+        "Within approximately the first 1–2 seconds, the listener should already hear the important "
+        "musical foundations this ad needs.\n"
+        "The advertisement is very short. Useful musical content must already be present in "
+        "approximately the first 10–15 seconds, and especially in the first 1–2 seconds. "
+        "Do not assume later portions of a generated track will ever be used in the final advertisement.\n"
+        "Builder2 may use only the opening portion of a longer generated track; "
+        "therefore the opening itself must already sound intentional, complete, layered, "
+        "and professionally produced.\n"
+        "Do not reserve essential rhythmic energy, low-frequency foundation, harmonic richness, "
+        "melodic identity, percussion or pulse, or the main musical character for a later build-up "
+        "unless a genuinely sparse/minimal creative direction is essential to the advertisement idea.\n"
+        "Think in musical functions, not a fixed instrument list. When appropriate to the creative idea, "
+        "consider whether the opening already includes foundations such as: low-frequency/bass support, "
+        "rhythmic foundation, percussion or pulse, harmonic layer, melodic identity, and multiple "
+        "complementary simultaneous layers. Do not force every function in every ad — "
+        "avoid thin, undeveloped, or unintentionally single-layer soundtracks when the creative idea "
+        "calls for richness.\n"
+        "Gentle, quiet, elegant, restrained, intimate, subtle, soft, or delicate music does not have "
+        "to be sparse or thin. A delicate soundtrack can still have complete bass foundation, "
+        "rhythmic support, harmony, musical depth, and complementary layers. "
+        "Do not treat soft/subdued/minimal wording as permission to strip the opening down to a lone "
+        "instrument or thin texture unless sparse/minimal is truly the creative idea.\n"
+        "Creative appropriateness remains mandatory: mood, energy, pacing, instrumentation, and musical "
+        "character must fit this advertisement's specific mechanism, sequence, reveal, and closure — "
+        "not a generic genre. Musical richness is not maximum loudness, maximum intensity, "
+        "or the largest possible number of instruments.\n"
+        "Optional short-ad timing guidance (conceptual only — no timestamps required): "
+        "opening/action — full musical palette already active; "
+        "middle — support development, change, tension, or reveal; "
+        "closure — resolve or land naturally with the advertising ending.\n"
+        "instrumental only; no vocals; no lyrics; no spoken words; no long intro; "
+        "the soundtrack must start musically immediately.\n"
+    )
+
+
 def build_winner_development_prompt(
     *,
     product_name: str,
@@ -531,10 +577,7 @@ def build_winner_development_prompt(
         f"advertisingClosure, {WINNER_SLOGAN_EVIDENCE_KEY}, coreVisualIdea, sequence{{beginning,development,resolution}}, sceneVariations, visualAnchor, "
         "openingFrameDescription, videoPrompt, musicDirection.\n"
         f"{build_winner_advertising_slogan_prompt_text()}\n"
-        "musicDirection object: prompt (non-empty creative direction for instrumental soundtrack), "
-        "instrumentalOnly=true, immediateStart=true. Describe mood, energy, pacing, and instrumentation/style "
-        "that support this specific advertisement's mechanism, sequence, reveal, and closure — not a generic genre. "
-        "The soundtrack must start musically immediately with no long intro; instrumental only; no vocals; no lyrics; no spoken words.\n"
+        f"{build_winner_music_direction_prompt_text()}"
         "Optional diagnostic keys: preservationReference, winnerPreservationCheck, headlineDecision.reason.\n"
         "headlineDecision.decision is authoritative (use|omit; include accepted as alias for use). "
         "headlineDecision.reason is optional diagnostic metadata and is not required for validity.\n"

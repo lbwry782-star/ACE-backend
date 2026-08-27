@@ -7,6 +7,7 @@ Does not read OpenAI or global GEMINI_API_KEY env vars.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 from dataclasses import dataclass
@@ -100,6 +101,121 @@ def build_lyria_generate_content_payload(*, combined_prompt: str) -> Dict[str, A
     }
 
 
+def _clean_str(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _part_inline_data(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    inline = part.get("inlineData")
+    if isinstance(inline, dict):
+        return inline
+    inline = part.get("inline_data")
+    if isinstance(inline, dict):
+        return inline
+    return None
+
+
+def _safe_safety_ratings_summary(raw: Any) -> Any:
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        out.append(
+            {
+                "category": item.get("category"),
+                "probability": item.get("probability"),
+                "blocked": item.get("blocked"),
+            }
+        )
+    return out or None
+
+
+def _summarize_part_for_missing_audio(part: Dict[str, Any]) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {"keys": sorted(str(k) for k in part.keys())}
+    if "text" in part:
+        summary["type"] = "text"
+        summary["textPresent"] = bool(_clean_str(part.get("text")))
+    inline = _part_inline_data(part)
+    if isinstance(inline, dict):
+        summary["inlineDataPresent"] = True
+        summary["mimeType"] = _clean_str(inline.get("mimeType") or inline.get("mime_type"))
+        data_b64 = inline.get("data")
+        summary["dataPresent"] = bool(data_b64)
+        if data_b64:
+            summary["dataLength"] = len(str(data_b64))
+    return summary
+
+
+def summarize_lyria_missing_audio_response(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Safe diagnostics when Lyria returns JSON without extractable audio — never includes audio bytes."""
+    summary: Dict[str, Any] = {}
+    response_id = _clean_str(payload.get("responseId"))
+    if response_id:
+        summary["responseId"] = response_id
+    model_version = _clean_str(payload.get("modelVersion"))
+    if model_version:
+        summary["modelVersion"] = model_version
+    usage = payload.get("usageMetadata")
+    if isinstance(usage, dict):
+        summary["usageMetadata"] = {
+            key: usage[key]
+            for key in (
+                "promptTokenCount",
+                "candidatesTokenCount",
+                "totalTokenCount",
+                "cachedContentTokenCount",
+            )
+            if key in usage
+        }
+    prompt_feedback = payload.get("promptFeedback")
+    if isinstance(prompt_feedback, dict):
+        summary["promptFeedback"] = {
+            key: prompt_feedback.get(key)
+            for key in ("blockReason", "blockReasonMessage")
+            if prompt_feedback.get(key) is not None
+        }
+        ratings = _safe_safety_ratings_summary(prompt_feedback.get("safetyRatings"))
+        if ratings:
+            summary["promptFeedback"]["safetyRatings"] = ratings
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        summary["candidateCount"] = len(candidates)
+        candidate_summaries = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            candidate_summary: Dict[str, Any] = {}
+            finish_reason = _clean_str(candidate.get("finishReason"))
+            if finish_reason:
+                candidate_summary["finishReason"] = finish_reason
+            ratings = _safe_safety_ratings_summary(candidate.get("safetyRatings"))
+            if ratings:
+                candidate_summary["safetyRatings"] = ratings
+            content = candidate.get("content")
+            if isinstance(content, dict):
+                parts = content.get("parts")
+                if isinstance(parts, list):
+                    candidate_summary["partsCount"] = len(parts)
+                    candidate_summary["parts"] = [
+                        _summarize_part_for_missing_audio(part)
+                        for part in parts
+                        if isinstance(part, dict)
+                    ]
+            candidate_summaries.append(candidate_summary)
+        summary["candidates"] = candidate_summaries
+    return summary
+
+
+def _log_missing_audio_diagnostics(payload: Dict[str, Any]) -> None:
+    diagnostics = summarize_lyria_missing_audio_response(payload)
+    logger.error(
+        "BUILDER2_LYRIA_RESPONSE_MISSING_AUDIO diagnostics=%s",
+        json.dumps(diagnostics, ensure_ascii=False, default=str),
+    )
+
+
 def extract_audio_bytes_from_generate_content_response(payload: Dict[str, Any]) -> bytes:
     candidates = payload.get("candidates")
     if not isinstance(candidates, list):
@@ -116,10 +232,10 @@ def extract_audio_bytes_from_generate_content_response(payload: Dict[str, Any]) 
         for part in parts:
             if not isinstance(part, dict):
                 continue
-            inline = part.get("inlineData")
+            inline = _part_inline_data(part)
             if not isinstance(inline, dict):
                 continue
-            mime = str(inline.get("mimeType") or "").lower()
+            mime = str(inline.get("mimeType") or inline.get("mime_type") or "").lower()
             data_b64 = inline.get("data")
             if not data_b64:
                 continue
@@ -128,6 +244,7 @@ def extract_audio_bytes_from_generate_content_response(payload: Dict[str, Any]) 
                     return base64.b64decode(str(data_b64))
                 except (ValueError, TypeError) as exc:
                     raise Builder2LyriaError("builder2_lyria_response_invalid_audio_data") from exc
+    _log_missing_audio_diagnostics(payload)
     raise Builder2LyriaError("builder2_lyria_response_missing_audio")
 
 

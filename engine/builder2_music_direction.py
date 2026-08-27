@@ -90,13 +90,26 @@ def validate_music_direction_for_lyria_media(plan: Dict[str, Any]) -> Dict[str, 
     }
 
 
+_LYRIA_PRODUCTION_CONSTRAINTS = (
+    "Production constraints (mandatory): Instrumental only. No vocals. No lyrics. No spoken words. "
+    "Begin the musical character immediately from the first beat. No long intro. "
+    "No silence at the start."
+)
+
+_LYRIA_SHORT_AD_GUARDRAIL = (
+    "Short-ad soundtrack guardrail (mandatory): This soundtrack is for a very short advertisement. "
+    "Full arrangement from the first beat: the essential rhythmic, harmonic, low-frequency, "
+    "melodic, and complementary layers appropriate to the creative direction must already be "
+    "established within the opening 1–2 seconds. Do not use a gradual build-up that saves important "
+    "instruments or arrangement richness for later in the generated track. "
+    "The opening portion must already sound complete, layered, and professionally produced. "
+    "Gentle or restrained music may still be harmonically and rhythmically complete — not thin or sparse "
+    "unless the creative direction genuinely requires it."
+)
+
+
 def build_lyria_request_prompt(music_direction: Dict[str, Any]) -> Tuple[str, str]:
     """Return (creative_prompt, combined_prompt_for_api)."""
     creative = _clean(music_direction.get("prompt"))
-    safety = (
-        "Production constraints (mandatory): Instrumental only. No vocals. No lyrics. No spoken words. "
-        "Begin the musical character immediately from the first beat. No long intro. "
-        "No silence at the start."
-    )
-    combined = f"{creative}\n\n{safety}".strip()
+    combined = f"{creative}\n\n{_LYRIA_PRODUCTION_CONSTRAINTS}\n\n{_LYRIA_SHORT_AD_GUARDRAIL}".strip()
     return creative, combined
