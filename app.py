@@ -612,6 +612,33 @@ def video_status():
     return jsonify(out), 200
 
 
+@app.route("/api/builder2/jobs/<job_id>/cancel", methods=["POST"])
+@app.route("/api/builder2-jobs/<job_id>/cancel", methods=["POST"])
+def builder2_job_cancel(job_id: str):
+    """Cancel an active Builder2 job (idempotent). Does not affect Builder1 jobs."""
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "video_jobs_unconfigured"}), 503
+    jid = (job_id or "").strip()
+    if not jid:
+        return jsonify({"ok": False, "error": "missing_param", "message": "jobId is required"}), 400
+    try:
+        from engine.builder2_job_cancellation import CANCEL_REASON_FRONTEND_REFRESH, request_builder2_job_cancellation
+
+        reason = CANCEL_REASON_FRONTEND_REFRESH
+        if request.is_json:
+            payload = request.get_json(silent=True)
+            if isinstance(payload, dict) and (payload.get("reason") or "").strip():
+                reason = str(payload.get("reason")).strip()
+        result = request_builder2_job_cancellation(jid, reason=reason)
+    except Exception as e:
+        logger.error("BUILDER2_JOB_CANCEL_FAILED jobId=%s err=%s", jid, e, exc_info=True)
+        return jsonify({"ok": False, "error": "builder2_job_cancel_failed", "jobId": jid}), 500
+    if not result.get("ok"):
+        code = 404 if result.get("error") == "not_found" else 400 if result.get("error") == "not_builder2_job" else 400
+        return jsonify(result), code
+    return jsonify(result), 200
+
+
 @app.route("/api/builder2-resume", methods=["POST"])
 def builder2_resume():
     """Resume an existing Builder2 job from the first incomplete stage (same jobId)."""

@@ -216,14 +216,15 @@ def main() -> None:
         clear_job_queued(job_id)
         logger.info("VIDEO_TIMING_STAGE_START stage=worker_dequeued jobId=%s", job_id)
 
-        logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
-        try:
-            get_redis().hset(job_key(job_id), mapping={"status": "running", "progressStage": "processing"})
-        except Exception:
-            pass
         _set_active_job_id(job_id)
         t_worker_job0 = time.monotonic()
         try:
+            from engine.builder2_job_cancellation import (
+                CANCELLED_ERROR_CODE,
+                is_builder2_job_cancelled,
+                video_job_mark_done_respecting_cancellation,
+            )
+
             logger.info("VIDEO_JOB_STEP step=redis_get_client start jobId=%s", job_id)
             r = get_redis()
             logger.info("VIDEO_JOB_STEP step=redis_get_client done jobId=%s", job_id)
@@ -238,6 +239,21 @@ def main() -> None:
             if not data:
                 logger.warning("VIDEO_JOB_MISSING jobId=%s (no hash)", job_id)
                 continue
+
+            if is_builder2_job_cancelled(job_id):
+                logger.info("BUILDER2_JOB_CANCEL_DEQUEUE_SKIP jobId=%s", job_id)
+                try:
+                    remove_recoverable_job(job_id)
+                except Exception:
+                    pass
+                logger.info("VIDEO_JOB_DONE jobId=%s outcome=cancelled", job_id)
+                continue
+
+            logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
+            try:
+                get_redis().hset(job_key(job_id), mapping={"status": "running", "progressStage": "processing"})
+            except Exception:
+                pass
 
             raw_enqueued = (data.get("enqueued_ts") or data.get("last_progress_ts") or "").strip()
             if raw_enqueued:
@@ -286,7 +302,12 @@ def main() -> None:
             )
             logger.info("VIDEO_TIMING_STAGE_START stage=redis_mark_done jobId=%s", job_id)
             logger.info("VIDEO_JOB_STEP step=redis_mark_done start jobId=%s", job_id)
-            video_job_mark_done(job_id, video_url, marketing_text or "", overlay_headline or "")
+            if not video_job_mark_done_respecting_cancellation(
+                job_id, video_url, marketing_text or "", overlay_headline or ""
+            ):
+                logger.info("VIDEO_JOB_CANCELLED jobId=%s outcome=cancelled_before_mark_done", job_id)
+                logger.info("VIDEO_JOB_DONE jobId=%s outcome=cancelled", job_id)
+                continue
             logger.info("VIDEO_JOB_STEP step=redis_mark_done done jobId=%s", job_id)
             logger.info("VIDEO_JOB_RESULT video_url=%s jobId=%s", video_url, job_id)
             logger.info(
@@ -306,6 +327,14 @@ def main() -> None:
                 pass
         except RunwayVideoMVPError as e:
             _reason = e.args[0] if getattr(e, "args", None) else "runway_mvp"
+            if _reason == CANCELLED_ERROR_CODE:
+                logger.info("VIDEO_JOB_CANCELLED jobId=%s", job_id)
+                try:
+                    remove_recoverable_job(job_id)
+                except Exception:
+                    pass
+                logger.info("VIDEO_JOB_DONE jobId=%s outcome=cancelled", job_id)
+                continue
             if _reason == "builder2_media_finalization_recoverable":
                 logger.warning(
                     "VIDEO_JOB_RECOVERABLE_FINALIZATION jobId=%s reason=%s",
@@ -334,7 +363,12 @@ def main() -> None:
         except Exception as e:
             logger.error("VIDEO_JOB_FATAL jobId=%s error=%s", job_id, e, exc_info=True)
             try:
-                video_job_mark_error(job_id, "video_generation_failed")
+                from engine.builder2_job_cancellation import is_builder2_job_cancelled
+
+                if is_builder2_job_cancelled(job_id):
+                    logger.info("VIDEO_JOB_CANCELLED jobId=%s outcome=cancelled_after_error", job_id)
+                else:
+                    video_job_mark_error(job_id, "video_generation_failed")
             except Exception as mark_err:
                 logger.error(
                     "VIDEO_JOB_FATAL mark_error_failed jobId=%s err=%s",

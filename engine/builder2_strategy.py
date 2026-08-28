@@ -367,6 +367,9 @@ def generate_strategy_foundation(
     )
 
     logger.info("BUILDER2_STRATEGY_GENERATION_START jobId=%s tournamentId=%s model=%s", job_id, tournament_id, model)
+    from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+    checkpoint_builder2_cancellation(job_id, stage="strategy_normal")
     timer = MetricsTimer()
     response_text, response_obj, token_usage = _invoke_strategy_model(
         prompt=prompt,
@@ -400,6 +403,7 @@ def generate_strategy_foundation(
                 if last_exc is None or not _repairable_failure(_failure_code(last_exc)):
                     break
                 repair_attempted = True
+                checkpoint_builder2_cancellation(job_id, stage="strategy_repair")
                 repair_prompt = build_strategy_repair_prompt(
                     product_name=product_name,
                     product_description=product_description,

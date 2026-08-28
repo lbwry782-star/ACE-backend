@@ -721,6 +721,9 @@ def judge_candidate(
             prompt = base_prompt
             call_type = "normal"
 
+        from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+        checkpoint_builder2_cancellation(job_id, stage=f"judge_{call_type}")
         timer = MetricsTimer()
         response_text = _invoke_judge_model(
             prompt=prompt,

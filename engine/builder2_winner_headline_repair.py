@@ -311,6 +311,9 @@ def repair_builder2_winner_headline_from_parsed(
         state["winnerDevelopmentPaidCallRecorded"] = True
         repair_call_recorded = True
 
+    from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+    checkpoint_builder2_cancellation(job_id, stage="winner_repair")
     try:
         raw, response_text = call_builder2_role_json_with_text(
             role="builder2_winner",

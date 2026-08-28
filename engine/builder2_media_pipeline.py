@@ -146,7 +146,9 @@ def _env_runway_base_url() -> str:
     return origin
 
 
-def _default_poll_runway_task(*, task_id: str) -> Tuple[str, str]:
+def _default_poll_runway_task(*, task_id: str, job_id: str = "") -> Tuple[str, str]:
+    from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
     from engine.runway_video import (
         _MAX_WAIT_SECONDS,
         _POLL_HTTP_TIMEOUT_SECONDS,
@@ -162,6 +164,8 @@ def _default_poll_runway_task(*, task_id: str) -> Tuple[str, str]:
     poll_start = time.monotonic()
     deadline = poll_start + _MAX_WAIT_SECONDS
     while time.monotonic() < deadline:
+        if job_id:
+            checkpoint_builder2_cancellation(job_id, stage="runway_polling")
         task = _poll_get_task_once(session, base, task_id, _POLL_HTTP_TIMEOUT_SECONDS)
         if task is None:
             if time.monotonic() >= deadline:
@@ -322,6 +326,9 @@ def execute_builder2_media_pipeline(
         return state, counters
 
     validate_builder2_pre_runway(plan)
+    from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+    checkpoint_builder2_cancellation(job_id, stage="media_pipeline_start")
     _update_media_progress(state, "preparing_start_image")
 
     start_image_geometry = None
@@ -378,6 +385,7 @@ def execute_builder2_media_pipeline(
 
         _update_media_progress(state, "generating_start_image")
         MediaResumeIsolationGuard.assert_safe_before_start_image()
+        checkpoint_builder2_cancellation(job_id, stage="start_image")
         if prompt_image_data_uri:
             validate_builder2_runway_start_image_artifact(prompt_image_data_uri, start_image_geometry)
             media["startImageStatus"] = "reused"
@@ -453,6 +461,7 @@ def execute_builder2_media_pipeline(
     ).strip()
     _update_media_progress(state, "submitting_runway")
     MediaResumeIsolationGuard.assert_safe_before_runway()
+    checkpoint_builder2_cancellation(job_id, stage="runway_submission")
     if builder2_runway_requires_start_image(runway_model) and prompt_image_data_uri:
         from engine.builder2_start_image_pipeline import validate_builder2_runway_start_image_artifact
 
@@ -526,7 +535,7 @@ def execute_builder2_media_pipeline(
         _update_media_progress(state, "waiting_for_runway", runwayTaskId=task_id)
         pipeline_deps = deps or default_media_pipeline_deps()
         counters.runway_polling_calls += 1
-        status, runway_url = pipeline_deps.poll_runway_task(task_id=task_id)
+        status, runway_url = pipeline_deps.poll_runway_task(task_id=task_id, job_id=job_id)
         media["runwayStatus"] = status
         media["runwayVideoUrl"] = runway_url
 
@@ -601,6 +610,7 @@ def execute_builder2_media_pipeline(
         else:
             _update_media_progress(state, "postprocessing_video")
             MediaResumeIsolationGuard.assert_safe_before_ffmpeg()
+            checkpoint_builder2_cancellation(job_id, stage="ffmpeg_headline_postprocess")
             headline_url = pipeline_deps.postprocess_video(
                 runway_url=visual_source_url,
                 public_base_url=public_base_url,
@@ -628,6 +638,7 @@ def execute_builder2_media_pipeline(
 
         _update_media_progress(state, "generating_music")
         MediaResumeIsolationGuard.assert_safe_before_lyria()
+        checkpoint_builder2_cancellation(job_id, stage="lyria")
         try:
             lyria_result = generate_builder2_music(
                 job_id=job_id,
@@ -636,6 +647,10 @@ def execute_builder2_media_pipeline(
                 public_base_url=public_base_url,
             )
         except Builder2LyriaError as exc:
+            from engine.builder2_job_cancellation import Builder2JobCancelledError, CANCELLED_ERROR_CODE
+
+            if isinstance(exc, Builder2JobCancelledError) or str(exc.args[0] if exc.args else "") == CANCELLED_ERROR_CODE:
+                raise Builder2TournamentError(CANCELLED_ERROR_CODE) from exc
             media["musicGenerationStatus"] = media.get("musicGenerationStatus") or "failed"
             if not media.get("musicFailure"):
                 media["musicFailure"] = {
@@ -671,6 +686,7 @@ def execute_builder2_media_pipeline(
         require_builder2_web_storage_capability(public_base_url)
         _update_media_progress(state, "rendering_advertising_closure")
         MediaResumeIsolationGuard.assert_safe_before_ffmpeg()
+        checkpoint_builder2_cancellation(job_id, stage="ffmpeg_closure")
         tmp = Path(tempfile.mkdtemp(prefix="ace_media_final_"))
         output_path = tmp / "builder2_final.mp4"
         try:
@@ -713,6 +729,7 @@ def execute_builder2_media_pipeline(
             )
             media["advertisingClosureSource"] = state.get("advertisingClosureSource") or "winner_creator_candidate"
             _update_media_progress(state, "publishing_final_video")
+            checkpoint_builder2_cancellation(job_id, stage="durable_publication")
             publication = publish_builder2_durable_final_video(
                 output_path,
                 public_base_url,

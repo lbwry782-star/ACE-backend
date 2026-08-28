@@ -1460,6 +1460,12 @@ def run_controlled_complete_ad_reasoning_resume(
             return report
 
         job_raw = video_job_get_raw(job_id) or {}
+        from engine.builder2_job_cancellation import is_builder2_job_cancelled
+
+        if is_builder2_job_cancelled(job_id):
+            report["failureReason"] = "builder2_job_cancelled"
+            report["canResume"] = False
+            return report
         ok, pre_reason = validate_controlled_complete_ad_preconditions(state, job_raw)
         if not ok:
             report["failureReason"] = pre_reason

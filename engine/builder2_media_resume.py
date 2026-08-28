@@ -152,6 +152,13 @@ def run_one_media_resume(
             report["failureReason"] = "builder2_media_resume_job_not_found"
             return report
 
+        from engine.builder2_job_cancellation import is_builder2_job_cancelled
+
+        if is_builder2_job_cancelled(job_id):
+            report["failureReason"] = "builder2_job_cancelled"
+            report["canResume"] = False
+            return report
+
         media = state.get("mediaResume")
         if isinstance(media, dict) and media.get("mediaResumeStatus") == "completed" and media.get("finalPublicUrl"):
             from engine.builder2_media_finalization_contract import validate_builder2_media_completion_contract

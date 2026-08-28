@@ -150,6 +150,9 @@ def develop_builder2_winning_candidate(
             state["winnerDevelopmentPaidCallRecorded"] = True
 
     try:
+        from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+        checkpoint_builder2_cancellation(job_id, stage="winner_development")
         raw, response_text = call_builder2_role_json_with_text(
             role="builder2_winner",
             model=resolve_builder2_winner_model(),

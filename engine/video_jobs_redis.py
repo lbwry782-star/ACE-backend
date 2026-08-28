@@ -105,6 +105,8 @@ def video_job_get_raw(job_id: str) -> Optional[Dict[str, str]]:
     if _use_memory_jobs:
         data = _memory_job_hashes.get(job_id)
         return dict(data) if data else None
+    if not redis_configured():
+        return None
     data = get_redis().hgetall(job_key(job_id))
     return data if data else None
 
@@ -180,6 +182,10 @@ def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
         "builder": (data.get("builder") or "").strip(),
         "builder2ResumeContractVersion": (data.get("builder2ResumeContractVersion") or "").strip(),
         "ownerContextPresent": (data.get("ownerContextPresent") or "").strip() in {"1", "true", "True"},
+        "cancelRequested": str(data.get("cancelRequested") or "").strip().lower() in {"1", "true", "yes"},
+        "cancelRequestedAt": (data.get("cancelRequestedAt") or "").strip(),
+        "cancelReason": (data.get("cancelReason") or "").strip(),
+        "cancelledAt": (data.get("cancelledAt") or "").strip(),
     }
 
 
@@ -230,6 +236,21 @@ def video_job_try_finalize_stale_running(job_id: str) -> bool:
     return True
 
 
+def video_job_remove_from_queue(job_id: str) -> int:
+    """Remove all queue entries for job_id. Returns count removed (0 if none)."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return 0
+    if _use_memory_jobs:
+        from engine.builder2_tournament_recovery import _use_memory_recovery, _memory_queued, clear_job_queued
+
+        if _use_memory_recovery and jid in _memory_queued:
+            clear_job_queued(jid)
+            return 1
+        return 0
+    return int(get_redis().lrem(QUEUE_KEY, 0, jid) or 0)
+
+
 def video_job_mark_done(
     job_id: str,
     video_url: str,
@@ -237,19 +258,22 @@ def video_job_mark_done(
     overlay_headline: str = "",
 ) -> None:
     t0 = time.monotonic()
-    r = get_redis()
-    r.hset(
-        job_key(job_id),
-        mapping={
-            "status": "done",
-            "video_url": video_url or "",
-            "marketing_text": marketing_text or "",
-            "overlay_headline": overlay_headline or "",
-            "postprocess_ran": "0",
-            "error": "",
-            "last_progress_ts": str(int(time.time())),
-        },
-    )
+    mapping = {
+        "status": "done",
+        "video_url": video_url or "",
+        "marketing_text": marketing_text or "",
+        "overlay_headline": overlay_headline or "",
+        "postprocess_ran": "0",
+        "error": "",
+        "last_progress_ts": str(int(time.time())),
+    }
+    if _use_memory_jobs:
+        existing = _memory_job_hashes.get(job_id) or {}
+        existing.update({k: str(v) for k, v in mapping.items()})
+        _memory_job_hashes[job_id] = existing
+    else:
+        r = get_redis()
+        r.hset(job_key(job_id), mapping=mapping)
     logger.info(
         "VIDEO_TIMING_STAGE_END stage=redis_mark_done jobId=%s elapsed_ms=%.1f",
         job_id,

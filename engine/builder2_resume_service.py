@@ -141,6 +141,17 @@ def request_builder2_resume(
     if not raw:
         return {"ok": False, "error": "not_found", "jobId": jid}
 
+    from engine.builder2_job_cancellation import is_builder2_job_cancelled
+
+    if is_builder2_job_cancelled(jid):
+        return {
+            "ok": False,
+            "error": "builder2_job_cancelled",
+            "jobId": jid,
+            "canResume": False,
+            "status": "cancelled",
+        }
+
     if request is not None:
         ok, reason = verify_owner_context(raw, request, allow_historical_admin=allow_historical_admin)
         if not ok:

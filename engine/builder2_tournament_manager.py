@@ -681,7 +681,12 @@ def _run_builder2_tournament_body(
     ensure_metrics(state)
     compatibility_mode = bool(state.get("methodologyCompatibilityMode"))
 
+    from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+    checkpoint_builder2_cancellation(job_id, stage="tournament_start")
+
     if not state.get("strategyFoundation"):
+        checkpoint_builder2_cancellation(job_id, stage="strategy")
         state["status"] = "strategy_generating"
         state["lastCompletedStep"] = "strategy_generating"
         save_tournament_state(job_id, state)
@@ -694,6 +699,13 @@ def _run_builder2_tournament_body(
                 state=state,
             )
         except Builder2TournamentError as exc:
+            from engine.builder2_job_cancellation import Builder2JobCancelledError, CANCELLED_ERROR_CODE
+
+            if isinstance(exc, Builder2JobCancelledError) or str(exc.args[0] if exc.args else "") == CANCELLED_ERROR_CODE:
+                state["status"] = "cancelled"
+                state["canResume"] = False
+                save_tournament_state(job_id, state)
+                raise
             state["status"] = "failed"
             state["error"] = str(exc.args[0] if exc.args else "builder2_strategy_validation_failed")
             record_process_failure_tag(state, state["error"])
@@ -749,6 +761,7 @@ def _run_builder2_tournament_body(
         save_tournament_state(job_id, state)
 
         for prototype_id in deck:
+            checkpoint_builder2_cancellation(job_id, stage=f"creator_prototype_{prototype_id}")
             if is_creator_contract_circuit_breaker_tripped(state):
                 logger.error("BUILDER2_CREATOR_CONTRACT_CIRCUIT_BREAKER stoppingRemainingCreators=true")
                 break
@@ -848,7 +861,14 @@ def _run_builder2_tournament_body(
         try:
             winner_id = select_global_winner(state)
         except Builder2TournamentError as exc:
+            from engine.builder2_job_cancellation import CANCELLED_ERROR_CODE
+
             reason = str(exc.args[0] if exc.args else exc)
+            if reason == CANCELLED_ERROR_CODE:
+                state["status"] = "cancelled"
+                state["canResume"] = False
+                save_tournament_state(job_id, state)
+                raise
             if reason == "builder2_no_factually_eligible_candidate":
                 state["status"] = "paused_for_reasoning_resume"
                 state["completionReason"] = "builder2_no_factually_eligible_candidate"
@@ -878,6 +898,7 @@ def _run_builder2_tournament_body(
     save_tournament_state(job_id, state)
 
     if not state.get("winnerDevelopmentPlan"):
+        checkpoint_builder2_cancellation(job_id, stage="winner_development")
         state["status"] = "winner_developing"
         state["lastCompletedStep"] = "winner_developing"
         save_tournament_state(job_id, state)
@@ -914,6 +935,13 @@ def _run_builder2_tournament_body(
                 save=False,
             )
         except Builder2TournamentError as exc:
+            from engine.builder2_job_cancellation import Builder2JobCancelledError, CANCELLED_ERROR_CODE
+
+            if isinstance(exc, Builder2JobCancelledError) or str(exc.args[0] if exc.args else "") == CANCELLED_ERROR_CODE:
+                state["status"] = "cancelled"
+                state["canResume"] = False
+                save_tournament_state(job_id, state)
+                raise
             record_process_failure_tag(state, str(exc.args[0] if exc.args else "builder2_winner_development_failed"))
             logger.error("BUILDER2_WINNER_DEVELOPMENT_FAILED candidateId=%s", winner_id)
             state["status"] = "failed"

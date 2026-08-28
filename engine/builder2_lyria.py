@@ -450,6 +450,9 @@ def generate_builder2_music(
     succeeded_attempt = 0
 
     while True:
+        from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+        checkpoint_builder2_cancellation(job_id, stage=f"lyria_attempt_{int(media.get('musicGenerationAttempt') or 0) + 1}")
         media = _media_bucket(state)
         attempt = int(media.get("musicGenerationAttempt") or 0)
         if attempt >= 2:
@@ -483,6 +486,7 @@ def generate_builder2_music(
 
         try:
             audio_bytes = caller(combined_prompt=combined_prompt, model=model, api_key=api_key, session=session)
+            checkpoint_builder2_cancellation(job_id, stage=f"lyria_after_attempt_{next_attempt}")
             dest = write_mp3_artifact(job_id=job_id, audio_bytes=audio_bytes)
             duration = probe_mp3_duration_seconds(dest)
             publish = publisher or publish_builder2_music_artifact
@@ -490,6 +494,10 @@ def generate_builder2_music(
             succeeded_attempt = next_attempt
             break
         except Builder2LyriaError as exc:
+            from engine.builder2_job_cancellation import Builder2JobCancelledError, CANCELLED_ERROR_CODE
+
+            if isinstance(exc, Builder2JobCancelledError) or str(exc.args[0] if exc.args else "") == CANCELLED_ERROR_CODE:
+                raise
             _mark_music_failure(state, reason=str(exc.args[0] if exc.args else "builder2_lyria_failed"))
             patch_tournament_state(
                 job_id,
@@ -502,7 +510,9 @@ def generate_builder2_music(
                     next_attempt,
                     exc.http_status,
                 )
+                checkpoint_builder2_cancellation(job_id, stage="lyria_auto_retry_before_delay")
                 _sleep_lyria_auto_retry_delay()
+                checkpoint_builder2_cancellation(job_id, stage="lyria_auto_retry_attempt_2")
                 logger.info(
                     "BUILDER2_LYRIA_AUTO_RETRY jobId=%s fromAttempt=%s toAttempt=%s reason=http_503",
                     job_id,
@@ -519,6 +529,10 @@ def generate_builder2_music(
             )
             raise Builder2LyriaError(str(exc.args[0] if exc.args else "builder2_music_artifact_upload_failed")) from exc
         except Exception as exc:
+            from engine.builder2_job_cancellation import Builder2JobCancelledError, CANCELLED_ERROR_CODE
+
+            if isinstance(exc, Builder2JobCancelledError) or str(getattr(exc, "args", [""])[0]) == CANCELLED_ERROR_CODE:
+                raise
             _mark_music_failure(state, reason="builder2_lyria_unexpected_failure")
             patch_tournament_state(
                 job_id,

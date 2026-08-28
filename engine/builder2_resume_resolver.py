@@ -321,13 +321,19 @@ def resolve_builder2_resume_stage(
     can_resume = resume_from != "completed" and not consistency_failures
     if job_status in {"recovery_exhausted", "cancelled"}:
         can_resume = False
+    if job_status == "cancelled" or str(job_state.get("cancelRequested") or "").strip().lower() in {"1", "true", "yes"}:
+        can_resume = False
+
+    blocked = None if can_resume else _clean(failure_info.get("failureReason")) or None
+    if not can_resume and job_status == "cancelled":
+        blocked = "builder2_job_cancelled"
 
     return {
         "resumeRequired": can_resume,
         "resumeFromStage": resume_from,
         "completedStages": sorted(completed),
         "reusableArtifacts": _reusable_artifacts(enriched),
-        "blockedReason": None if can_resume else _clean(failure_info.get("failureReason")) or None,
+        "blockedReason": blocked,
         "jobAlreadyCompleted": False,
         "canResume": can_resume,
         "consistencyFailures": consistency_failures,

@@ -888,9 +888,15 @@ def _generate_one_video_mvp_body(
     except Builder2TournamentError as exc:
         plan_ms = (time.monotonic() - t_plan0) * 1000.0
         logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)
-        logger.error("BUILDER2_TOURNAMENT_FAILED reason=%s", exc.args[0] if exc.args else "unknown")
+        from engine.builder2_job_cancellation import Builder2JobCancelledError, CANCELLED_ERROR_CODE
+
+        reason = str(exc.args[0] if exc.args else "builder2_tournament_failed")
+        if isinstance(exc, Builder2JobCancelledError) or reason == CANCELLED_ERROR_CODE:
+            logger.info("BUILDER2_JOB_CANCELLED jobId=%s phase=plan", job_id or "(none)")
+            raise RunwayVideoMVPError(CANCELLED_ERROR_CODE)
+        logger.error("BUILDER2_TOURNAMENT_FAILED reason=%s", reason)
         _maybe_log_ad_promise_skip_after_failed_generation(None, promise_saved)
-        raise RunwayVideoMVPError(str(exc.args[0] if exc.args else "builder2_tournament_failed"))
+        raise RunwayVideoMVPError(reason)
     except VideoPlanningTimeoutError:
         plan_ms = (time.monotonic() - t_plan0) * 1000.0
         logger.info("VIDEO_TIMING_PLAN_MS=%.1f", plan_ms)

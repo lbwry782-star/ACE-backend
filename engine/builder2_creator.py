@@ -955,6 +955,9 @@ def generate_creator_candidate(
             prompt = base_prompt
             call_type = "normal"
 
+        from engine.builder2_job_cancellation import checkpoint_builder2_cancellation
+
+        checkpoint_builder2_cancellation(job_id, stage=f"creator_{call_type}")
         timer = MetricsTimer()
         try:
             response_text, _response_obj = _invoke_creator_model(
