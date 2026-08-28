@@ -311,7 +311,12 @@ def run_one_media_resume(
         report["mediaReused"] = counters.media_reused
 
         final_url = str((state.get("mediaResume") or {}).get("finalPublicUrl") or "")
-        marketing_text = str((state.get("mediaResume") or {}).get("marketingText") or "")
+        media_bucket = state.setdefault("mediaResume", {})
+        if not isinstance(media_bucket, dict):
+            media_bucket = {}
+            state["mediaResume"] = media_bucket
+        marketing_text = str(media_bucket.get("marketingText") or "")
+        marketing_source = str(media_bucket.get("marketingCopySource") or "")
         overlay_headline = "" if not builder2_requires_headline_overlay(plan=plan, state=state) else (plan.get("headlineText") or "")
         job_video_url = ""
         if redis_configured():
@@ -340,6 +345,20 @@ def run_one_media_resume(
             report["jobCompleted"] = False
             report["ok"] = False
             return report
+        MediaResumeIsolationGuard.end()
+        from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+
+        marketing_text, marketing_source = ensure_builder2_packaging_marketing_text(
+            existing_text=marketing_text,
+            existing_source=marketing_source,
+            product_name=str(state.get("productName") or plan.get("productNameResolved") or ""),
+            product_description=str(state.get("productDescription") or ""),
+            plan=plan,
+            content_language=str(state.get("contentLanguage") or plan.get("language") or ""),
+            headline_text=str(plan.get("headlineText") or ""),
+        )
+        media_bucket["marketingText"] = marketing_text
+        media_bucket["marketingCopySource"] = marketing_source
         if redis_configured() and final_url:
             video_job_mark_done(job_id, final_url, marketing_text, overlay_headline=str(overlay_headline or ""))
         save_tournament_state(job_id, state)

@@ -2143,19 +2143,30 @@ def builder2_download_zip():
         return jsonify({"ok": False, "error": "invalid_input"}), 400
 
     video_url = (body.get("videoUrl") or "").strip()
-    marketing_text = (body.get("marketingText") or "").strip()
+    marketing_text = body.get("marketingText")
+    if marketing_text is None:
+        marketing_text = ""
+    else:
+        marketing_text = str(marketing_text)
     if not video_url:
         return jsonify({"ok": False, "error": "missing_video_url"}), 400
 
+    from engine.builder2_zip_download import Builder2ZipVideoFetchError, fetch_builder2_zip_video_bytes
+
     try:
-        resp = httpx.get(video_url, timeout=httpx.Timeout(120.0), follow_redirects=True)
-        if resp.status_code != 200 or not resp.content:
-            return jsonify({"ok": False, "error": "video_download_failed"}), 400
-        zip_bytes = build_builder2_video_zip_bytes(resp.content, marketing_text)
-    except ValueError as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
+        video_bytes = fetch_builder2_zip_video_bytes(video_url)
+        zip_bytes = build_builder2_video_zip_bytes(video_bytes, marketing_text)
+    except Builder2ZipVideoFetchError as exc:
+        status = 504 if exc.code == "video_download_timeout" else 400
+        payload = {"ok": False, "error": exc.code}
+        if exc.http_status is not None:
+            payload["httpStatus"] = exc.http_status
+        return jsonify(payload), status
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc) or "invalid_input"}), 400
     except Exception:
-        return jsonify({"ok": False, "error": "video_download_failed"}), 400
+        logger.exception("BUILDER2_DOWNLOAD_ZIP_FAILED")
+        return jsonify({"ok": False, "error": "zip_build_failed"}), 500
 
     return send_file(
         io.BytesIO(zip_bytes),

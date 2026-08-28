@@ -34,6 +34,10 @@ from tests.test_builder2_media_resume import (
 )
 
 
+def _fifty_word_packaging_copy(*_args: Any, **_kwargs: Any) -> str:
+    return " ".join(f"word{i}" for i in range(1, 51))
+
+
 def _block_roles() -> tuple[str, ...]:
     return (
         "strategy",
@@ -205,9 +209,10 @@ class TestMediaResumeReporting(unittest.TestCase):
         self.capability_patch.stop()
         disable_memory_store()
 
+    @patch("engine.runway_video._fallback_packaging_marketing_copy", side_effect=_fifty_word_packaging_copy)
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
-    def test_success_reports_all_reasoning_counters_zero(self, _redis: Any) -> None:
+    def test_success_reports_all_reasoning_counters_zero(self, _redis: Any, _packaging: Any) -> None:
         state = _media_ready_state(job_id="job-report-counters")
         report = run_one_media_resume(
             job_id="job-report-counters",
@@ -222,9 +227,10 @@ class TestMediaResumeReporting(unittest.TestCase):
         self.assertEqual(report["otherReasoningCalls"], 0)
         self.assertEqual(report["totalReasoningCalls"], 0)
 
+    @patch("engine.runway_video._fallback_packaging_marketing_copy", side_effect=_fifty_word_packaging_copy)
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
-    def test_completed_job_zero_calls(self, _redis: Any) -> None:
+    def test_completed_job_zero_calls(self, _redis: Any, _packaging: Any) -> None:
         state = _media_ready_state(job_id="job-completed-zero")
         first_state = deepcopy(state)
         first = run_one_media_resume(

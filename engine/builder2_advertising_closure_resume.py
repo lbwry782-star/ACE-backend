@@ -162,7 +162,23 @@ def run_one_advertising_closure_resume(
             save_tournament_state(jid, state)
             final_url = str((state.get("mediaResume") or {}).get("finalVideoWithClosureUrl") or "")
             if redis_configured() and final_url:
-                marketing_text = str((state.get("mediaResume") or {}).get("marketingText") or "")
+                from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+                from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+
+                media = state.setdefault("mediaResume", {})
+                MediaResumeIsolationGuard.end()
+                marketing_text, marketing_source = ensure_builder2_packaging_marketing_text(
+                    existing_text=str(media.get("marketingText") or ""),
+                    existing_source=str(media.get("marketingCopySource") or ""),
+                    product_name=str(state.get("productName") or plan.get("productNameResolved") or ""),
+                    product_description=str(state.get("productDescription") or ""),
+                    plan=plan if isinstance(plan, dict) else {},
+                    content_language=str(state.get("contentLanguage") or (plan or {}).get("language") or ""),
+                    headline_text=str((plan or {}).get("headlineText") or ""),
+                )
+                media["marketingText"] = marketing_text
+                media["marketingCopySource"] = marketing_source
+                save_tournament_state(jid, state)
                 video_job_mark_done(jid, final_url, marketing_text, overlay_headline="")
             report["closureFfmpegCalls"] = counters.closure_ffmpeg_calls
             report["mediaReused"] = counters.media_reused

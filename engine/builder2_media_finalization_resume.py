@@ -948,7 +948,24 @@ def run_one_media_finalization_resume(
         save_tournament_state(job_id, state)
         report["redisMutations"] = 1
 
+        from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+        from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+
+        MediaResumeIsolationGuard.end()
         marketing_text = str(media.get("marketingText") or "")
+        marketing_source = str(media.get("marketingCopySource") or "")
+        marketing_text, marketing_source = ensure_builder2_packaging_marketing_text(
+            existing_text=marketing_text,
+            existing_source=marketing_source,
+            product_name=str(state.get("productName") or plan.get("productNameResolved") or ""),
+            product_description=str(state.get("productDescription") or ""),
+            plan=plan,
+            content_language=str(state.get("contentLanguage") or plan.get("language") or ""),
+            headline_text=str(plan.get("headlineText") or ""),
+        )
+        media["marketingText"] = marketing_text
+        media["marketingCopySource"] = marketing_source
+        save_tournament_state(job_id, state)
         overlay_headline = "" if not builder2_requires_headline_overlay(plan=plan, state=state) else str(
             plan.get("headlineText") or ""
         )

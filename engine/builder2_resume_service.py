@@ -105,6 +105,9 @@ def build_builder2_status_payload(
         "resumeAlreadyInProgress": bool(has_active_lease(jid) or is_job_queued(jid)),
         "advertisingClosureStatus": (tournament or {}).get("advertisingClosureStatus") if isinstance(tournament, dict) else None,
         "videoUrl": _clean(raw.get("video_url") or raw.get("videoUrl")) or None,
+        "marketingText": _clean(raw.get("marketing_text") or raw.get("marketingText"))
+        or (_clean(media.get("marketingText")) if isinstance(media, dict) else "")
+        or None,
         "finalVideoUrl": _clean(media.get("finalPublicUrl")) or None,
         "finalVideoWithClosureUrl": _clean(media.get("finalVideoWithClosureUrl")) or None,
         "failureStage": _clean(raw.get("failureStage")) or None,

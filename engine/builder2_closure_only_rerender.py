@@ -252,7 +252,23 @@ def run_builder2_closure_only_rerender(
         state["mediaContinuationRequired"] = False
         save_tournament_state(job_id, state)
         if redis_configured():
-            marketing_text = _clean(media.get("marketingText"))
+            from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
+            from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+
+            plan = state.get("winnerDevelopmentPlan") if isinstance(state.get("winnerDevelopmentPlan"), dict) else {}
+            MediaResumeIsolationGuard.end()
+            marketing_text, marketing_source = ensure_builder2_packaging_marketing_text(
+                existing_text=_clean(media.get("marketingText")),
+                existing_source=str(media.get("marketingCopySource") or ""),
+                product_name=str(state.get("productName") or plan.get("productNameResolved") or product_name or ""),
+                product_description=str(state.get("productDescription") or ""),
+                plan=plan,
+                content_language=str(state.get("contentLanguage") or plan.get("language") or language or ""),
+                headline_text=str(plan.get("headlineText") or ""),
+            )
+            media["marketingText"] = marketing_text
+            media["marketingCopySource"] = marketing_source
+            save_tournament_state(job_id, state)
             video_job_mark_done(job_id, final_url, marketing_text)
         report["stateMutated"] = True
         report["newFinalPromoted"] = True

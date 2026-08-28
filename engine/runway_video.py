@@ -1000,6 +1000,26 @@ def _generate_one_video_mvp_body(
         if not final_url:
             raise RunwayVideoMVPError("builder2_media_missing_final_public_url")
         marketing_text = str(media.get("marketingText") or "")
+        marketing_source = str(media.get("marketingCopySource") or "")
+        from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+
+        marketing_text, marketing_source = ensure_builder2_packaging_marketing_text(
+            existing_text=marketing_text,
+            existing_source=marketing_source,
+            product_name=canonical_name,
+            product_description=product_description,
+            plan=winner_plan if isinstance(winner_plan, dict) else plan,
+            content_language=video_lang,
+            headline_text=str(winner_plan.get("headlineText") or "") if isinstance(winner_plan, dict) else "",
+        )
+        if marketing_text:
+            def _persist_packaging_copy(st: Dict[str, Any]) -> None:
+                bucket = st.setdefault("mediaResume", {})
+                if isinstance(bucket, dict):
+                    bucket["marketingText"] = marketing_text
+                    bucket["marketingCopySource"] = marketing_source
+
+            patch_tournament_state(job_id, _persist_packaging_copy)
         headline_decision = get_normalized_headline_decision(winner_plan)
         overlay_headline = ""
         from engine.builder2_single_slogan_contract import builder2_requires_headline_overlay
