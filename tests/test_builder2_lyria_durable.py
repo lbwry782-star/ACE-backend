@@ -486,6 +486,107 @@ class TestCompletionContractAudio(unittest.TestCase):
         self.assertEqual(failure, "builder2_final_video_missing_audio_stream")
 
 
+class TestLyria503PipelineIntegration(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+    def tearDown(self) -> None:
+        disable_memory_store()
+
+    @patch("engine.builder2_media_pipeline.builder2_runway_requires_start_image", return_value=False)
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER2_LYRIA_ENABLED": "true",
+            "BUILDER2_LYRIA_API_KEY": "test-key",
+            "BUILDER2_LYRIA_ARTIFACT_DIR": "",
+        },
+        clear=True,
+    )
+    @patch("engine.builder2_lyria._sleep_lyria_auto_retry_delay")
+    def test_pipeline_continues_after_503_then_success(self, sleep_mock: MagicMock, _start_image_mock: MagicMock) -> None:
+        from engine.builder2_closure_render import ClosureRenderResult
+        from tests.test_builder2_lyria import _fake_mp3_bytes, _music_direction, _winner_plan_with_music
+
+        with patch.dict(os.environ, {"BUILDER2_LYRIA_ARTIFACT_DIR": self.tmp}, clear=False):
+            state: Dict[str, Any] = {
+                "mediaResume": {
+                    "mediaResumeStatus": "running",
+                    "runwayVideoUrl": "https://example.com/runway.mp4",
+                    "downloadedVideoPath": "https://example.com/runway.mp4",
+                    "runwayTaskId": "task-1",
+                }
+            }
+            plan = _winner_plan_with_music()
+            plan.setdefault(
+                "advertisingClosure",
+                {"productNameText": "ACE", "sloganText": "Feel the breeze.", "language": "en"},
+            )
+            state["advertisingClosure"] = plan["advertisingClosure"]
+            deps = MediaPipelineDeps(
+                generate_start_image=lambda plan: "",
+                submit_runway_task=lambda **kwargs: "task-1",
+                poll_runway_task=lambda **kwargs: ("succeeded", "https://example.com/runway.mp4"),
+                postprocess_video=lambda **kwargs: kwargs["runway_url"],
+                compose_marketing_copy=lambda **kwargs: "marketing",
+            )
+            calls = {"count": 0}
+
+            def _fake_caller(**kwargs: Any) -> bytes:
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise Builder2LyriaError("builder2_lyria_api_rejected", http_status=503)
+                return _fake_mp3_bytes() * 20
+
+            with patch("engine.builder2_lyria.patch_tournament_state", lambda job_id, fn: None):
+                with patch("engine.builder2_lyria.probe_mp3_duration_seconds", return_value=30.0):
+                    with patch("engine.builder2_lyria.call_lyria_generate_content", side_effect=_fake_caller):
+                        with patch("engine.builder2_media_pipeline.validate_builder2_pre_runway"):
+                            with patch(
+                                "engine.builder2_closure_render.render_builder2_advertising_closure_endcard"
+                            ) as render_mock:
+                                render_mock.return_value = ClosureRenderResult(
+                                    public_url="",
+                                    local_path="/tmp/out.mp4",
+                                    measured_duration_seconds=13.5,
+                                    output_token="token",
+                                    input_fingerprint="fp",
+                                )
+                                with patch(
+                                    "engine.builder2_durable_finalization.publish_builder2_durable_final_video"
+                                ) as pub_mock:
+                                    pub_mock.return_value = MagicMock(public_url="https://example.com/final.mp4")
+                                    with patch(
+                                        "engine.builder2_durable_finalization.apply_builder2_durable_publication_fields",
+                                        return_value="https://example.com/final.mp4",
+                                    ):
+                                        with patch(
+                                            "engine.builder2_durable_finalization.require_builder2_web_storage_capability"
+                                        ):
+                                            with patch(
+                                                "engine.builder2_lyria.publish_builder2_music_artifact",
+                                                _fake_publish,
+                                            ):
+                                                updated_state, _counters = execute_builder2_media_pipeline(
+                                                    job_id="job-pipeline-503",
+                                                    state=state,
+                                                    plan=plan,
+                                                    public_base_url="https://ace.example.com",
+                                                    product_description="desc",
+                                                    deps=deps,
+                                                )
+        self.assertEqual(calls["count"], 2)
+        sleep_mock.assert_called_once()
+        media = updated_state["mediaResume"]
+        self.assertEqual(media["musicGenerationStatus"], "succeeded")
+        self.assertEqual(media["musicGenerationAttempt"], 2)
+        self.assertTrue(str(media.get("musicArtifactPath") or "").strip())
+        _, kwargs = render_mock.call_args
+        self.assertTrue(str(kwargs.get("lyria_audio_path") or "").strip())
+
+
 class TestFlagFalseUnchanged(unittest.TestCase):
     @patch("engine.builder2_media_pipeline.builder2_runway_requires_start_image", return_value=False)
     @patch.dict(os.environ, {"BUILDER2_LYRIA_ENABLED": "false"}, clear=True)

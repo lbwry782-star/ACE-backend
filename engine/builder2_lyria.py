@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,12 +42,34 @@ logger = logging.getLogger(__name__)
 
 _LYRIA_HTTP_TIMEOUT = float((os.environ.get("BUILDER2_LYRIA_HTTP_TIMEOUT_SECONDS") or "300").strip() or "300")
 _FFPROBE_TIMEOUT = float((os.environ.get("VIDEO_HEADLINE_FFPROBE_TIMEOUT_SECONDS") or "30").strip() or "30")
+_LYRIA_AUTO_RETRY_HTTP_STATUS = 503
+_LYRIA_AUTO_RETRY_DELAY_SECONDS = float(
+    (os.environ.get("BUILDER2_LYRIA_AUTO_RETRY_DELAY_SECONDS") or "2").strip() or "2"
+)
 
 
 class Builder2LyriaError(Builder2TournamentError):
-    def __init__(self, code: str, *, failure_class: str = "Builder2LyriaError") -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        failure_class: str = "Builder2LyriaError",
+        http_status: Optional[int] = None,
+    ) -> None:
         super().__init__(code)
         self.failure_class = failure_class
+        self.http_status = http_status
+
+
+def is_lyria_auto_retryable_http_failure(exc: Builder2LyriaError) -> bool:
+    """Known provider HTTP failures eligible for one automatic in-production retry."""
+    return getattr(exc, "http_status", None) == _LYRIA_AUTO_RETRY_HTTP_STATUS
+
+
+def _sleep_lyria_auto_retry_delay() -> None:
+    delay = max(0.0, _LYRIA_AUTO_RETRY_DELAY_SECONDS)
+    if delay > 0:
+        time.sleep(delay)
 
 
 @dataclass(frozen=True)
@@ -272,7 +295,10 @@ def call_lyria_generate_content(
             response.status_code,
             model,
         )
-        raise Builder2LyriaError("builder2_lyria_api_rejected")
+        raise Builder2LyriaError(
+            "builder2_lyria_api_rejected",
+            http_status=int(response.status_code),
+        )
     try:
         payload = response.json()
     except ValueError as exc:
@@ -405,8 +431,7 @@ def generate_builder2_music(
         )
 
     media = _media_bucket(state)
-    attempt = int(media.get("musicGenerationAttempt") or 0)
-    if attempt >= 2:
+    if int(media.get("musicGenerationAttempt") or 0) >= 2:
         raise Builder2LyriaError("builder2_lyria_generation_exhausted")
 
     music_direction = validate_music_direction_for_lyria_media(plan)
@@ -418,60 +443,91 @@ def generate_builder2_music(
     except Builder2LyriaConfigError as exc:
         raise Builder2LyriaError(str(exc)) from exc
 
-    next_attempt = attempt + 1
-
-    _persist_music_fields(
-        state,
-        musicGenerationStatus="generating",
-        musicGenerationAttempt=next_attempt,
-        musicModel=model,
-        musicPrompt=creative_prompt,
-    )
-
-    def _persist_generating(st: Dict[str, Any]) -> None:
-        bucket = _media_bucket(st)
-        bucket["musicGenerationStatus"] = "generating"
-        bucket["musicGenerationAttempt"] = next_attempt
-        bucket["musicModel"] = model
-        bucket["musicPrompt"] = creative_prompt
-
-    patch_tournament_state(job_id, _persist_generating)
-
-    logger.info(
-        "BUILDER2_LYRIA_GENERATION_START jobId=%s model=%s attempt=%s reused=false",
-        job_id,
-        model,
-        next_attempt,
-    )
-
     caller = api_caller or call_lyria_generate_content
-    try:
-        audio_bytes = caller(combined_prompt=combined_prompt, model=model, api_key=api_key, session=session)
-        dest = write_mp3_artifact(job_id=job_id, audio_bytes=audio_bytes)
-        duration = probe_mp3_duration_seconds(dest)
-        publish = publisher or publish_builder2_music_artifact
-        publication = publish(dest, public_base_url, job_id=job_id)
-    except Builder2LyriaError as exc:
-        _mark_music_failure(state, reason=str(exc.args[0] if exc.args else "builder2_lyria_failed"))
-        patch_tournament_state(
-            job_id,
-            lambda st: _media_bucket(st).update(dict(state.get("mediaResume") or {})),
+    dest: Optional[Path] = None
+    duration = 0.0
+    publication = None
+    succeeded_attempt = 0
+
+    while True:
+        media = _media_bucket(state)
+        attempt = int(media.get("musicGenerationAttempt") or 0)
+        if attempt >= 2:
+            raise Builder2LyriaError("builder2_lyria_generation_exhausted")
+
+        next_attempt = attempt + 1
+
+        _persist_music_fields(
+            state,
+            musicGenerationStatus="generating",
+            musicGenerationAttempt=next_attempt,
+            musicModel=model,
+            musicPrompt=creative_prompt,
         )
-        raise
-    except Builder2MusicPublicationError as exc:
-        _mark_music_failure(state, reason=str(exc.args[0] if exc.args else "builder2_music_artifact_upload_failed"))
-        patch_tournament_state(
+
+        def _persist_generating(st: Dict[str, Any]) -> None:
+            bucket = _media_bucket(st)
+            bucket["musicGenerationStatus"] = "generating"
+            bucket["musicGenerationAttempt"] = next_attempt
+            bucket["musicModel"] = model
+            bucket["musicPrompt"] = creative_prompt
+
+        patch_tournament_state(job_id, _persist_generating)
+
+        logger.info(
+            "BUILDER2_LYRIA_GENERATION_START jobId=%s model=%s attempt=%s reused=false",
             job_id,
-            lambda st: _media_bucket(st).update(dict(state.get("mediaResume") or {})),
+            model,
+            next_attempt,
         )
-        raise Builder2LyriaError(str(exc.args[0] if exc.args else "builder2_music_artifact_upload_failed")) from exc
-    except Exception as exc:
-        _mark_music_failure(state, reason="builder2_lyria_unexpected_failure")
-        patch_tournament_state(
-            job_id,
-            lambda st: _media_bucket(st).update(dict(state.get("mediaResume") or {})),
-        )
-        raise Builder2LyriaError("builder2_lyria_unexpected_failure") from exc
+
+        try:
+            audio_bytes = caller(combined_prompt=combined_prompt, model=model, api_key=api_key, session=session)
+            dest = write_mp3_artifact(job_id=job_id, audio_bytes=audio_bytes)
+            duration = probe_mp3_duration_seconds(dest)
+            publish = publisher or publish_builder2_music_artifact
+            publication = publish(dest, public_base_url, job_id=job_id)
+            succeeded_attempt = next_attempt
+            break
+        except Builder2LyriaError as exc:
+            _mark_music_failure(state, reason=str(exc.args[0] if exc.args else "builder2_lyria_failed"))
+            patch_tournament_state(
+                job_id,
+                lambda st: _media_bucket(st).update(dict(state.get("mediaResume") or {})),
+            )
+            if is_lyria_auto_retryable_http_failure(exc) and next_attempt == 1:
+                logger.warning(
+                    "BUILDER2_LYRIA_TRANSIENT_FAILURE jobId=%s attempt=%s status=%s outcomeKnown=true retryAllowed=true",
+                    job_id,
+                    next_attempt,
+                    exc.http_status,
+                )
+                _sleep_lyria_auto_retry_delay()
+                logger.info(
+                    "BUILDER2_LYRIA_AUTO_RETRY jobId=%s fromAttempt=%s toAttempt=%s reason=http_503",
+                    job_id,
+                    1,
+                    2,
+                )
+                continue
+            raise
+        except Builder2MusicPublicationError as exc:
+            _mark_music_failure(state, reason=str(exc.args[0] if exc.args else "builder2_music_artifact_upload_failed"))
+            patch_tournament_state(
+                job_id,
+                lambda st: _media_bucket(st).update(dict(state.get("mediaResume") or {})),
+            )
+            raise Builder2LyriaError(str(exc.args[0] if exc.args else "builder2_music_artifact_upload_failed")) from exc
+        except Exception as exc:
+            _mark_music_failure(state, reason="builder2_lyria_unexpected_failure")
+            patch_tournament_state(
+                job_id,
+                lambda st: _media_bucket(st).update(dict(state.get("mediaResume") or {})),
+            )
+            raise Builder2LyriaError("builder2_lyria_unexpected_failure") from exc
+
+    if dest is None or publication is None or succeeded_attempt <= 0:
+        raise Builder2LyriaError("builder2_lyria_unexpected_failure")
 
     _persist_music_success(
         state,
@@ -480,15 +536,16 @@ def generate_builder2_music(
         duration=duration,
         model=model,
         creative_prompt=creative_prompt,
-        next_attempt=next_attempt,
+        next_attempt=succeeded_attempt,
         music_artifact_url=publication.music_artifact_url,
         music_artifact_token=publication.output_token,
     )
 
     logger.info(
-        "BUILDER2_LYRIA_GENERATION_DONE jobId=%s model=%s status=succeeded durationSeconds=%.3f durableUrl=%s",
+        "BUILDER2_LYRIA_GENERATION_DONE jobId=%s model=%s attempt=%s status=succeeded durationSeconds=%.3f durableUrl=%s",
         job_id,
         model,
+        succeeded_attempt,
         duration,
         publication.music_artifact_url,
     )

@@ -19,6 +19,7 @@ from engine.builder2_lyria import (
     call_lyria_generate_content,
     extract_audio_bytes_from_generate_content_response,
     generate_builder2_music,
+    is_lyria_auto_retryable_http_failure,
     music_artifact_is_valid,
     summarize_lyria_missing_audio_response,
 )
@@ -381,6 +382,159 @@ class TestGenerateBuilder2Music(unittest.TestCase):
                         publisher=_fake_publish,
                     )
             self.assertEqual(calls["count"], 1)
+
+
+class TestLyria503AutoRetry(unittest.TestCase):
+    def setUp(self) -> None:
+        enable_memory_store()
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+
+    def tearDown(self) -> None:
+        disable_memory_store()
+
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER2_LYRIA_ENABLED": "true",
+            "BUILDER2_LYRIA_API_KEY": "test-key",
+            "BUILDER2_LYRIA_ARTIFACT_DIR": "",
+        },
+        clear=True,
+    )
+    @patch("engine.builder2_lyria._sleep_lyria_auto_retry_delay")
+    def test_503_then_success_performs_two_calls_in_one_invocation(self, sleep_mock: MagicMock) -> None:
+        with patch.dict(os.environ, {"BUILDER2_LYRIA_ARTIFACT_DIR": self.tmp}, clear=False):
+            state: Dict[str, Any] = {"mediaResume": {}}
+            plan = {"musicDirection": _music_direction()}
+            calls = {"count": 0}
+
+            def _fake_caller(**kwargs: Any) -> bytes:
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise Builder2LyriaError("builder2_lyria_api_rejected", http_status=503)
+                return _fake_mp3_bytes() * 20
+
+            with patch("engine.builder2_lyria.patch_tournament_state", lambda job_id, fn: None):
+                with patch("engine.builder2_lyria.probe_mp3_duration_seconds", return_value=30.0):
+                    from tests.test_builder2_lyria_durable import _fake_publish
+
+                    result = generate_builder2_music(
+                        job_id="job-503-retry",
+                        state=state,
+                        plan=plan,
+                        public_base_url="https://ace.example.com",
+                        api_caller=_fake_caller,
+                        publisher=_fake_publish,
+                    )
+            self.assertEqual(calls["count"], 2)
+            sleep_mock.assert_called_once()
+            media = state["mediaResume"]
+            self.assertEqual(media["musicGenerationStatus"], "succeeded")
+            self.assertEqual(media["musicGenerationAttempt"], 2)
+            self.assertTrue(music_artifact_is_valid(result.artifact_path))
+
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER2_LYRIA_ENABLED": "true",
+            "BUILDER2_LYRIA_API_KEY": "test-key",
+            "BUILDER2_LYRIA_ARTIFACT_DIR": "",
+        },
+        clear=True,
+    )
+    @patch("engine.builder2_lyria._sleep_lyria_auto_retry_delay")
+    def test_two_503_responses_exhaust_without_third_call(self, sleep_mock: MagicMock) -> None:
+        with patch.dict(os.environ, {"BUILDER2_LYRIA_ARTIFACT_DIR": self.tmp}, clear=False):
+            state: Dict[str, Any] = {"mediaResume": {}}
+            plan = {"musicDirection": _music_direction()}
+            calls = {"count": 0}
+
+            def _fake_caller(**kwargs: Any) -> bytes:
+                calls["count"] += 1
+                raise Builder2LyriaError("builder2_lyria_api_rejected", http_status=503)
+
+            with patch("engine.builder2_lyria.patch_tournament_state", lambda job_id, fn: None):
+                with self.assertRaises(Builder2LyriaError) as ctx:
+                    generate_builder2_music(
+                        job_id="job-503-exhaust",
+                        state=state,
+                        plan=plan,
+                        public_base_url="https://ace.example.com",
+                        api_caller=_fake_caller,
+                    )
+            self.assertEqual(calls["count"], 2)
+            sleep_mock.assert_called_once()
+            self.assertEqual(str(ctx.exception.args[0]), "builder2_lyria_api_rejected")
+            media = state["mediaResume"]
+            self.assertEqual(media["musicGenerationStatus"], "failed")
+            self.assertEqual(media["musicGenerationAttempt"], 2)
+
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER2_LYRIA_ENABLED": "true",
+            "BUILDER2_LYRIA_API_KEY": "test-key",
+            "BUILDER2_LYRIA_ARTIFACT_DIR": "",
+        },
+        clear=True,
+    )
+    def test_http_400_does_not_auto_retry(self) -> None:
+        with patch.dict(os.environ, {"BUILDER2_LYRIA_ARTIFACT_DIR": self.tmp}, clear=False):
+            state: Dict[str, Any] = {"mediaResume": {}}
+            plan = {"musicDirection": _music_direction()}
+            calls = {"count": 0}
+
+            def _fake_caller(**kwargs: Any) -> bytes:
+                calls["count"] += 1
+                raise Builder2LyriaError("builder2_lyria_api_rejected", http_status=400)
+
+            with patch("engine.builder2_lyria.patch_tournament_state", lambda job_id, fn: None):
+                with self.assertRaises(Builder2LyriaError):
+                    generate_builder2_music(
+                        job_id="job-400-no-retry",
+                        state=state,
+                        plan=plan,
+                        public_base_url="https://ace.example.com",
+                        api_caller=_fake_caller,
+                    )
+            self.assertEqual(calls["count"], 1)
+            self.assertEqual(state["mediaResume"]["musicGenerationAttempt"], 1)
+
+    @patch.dict(
+        os.environ,
+        {
+            "BUILDER2_LYRIA_ENABLED": "true",
+            "BUILDER2_LYRIA_API_KEY": "test-key",
+            "BUILDER2_LYRIA_ARTIFACT_DIR": "",
+        },
+        clear=True,
+    )
+    def test_http_error_without_status_does_not_auto_retry(self) -> None:
+        calls = {"count": 0}
+
+        def _fake_caller(**kwargs: Any) -> bytes:
+            calls["count"] += 1
+            raise Builder2LyriaError("builder2_lyria_http_error")
+
+        with patch.dict(os.environ, {"BUILDER2_LYRIA_ARTIFACT_DIR": self.tmp}, clear=False):
+            state: Dict[str, Any] = {"mediaResume": {}}
+            plan = {"musicDirection": _music_direction()}
+            with patch("engine.builder2_lyria.patch_tournament_state", lambda job_id, fn: None):
+                with self.assertRaises(Builder2LyriaError):
+                    generate_builder2_music(
+                        job_id="job-http-error",
+                        state=state,
+                        plan=plan,
+                        public_base_url="https://ace.example.com",
+                        api_caller=_fake_caller,
+                    )
+        self.assertEqual(calls["count"], 1)
+
+    def test_auto_retryable_helper_only_matches_503(self) -> None:
+        self.assertTrue(is_lyria_auto_retryable_http_failure(Builder2LyriaError("builder2_lyria_api_rejected", http_status=503)))
+        self.assertFalse(is_lyria_auto_retryable_http_failure(Builder2LyriaError("builder2_lyria_api_rejected", http_status=400)))
+        self.assertFalse(is_lyria_auto_retryable_http_failure(Builder2LyriaError("builder2_lyria_http_error")))
 
 
 class TestMediaPipelineLyriaFlag(unittest.TestCase):
