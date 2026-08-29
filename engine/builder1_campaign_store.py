@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 CAMPAIGN_KEY_PREFIX = "builder1:campaign:"
 CAMPAIGN_TTL_SECONDS = 24 * 3600
+GENERATION_LOCK_STALE_SECONDS = int(
+    (os.environ.get("BUILDER1_GENERATION_LOCK_STALE_SECONDS") or "900").strip() or "900"
+)
+CAMPAIGN_CANCELLED_LIFECYCLE = "cancelled"
 
 _memory_lock = threading.Lock()
 _memory_campaigns: Dict[str, Dict[str, Any]] = {}
@@ -163,6 +167,38 @@ return cjson.encode({
 """
 )
 
+_CLEAR_STALE_GENERATION_LOCK_LUA = (
+    _LUA_IS_NULL
+    + """
+local raw = redis.call('GET', KEYS[1])
+if not raw then
+  return cjson.encode({ok=false, code='campaign_not_found'})
+end
+local data = cjson.decode(raw)
+local req_job = ARGV[1] or ''
+local req_token = ARGV[2] or ''
+local ttl = tonumber(ARGV[3])
+if is_null(data.generatingIndex) then
+  return cjson.encode({ok=true, cleared=false})
+end
+local owner = data.generatingLockOwnerJobId
+local token = data.generatingLockToken
+if req_job ~= '' and not is_null(owner) and owner ~= req_job then
+  return cjson.encode({ok=false, code='campaign_lock_owner_mismatch'})
+end
+if req_token ~= '' and not is_null(token) and token ~= req_token then
+  return cjson.encode({ok=false, code='campaign_lock_token_mismatch'})
+end
+data.generatingIndex = cjson.null
+data.generatingLockOwnerJobId = cjson.null
+data.generatingLockToken = cjson.null
+data.generatingLockAcquiredAt = cjson.null
+data.generatingLockHeartbeatAt = cjson.null
+redis.call('SET', KEYS[1], cjson.encode(data), 'EX', ttl)
+return cjson.encode({ok=true, cleared=true, adIndex=tonumber(ARGV[4])})
+"""
+)
+
 _RELEASE_RESERVATION_LUA = (
     _LUA_IS_NULL
     + """
@@ -230,6 +266,14 @@ class Builder1CampaignSession:
     compliance_failure_reason: Optional[str] = None
     compliance_contract_attempts: int = 0
     image_generated_pending: bool = False
+    cancel_requested: bool = False
+    cancel_reason: Optional[str] = None
+    cancelled_at: Optional[float] = None
+    campaign_lifecycle_status: str = "active"
+    ad_artifacts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    paid_stage_state: Dict[str, Any] = field(default_factory=dict)
+    owner_context_ref: Optional[str] = None
+    owner_context_present: bool = False
 
 
 def get_campaign_store_backend() -> str:
@@ -320,6 +364,14 @@ def _session_from_raw(campaign_id: str, raw: Dict[str, Any]) -> Builder1Campaign
         compliance_failure_reason=str(raw.get("complianceFailureReason") or "").strip() or None,
         compliance_contract_attempts=int(raw.get("complianceContractAttempts") or 0),
         image_generated_pending=bool(raw.get("imageGeneratedPending")),
+        cancel_requested=bool(raw.get("cancelRequested")),
+        cancel_reason=str(raw.get("cancelReason") or "").strip() or None,
+        cancelled_at=float(raw["cancelledAt"]) if raw.get("cancelledAt") is not None else None,
+        campaign_lifecycle_status=str(raw.get("campaignLifecycleStatus") or "active"),
+        ad_artifacts=dict(raw.get("adArtifacts") or {}),
+        paid_stage_state=dict(raw.get("paidStageState") or {}),
+        owner_context_ref=str(raw.get("ownerContextRef") or "").strip() or None,
+        owner_context_present=str(raw.get("ownerContextPresent") or "").strip() in {"1", "true", "True"},
     )
 
 
@@ -368,6 +420,22 @@ def _session_to_raw(session: Builder1CampaignSession) -> Dict[str, Any]:
         raw["complianceContractAttempts"] = session.compliance_contract_attempts
     if session.image_generated_pending:
         raw["imageGeneratedPending"] = True
+    if session.cancel_requested:
+        raw["cancelRequested"] = True
+    if session.cancel_reason:
+        raw["cancelReason"] = session.cancel_reason
+    if session.cancelled_at is not None:
+        raw["cancelledAt"] = session.cancelled_at
+    if session.campaign_lifecycle_status:
+        raw["campaignLifecycleStatus"] = session.campaign_lifecycle_status
+    if session.ad_artifacts:
+        raw["adArtifacts"] = dict(session.ad_artifacts)
+    if session.paid_stage_state:
+        raw["paidStageState"] = dict(session.paid_stage_state)
+    if session.owner_context_ref:
+        raw["ownerContextRef"] = session.owner_context_ref
+    if session.owner_context_present:
+        raw["ownerContextPresent"] = "1"
     return raw
 
 
@@ -610,11 +678,209 @@ def _log_campaign_progress(session: Builder1CampaignSession, *, ad_index: int) -
         logger.info("BUILDER1_CAMPAIGN_COMPLETE campaignId=%s", session.campaign_id)
 
 
+def get_campaign_session_raw(campaign_id: str) -> Optional[Dict[str, Any]]:
+    return _load_raw((campaign_id or "").strip())
+
+
+def assert_campaign_not_cancelled(campaign_id: str) -> None:
+    raw = _load_raw((campaign_id or "").strip())
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    if raw.get("cancelRequested") or str(raw.get("campaignLifecycleStatus") or "") == CAMPAIGN_CANCELLED_LIFECYCLE:
+        raise CampaignStoreError("builder1_campaign_cancelled")
+
+
+def mark_campaign_cancelled(campaign_id: str, *, reason: str) -> Optional[Builder1CampaignSession]:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        logger.warning("BUILDER1_CAMPAIGN_CANCEL_SKIP_NOT_FOUND campaignId=%s", cid)
+        return None
+    raw = dict(raw)
+    if not raw.get("cancelRequested"):
+        raw["cancelRequested"] = True
+        raw["cancelReason"] = str(reason or "frontend_refresh")
+        raw["cancelledAt"] = time.time()
+    raw["campaignLifecycleStatus"] = CAMPAIGN_CANCELLED_LIFECYCLE
+    _save_raw(cid, raw)
+    logger.info("BUILDER1_CAMPAIGN_CANCELLED campaignId=%s reason=%s", cid, reason)
+    return _session_from_raw(cid, raw)
+
+
+def release_generation_lock_for_cancelled_job(campaign_id: str, *, job_id: str) -> None:
+    cid = (campaign_id or "").strip()
+    jid = (job_id or "").strip()
+    if not cid:
+        return
+    try:
+        release_generation_lock(cid, job_id=jid)
+    except CampaignStoreError as exc:
+        if exc.code not in {"campaign_lock_owner_mismatch", "campaign_not_found"}:
+            raise
+
+
+def touch_campaign_lock_heartbeat(campaign_id: str, *, job_id: str, heartbeat_at: float) -> None:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        return
+    owner = str(raw.get("generatingLockOwnerJobId") or "").strip()
+    if not owner or owner != (job_id or "").strip():
+        return
+    if raw.get("generatingIndex") is None:
+        return
+    raw = dict(raw)
+    raw["generatingLockHeartbeatAt"] = float(heartbeat_at)
+    _save_raw(cid, raw)
+
+
+def record_campaign_paid_stage(
+    campaign_id: str,
+    *,
+    stage: str,
+    status: str,
+    owner_job_id: str = "",
+    ad_index: Optional[int] = None,
+) -> None:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        return
+    raw = dict(raw)
+    state = dict(raw.get("paidStageState") or {})
+    key = str(ad_index) if ad_index is not None else "_campaign"
+    state[key] = {
+        "stage": stage,
+        "status": status,
+        "ownerJobId": owner_job_id,
+        "updatedAt": time.time(),
+    }
+    raw["paidStageState"] = state
+    _save_raw(cid, raw)
+
+
+def persist_campaign_ad_artifact(
+    campaign_id: str,
+    *,
+    ad_index: int,
+    artifact: Dict[str, Any],
+) -> Builder1CampaignSession:
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    artifacts = dict(raw.get("adArtifacts") or {})
+    artifacts[str(int(ad_index))] = dict(artifact)
+    raw["adArtifacts"] = artifacts
+    _save_raw(cid, raw)
+    return _session_from_raw(cid, raw)
+
+
+def _lock_is_stale(raw: Dict[str, Any]) -> bool:
+    if raw.get("generatingIndex") is None:
+        return False
+    acquired = raw.get("generatingLockAcquiredAt")
+    heartbeat = raw.get("generatingLockHeartbeatAt")
+    if acquired is None and heartbeat is None:
+        return False
+    try:
+        ref = float(heartbeat if heartbeat is not None else acquired or 0)
+    except (TypeError, ValueError):
+        return False
+    if ref <= 0:
+        return False
+    return (time.time() - ref) > GENERATION_LOCK_STALE_SECONDS
+
+
+def _owner_job_allows_stale_recovery(owner_job_id: str) -> bool:
+    if not owner_job_id:
+        return True
+    from engine.builder1_jobs_store import get_builder1_job, is_builder1_job_stale, try_finalize_stale_builder1_job
+
+    job = get_builder1_job(owner_job_id)
+    if job is None:
+        return True
+    status = str(job.get("status") or "").strip()
+    if status in {"cancelled", "error", "done"}:
+        return True
+    if status == "running" and is_builder1_job_stale(job):
+        try_finalize_stale_builder1_job(owner_job_id)
+        return True
+    return False
+
+
+def try_recover_stale_generation_lock(campaign_id: str) -> bool:
+    """
+    Recover a stale generation lock when the owner job is dead/cancelled/stale.
+    If a durable artifact already exists for the reserved index, mark the ad generated.
+    Returns True when recovery changed campaign state.
+    """
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None or raw.get("generatingIndex") is None:
+        return False
+    if not _lock_is_stale(raw):
+        return False
+    owner = str(raw.get("generatingLockOwnerJobId") or "").strip()
+    if owner and not _owner_job_allows_stale_recovery(owner):
+        return False
+    ad_index = int(raw.get("generatingIndex"))
+    artifacts = dict(raw.get("adArtifacts") or {})
+    art = artifacts.get(str(ad_index)) or {}
+    if str(art.get("status") or "") == "succeeded" and ad_index not in (raw.get("generatedIndexes") or []):
+        try:
+            mark_ad_generated(cid, ad_index)
+            logger.info(
+                "BUILDER1_STALE_LOCK_RECOVERED_ARTIFACT campaignId=%s adIndex=%s ownerJobId=%s",
+                cid,
+                ad_index,
+                owner or None,
+            )
+            return True
+        except CampaignStoreError:
+            pass
+    if _redis_configured():
+        try:
+            r = _get_redis()
+            script = r.register_script(_CLEAR_STALE_GENERATION_LOCK_LUA)
+            token = str(raw.get("generatingLockToken") or "")
+            result = _decode_lua_result(
+                script(
+                    keys=[_campaign_key(cid)],
+                    args=[owner, token, CAMPAIGN_TTL_SECONDS, ad_index],
+                )
+            )
+            if result.get("ok") and result.get("cleared"):
+                logger.info(
+                    "BUILDER1_STALE_LOCK_CLEARED campaignId=%s adIndex=%s ownerJobId=%s",
+                    cid,
+                    ad_index,
+                    owner or None,
+                )
+                return True
+        except Exception as exc:
+            logger.error("BUILDER1_STALE_LOCK_CLEAR_ERR campaignId=%s err=%s", cid, exc)
+    with _memory_lock:
+        mem = _memory_campaigns.get(cid)
+        if mem and mem.get("generatingIndex") is not None and _lock_is_stale(mem):
+            mem = dict(mem)
+            mem.pop("generatingIndex", None)
+            mem.pop("generatingLockOwnerJobId", None)
+            mem.pop("generatingLockToken", None)
+            mem.pop("generatingLockAcquiredAt", None)
+            mem.pop("generatingLockHeartbeatAt", None)
+            _memory_campaigns[cid] = mem
+            return True
+    return False
+
+
 def create_campaign_session(
     *,
     campaign_id: str,
     plan: Builder1SeriesPlan,
     target_ad_count: Optional[int] = None,
+    ownership_fields: Optional[Dict[str, str]] = None,
 ) -> Builder1CampaignSession:
     target = int(target_ad_count if target_ad_count is not None else plan.ad_count)
     session = Builder1CampaignSession(
@@ -628,8 +894,13 @@ def create_campaign_session(
         generated_count=0,
         complete=False,
         plan=plan,
+        owner_context_ref=(ownership_fields or {}).get("ownerContextRef"),
+        owner_context_present=str((ownership_fields or {}).get("ownerContextPresent") or "") in {"1", "true"},
     )
-    _save_raw(campaign_id, _session_to_raw(session), create=True)
+    raw = _session_to_raw(session)
+    if ownership_fields:
+        raw.update(dict(ownership_fields))
+    _save_raw(campaign_id, raw, create=True)
     logger.info(
         "BUILDER1_CAMPAIGN_CREATED campaignId=%s targetAdCount=%s backend=%s planRevision=%s",
         campaign_id,
@@ -660,6 +931,8 @@ def reserve_next_ad_index(
     lock_token: str = "",
 ) -> Builder1CampaignSession:
     cid = (campaign_id or "").strip()
+    assert_campaign_not_cancelled(cid)
+    try_recover_stale_generation_lock(cid)
     token = lock_token or (_new_lock_token(job_id=job_id, ad_index=expected_index) if job_id else "")
     pre_session = get_campaign_session(cid)
     _validate_next_index(pre_session, expected_index)
@@ -1066,6 +1339,7 @@ def mark_image_retry_required(
 
 
 def validate_next_ad_request(campaign_id: str, expected_next_index: int) -> Builder1CampaignSession:
+    try_recover_stale_generation_lock(campaign_id)
     try:
         session = get_campaign_session(campaign_id)
     except CampaignStoreError:
@@ -1073,10 +1347,14 @@ def validate_next_ad_request(campaign_id: str, expected_next_index: int) -> Buil
     except Exception as exc:
         logger.error("BUILDER1_CAMPAIGN_LOAD_ERR campaignId=%s err=%s", campaign_id, exc)
         raise CampaignStoreError("campaign_expired") from exc
+    assert_campaign_not_cancelled(campaign_id)
     if session.complete:
         raise CampaignStoreError("campaign_complete")
     if session.generating_index is not None:
-        raise CampaignStoreError("campaign_generation_in_progress")
+        try_recover_stale_generation_lock(campaign_id)
+        session = get_campaign_session(campaign_id)
+        if session.generating_index is not None:
+            raise CampaignStoreError("campaign_generation_in_progress")
     if session.repair_in_progress:
         raise CampaignStoreError("physical_repair_not_completed")
     if expected_next_index != session.next_ad_index:

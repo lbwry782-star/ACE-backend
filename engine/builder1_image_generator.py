@@ -140,39 +140,33 @@ def _record_attempt(
     return dict(session.image_attempt_history or {})
 
 
-def _generate_with_retry(
+def _generate_once(
     *,
     ad_index: int,
     prompt: str,
     format_value: str,
     image_caller: ImageCaller,
 ) -> bytes:
-    last_exc: Optional[Exception] = None
-    for attempt in (1, 2):
-        try:
-            logger.info("BUILDER1_SERIES_IMAGE_START adIndex=%s attempt=%s", ad_index, attempt)
-            image_bytes = image_caller(prompt, format_value)
-            logger.info("BUILDER1_SERIES_IMAGE_OK adIndex=%s", ad_index)
-            return image_bytes
-        except ImageRateLimitError:
-            raise
-        except Exception as exc:
-            last_exc = exc
-            if _is_rate_limit_error(exc):
-                retry_after = _retry_after_seconds(exc)
-                logger.error(
-                    "BUILDER1_IMAGE_RATE_LIMITED adIndex=%s retryAfterSeconds=%s",
-                    ad_index,
-                    retry_after,
-                )
-                raise ImageRateLimitError(retry_after_seconds=retry_after) from exc
+    from engine.builder1_paid_stage_guard import checkpoint_before_paid_call
+
+    checkpoint_before_paid_call(f"image_generation_transport_{ad_index}")
+    logger.info("BUILDER1_SERIES_IMAGE_START adIndex=%s", ad_index)
+    try:
+        image_bytes = image_caller(prompt, format_value)
+    except ImageRateLimitError:
+        raise
+    except Exception as exc:
+        if _is_rate_limit_error(exc):
+            retry_after = _retry_after_seconds(exc)
             logger.error(
-                "BUILDER1_SERIES_IMAGE_FAILED adIndex=%s attempt=%s err=%s",
+                "BUILDER1_IMAGE_RATE_LIMITED adIndex=%s retryAfterSeconds=%s",
                 ad_index,
-                attempt,
-                exc,
+                retry_after,
             )
-    raise RuntimeError(f"image_generation_failed_ad_{ad_index}") from last_exc
+            raise ImageRateLimitError(retry_after_seconds=retry_after) from exc
+        raise
+    logger.info("BUILDER1_SERIES_IMAGE_OK adIndex=%s", ad_index)
+    return image_bytes
 
 
 def _build_prompt_for_level(
@@ -298,8 +292,11 @@ def generate_builder1_ad_image(
         )
         last_prompt = prompt
 
+        from engine.builder1_paid_stage_guard import checkpoint_before_paid_call
+
+        checkpoint_before_paid_call(f"image_generation_level_{ad_index}_{level}")
         image_started = time.perf_counter()
-        image_bytes = _generate_with_retry(
+        image_bytes = _generate_once(
             ad_index=ad_index,
             prompt=prompt,
             format_value=series_plan.format,
@@ -311,6 +308,7 @@ def generate_builder1_ad_image(
 
         compliance_started = time.perf_counter()
         try:
+            checkpoint_before_paid_call(f"image_compliance_level_{ad_index}_{level}")
             review = review_builder1_ad_image_compliance(
                 image_bytes,
                 product_name=series_plan.product_name_resolved,

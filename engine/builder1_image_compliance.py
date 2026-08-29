@@ -576,10 +576,20 @@ def _openai_compliance_responses_call(
         text_format=active_text_format,
     )
 
-    last_exc: Optional[Exception] = None
-    for attempt in (1, 2):
-        try:
-            response = client.responses.create(**kwargs)
+    stage_base = (
+        f"image_compliance_contract_repair_ad_{ad_index}"
+        if extra_user_text.strip()
+        else f"image_compliance_review_ad_{ad_index}"
+    )
+    ad_idx = ad_index if ad_index >= 0 else None
+
+    def _dispatch_responses(request_kwargs: dict, mode: str) -> str:
+        from engine.builder1_paid_provider import run_paid_provider_call
+
+        stage = f"{stage_base}_{mode}"
+
+        def _call() -> str:
+            response = client.responses.create(**request_kwargs)
             _log_compliance_response_structure(
                 response,
                 campaign_id=campaign_id,
@@ -590,68 +600,72 @@ def _openai_compliance_responses_call(
             if not out_text:
                 raise ImageComplianceResponseError("compliance_output_empty")
             return out_text
-        except ImageComplianceUnavailableError:
-            raise
-        except ImageComplianceResponseError:
-            raise
-        except Exception as exc:
-            last_exc = exc
-            api_details = _log_api_rejected(
-                exc=exc,
-                campaign_id=campaign_id,
-                job_id=job_id,
-                ad_index=ad_index,
-                schema_mode=active_mode,
+
+        return run_paid_provider_call(stage, _call, ad_index=ad_idx)
+
+    try:
+        return _dispatch_responses(kwargs, active_mode)
+    except ImageComplianceUnavailableError:
+        raise
+    except ImageComplianceResponseError:
+        raise
+    except Exception as exc:
+        from engine.builder1_paid_provider import PaidStageOutcomeUnknownError
+
+        if isinstance(exc, PaidStageOutcomeUnknownError):
+            raise ImageComplianceUnavailableError("review_outcome_unknown", ad_index=ad_index) from exc
+
+        api_details = _log_api_rejected(
+            exc=exc,
+            campaign_id=campaign_id,
+            job_id=job_id,
+            ad_index=ad_index,
+            schema_mode=active_mode,
+        )
+        if _is_unsupported_model_error(exc):
+            raise ImageComplianceUnavailableError("unsupported_model", ad_index=-1) from exc
+        if type(exc).__name__ == "RateLimitError" or api_details.get("statusCode") == 429:
+            raise ImageComplianceUnavailableError("review_rate_limited", ad_index=-1) from exc
+        if type(exc).__name__ == "AuthenticationError" or api_details.get("statusCode") == 401:
+            raise ImageComplianceUnavailableError("review_auth_error", ad_index=-1) from exc
+
+        if (
+            allow_schema_fallback
+            and active_mode == "strict"
+            and is_invalid_json_schema_api_error(exc)
+        ):
+            logger.info(
+                "BUILDER1_IMAGE_COMPLIANCE_SCHEMA_FALLBACK campaignId=%s adIndex=%s "
+                "fromMode=strict_json_schema toMode=plain_json openaiErrorCode=%s openaiErrorParam=%s",
+                campaign_id or "",
+                ad_index,
+                api_details.get("errorCode"),
+                api_details.get("errorParam"),
             )
-            if _is_unsupported_model_error(exc):
-                raise ImageComplianceUnavailableError("unsupported_model", ad_index=-1) from exc
-            if type(exc).__name__ == "RateLimitError" or api_details.get("statusCode") == 429:
-                raise ImageComplianceUnavailableError("review_rate_limited", ad_index=-1) from exc
-            if type(exc).__name__ == "AuthenticationError" or api_details.get("statusCode") == 401:
-                raise ImageComplianceUnavailableError("review_auth_error", ad_index=-1) from exc
-            if _is_transient_review_error(exc) and attempt == 1:
-                logger.info("BUILDER1_IMAGE_COMPLIANCE_REVIEW_RETRY attempt=2")
-                continue
-            if _is_transient_review_error(exc):
-                raise ImageComplianceUnavailableError("review_timeout", ad_index=-1) from exc
+            plain_kwargs = build_compliance_responses_request_kwargs(
+                model=model,
+                image_bytes=image_bytes,
+                system_prompt=IMAGE_COMPLIANCE_SYSTEM_PROMPT,
+                product_name=product_name,
+                product_description=product_description,
+                visibility_policy=visibility_policy,
+                transferred_object=transferred_object,
+                series_plan=series_plan,
+                ad_index=max(1, ad_index),
+                extra_user_text=extra_user_text,
+                schema_mode="plain",
+                text_format=None,
+            )
+            try:
+                return _dispatch_responses(plain_kwargs, "plain")
+            except PaidStageOutcomeUnknownError as unknown_exc:
+                raise ImageComplianceUnavailableError("review_outcome_unknown", ad_index=ad_index) from unknown_exc
+            except Exception as plain_exc:
+                reason_code = classify_compliance_api_error(plain_exc)
+                raise ImageComplianceUnavailableError(reason_code, ad_index=-1) from plain_exc
 
-            if (
-                allow_schema_fallback
-                and active_mode == "strict"
-                and is_invalid_json_schema_api_error(exc)
-            ):
-                logger.info(
-                    "BUILDER1_IMAGE_COMPLIANCE_SCHEMA_FALLBACK campaignId=%s adIndex=%s "
-                    "fromMode=strict_json_schema toMode=plain_json openaiErrorCode=%s openaiErrorParam=%s",
-                    campaign_id or "",
-                    ad_index,
-                    api_details.get("errorCode"),
-                    api_details.get("errorParam"),
-                )
-                kwargs = build_compliance_responses_request_kwargs(
-                    model=model,
-                    image_bytes=image_bytes,
-                    system_prompt=IMAGE_COMPLIANCE_SYSTEM_PROMPT,
-                    product_name=product_name,
-                    product_description=product_description,
-                    visibility_policy=visibility_policy,
-                    transferred_object=transferred_object,
-                    series_plan=series_plan,
-                    ad_index=max(1, ad_index),
-                    extra_user_text=extra_user_text,
-                    schema_mode="plain",
-                    text_format=None,
-                )
-                active_mode = "plain"
-                allow_schema_fallback = False
-                continue
-
-            reason_code = classify_compliance_api_error(exc)
-            raise ImageComplianceUnavailableError(reason_code, ad_index=-1) from exc
-    if last_exc is not None:
-        reason_code = classify_compliance_api_error(last_exc)
-        raise ImageComplianceUnavailableError(reason_code, ad_index=-1) from last_exc
-    raise ImageComplianceUnavailableError("review_timeout", ad_index=-1)
+        reason_code = classify_compliance_api_error(exc)
+        raise ImageComplianceUnavailableError(reason_code, ad_index=-1) from exc
 
 
 def _openai_compliance_review_call(
@@ -802,6 +816,9 @@ def review_builder1_ad_image_compliance(
         job_id or "",
         ad_index,
     )
+    from engine.builder1_paid_stage_guard import checkpoint_before_paid_call
+
+    checkpoint_before_paid_call(f"image_compliance_review_ad_{ad_index}")
     contract_repair_attempted = False
     try:
         if reviewer is not None:

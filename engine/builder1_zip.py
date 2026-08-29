@@ -201,4 +201,48 @@ def build_builder1_zip_from_request(payload: Dict[str, Any]) -> Tuple[bytes, str
     scope = str(payload.get("scope") or "campaign").strip().lower()
     if scope == "single_ad":
         return build_builder1_single_ad_zip_bytes(payload)
+    if scope == "campaign_server":
+        campaign_id = str(payload.get("campaignId") or "").strip()
+        if not campaign_id:
+            raise ValueError("missing_campaign_id")
+        from engine.builder1_campaign_store import get_campaign_session
+
+        session = get_campaign_session(campaign_id)
+        return build_builder1_zip_from_campaign_session(session), "builder1-campaign.zip"
     return build_builder1_zip_bytes(payload), "builder1-campaign.zip"
+
+
+def build_builder1_zip_from_campaign_session(session) -> bytes:
+    from engine.builder1_campaign_completion import evaluate_campaign_completion
+    from engine.builder1_image_artifact_store import read_builder1_image_artifact_bytes
+
+    report = evaluate_campaign_completion(session)
+    if not report.get("campaignReady"):
+        if report.get("missingArtifacts") or report.get("missingIndexes"):
+            raise ValueError("campaign_missing_artifacts")
+        if report.get("missingMarketingText") or report.get("invalidMarketingWordCount"):
+            raise ValueError("campaign_marketing_not_ready")
+        raise ValueError("campaign_not_ready_for_zip")
+
+    ads: List[Dict[str, Any]] = []
+    for idx in range(1, int(session.target_ad_count) + 1):
+        art = dict((session.ad_artifacts or {}).get(str(idx)) or {})
+        token = str(art.get("token") or "").strip()
+        image_bytes = read_builder1_image_artifact_bytes(token)
+        if not image_bytes:
+            raise ValueError(f"missing_image_artifact_{idx}")
+        ad_plan = next(a for a in session.plan.ads if a.index == idx)
+        ads.append(
+            {
+                "index": idx,
+                "imageBase64": base64.b64encode(image_bytes).decode("ascii"),
+                "marketingText": ad_plan.marketing_text,
+                "headline": ad_plan.headline,
+            }
+        )
+    payload: Dict[str, Any] = {
+        "productName": session.plan.product_name_resolved or session.plan.product_name,
+        "brandSlogan": session.plan.brand_slogan,
+        "ads": ads,
+    }
+    return build_builder1_zip_bytes(payload)

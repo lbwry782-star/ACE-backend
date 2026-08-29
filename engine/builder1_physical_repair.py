@@ -186,6 +186,9 @@ def repair_builder1_campaign_from_physical(
     brand_guidelines: Optional[Dict[str, Any]] = None,
 ) -> Builder1SeriesPlan:
     """Rerun brand_physical, graphic_system, and series_ads while preserving upstream identity."""
+    from engine.builder1_paid_stage_guard import checkpoint_before_paid_call
+
+    checkpoint_before_paid_call("physical_repair_start")
     strategy, strategy_selection, selected_slogan, selected_conceptual = _reconstruct_upstream_from_plan(plan)
     conceptual_fixed = _conceptual_to_dict(selected_conceptual)
     visibility_policy = ProductVisibilityPolicy.FORBIDDEN

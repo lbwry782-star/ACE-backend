@@ -38,6 +38,7 @@ from engine.video_web_postprocess import ensure_video_postprocessed_for_poll
 from engine.builder1_campaign_store import (
     CampaignStoreError,
     apply_repaired_campaign_plan,
+    assert_campaign_not_cancelled,
     begin_physical_repair,
     create_campaign_session,
     cumulative_violations_for_ad,
@@ -46,6 +47,7 @@ from engine.builder1_campaign_store import (
     mark_compliance_review_required,
     mark_image_retry_required,
     mark_physical_repair_required,
+    persist_campaign_ad_artifact,
     release_generation_lock,
     reserve_next_ad_index,
     validate_next_ad_request,
@@ -67,6 +69,7 @@ from engine.builder1_jobs_store import (
     create_builder1_job,
     finalize_builder1_job,
     get_builder1_job,
+    try_finalize_stale_builder1_job,
     update_builder1_job,
 )
 from engine.builder2_zip import build_builder2_video_zip_bytes
@@ -113,6 +116,216 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _builder1_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="builder1_job")
+
+
+def _builder1_require_production_ready() -> Optional[tuple[Any, int]]:
+    try:
+        from engine.builder1_production_config import assert_builder1_production_ready
+
+        assert_builder1_production_ready()
+    except RuntimeError as exc:
+        code = str(exc)
+        if code == "builder1_production_requires_redis":
+            return jsonify({"ok": False, "error": code}), 503
+        if code in {
+            "builder1_production_requires_durable_artifact_storage",
+            "builder1_production_artifact_storage_not_writable",
+        }:
+            return jsonify({"ok": False, "error": code}), 503
+        return jsonify({"ok": False, "error": "builder1_production_not_ready"}), 503
+    return None
+
+
+def _builder1_require_request_id() -> Optional[tuple[Any, int]]:
+    from engine.builder1_production_config import builder1_request_id_required
+    from engine.builder1_request_idempotency import extract_request_id, validate_request_id_format
+
+    if not builder1_request_id_required():
+        return None
+    rid = extract_request_id(request)
+    if not rid:
+        return jsonify({"ok": False, "error": "builder1_request_id_required"}), 400
+    if not validate_request_id_format(rid):
+        return jsonify({"ok": False, "error": "builder1_request_id_invalid"}), 400
+    return None
+
+
+def _builder1_owner_context_ref() -> str:
+    from engine.builder1_job_ownership import extract_owner_context_from_request
+
+    return extract_owner_context_from_request(request).get("ownerContextRef", "")
+
+
+def _builder1_idempotency_begin(
+    *,
+    operation: str,
+    request_fingerprint: str,
+    job_id: str,
+    campaign_id: str,
+    extra: Optional[dict[str, Any]] = None,
+) -> tuple[Optional[tuple[Any, int]], Optional[str], Optional[dict[str, Any]], str, str]:
+    """
+    Reserve or load idempotency record. Returns (early_http_response, key, record, job_id, campaign_id).
+    """
+    from engine.builder1_request_idempotency import (
+        begin_builder1_idempotent_request,
+        extract_request_id,
+        replay_response_from_record,
+    )
+
+    request_id = extract_request_id(request)
+    owner_ref = _builder1_owner_context_ref()
+    if not request_id or not owner_ref:
+        return None, None, None, job_id, campaign_id
+
+    begin = begin_builder1_idempotent_request(
+        operation=operation,
+        request_id=request_id,
+        owner_context_ref=owner_ref,
+        request_fingerprint=request_fingerprint,
+        job_id=job_id,
+        campaign_id=campaign_id,
+        extra=extra,
+    )
+    jid = str(begin.record.get("jobId") or job_id)
+    cid = str(begin.record.get("campaignId") or campaign_id)
+    if begin.kind == "conflict":
+        return (jsonify({"ok": False, "error": "builder1_idempotency_conflict"}), 409), None, None, jid, cid
+    if begin.kind == "replay":
+        return (jsonify(replay_response_from_record(begin.record)), 202), begin.key, begin.record, jid, cid
+    return None, begin.key, begin.record, jid, cid
+
+
+def _builder1_idempotency_finish(
+    *,
+    idem_key: Optional[str],
+    idem_record: Optional[dict[str, Any]],
+    response_body: dict[str, Any],
+    submit_fn: Any,
+) -> tuple[Any, int]:
+    from engine.builder1_request_idempotency import finalize_idempotent_worker_dispatch
+    from flask import jsonify
+
+    body, is_replay = finalize_idempotent_worker_dispatch(
+        idem_key=idem_key,
+        idem_record=idem_record,
+        job_id=str(response_body.get("jobId") or ""),
+        response_body=response_body,
+        submit_fn=submit_fn,
+    )
+    return jsonify(body), 202
+
+
+def _builder1_mark_worker_started(job_id: str) -> None:
+    from engine.builder1_request_idempotency import mark_builder1_worker_started
+
+    mark_builder1_worker_started(job_id)
+
+
+def _builder1_ownership_fields_for_create(payload: Optional[dict[str, Any]] = None) -> dict[str, str]:
+    from engine.builder1_job_ownership import ownership_fields_for_builder1_create
+
+    return ownership_fields_for_builder1_create(request, payload)
+
+
+def _builder1_enforce_create_ownership(payload: Optional[dict[str, Any]] = None) -> Optional[tuple[Any, int]]:
+    from engine.builder1_job_ownership import ownership_denied_response
+    from engine.builder1_production_config import builder1_ownership_required
+
+    if not builder1_ownership_required():
+        return None
+    fields = _builder1_ownership_fields_for_create(payload)
+    if fields.get("ownerContextPresent") != "1":
+        return ownership_denied_response("ownership_required")
+    return None
+
+
+def _builder1_verify_job_access(job_id: str) -> tuple[Optional[dict[str, Any]], Optional[tuple[Any, int]]]:
+    from engine.builder1_job_ownership import ownership_denied_response, verify_owner_context
+    from engine.builder1_production_config import builder1_ownership_required
+
+    job = get_builder1_job((job_id or "").strip())
+    if not job:
+        return None, (jsonify({"ok": False, "error": "not_found"}), 404)
+    if builder1_ownership_required():
+        ok, err = verify_owner_context(job, request, allow_historical=False)
+        if not ok:
+            return None, ownership_denied_response(err or "ownership_required")
+    return job, None
+
+
+def _builder1_verify_campaign_access(
+    campaign_id: str,
+) -> tuple[Optional[Any], Optional[tuple[Any, int]]]:
+    from engine.builder1_campaign_store import get_campaign_session_raw
+    from engine.builder1_job_ownership import ownership_denied_response, verify_owner_context
+    from engine.builder1_production_config import builder1_ownership_required
+
+    raw = get_campaign_session_raw((campaign_id or "").strip())
+    if not raw:
+        return None, (jsonify({"ok": False, "error": "campaign_not_found"}), 404)
+    if builder1_ownership_required():
+        ok, err = verify_owner_context(raw, request, allow_historical=False)
+        if not ok:
+            return None, ownership_denied_response(err or "ownership_required")
+    try:
+        session = get_campaign_session((campaign_id or "").strip())
+    except CampaignStoreError as exc:
+        return None, (jsonify({"ok": False, "error": exc.code}), 200)
+    return session, None
+
+
+def _builder1_persist_ad_artifact(
+    *,
+    campaign_id: str,
+    ad_index: int,
+    plan_revision: int,
+    image_bytes: bytes,
+) -> dict[str, Any]:
+    from engine.builder1_image_artifact_store import (
+        ad_artifact_record,
+        get_builder1_image_artifact_path,
+        write_builder1_image_artifact_bytes,
+    )
+    from engine.builder1_production_config import builder1_production_mode_enabled
+
+    if builder1_production_mode_enabled():
+        from engine.builder1_artifact_storage import assert_builder1_durable_artifact_storage_ready
+
+        assert_builder1_durable_artifact_storage_ready()
+
+    artifact = ad_artifact_record(
+        campaign_id=campaign_id,
+        ad_index=ad_index,
+        plan_revision=plan_revision,
+        status="succeeded",
+    )
+    token = str(artifact["token"])
+    write_builder1_image_artifact_bytes(token, image_bytes)
+    if get_builder1_image_artifact_path(token) is None:
+        raise RuntimeError("builder1_artifact_write_not_durable")
+    persist_campaign_ad_artifact(campaign_id, ad_index=ad_index, artifact=artifact)
+    return artifact
+
+
+def _builder1_copy_campaign_ownership_to_job(job_id: str, campaign_id: str) -> None:
+    from engine.builder1_campaign_store import get_campaign_session_raw
+
+    raw = get_campaign_session_raw(campaign_id) or {}
+    fields = {
+        k: str(raw[k])
+        for k in (
+            "ownerContextRef",
+            "ownerContextVersion",
+            "ownerContextPresent",
+            "builder",
+            "builder1ContractVersion",
+            "originalRequestFingerprint",
+        )
+        if raw.get(k) is not None
+    }
+    if fields:
+        update_builder1_job(job_id, **fields)
 
 try:
     log_video_headline_delivery_startup("web")
@@ -778,36 +991,80 @@ def _builder1_gpt_image_size_for_format(format_value: str) -> str:
 
 
 def _builder1_image_caller(prompt: str, format_value: str) -> bytes:
-    if (os.environ.get("BUILDER1_IMAGE_MODEL") or "").strip():
-        model = os.environ["BUILDER1_IMAGE_MODEL"].strip()
-        source = "env"
-    else:
-        model = os.getenv("BUILDER1_IMAGE_MODEL", "gpt-image-1.5")
-        source = "default"
-    logger.info("BUILDER1_IMAGE_MODEL_SELECTED model=%s source=%s", model, source)
-    api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-    if not api_key:
-        raise ValueError("openai_unconfigured")
-    client = OpenAI(
-        api_key=api_key,
-        timeout=httpx.Timeout(120.0),
-        max_retries=0,
+    import base64
+
+    import httpx
+    from openai import OpenAI
+
+    from engine.builder1_paid_provider import run_paid_provider_call
+
+    def _pre_submit() -> None:
+        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        if not api_key:
+            raise ValueError("openai_unconfigured")
+
+    def _dispatch() -> bytes:
+        if (os.environ.get("BUILDER1_IMAGE_MODEL") or "").strip():
+            model = os.environ["BUILDER1_IMAGE_MODEL"].strip()
+            source = "env"
+        else:
+            model = os.getenv("BUILDER1_IMAGE_MODEL", "gpt-image-1.5")
+            source = "default"
+        logger.info("BUILDER1_IMAGE_MODEL_SELECTED model=%s source=%s", model, source)
+        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        client = OpenAI(
+            api_key=api_key,
+            timeout=httpx.Timeout(120.0),
+            max_retries=0,
+        )
+        r = client.images.generate(
+            model=model,
+            prompt=prompt,
+            size=_builder1_gpt_image_size_for_format(format_value),
+            quality="low",
+        )
+        if not r.data:
+            raise ValueError("image_generation_empty")
+        b64 = r.data[0].b64_json
+        if not b64:
+            raise ValueError("image_generation_empty")
+        return base64.b64decode(b64)
+
+    return run_paid_provider_call(
+        "openai_image_generation",
+        _dispatch,
+        pre_submit=_pre_submit,
     )
-    r = client.images.generate(
-        model=model,
-        prompt=prompt,
-        size=_builder1_gpt_image_size_for_format(format_value),
-        quality="low",
-    )
-    if not r.data:
-        raise ValueError("image_generation_empty")
-    b64 = r.data[0].b64_json
-    if not b64:
-        raise ValueError("image_generation_empty")
-    return base64.b64decode(b64)
+
+
+def _builder1_handle_background_job_exception(job_id: str, exc: Exception) -> None:
+    from engine.builder1_job_cancellation import Builder1JobCancelledError
+    from engine.builder1_paid_provider import PaidStageOutcomeUnknownError, PaidStageRetryBlockedError
+
+    if isinstance(exc, Builder1JobCancelledError):
+        logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+        return
+    if isinstance(exc, (PaidStageOutcomeUnknownError, PaidStageRetryBlockedError)):
+        update_builder1_job(
+            job_id,
+            status="error",
+            error="paid_stage_outcome_unknown",
+            retryable=False,
+        )
+        logger.error(
+            "BUILDER1_JOB_PAID_OUTCOME_UNKNOWN jobId=%s stage=%s",
+            job_id,
+            getattr(exc, "stage", ""),
+        )
+        return
+    update_builder1_job(job_id, status="error", error="builder1_generation_failed")
+    logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, exc, exc_info=True)
 
 
 def _builder1_update_job(job_id: str, **fields: Any) -> None:
+    update_builder1_job(job_id, **fields)
+
+
     update_builder1_job(job_id, **fields)
 
 
@@ -823,7 +1080,11 @@ def _builder1_build_incremental_result(
     composition = build_builder1_series_composition_metadata(session.plan)
     generated_count = session.generated_count
     can_next = not session.complete and session.next_ad_index is not None
-    return {
+    from engine.builder1_campaign_completion import campaign_completion_public_fields
+
+    completion = campaign_completion_public_fields(session)
+    artifact = dict((session.ad_artifacts or {}).get(str(ad_index)) or {})
+    out = {
         "ok": True,
         "campaignId": campaign_id,
         "campaign": campaign_identity_to_dict(session.plan),
@@ -838,7 +1099,12 @@ def _builder1_build_incremental_result(
         "targetAdCount": session.target_ad_count,
         "nextAdIndex": session.next_ad_index,
         "canGenerateNext": can_next,
+        **completion,
     }
+    if artifact.get("artifactUrl"):
+        out["imageArtifactUrl"] = artifact.get("artifactUrl")
+        out["ad"]["imageArtifactUrl"] = artifact.get("artifactUrl")
+    return out
 
 
 BUILDER1_PUBLIC_IMAGE_RETRY_MESSAGE = (
@@ -985,6 +1251,7 @@ def _builder1_generate_single_ad(
     reservation_started = time.perf_counter()
     reservation_duration_ms = 0
     try:
+        assert_campaign_not_cancelled(campaign_id)
         if already_reserved:
             session = get_campaign_session(campaign_id)
             if session.generating_index != ad_index:
@@ -1041,7 +1308,28 @@ def _builder1_generate_single_ad(
             plan_revision=session.plan_revision,
             cumulative_violations=cumulative_violations_for_ad(session, ad_index),
         )
+        from engine.builder1_job_cancellation import (
+            Builder1JobCancelledError,
+            is_builder1_campaign_cancelled,
+            is_builder1_job_cancelled,
+        )
+
+        if is_builder1_job_cancelled(job_id) or is_builder1_campaign_cancelled(campaign_id):
+            _builder1_persist_ad_artifact(
+                campaign_id=campaign_id,
+                ad_index=ad_index,
+                plan_revision=session.plan_revision,
+                image_bytes=image_result.image_bytes,
+            )
+            raise Builder1JobCancelledError("builder1_job_cancelled")
+        _builder1_persist_ad_artifact(
+            campaign_id=campaign_id,
+            ad_index=ad_index,
+            plan_revision=session.plan_revision,
+            image_bytes=image_result.image_bytes,
+        )
         session = mark_ad_generated(campaign_id, ad_index)
+        session = get_campaign_session(campaign_id)
         reservation_held = False
 
         logger.info("BUILDER1_AD_GENERATED campaignId=%s adIndex=%s", campaign_id, ad_index)
@@ -1518,10 +1806,26 @@ def _builder1_generate_initial(
         planning_duration_ms = metrics.total_planning_duration_ms
 
     persistence_started_at = time.perf_counter()
+    job_record = get_builder1_job(job_id) or {}
+    ownership_fields = {
+        k: str(v)
+        for k, v in job_record.items()
+        if k
+        in {
+            "ownerContextRef",
+            "ownerContextVersion",
+            "ownerContextPresent",
+            "builder",
+            "builder1ContractVersion",
+            "originalRequestFingerprint",
+        }
+        and v is not None
+    }
     create_campaign_session(
         campaign_id=campaign_id,
         plan=series_plan,
         target_ad_count=ad_count,
+        ownership_fields=ownership_fields or None,
     )
     update_builder1_job(
         job_id,
@@ -1550,67 +1854,93 @@ def _builder1_run_initial_job(
     ad_count: int,
     brand_guidelines: Optional[dict[str, Any]],
 ) -> None:
+    from engine.builder1_job_cancellation import Builder1JobCancelledError
+    from engine.builder1_paid_stage_guard import builder1_paid_stage_context
+
     logger.info("BUILDER1_JOB_STARTED jobId=%s campaignId=%s adCount=%s", job_id, campaign_id, ad_count)
-    try:
-        result = _builder1_generate_initial(
-            job_id, campaign_id, product_name, product_description, format_val, ad_count, brand_guidelines
-        )
-        _builder1_finalize_job(job_id, result, target_ad_count=ad_count)
-    except Exception as e:
-        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
-        logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+    _builder1_mark_worker_started(job_id)
+    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+        try:
+            result = _builder1_generate_initial(
+                job_id, campaign_id, product_name, product_description, format_val, ad_count, brand_guidelines
+            )
+            _builder1_finalize_job(job_id, result, target_ad_count=ad_count)
+        except Builder1JobCancelledError:
+            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+        except Exception as e:
+            _builder1_handle_background_job_exception(job_id, e)
 
 
 def _builder1_run_review_only_job(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
+    from engine.builder1_job_cancellation import Builder1JobCancelledError
+    from engine.builder1_paid_stage_guard import builder1_paid_stage_context
+
     logger.info(
         "BUILDER1_REVIEW_ONLY_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
         job_id,
         campaign_id,
         retry_ad_index,
     )
-    try:
-        result = _builder1_generate_review_only_ad(
-            job_id=job_id,
-            campaign_id=campaign_id,
-            ad_index=retry_ad_index,
-            already_reserved=True,
-        )
-        target_ad_count = get_campaign_session(campaign_id).target_ad_count
-        _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
-    except Exception as e:
-        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
-        logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+    _builder1_mark_worker_started(job_id)
+    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+        try:
+            result = _builder1_generate_review_only_ad(
+                job_id=job_id,
+                campaign_id=campaign_id,
+                ad_index=retry_ad_index,
+                already_reserved=True,
+            )
+            target_ad_count = get_campaign_session(campaign_id).target_ad_count
+            _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
+        except Builder1JobCancelledError:
+            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+        except Exception as e:
+            _builder1_handle_background_job_exception(job_id, e)
 
 
 def _builder1_run_next_job(job_id: str, campaign_id: str, expected_next_index: int) -> None:
+    from engine.builder1_job_cancellation import Builder1JobCancelledError
+    from engine.builder1_paid_stage_guard import builder1_paid_stage_context
+
     logger.info(
         "BUILDER1_NEXT_AD_REQUEST jobId=%s campaignId=%s expectedNextIndex=%s",
         job_id,
         campaign_id,
         expected_next_index,
     )
-    try:
-        result = _builder1_generate_single_ad(
-            job_id=job_id,
-            campaign_id=campaign_id,
-            ad_index=expected_next_index,
-            already_reserved=True,
-            log_next_ad_timing=True,
-        )
-        target_ad_count = get_campaign_session(campaign_id).target_ad_count
-        _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
-    except Exception as e:
-        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
-        logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+    _builder1_mark_worker_started(job_id)
+    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+        try:
+            result = _builder1_generate_single_ad(
+                job_id=job_id,
+                campaign_id=campaign_id,
+                ad_index=expected_next_index,
+                already_reserved=True,
+                log_next_ad_timing=True,
+            )
+            target_ad_count = get_campaign_session(campaign_id).target_ad_count
+            _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
+        except Builder1JobCancelledError:
+            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+        except Exception as e:
+            _builder1_handle_background_job_exception(job_id, e)
 
 
 def _builder1_run_physical_repair_job(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
+    from engine.builder1_paid_stage_guard import builder1_paid_stage_context
+
     logger.info(
         "BUILDER1_PHYSICAL_REPAIR_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
         job_id,
         campaign_id,
         retry_ad_index,
     )
+    _builder1_mark_worker_started(job_id)
+    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+        _builder1_run_physical_repair_job_inner(job_id, campaign_id, retry_ad_index)
+
+
+def _builder1_run_physical_repair_job_inner(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
     try:
         session = get_campaign_session(campaign_id)
         if not session.repair_in_progress:
@@ -1673,16 +2003,23 @@ def _builder1_run_physical_repair_job(job_id: str, campaign_id: str, retry_ad_in
             cancel_physical_repair_in_progress(campaign_id)
         except Exception:
             pass
-        update_builder1_job(job_id, status="error", error="builder1_generation_failed")
-        logger.error("BUILDER1_JOB_ERROR jobId=%s err=%s", job_id, e, exc_info=True)
+        _builder1_handle_background_job_exception(job_id, e)
 
 
 def _builder1_finalize_job(job_id: str, result: dict[str, Any], *, target_ad_count: int) -> None:
-    finalize_builder1_job(job_id, result, target_ad_count=target_ad_count)
+    from engine.builder1_job_cancellation import finalize_builder1_job_respecting_cancellation
+
+    finalize_builder1_job_respecting_cancellation(job_id, result, target_ad_count=target_ad_count)
 
 
 @app.route("/api/builder1-generate", methods=["POST"])
 def builder1_generate():
+    prod_err = _builder1_require_production_ready()
+    if prod_err is not None:
+        return prod_err
+    req_id_err = _builder1_require_request_id()
+    if req_id_err is not None:
+        return req_id_err
     if not request.is_json:
         return (
             jsonify(
@@ -1706,6 +2043,9 @@ def builder1_generate():
             ),
             200,
         )
+    own_err = _builder1_enforce_create_ownership(body)
+    if own_err is not None:
+        return own_err
     product_name = (body.get("productName") or "").strip()
     product_description = (body.get("productDescription") or "").strip()
     format_val = (body.get("format") or "portrait").strip() or "portrait"
@@ -1740,44 +2080,74 @@ def builder1_generate():
             200,
         )
     logger.info("BUILDER1_AD_COUNT_NORMALIZED value=%s", ad_count)
+
+    from engine.builder1_request_idempotency import (
+        OPERATION_INITIAL_GENERATE,
+        fingerprint_initial_generate,
+    )
+
     job_id = str(uuid.uuid4())
     campaign_id = str(uuid.uuid4())
-    create_builder1_job(
+    fingerprint = fingerprint_initial_generate(body, ad_count=ad_count)
+    early, idem_key, idem_record, job_id, campaign_id = _builder1_idempotency_begin(
+        operation=OPERATION_INITIAL_GENERATE,
+        request_fingerprint=fingerprint,
         job_id=job_id,
         campaign_id=campaign_id,
-        target_ad_count=ad_count,
-        stage="planning",
     )
-    logger.info("BUILDER1_JOB_CREATED jobId=%s campaignId=%s targetAdCount=%s", job_id, campaign_id, ad_count)
-    _builder1_executor.submit(
-        _builder1_run_initial_job,
-        job_id,
-        campaign_id,
-        product_name,
-        product_description,
-        format_val,
-        ad_count,
-        brand_guidelines,
-    )
-    return (
-        jsonify(
-            {
-                "status": "running",
-                "jobId": job_id,
-                "stage": "planning",
-                "completedAds": 0,
-                "totalAds": ad_count,
-                "targetAdCount": ad_count,
-                "pollUrl": f"/api/builder1-status?jobId={job_id}",
-                "campaignId": campaign_id,
-            }
-        ),
-        202,
+    if early is not None:
+        return early
+
+    ownership_fields = _builder1_ownership_fields_for_create(body)
+    if get_builder1_job(job_id) is None:
+        create_builder1_job(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            target_ad_count=ad_count,
+            stage="planning",
+            ownership_fields=ownership_fields,
+        )
+        logger.info("BUILDER1_JOB_CREATED jobId=%s campaignId=%s targetAdCount=%s", job_id, campaign_id, ad_count)
+
+    response_body = {
+        "status": "running",
+        "jobId": job_id,
+        "stage": "planning",
+        "completedAds": 0,
+        "totalAds": ad_count,
+        "targetAdCount": ad_count,
+        "pollUrl": f"/api/builder1-status?jobId={job_id}",
+        "campaignId": campaign_id,
+    }
+
+    def _submit() -> None:
+        _builder1_executor.submit(
+            _builder1_run_initial_job,
+            job_id,
+            campaign_id,
+            product_name,
+            product_description,
+            format_val,
+            ad_count,
+            brand_guidelines,
+        )
+
+    return _builder1_idempotency_finish(
+        idem_key=idem_key,
+        idem_record=idem_record,
+        response_body=response_body,
+        submit_fn=_submit,
     )
 
 
 @app.route("/api/builder1-retry-image", methods=["POST"])
 def builder1_retry_image():
+    prod_err = _builder1_require_production_ready()
+    if prod_err is not None:
+        return prod_err
+    req_id_err = _builder1_require_request_id()
+    if req_id_err is not None:
+        return req_id_err
     if not request.is_json:
         return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON body"}), 200
     body = request.get_json(silent=True)
@@ -1787,6 +2157,14 @@ def builder1_retry_image():
     campaign_id = (body.get("campaignId") or "").strip()
     if not campaign_id:
         return jsonify({"ok": False, "error": "invalid_input", "message": "campaignId is required"}), 200
+
+    _, deny = _builder1_verify_campaign_access(campaign_id)
+    if deny is not None:
+        return deny
+    try:
+        assert_campaign_not_cancelled(campaign_id)
+    except CampaignStoreError as e:
+        return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
 
     try:
         retry_ad_index = int(body.get("retryAdIndex") or body.get("adIndex") or body.get("expectedNextIndex"))
@@ -1816,51 +2194,84 @@ def builder1_retry_image():
     if retry_ad_index < 1 or retry_ad_index > session.target_ad_count:
         return jsonify({"ok": False, "error": "campaign_index_conflict", "campaignId": campaign_id}), 200
 
-    job_id = str(uuid.uuid4())
-    try:
-        session = reserve_next_ad_index(campaign_id, retry_ad_index, job_id=job_id)
-    except CampaignStoreError as e:
-        return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
+    from engine.builder1_request_idempotency import OPERATION_RETRY_IMAGE, fingerprint_retry_image
 
-    create_builder1_job(
+    job_id = str(uuid.uuid4())
+    fingerprint = fingerprint_retry_image(campaign_id=campaign_id, retry_ad_index=retry_ad_index)
+    early, idem_key, idem_record, job_id, _ = _builder1_idempotency_begin(
+        operation=OPERATION_RETRY_IMAGE,
+        request_fingerprint=fingerprint,
         job_id=job_id,
         campaign_id=campaign_id,
-        target_ad_count=session.target_ad_count,
-        stage="generating_images",
+        extra={"expectedNextIndex": retry_ad_index},
     )
-    update_builder1_job(
-        job_id,
-        completedAds=session.generated_count,
-        totalAds=session.target_ad_count,
-    )
-    _builder1_executor.submit(
-        _builder1_run_next_job,
-        job_id,
-        campaign_id,
-        retry_ad_index,
-    )
-    return (
-        jsonify(
-            {
-                "status": "running",
-                "jobId": job_id,
-                "campaignId": campaign_id,
-                "stage": "generating_images",
-                "completedAds": session.generated_count,
-                "totalAds": session.target_ad_count,
-                "targetAdCount": session.target_ad_count,
-                "retryAdIndex": retry_ad_index,
-                "retryMode": "image_only",
-                "planningComplete": True,
-                "pollUrl": f"/api/builder1-status?jobId={job_id}",
-            }
-        ),
-        202,
+    if early is not None:
+        return early
+
+    if get_builder1_job(job_id) is None:
+        try:
+            if (
+                session.generating_lock_owner_job_id == job_id
+                and session.generating_index == retry_ad_index
+            ):
+                pass
+            else:
+                session = reserve_next_ad_index(campaign_id, retry_ad_index, job_id=job_id)
+        except CampaignStoreError as e:
+            return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
+        create_builder1_job(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            target_ad_count=session.target_ad_count,
+            stage="generating_images",
+        )
+        _builder1_copy_campaign_ownership_to_job(job_id, campaign_id)
+        update_builder1_job(
+            job_id,
+            completedAds=session.generated_count,
+            totalAds=session.target_ad_count,
+        )
+    else:
+        session = get_campaign_session(campaign_id)
+
+    response_body = {
+        "status": "running",
+        "jobId": job_id,
+        "campaignId": campaign_id,
+        "stage": "generating_images",
+        "completedAds": session.generated_count,
+        "totalAds": session.target_ad_count,
+        "targetAdCount": session.target_ad_count,
+        "retryAdIndex": retry_ad_index,
+        "retryMode": "image_only",
+        "planningComplete": True,
+        "pollUrl": f"/api/builder1-status?jobId={job_id}",
+    }
+
+    def _submit() -> None:
+        _builder1_executor.submit(
+            _builder1_run_next_job,
+            job_id,
+            campaign_id,
+            retry_ad_index,
+        )
+
+    return _builder1_idempotency_finish(
+        idem_key=idem_key,
+        idem_record=idem_record,
+        response_body=response_body,
+        submit_fn=_submit,
     )
 
 
 @app.route("/api/builder1-repair-physical", methods=["POST"])
 def builder1_repair_physical():
+    prod_err = _builder1_require_production_ready()
+    if prod_err is not None:
+        return prod_err
+    req_id_err = _builder1_require_request_id()
+    if req_id_err is not None:
+        return req_id_err
     if not request.is_json:
         return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON body"}), 200
     body = request.get_json(silent=True)
@@ -1870,6 +2281,14 @@ def builder1_repair_physical():
     campaign_id = (body.get("campaignId") or "").strip()
     if not campaign_id:
         return jsonify({"ok": False, "error": "invalid_input", "message": "campaignId is required"}), 200
+
+    _, deny = _builder1_verify_campaign_access(campaign_id)
+    if deny is not None:
+        return deny
+    try:
+        assert_campaign_not_cancelled(campaign_id)
+    except CampaignStoreError as e:
+        return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
 
     try:
         retry_ad_index = int(body.get("retryAdIndex") or body.get("adIndex") or body.get("expectedNextIndex"))
@@ -1884,46 +2303,74 @@ def builder1_repair_physical():
     if not session.planning_complete:
         return jsonify({"ok": False, "error": "planning_incomplete", "campaignId": campaign_id}), 200
 
+    from engine.builder1_request_idempotency import OPERATION_REPAIR_PHYSICAL, fingerprint_repair_physical
+
     job_id = str(uuid.uuid4())
-    create_builder1_job(
+    fingerprint = fingerprint_repair_physical(campaign_id=campaign_id, retry_ad_index=retry_ad_index)
+    early, idem_key, idem_record, job_id, _ = _builder1_idempotency_begin(
+        operation=OPERATION_REPAIR_PHYSICAL,
+        request_fingerprint=fingerprint,
         job_id=job_id,
         campaign_id=campaign_id,
-        target_ad_count=session.target_ad_count,
-        stage="repairing_physical",
+        extra={"expectedNextIndex": retry_ad_index},
     )
-    update_builder1_job(
-        job_id,
-        completedAds=session.generated_count,
-        totalAds=session.target_ad_count,
-    )
-    _builder1_executor.submit(
-        _builder1_run_physical_repair_job,
-        job_id,
-        campaign_id,
-        retry_ad_index,
-    )
-    return (
-        jsonify(
-            {
-                "status": "running",
-                "jobId": job_id,
-                "campaignId": campaign_id,
-                "stage": "repairing_physical",
-                "completedAds": session.generated_count,
-                "totalAds": session.target_ad_count,
-                "targetAdCount": session.target_ad_count,
-                "retryAdIndex": retry_ad_index,
-                "retryMode": "repair_from_physical",
-                "planningComplete": True,
-                "pollUrl": f"/api/builder1-status?jobId={job_id}",
-            }
-        ),
-        202,
+    if early is not None:
+        return early
+
+    if get_builder1_job(job_id) is None:
+        create_builder1_job(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            target_ad_count=session.target_ad_count,
+            stage="repairing_physical",
+        )
+        _builder1_copy_campaign_ownership_to_job(job_id, campaign_id)
+        update_builder1_job(
+            job_id,
+            completedAds=session.generated_count,
+            totalAds=session.target_ad_count,
+        )
+    else:
+        session = get_campaign_session(campaign_id)
+
+    response_body = {
+        "status": "running",
+        "jobId": job_id,
+        "campaignId": campaign_id,
+        "stage": "repairing_physical",
+        "completedAds": session.generated_count,
+        "totalAds": session.target_ad_count,
+        "targetAdCount": session.target_ad_count,
+        "retryAdIndex": retry_ad_index,
+        "retryMode": "repair_from_physical",
+        "planningComplete": True,
+        "pollUrl": f"/api/builder1-status?jobId={job_id}",
+    }
+
+    def _submit() -> None:
+        _builder1_executor.submit(
+            _builder1_run_physical_repair_job,
+            job_id,
+            campaign_id,
+            retry_ad_index,
+        )
+
+    return _builder1_idempotency_finish(
+        idem_key=idem_key,
+        idem_record=idem_record,
+        response_body=response_body,
+        submit_fn=_submit,
     )
 
 
 @app.route("/api/builder1-generate-next", methods=["POST"])
 def builder1_generate_next():
+    prod_err = _builder1_require_production_ready()
+    if prod_err is not None:
+        return prod_err
+    req_id_err = _builder1_require_request_id()
+    if req_id_err is not None:
+        return req_id_err
     if not request.is_json:
         return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON body"}), 200
     body = request.get_json(silent=True)
@@ -1933,6 +2380,10 @@ def builder1_generate_next():
     campaign_id = (body.get("campaignId") or "").strip()
     if not campaign_id:
         return jsonify({"ok": False, "error": "invalid_input", "message": "campaignId is required"}), 200
+
+    _, deny = _builder1_verify_campaign_access(campaign_id)
+    if deny is not None:
+        return deny
 
     try:
         expected_next_index = int(body.get("expectedNextIndex"))
@@ -1944,138 +2395,231 @@ def builder1_generate_next():
     except CampaignStoreError as e:
         return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
 
+    from engine.builder1_request_idempotency import OPERATION_GENERATE_NEXT, fingerprint_generate_next
+
+    job_id = str(uuid.uuid4())
+    fingerprint = fingerprint_generate_next(
+        campaign_id=campaign_id,
+        expected_next_index=expected_next_index,
+    )
+    early, idem_key, idem_record, job_id, _ = _builder1_idempotency_begin(
+        operation=OPERATION_GENERATE_NEXT,
+        request_fingerprint=fingerprint,
+        job_id=job_id,
+        campaign_id=campaign_id,
+        extra={"expectedNextIndex": expected_next_index},
+    )
+    if early is not None:
+        return early
+
     retry_mode = resolve_authoritative_retry_mode(
         status=session.status,
         retry_mode=session.retry_mode,
     )
-    job_id = str(uuid.uuid4())
 
     if retry_mode == RETRY_MODE_REPAIR_FROM_PHYSICAL:
-        try:
-            session = begin_physical_repair(campaign_id, job_id=job_id)
-        except CampaignStoreError as e:
-            return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
-        create_builder1_job(
-            job_id=job_id,
-            campaign_id=campaign_id,
-            target_ad_count=session.target_ad_count,
-            stage="repairing_physical",
-        )
-        update_builder1_job(
-            job_id,
-            completedAds=session.generated_count,
-            totalAds=session.target_ad_count,
-            planRevision=session.plan_revision,
-            retryMode=retry_mode,
-            retryAdIndex=expected_next_index,
-        )
-        _builder1_executor.submit(
-            _builder1_run_physical_repair_job,
-            job_id,
-            campaign_id,
-            expected_next_index,
-        )
-        return (
-            jsonify(
-                {
-                    "status": "running",
-                    "jobId": job_id,
-                    "campaignId": campaign_id,
-                    "stage": "repairing_physical",
-                    "completedAds": session.generated_count,
-                    "totalAds": session.target_ad_count,
-                    "targetAdCount": session.target_ad_count,
-                    "pollUrl": f"/api/builder1-status?jobId={job_id}",
-                    **public_retry_fields(
-                        session=session,
-                        retry_ad_index=expected_next_index,
-                        repair_in_progress=True,
-                    ),
-                }
+        if get_builder1_job(job_id) is None:
+            try:
+                session = begin_physical_repair(campaign_id, job_id=job_id)
+            except CampaignStoreError as e:
+                return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
+            create_builder1_job(
+                job_id=job_id,
+                campaign_id=campaign_id,
+                target_ad_count=session.target_ad_count,
+                stage="repairing_physical",
+            )
+            _builder1_copy_campaign_ownership_to_job(job_id, campaign_id)
+            update_builder1_job(
+                job_id,
+                completedAds=session.generated_count,
+                totalAds=session.target_ad_count,
+                planRevision=session.plan_revision,
+                retryMode=retry_mode,
+                retryAdIndex=expected_next_index,
+            )
+        else:
+            session = get_campaign_session(campaign_id)
+        response_body = {
+            "status": "running",
+            "jobId": job_id,
+            "campaignId": campaign_id,
+            "stage": "repairing_physical",
+            "completedAds": session.generated_count,
+            "totalAds": session.target_ad_count,
+            "targetAdCount": session.target_ad_count,
+            "pollUrl": f"/api/builder1-status?jobId={job_id}",
+            **public_retry_fields(
+                session=session,
+                retry_ad_index=expected_next_index,
+                repair_in_progress=True,
             ),
-            202,
+        }
+
+        def _submit_repair() -> None:
+            _builder1_executor.submit(
+                _builder1_run_physical_repair_job,
+                job_id,
+                campaign_id,
+                expected_next_index,
+            )
+
+        return _builder1_idempotency_finish(
+            idem_key=idem_key,
+            idem_record=idem_record,
+            response_body=response_body,
+            submit_fn=_submit_repair,
         )
 
     if retry_mode == RETRY_MODE_REVIEW_ONLY:
+        if get_builder1_job(job_id) is None:
+            try:
+                if (
+                    session.generating_lock_owner_job_id == job_id
+                    and session.generating_index == expected_next_index
+                ):
+                    pass
+                else:
+                    session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
+            except CampaignStoreError as e:
+                return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
+            create_builder1_job(
+                job_id=job_id,
+                campaign_id=campaign_id,
+                target_ad_count=session.target_ad_count,
+                stage="reviewing_compliance",
+            )
+            _builder1_copy_campaign_ownership_to_job(job_id, campaign_id)
+            update_builder1_job(
+                job_id,
+                completedAds=session.generated_count,
+                totalAds=session.target_ad_count,
+                planRevision=session.plan_revision,
+                retryMode=RETRY_MODE_REVIEW_ONLY,
+                retryAdIndex=expected_next_index,
+            )
+        else:
+            session = get_campaign_session(campaign_id)
+        response_body = {
+            "status": "running",
+            "jobId": job_id,
+            "campaignId": campaign_id,
+            "stage": "reviewing_compliance",
+            "completedAds": session.generated_count,
+            "totalAds": session.target_ad_count,
+            "targetAdCount": session.target_ad_count,
+            "pollUrl": f"/api/builder1-status?jobId={job_id}",
+            **public_retry_fields(session=session, retry_ad_index=expected_next_index),
+        }
+
+        def _submit_review() -> None:
+            _builder1_executor.submit(
+                _builder1_run_review_only_job,
+                job_id,
+                campaign_id,
+                expected_next_index,
+            )
+
+        return _builder1_idempotency_finish(
+            idem_key=idem_key,
+            idem_record=idem_record,
+            response_body=response_body,
+            submit_fn=_submit_review,
+        )
+
+    if get_builder1_job(job_id) is None:
         try:
-            session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
+            if (
+                session.generating_lock_owner_job_id == job_id
+                and session.generating_index == expected_next_index
+            ):
+                pass
+            else:
+                session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
         except CampaignStoreError as e:
             return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
         create_builder1_job(
             job_id=job_id,
             campaign_id=campaign_id,
             target_ad_count=session.target_ad_count,
-            stage="reviewing_compliance",
+            stage="generating_images",
         )
+        _builder1_copy_campaign_ownership_to_job(job_id, campaign_id)
         update_builder1_job(
             job_id,
             completedAds=session.generated_count,
             totalAds=session.target_ad_count,
             planRevision=session.plan_revision,
-            retryMode=RETRY_MODE_REVIEW_ONLY,
+            retryMode=retry_mode if retry_mode != RETRY_MODE_NONE else RETRY_MODE_IMAGE_ONLY
+            if session.failed_ad_index == expected_next_index
+            else RETRY_MODE_NONE,
             retryAdIndex=expected_next_index,
         )
-        _builder1_executor.submit(
-            _builder1_run_review_only_job,
-            job_id,
-            campaign_id,
-            expected_next_index,
-        )
-        return (
-            jsonify(
-                {
-                    "status": "running",
-                    "jobId": job_id,
-                    "campaignId": campaign_id,
-                    "stage": "reviewing_compliance",
-                    "completedAds": session.generated_count,
-                    "totalAds": session.target_ad_count,
-                    "targetAdCount": session.target_ad_count,
-                    "pollUrl": f"/api/builder1-status?jobId={job_id}",
-                    **public_retry_fields(session=session, retry_ad_index=expected_next_index),
-                }
-            ),
-            202,
-        )
+    else:
+        session = get_campaign_session(campaign_id)
 
+    response_body = {
+        "status": "running",
+        "jobId": job_id,
+        "campaignId": campaign_id,
+        "stage": "generating_images",
+        "completedAds": session.generated_count,
+        "totalAds": session.target_ad_count,
+        "targetAdCount": session.target_ad_count,
+        "pollUrl": f"/api/builder1-status?jobId={job_id}",
+        **public_retry_fields(session=session, retry_ad_index=expected_next_index),
+    }
+
+    def _submit_next() -> None:
+        _builder1_executor.submit(_builder1_run_next_job, job_id, campaign_id, expected_next_index)
+
+    return _builder1_idempotency_finish(
+        idem_key=idem_key,
+        idem_record=idem_record,
+        response_body=response_body,
+        submit_fn=_submit_next,
+    )
+
+
+@app.route("/api/builder1/jobs/<job_id>/cancel", methods=["POST"])
+@app.route("/api/builder1-jobs/<job_id>/cancel", methods=["POST"])
+def builder1_job_cancel(job_id: str):
+    """Cancel an active Builder1 job (idempotent). Does not affect Builder2 jobs."""
+    prod_err = _builder1_require_production_ready()
+    if prod_err is not None:
+        return prod_err
+    jid = (job_id or "").strip()
+    if not jid:
+        return jsonify({"ok": False, "error": "missing_job_id"}), 400
+    job, deny = _builder1_verify_job_access(jid)
+    if deny is not None:
+        return deny
     try:
-        session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
-    except CampaignStoreError as e:
-        return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
+        from engine.builder1_job_cancellation import CANCEL_REASON_FRONTEND_REFRESH, request_builder1_job_cancellation
 
-    create_builder1_job(
-        job_id=job_id,
-        campaign_id=campaign_id,
-        target_ad_count=session.target_ad_count,
-        stage="generating_images",
-    )
-    update_builder1_job(
-        job_id,
-        completedAds=session.generated_count,
-        totalAds=session.target_ad_count,
-        planRevision=session.plan_revision,
-        retryMode=retry_mode if retry_mode != RETRY_MODE_NONE else RETRY_MODE_IMAGE_ONLY
-        if session.failed_ad_index == expected_next_index
-        else RETRY_MODE_NONE,
-        retryAdIndex=expected_next_index,
-    )
-    _builder1_executor.submit(_builder1_run_next_job, job_id, campaign_id, expected_next_index)
-    return (
-        jsonify(
-            {
-                "status": "running",
-                "jobId": job_id,
-                "campaignId": campaign_id,
-                "stage": "generating_images",
-                "completedAds": session.generated_count,
-                "totalAds": session.target_ad_count,
-                "targetAdCount": session.target_ad_count,
-                "pollUrl": f"/api/builder1-status?jobId={job_id}",
-                **public_retry_fields(session=session, retry_ad_index=expected_next_index),
-            }
-        ),
-        202,
-    )
+        reason = CANCEL_REASON_FRONTEND_REFRESH
+        if request.is_json:
+            payload = request.get_json(silent=True)
+            if isinstance(payload, dict) and (payload.get("reason") or "").strip():
+                reason = str(payload.get("reason")).strip()
+        result = request_builder1_job_cancellation(jid, reason=reason)
+    except Exception as exc:
+        logger.error("BUILDER1_JOB_CANCEL_FAILED jobId=%s err=%s", jid, exc, exc_info=True)
+        return jsonify({"ok": False, "error": "builder1_job_cancel_failed", "jobId": jid}), 500
+    if not result.get("ok"):
+        code = 404 if result.get("error") == "not_found" else 400
+        return jsonify(result), code
+    return jsonify(result), 200
+
+
+@app.route("/api/builder1-image-artifact/<token>", methods=["GET"])
+def builder1_image_artifact(token: str):
+    from engine.builder1_image_artifact_store import get_builder1_image_artifact_path
+
+    path = get_builder1_image_artifact_path((token or "").strip())
+    if path is None:
+        return jsonify({"ok": False, "error": "not_found"}), 404
+    return send_file(path, mimetype="image/jpeg", as_attachment=False)
 
 
 @app.route("/api/builder1-status", methods=["GET"])
@@ -2083,11 +2627,25 @@ def builder1_status():
     job_id = (request.args.get("jobId") or "").strip()
     if not job_id:
         return jsonify({"status": "error", "error": "missing_job_id"}), 400
-    job = get_builder1_job(job_id)
-    if not job:
-        return jsonify({"status": "error", "jobId": job_id, "error": "not_found"}), 404
+    try_finalize_stale_builder1_job(job_id)
+    job, deny = _builder1_verify_job_access(job_id)
+    if deny is not None:
+        return deny
+    assert job is not None
     status = (job.get("status") or "running").strip()
     logger.info("BUILDER1_JOB_STATUS jobId=%s status=%s", job_id, status)
+    if status == "cancelled":
+        return (
+            jsonify(
+                {
+                    "status": "cancelled",
+                    "jobId": job_id,
+                    "cancelReason": job.get("cancelReason"),
+                    "cancelRequestedAt": job.get("cancelRequestedAt"),
+                }
+            ),
+            200,
+        )
     if status == "running":
         out: dict[str, Any] = {"status": "running", "jobId": job_id}
         if job.get("stage"):
@@ -2360,6 +2918,13 @@ def builder1_download_zip():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "invalid_input"}), 400
+
+    scope = str(body.get("scope") or "campaign").strip().lower()
+    if scope == "campaign_server":
+        campaign_id = str(body.get("campaignId") or "").strip()
+        _, deny = _builder1_verify_campaign_access(campaign_id)
+        if deny is not None:
+            return deny
 
     try:
         zip_bytes, download_name = build_builder1_zip_from_request(body)

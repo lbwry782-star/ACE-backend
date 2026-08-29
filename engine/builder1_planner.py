@@ -178,16 +178,23 @@ def _invoke_model_caller(
     *,
     stage: Optional[str] = None,
 ) -> object:
+    from engine.builder1_paid_provider import PaidStageOutcomeUnknownError, run_paid_provider_call
+
+    stage_name = stage or "planning_model"
     metrics = get_planning_metrics()
-    if metrics is not None:
-        metrics.record_model_call(stage)
-    try:
-        sig = inspect.signature(model_caller)
-    except (TypeError, ValueError):
+
+    def _dispatch() -> object:
+        if metrics is not None:
+            metrics.record_model_call(stage)
+        try:
+            sig = inspect.signature(model_caller)
+        except (TypeError, ValueError):
+            return model_caller(system_prompt, user_prompt)
+        if "stage" in sig.parameters:
+            return model_caller(system_prompt, user_prompt, stage=stage)
         return model_caller(system_prompt, user_prompt)
-    if "stage" in sig.parameters:
-        return model_caller(system_prompt, user_prompt, stage=stage)
-    return model_caller(system_prompt, user_prompt)
+
+    return run_paid_provider_call(stage_name, _dispatch)
 
 
 def _run_stage(
@@ -211,6 +218,9 @@ def _run_stage(
         logger.info("BUILDER1_STAGE_START stage=%s attempt=%s", stage, attempt)
         started_at = time.perf_counter()
         try:
+            from engine.builder1_paid_stage_guard import checkpoint_before_paid_call
+
+            checkpoint_before_paid_call(f"{stage}_attempt_{attempt}")
             try:
                 raw = _invoke_model_caller(
                     model_caller, system_prompt, current_prompt, stage=stage
@@ -250,6 +260,11 @@ def _run_stage(
                 logger.info("BUILDER1_STAGE_RETRY stage=%s", stage)
                 current_prompt = user_prompt
             except Exception as exc:
+                from engine.builder1_job_cancellation import Builder1JobCancelledError
+                from engine.builder1_paid_provider import PaidStageOutcomeUnknownError, PaidStageRetryBlockedError
+
+                if isinstance(exc, (Builder1JobCancelledError, PaidStageOutcomeUnknownError, PaidStageRetryBlockedError)):
+                    raise
                 logger.error("BUILDER1_STAGE_FAILED stage=%s err=%s", stage, exc)
                 if attempt == 2:
                     raise Builder1PlannerError(f"{stage}_failed") from exc

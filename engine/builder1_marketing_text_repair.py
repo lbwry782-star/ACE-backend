@@ -17,6 +17,10 @@ from engine.builder1_marketing_copy import (
     trim_marketing_text_to_50_words_if_usable,
     validate_marketing_text_language,
 )
+from engine.builder1_marketing_placeholders import (
+    marketing_placeholder_error,
+    sanitize_builder1_marketing_placeholder_residue,
+)
 from engine.builder1_staged_parsers import StageParseError, coerce_json_dict
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,9 @@ def _parse_repair_response(raw_payload: object, *, detected_language: str) -> Di
         err = marketing_text_word_count_error(text)
         if err:
             raise StageParseError("marketing_text_repair", [err])
+        placeholder_err = marketing_placeholder_error(text)
+        if placeholder_err:
+            raise StageParseError("marketing_text_repair", [placeholder_err])
         lang_err = marketing_text_language_error(text, detected_language)
         if lang_err:
             raise StageParseError("marketing_text_repair", [lang_err])
@@ -112,15 +119,24 @@ def ensure_series_ads_marketing_text(
         return working
 
     for attempt in (1, 2):
-        repairs = _run_marketing_text_repair(
-            working,
-            invalid_indexes=invalid,
-            detected_language=detected_language,
-            relative_advantage=relative_advantage,
-            product_name=product_name,
-            model_caller=model_caller,
-            attempt=attempt,
-        )
+        try:
+            repairs = _run_marketing_text_repair(
+                working,
+                invalid_indexes=invalid,
+                detected_language=detected_language,
+                relative_advantage=relative_advantage,
+                product_name=product_name,
+                model_caller=model_caller,
+                attempt=attempt,
+            )
+        except Exception as exc:
+            from engine.builder1_paid_provider import PaidStageOutcomeUnknownError, PaidStageRetryBlockedError
+
+            if isinstance(exc, (PaidStageOutcomeUnknownError, PaidStageRetryBlockedError)):
+                raise
+            if attempt == 2:
+                raise
+            continue
         for idx, text in repairs.items():
             for ad in working:
                 if int(ad.get("index", -1)) == idx:
@@ -143,7 +159,8 @@ def ensure_series_ads_marketing_text(
         ad = next(a for a in working if int(a.get("index", -1)) == idx)
         trimmed = trim_marketing_text_to_50_words_if_usable(ad.get("marketingText"))
         if trimmed and not marketing_text_word_count_error(trimmed):
-            if not marketing_text_language_error(trimmed, detected_language):
+            trimmed = sanitize_builder1_marketing_placeholder_residue(trimmed)
+            if not marketing_text_language_error(trimmed, detected_language) and not marketing_placeholder_error(trimmed):
                 ad["marketingText"] = trimmed
                 logger.info(
                     "BUILDER1_MARKETING_TEXT_OK adIndex=%s wordCount=%s source=trim",
@@ -187,6 +204,8 @@ def _collect_invalid_marketing_indexes(
         _log_marketing_language_check(ad_index=idx, detected_language=detected_language, text=text)
         if count != MARKETING_TEXT_WORD_COUNT or marketing_text_language_error(text, detected_language):
             invalid.append(idx)
+        elif marketing_placeholder_error(text):
+            invalid.append(idx)
     return list(dict.fromkeys(invalid))
 
 
@@ -228,7 +247,14 @@ def _run_marketing_text_repair(
         product_name=product_name,
         ads_to_repair=ads_to_repair,
     )
-    raw = model_caller(MARKETING_TEXT_REPAIR_SYSTEM, user_prompt)
+    from engine.builder1_paid_provider import run_paid_provider_call
+
+    stage = f"marketing_text_repair_attempt_{attempt}"
+
+    def _dispatch() -> object:
+        return model_caller(MARKETING_TEXT_REPAIR_SYSTEM, user_prompt)
+
+    raw = run_paid_provider_call(stage, _dispatch)
     repairs = _parse_repair_response(raw, detected_language=detected_language)
     for idx in invalid_indexes:
         if idx not in repairs:
