@@ -561,6 +561,23 @@ def video_status():
                 status = (job.get("status") or "error").strip()
         except Exception as e:
             logger.error("VIDEO_JOB_STALE_CHECK_ERR jobId=%s err=%s", job_id, e, exc_info=True)
+    try:
+        from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
+        from engine.builder2_job_ownership import builder2_video_status_ownership_denied
+        from engine.video_jobs_redis import video_job_get_raw
+
+        if resolve_builder2_tournament_enabled():
+            raw = video_job_get_raw(job_id) or {}
+            ownership_error = builder2_video_status_ownership_denied(raw, request)
+            if ownership_error:
+                logger.info(
+                    "VIDEO_JOB_POLL ownership_denied jobId=%s error=%s",
+                    job_id,
+                    ownership_error,
+                )
+                return jsonify({"ok": False, "error": ownership_error, "jobId": job_id}), 403
+    except Exception as e:
+        logger.debug("BUILDER2_VIDEO_STATUS_OWNERSHIP_SKIP jobId=%s err=%s", job_id, e)
     logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
     out = {"ok": True, "status": status, "jobId": job_id}
     try:

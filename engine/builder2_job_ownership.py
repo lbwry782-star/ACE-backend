@@ -114,3 +114,28 @@ def public_owner_fields(job_hash: Optional[Mapping[str, Any]]) -> Dict[str, Any]
     return {
         "ownerContextPresent": owner_context_present_in_job(job_hash),
     }
+
+
+def _is_builder2_job_hash(job_hash: Mapping[str, Any]) -> bool:
+    return _clean(job_hash.get("builder")) == "builder2" or bool(_clean(job_hash.get("builder2ResumeContractVersion")))
+
+
+def builder2_video_status_ownership_denied(
+    job_hash: Optional[Mapping[str, Any]],
+    request: Any,
+) -> Optional[str]:
+    """
+    Return an ownership error code when Builder2 video-status must be denied.
+
+    Non-Builder2 jobs and historical jobs without ownership metadata are not gated here.
+    """
+    if not isinstance(job_hash, Mapping) or not job_hash:
+        return None
+    if not _is_builder2_job_hash(job_hash):
+        return None
+    if is_historical_job_without_ownership(job_hash):
+        return None
+    ok, reason = verify_owner_context(job_hash, request)
+    if ok:
+        return None
+    return reason or "ownership_required"
