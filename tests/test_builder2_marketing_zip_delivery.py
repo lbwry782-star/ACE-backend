@@ -42,7 +42,7 @@ class TestPackagingMarketingText(unittest.TestCase):
         self.assertEqual(text, existing)
         self.assertEqual(source, "delivery_existing")
 
-    @patch("engine.runway_video._fallback_packaging_marketing_copy")
+    @patch("engine.runway_video.generate_builder2_packaging_marketing_copy")
     def test_generates_when_deterministic_fallback(self, mock_copy: Any) -> None:
         mock_copy.return_value = _fifty_word_copy()
         text, source = ensure_builder2_packaging_marketing_text(
@@ -155,7 +155,7 @@ class TestBuilder2DownloadZipEndpoint(unittest.TestCase):
             self.assertTrue(zf.read("ad.mp4"))
         fetch_mock.assert_called_once()
 
-    @patch("engine.runway_video._fallback_packaging_marketing_copy")
+    @patch("engine.runway_video.generate_builder2_packaging_marketing_copy")
     def test_zip_endpoint_does_not_generate_marketing_copy(self, mock_copy: Any) -> None:
         mock_copy.side_effect = AssertionError("marketing copy must not run during zip download")
         with patch("engine.builder2_zip_download.fetch_builder2_zip_video_bytes", return_value=b"video"):
@@ -167,7 +167,7 @@ class TestBuilder2DownloadZipEndpoint(unittest.TestCase):
 
 
 class TestParagraphNotTruncatedMidSentence(unittest.TestCase):
-    @patch("engine.runway_video._fallback_packaging_marketing_copy")
+    @patch("engine.runway_video.generate_builder2_packaging_marketing_copy")
     def test_finalize_paragraph_preserves_sentence_boundary(self, mock_copy: Any) -> None:
         sentence = " ".join(["This"] + [f"word{i}" for i in range(2, 46)] + ["works."])
         mock_copy.return_value = sentence

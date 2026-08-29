@@ -30,6 +30,7 @@ class MediaResumeIsolationGuard:
     zip_generation_enabled: bool = False
     active: bool = False
     reasoning_counters: MediaResumeReasoningCounters = MediaResumeReasoningCounters()
+    packaging_marketing_copy_calls: int = 0
 
     @classmethod
     def begin(cls) -> None:
@@ -46,6 +47,7 @@ class MediaResumeIsolationGuard:
         cls.lyria_enabled = False
         cls.zip_generation_enabled = False
         cls.reasoning_counters = MediaResumeReasoningCounters()
+        cls.packaging_marketing_copy_calls = 0
         cls.active = True
 
     @classmethod
@@ -92,6 +94,24 @@ class MediaResumeIsolationGuard:
         if not cls.active:
             return
         cls.reasoning_counters.increment(role)
+
+    @classmethod
+    def record_packaging_marketing_copy_call(cls, *, call_type: str = "normal") -> None:
+        """Count Builder2 delivery-phase marketing_copy OpenAI dispatches (post-isolation)."""
+        _ = call_type
+        cls.packaging_marketing_copy_calls += 1
+
+    @classmethod
+    def packaging_report(cls) -> dict[str, int]:
+        """
+        Delivery-phase OpenAI accounting. marketingCopyCalls counts actual packaging
+        marketing_copy dispatches for this invocation (including allowed retries).
+        totalReasoningCalls in reasoning_report() remains tournament/in-isolation only.
+        """
+        return {
+            "marketingCopyCalls": cls.packaging_marketing_copy_calls,
+            "totalOpenAIDispatchesThisRun": cls.packaging_marketing_copy_calls,
+        }
 
     @classmethod
     def assert_reasoning_isolated(cls) -> None:

@@ -950,6 +950,7 @@ def run_one_media_finalization_resume(
 
         from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
         from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+        from engine.builder2_product_description_resolve import resolve_builder2_product_description_for_packaging
 
         MediaResumeIsolationGuard.end()
         marketing_text = str(media.get("marketingText") or "")
@@ -958,7 +959,7 @@ def run_one_media_finalization_resume(
             existing_text=marketing_text,
             existing_source=marketing_source,
             product_name=str(state.get("productName") or plan.get("productNameResolved") or ""),
-            product_description=str(state.get("productDescription") or ""),
+            product_description=resolve_builder2_product_description_for_packaging(job_id=job_id, state=state),
             plan=plan,
             content_language=str(state.get("contentLanguage") or plan.get("language") or ""),
             headline_text=str(plan.get("headlineText") or ""),

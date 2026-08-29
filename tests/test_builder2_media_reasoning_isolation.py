@@ -35,6 +35,7 @@ from tests.test_builder2_media_resume import (
 
 
 def _fifty_word_packaging_copy(*_args: Any, **_kwargs: Any) -> str:
+    MediaResumeIsolationGuard.record_packaging_marketing_copy_call(call_type="normal")
     return " ".join(f"word{i}" for i in range(1, 51))
 
 
@@ -209,7 +210,7 @@ class TestMediaResumeReporting(unittest.TestCase):
         self.capability_patch.stop()
         disable_memory_store()
 
-    @patch("engine.runway_video._fallback_packaging_marketing_copy", side_effect=_fifty_word_packaging_copy)
+    @patch("engine.runway_video.generate_builder2_packaging_marketing_copy", side_effect=_fifty_word_packaging_copy)
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
     def test_success_reports_all_reasoning_counters_zero(self, _redis: Any, _packaging: Any) -> None:
@@ -221,13 +222,17 @@ class TestMediaResumeReporting(unittest.TestCase):
             pipeline_deps=_mock_pipeline_deps(),
         )
         self.assertTrue(report["ok"])
-        self.assertEqual(report["marketingCopyCalls"], 0)
+        self.assertEqual(report["marketingCopyCalls"], 1)
+        self.assertEqual(
+            report["totalOpenAIDispatchesThisRun"],
+            int(report.get("marketingCopyCalls") or 0) + int(report.get("startImageNormalCalls") or 0),
+        )
         self.assertEqual(report["headlineCalls"], 0)
         self.assertEqual(report["keywordCalls"], 0)
         self.assertEqual(report["otherReasoningCalls"], 0)
         self.assertEqual(report["totalReasoningCalls"], 0)
 
-    @patch("engine.runway_video._fallback_packaging_marketing_copy", side_effect=_fifty_word_packaging_copy)
+    @patch("engine.runway_video.generate_builder2_packaging_marketing_copy", side_effect=_fifty_word_packaging_copy)
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
     def test_completed_job_zero_calls(self, _redis: Any, _packaging: Any) -> None:

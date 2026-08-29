@@ -23,6 +23,7 @@ from engine.builder2_runway_config import (
 )
 from engine.builder2_tournament_contracts import WINNER_PLAN_SCHEMA_VERSION, Builder2TournamentError
 from engine.builder2_tournament_store import load_tournament_state, save_tournament_state
+from engine.builder2_product_description_resolve import resolve_builder2_product_description_for_packaging
 from engine.builder2_winner_downstream import Builder2WinnerDownstreamError, normalize_builder2_winner_downstream
 from engine.builder2_winner_persistence import (
     collect_winner_media_continuation_missing_fields,
@@ -66,6 +67,7 @@ def _initial_report(*, job_id: str, dry_run: bool = False) -> Dict[str, Any]:
         "keywordCalls": 0,
         "otherReasoningCalls": 0,
         "totalReasoningCalls": 0,
+        "totalOpenAIDispatchesThisRun": 0,
         "startImageCalls": 0,
         "startImageNormalCalls": 0,
         "startImageRepairCalls": 0,
@@ -352,7 +354,7 @@ def run_one_media_resume(
             existing_text=marketing_text,
             existing_source=marketing_source,
             product_name=str(state.get("productName") or plan.get("productNameResolved") or ""),
-            product_description=str(state.get("productDescription") or ""),
+            product_description=resolve_builder2_product_description_for_packaging(job_id=job_id, state=state),
             plan=plan,
             content_language=str(state.get("contentLanguage") or plan.get("language") or ""),
             headline_text=str(plan.get("headlineText") or ""),
@@ -465,6 +467,11 @@ def run_one_media_resume(
             save_tournament_state(job_id, state)
     finally:
         report.update(MediaResumeIsolationGuard.reasoning_report())
+        packaging = MediaResumeIsolationGuard.packaging_report()
+        report["marketingCopyCalls"] = packaging.get("marketingCopyCalls", 0)
+        report["totalOpenAIDispatchesThisRun"] = int(report.get("marketingCopyCalls") or 0) + int(
+            report.get("startImageNormalCalls") or 0
+        )
         MediaResumeIsolationGuard.end()
 
     return report
@@ -516,6 +523,7 @@ def print_media_resume_report(report: Dict[str, Any]) -> None:
         "keywordCalls",
         "otherReasoningCalls",
         "totalReasoningCalls",
+        "totalOpenAIDispatchesThisRun",
         "startImageCalls",
         "startImageNormalCalls",
         "startImageRepairCalls",

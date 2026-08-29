@@ -164,6 +164,7 @@ def run_one_advertising_closure_resume(
             if redis_configured() and final_url:
                 from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
                 from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+                from engine.builder2_product_description_resolve import resolve_builder2_product_description_for_packaging
 
                 media = state.setdefault("mediaResume", {})
                 MediaResumeIsolationGuard.end()
@@ -171,7 +172,7 @@ def run_one_advertising_closure_resume(
                     existing_text=str(media.get("marketingText") or ""),
                     existing_source=str(media.get("marketingCopySource") or ""),
                     product_name=str(state.get("productName") or plan.get("productNameResolved") or ""),
-                    product_description=str(state.get("productDescription") or ""),
+                    product_description=resolve_builder2_product_description_for_packaging(job_id=jid, state=state),
                     plan=plan if isinstance(plan, dict) else {},
                     content_language=str(state.get("contentLanguage") or (plan or {}).get("language") or ""),
                     headline_text=str((plan or {}).get("headlineText") or ""),

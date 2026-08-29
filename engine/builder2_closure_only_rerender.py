@@ -254,6 +254,7 @@ def run_builder2_closure_only_rerender(
         if redis_configured():
             from engine.builder2_media_resume_guard import MediaResumeIsolationGuard
             from engine.builder2_packaging_marketing_text import ensure_builder2_packaging_marketing_text
+            from engine.builder2_product_description_resolve import resolve_builder2_product_description_for_packaging
 
             plan = state.get("winnerDevelopmentPlan") if isinstance(state.get("winnerDevelopmentPlan"), dict) else {}
             MediaResumeIsolationGuard.end()
@@ -261,7 +262,7 @@ def run_builder2_closure_only_rerender(
                 existing_text=_clean(media.get("marketingText")),
                 existing_source=str(media.get("marketingCopySource") or ""),
                 product_name=str(state.get("productName") or plan.get("productNameResolved") or product_name or ""),
-                product_description=str(state.get("productDescription") or ""),
+                product_description=resolve_builder2_product_description_for_packaging(job_id=job_id, state=state),
                 plan=plan,
                 content_language=str(state.get("contentLanguage") or plan.get("language") or language or ""),
                 headline_text=str(plan.get("headlineText") or ""),

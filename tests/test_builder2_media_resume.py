@@ -25,6 +25,11 @@ HISTORICAL_JOB_ID = "5a3157a3-532f-44ef-86db-c777cff54d38"
 HISTORICAL_CANDIDATE_ID = "cand-1-summer_fan-1-57f415ca"
 
 
+def _fifty_word_packaging_copy(*_args: Any, **_kwargs: Any) -> str:
+    MediaResumeIsolationGuard.record_packaging_marketing_copy_call(call_type="normal")
+    return " ".join(f"word{i}" for i in range(1, 51))
+
+
 def _mock_start_image_data_uri() -> str:
     import base64
     import io
@@ -403,9 +408,10 @@ class TestMediaResumeExecution(unittest.TestCase):
         self.assertTrue(report["finalVideoAvailable"])
         self.assertEqual(captured.get("status"), "completed")
 
+    @patch("engine.runway_video.generate_builder2_packaging_marketing_copy", side_effect=_fifty_word_packaging_copy)
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
     @patch.dict(os.environ, {"RUNWAY_API_KEY": "rk-test", "OPENAI_API_KEY": "sk-test", "ACE_PUBLIC_BASE_URL": "https://example.com"}, clear=False)
-    def test_zero_reasoning_calls_on_media_path(self, _redis_cfg: Any) -> None:
+    def test_zero_reasoning_calls_on_media_path(self, _redis_cfg: Any, _packaging: Any) -> None:
         state = _media_ready_state(job_id="job-media-zero-reasoning")
         report = run_one_media_resume(
             job_id="job-media-zero-reasoning",
@@ -417,7 +423,7 @@ class TestMediaResumeExecution(unittest.TestCase):
         self.assertEqual(report["creatorCalls"], 0)
         self.assertEqual(report["judgeCalls"], 0)
         self.assertEqual(report["winnerCalls"], 0)
-        self.assertEqual(report["marketingCopyCalls"], 0)
+        self.assertEqual(report["marketingCopyCalls"], 1)
         self.assertEqual(report["totalReasoningCalls"], 0)
 
     @patch("engine.builder2_media_resume.redis_configured", return_value=False)
