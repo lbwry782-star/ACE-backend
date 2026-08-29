@@ -518,6 +518,19 @@ def resolve_complete_ad_canonical_resume_plan(
                     if _clean(state.get("winnerCandidateId"))
                     else RESUME_STAGE_WINNER_SELECTION
                 )
+    elif is_tournament_ready_for_winner_selection(state, read_only=read_only):
+        if not is_valid_persisted_winner_development(state):
+            if parsed_winner_reusable_for_candidate(
+                state,
+                winner_candidate_id=_clean(state.get("winnerCandidateId")),
+            ):
+                resolved_stage = RESUME_STAGE_WINNER_OFFLINE_REVALIDATION
+            else:
+                resolved_stage = (
+                    RESUME_STAGE_WINNER_DEVELOPMENT
+                    if _clean(state.get("winnerCandidateId"))
+                    else RESUME_STAGE_WINNER_SELECTION
+                )
     elif accepted_creators == 6 and accepted_judgments == 6:
         if not is_valid_persisted_winner_development(state):
             if parsed_winner_reusable_for_candidate(
@@ -581,7 +594,7 @@ def resolve_complete_ad_canonical_resume_plan(
     pending_repair_candidate_ids = pending_judge_repair_candidate_ids(state)
     mixed_call_plan = compute_mixed_partial_call_plan(
         missing_creator_prototype_ids=missing_creators,
-        missing_judgment_prototype_ids=missing_actionable_judges,
+        missing_judgment_prototype_ids=sorted(set(missing_actionable_judges) | set(missing_creators)),
         required_judge_repair_calls=required_judge_repair_calls,
         per_invocation_call_limit=PER_INVOCATION_REASONING_CALL_LIMIT,
     )

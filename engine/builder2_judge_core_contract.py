@@ -232,7 +232,10 @@ def build_judge_factual_grounding_prompt_text() -> str:
         "Every gate must be JSON boolean true or false — false is valid when the candidate is not factually grounded.\n"
         "notes must be a non-empty string explaining the factual-grounding assessment.\n"
         "Never omit factualGroundingAssessment merely because eligible=false.\n"
-        "Compare product claims against the original product description and Strategy evidence ledger."
+        "Compare product claims against the original product description, productSemanticBrief explicitFacts, "
+        "and licensedImplications — not identical wording.\n"
+        "Reject unsupported capabilities listed in restrictedCapabilities unless explicitly supplied.\n"
+        "Internal creatorReport analysis and explicit negations are not public product claims."
     )
 
 

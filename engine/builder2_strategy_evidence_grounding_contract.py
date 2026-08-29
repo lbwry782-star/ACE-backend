@@ -12,6 +12,14 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from engine.builder2_product_semantic_brief import (
+    collect_creator_claim_bearing_fields,
+    collect_creator_text_fields as _collect_all_creator_text_fields,
+    find_grounding_violations,
+    get_product_semantic_brief,
+    merge_product_semantic_brief,
+    validate_product_semantic_brief,
+)
 from engine.builder2_tournament_contracts import Builder2TournamentError
 
 BUILDER2_STRATEGY_EVIDENCE_GROUNDING_CONTRACT_VERSION = "builder2_strategy_evidence_grounding_v1"
@@ -149,23 +157,7 @@ _GENERIC_UNGROUNDED_ADVANTAGE_PATTERNS: Tuple[re.Pattern[str], ...] = (
 _CONSERVATIVE_MARKET_STATUSES = frozenset({"prelaunch", "concept_stage", "unknown"})
 _CONSERVATIVE_DENSITIES = frozenset({"sparse", "minimal"})
 
-_CREATOR_TEXT_FIELDS: Tuple[str, ...] = (
-    "coreCreativeMechanism",
-    "visualMechanism",
-    "conceptSummary",
-    "creatorReport.problemPerception",
-    "creatorReport.relativeAdvantage",
-    "creatorReport.mechanismScanSummary",
-    "creatorReport.whyParallelExpressesAdvantage",
-    "advertisingClosure.sloganText",
-    "advertisingSloganFormulation.finalSloganText",
-    "advertisingSloganFormulation.whyThisIsAdvertisingCopy",
-    "sevenSecondStructure.beginning",
-    "sevenSecondStructure.development",
-    "sevenSecondStructure.resolution",
-    "visualAnchor.description",
-    "visualAnchor.whyEssential",
-)
+# Claim-bearing vs internal analysis field lists live in builder2_product_semantic_brief.
 
 
 def _clean(value: Any) -> str:
@@ -581,6 +573,14 @@ def apply_strategy_evidence_grounding(
     ra.setdefault("unsupportedAssumptions", [hit["capability"] for hit in unsupported_hits])
     ra.setdefault("relativeAdvantageFactuallyGrounded", not unsupported_hits)
     out["relativeAdvantage"] = ra
+    existing_block = out.get("strategyEvidenceGrounding") if isinstance(out.get("strategyEvidenceGrounding"), dict) else {}
+    llm_brief = existing_block.get("productSemanticBrief") if isinstance(existing_block, dict) else None
+    product_semantic_brief = merge_product_semantic_brief(
+        llm_brief if isinstance(llm_brief, dict) else None,
+        product_name=product_name,
+        product_description=product_description,
+        target_audience=target_audience,
+    )
     out["strategyEvidenceGrounding"] = {
         "contractVersion": BUILDER2_STRATEGY_EVIDENCE_GROUNDING_CONTRACT_VERSION,
         "productMarketStatus": audit["productMarketStatus"],
@@ -591,6 +591,7 @@ def apply_strategy_evidence_grounding(
         "unsupportedAssumptions": [hit["capability"] for hit in unsupported_hits],
         "allowedCapabilities": allowed_capabilities,
         "productInputAudit": audit,
+        "productSemanticBrief": product_semantic_brief,
     }
     return out
 
@@ -634,6 +635,13 @@ def validate_strategy_evidence_grounding(
         if pattern.search(statement):
             _raise("builder2_strategy_validation_failed", field="relativeAdvantage.statement.ungrounded_generic_claim")
 
+    brief = block.get("productSemanticBrief")
+    if isinstance(brief, dict):
+        try:
+            validate_product_semantic_brief(brief, product_description=product_description)
+        except ValueError as exc:
+            _raise("builder2_strategy_validation_failed", field=f"strategyEvidenceGrounding.productSemanticBrief.{exc}")
+
 
 def _get_nested_text(candidate: Dict[str, Any], field_path: str) -> str:
     current: Any = candidate
@@ -645,30 +653,37 @@ def _get_nested_text(candidate: Dict[str, Any], field_path: str) -> str:
 
 
 def collect_creator_text_fields(candidate: Dict[str, Any]) -> List[Tuple[str, str]]:
-    texts: List[Tuple[str, str]] = []
-    for field_path in _CREATOR_TEXT_FIELDS:
-        text = _get_nested_text(candidate, field_path)
-        if text:
-            texts.append((field_path, text))
-    return texts
+    return _collect_all_creator_text_fields(candidate)
 
 
 def stamp_creator_evidence_inheritance(
     candidate: Dict[str, Any],
     *,
     strategy_foundation: Dict[str, Any],
+    product_description: str = "",
 ) -> None:
     block = strategy_foundation.get("strategyEvidenceGrounding")
     if not isinstance(block, dict):
         return
     ra = strategy_foundation.get("relativeAdvantage") if isinstance(strategy_foundation.get("relativeAdvantage"), dict) else {}
+    brief = get_product_semantic_brief(
+        strategy_foundation,
+        product_name=_clean(strategy_foundation.get("productNameResolved")),
+        product_description=product_description,
+    )
     candidate["inheritedProductFacts"] = list(block.get("explicitProductFacts") or [])
     candidate["inheritedRelativeAdvantageEvidence"] = list(ra.get("relativeAdvantageEvidence") or [])
-    unsupported = scan_texts_for_unsupported_capabilities(
-        collect_creator_text_fields(candidate),
-        allowed_capabilities=block.get("allowedCapabilities") or [],
+    candidate["inheritedProductSemanticBrief"] = brief
+    allowed_capabilities = list(brief.get("allowedCapabilities") or block.get("allowedCapabilities") or [])
+    claim_texts = collect_creator_claim_bearing_fields(candidate)
+    violations = find_grounding_violations(
+        claim_texts,
+        brief=brief,
+        allowed_capabilities=allowed_capabilities,
+        scan_fn=scan_texts_for_unsupported_capabilities,
     )
-    introduced = sorted({hit["capability"] for hit in unsupported})
+    introduced = sorted({_clean(item.get("capability")) for item in violations if _clean(item.get("capability"))})
+    candidate["groundingViolations"] = violations
     candidate["newProductClaimsIntroduced"] = introduced
     candidate["creatorFactuallyGrounded"] = not introduced
 
@@ -910,7 +925,7 @@ def inspect_disputed_capability_introduction(
             [
                 item
                 for candidate in candidates
-                for item in collect_creator_text_fields(candidate if isinstance(candidate, dict) else {})
+                for item in collect_creator_claim_bearing_fields(candidate if isinstance(candidate, dict) else {})
             ],
         ),
     ):
