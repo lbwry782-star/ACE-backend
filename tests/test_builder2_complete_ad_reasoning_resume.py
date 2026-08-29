@@ -105,6 +105,13 @@ class TestControlledReasoningPreconditions(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIsNone(reason)
 
+    def test_degraded_terminal_uri_lev_passes(self) -> None:
+        from tests.test_builder2_tournament_terminal_slots import _uri_lev_production_state
+
+        ok, reason = validate_controlled_complete_ad_preconditions(_uri_lev_production_state())
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+
 
 class TestControlledReasoningCallBudget(unittest.TestCase):
     def test_fourth_call_blocked_before_submission(self) -> None:

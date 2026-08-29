@@ -39,9 +39,11 @@ from engine.builder2_complete_ad_resume_plan import (
     RESUME_STAGE_JUDGE_GENERATION,
     RESUME_STAGE_MIXED_PARTIAL,
     RESUME_STAGE_WINNER_DEVELOPMENT,
+    RESUME_STAGE_WINNER_SELECTION,
     build_resume_plan_by_prototype,
     parsed_winner_reusable_for_candidate,
     resolve_complete_ad_canonical_resume_plan,
+    validate_controlled_reasoning_resume_partial_state,
 )
 from engine.builder2_creator import generate_creator_candidate, is_slogan_word_limit_failure
 from engine.builder2_creator_slogan_repair_patch import (
@@ -80,7 +82,6 @@ from engine.builder2_tournament_completion_gate import (
     mark_authoritative_winner_selection,
     missing_creator_prototype_ids,
     missing_judge_prototype_ids,
-    tournament_resolution_summary,
 )
 from engine.builder2_tournament_contracts import Builder2TournamentError
 from engine.builder2_tournament_manager import select_global_winner
@@ -242,47 +243,15 @@ def validate_controlled_complete_ad_preconditions(
     *,
     expected_missing_prototype: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
-    from engine.builder2_complete_ad_resume_plan import evaluate_complete_ad_reasoning_executor_preconditions
-
-    ok, reason, plan = evaluate_complete_ad_reasoning_executor_preconditions(state, job_raw)
-    if not ok:
-        return False, reason
-
-    summary = plan.get("summary") or {}
-    missing_creators = list(plan.get("missingCreatorPrototypeIds") or [])
-    missing_judges = list(plan.get("missingJudgmentPrototypeIds") or [])
-    accepted_creators = int(plan.get("acceptedCreatorCount") or 0)
-    accepted_judgments = int(plan.get("acceptedJudgmentCount") or 0)
-    stage = _clean(plan.get("resolvedResumeStage"))
-
-    if accepted_creators == 6 and accepted_judgments == 6:
-        return True, None
-
-    if stage == RESUME_STAGE_JUDGE_GENERATION and accepted_creators == 6 and not missing_creators:
-        return True, None
-
-    if stage == RESUME_STAGE_MIXED_PARTIAL:
-        return True, None
-
-    if stage == RESUME_STAGE_WINNER_DEVELOPMENT:
-        winner_id = _clean(plan.get("finalWinnerCandidateId") or state.get("winnerCandidateId"))
-        if winner_id and is_reasoning_complete_for_winner_selection(state) and not is_valid_persisted_winner_development(state):
-            return True, None
-
-    if accepted_creators != 5 or accepted_judgments != 5:
-        return False, "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
-
-    if expected_missing_prototype is None:
-        expected_missing_prototype = _resolve_single_missing_creator_prototype(state)
-    if not expected_missing_prototype:
-        return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_creator"
-
-    if missing_creators != [expected_missing_prototype]:
-        return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_creator"
-    if expected_missing_prototype not in missing_judges:
-        return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_judge"
-
-    return True, None
+    plan = resolve_complete_ad_canonical_resume_plan(state, job_raw=job_raw)
+    if not plan.get("resumeEligible"):
+        return False, plan.get("executorRejectionReason")
+    ok, reason = validate_controlled_reasoning_resume_partial_state(
+        state,
+        plan,
+        expected_missing_prototype=expected_missing_prototype,
+    )
+    return ok, reason
 
 
 def _candidate_id_for_prototype(state: Dict[str, Any], prototype_id: str) -> Optional[str]:
@@ -298,12 +267,12 @@ def _candidate_id_for_prototype(state: Dict[str, Any], prototype_id: str) -> Opt
 
 
 def _controlled_reasoning_already_complete(state: Dict[str, Any]) -> bool:
-    summary = tournament_resolution_summary(state)
-    if summary["acceptedCreatorCount"] != 6 or summary["acceptedJudgmentCount"] != 6:
-        return False
     if not is_valid_persisted_winner_development(state):
         return False
     if state.get("mediaStarted"):
+        return False
+    winner_id = _clean(state.get("winnerDevelopmentCandidateId") or state.get("winnerCandidateId"))
+    if not winner_id:
         return False
     if state.get("reasoningComplete") and _clean(state.get("progressStage")) == "media_prerequisite_validation":
         return True
@@ -1200,6 +1169,70 @@ def _execute_mixed_partial_reasoning_resume(
     return report
 
 
+def _execute_winner_selection_reasoning_resume(
+    *,
+    state: Dict[str, Any],
+    job_id: str,
+    report: Dict[str, Any],
+    budget: ControlledReasoningCallBudget,
+    strategy: Dict[str, Any],
+    product_name: str,
+    product_description: str,
+    language: str,
+    compatibility_mode: bool,
+    llm_client: Optional[Any],
+    lease_acquired: bool,
+    stop_before_media: bool,
+    runway_mode: str,
+) -> Dict[str, Any]:
+    _clear_stale_winner_before_recompute(state)
+    provisional_winner = _clean(state.get("provisionalWinnerCandidateId"))
+
+    try:
+        winner_id = select_global_winner(state)
+    except Builder2TournamentError as exc:
+        reason = str(exc.args[0] if exc.args else "builder2_no_factually_eligible_candidate")
+        _persist_resumable_failure(
+            state,
+            job_id=job_id,
+            failure_stage="winner_selection",
+            failure_reason=reason,
+        )
+        report["strategyReused"] = True
+        return _emit_resume_stage_failure(
+            report,
+            state,
+            job_id=job_id,
+            failure_stage="winner_selection",
+            failure_reason=reason,
+            budget=budget,
+            reasoning_role="builder2_winner",
+            redis_mutated=True,
+            lease_acquired=lease_acquired,
+        )
+
+    mark_authoritative_winner_selection(state, winner_id=winner_id)
+    save_tournament_state(job_id, state)
+
+    return _dispatch_winner_development_for_selected_winner(
+        state=state,
+        job_id=job_id,
+        report=report,
+        budget=budget,
+        strategy=strategy,
+        winner_id=winner_id,
+        product_name=product_name,
+        product_description=product_description,
+        language=language,
+        compatibility_mode=compatibility_mode,
+        llm_client=llm_client,
+        lease_acquired=lease_acquired,
+        stop_before_media=stop_before_media,
+        runway_mode=runway_mode,
+        provisional_winner=provisional_winner,
+    )
+
+
 def _dispatch_winner_development_for_selected_winner(
     *,
     state: Dict[str, Any],
@@ -1526,6 +1559,28 @@ def run_controlled_complete_ad_reasoning_resume(
             language = _clean(state.get("contentLanguage") or state.get("language") or strategy.get("language") or "he")
             runway_mode = builder2_runway_generation_mode(resolve_builder2_runway_video_model())
             return _execute_mixed_partial_reasoning_resume(
+                state=state,
+                job_id=job_id,
+                report=report,
+                budget=budget,
+                strategy=strategy,
+                product_name=product_name,
+                product_description=product_description,
+                language=language,
+                compatibility_mode=compatibility_mode,
+                llm_client=llm_client,
+                lease_acquired=lease_acquired,
+                stop_before_media=stop_before_media,
+                runway_mode=runway_mode,
+            )
+
+        if canonical_plan.get("resolvedResumeStage") == RESUME_STAGE_WINNER_SELECTION:
+            current_stage = RESUME_STAGE_WINNER_SELECTION
+            product_name = _clean(strategy.get("productNameResolved") or state.get("productNameResolved") or "Product")
+            product_description = _clean(state.get("productDescription") or "Product description")
+            language = _clean(state.get("contentLanguage") or state.get("language") or strategy.get("language") or "he")
+            runway_mode = builder2_runway_generation_mode(resolve_builder2_runway_video_model())
+            return _execute_winner_selection_reasoning_resume(
                 state=state,
                 job_id=job_id,
                 report=report,
@@ -2063,7 +2118,7 @@ def run_controlled_complete_ad_reasoning_resume(
 
         report["acceptedCreatorCount"] = accepted_creator_count(state)
         report["acceptedJudgmentCount"] = accepted_judgment_count(state)
-        if report["acceptedCreatorCount"] != 6 or report["acceptedJudgmentCount"] != 6:
+        if not is_reasoning_complete_for_winner_selection(state):
             reason = "builder2_complete_ad_reasoning_resume_six_way_incomplete"
             _persist_resumable_failure(
                 state,

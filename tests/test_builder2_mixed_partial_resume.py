@@ -155,6 +155,9 @@ class TestMixedPartialResumePlanning(unittest.TestCase):
         self.assertEqual(by_proto["think_small"]["judgeAction"], "dispatch")
         self.assertEqual(by_proto["winning_card"]["creatorAction"], "dispatch")
         self.assertEqual(by_proto["winning_card"]["judgeAction"], "dispatch_after_creator")
+        self.assertEqual(by_proto["summer_fan"]["creatorAction"], "dispatch")
+        self.assertEqual(by_proto["forgot"]["creatorAction"], "dispatch")
+        self.assertEqual(by_proto["greenpeace_essential_pairing"]["creatorAction"], "dispatch")
 
     def test_failed_unrelated_state_still_rejected(self) -> None:
         state = _production_mixed_partial_state()
@@ -294,8 +297,11 @@ class TestCompleteAdResumeInspectorFields(unittest.TestCase):
         self.assertEqual(report["remainingJudgeNormalCalls"], 6)
         self.assertEqual(report["normalCallsBeforeWinner"], 10)
         self.assertEqual(len(report["missingCreatorPrototypeIds"]), 4)
-        self.assertEqual(len(report["missingJudgmentPrototypeIds"]), 6)
+        self.assertEqual(report["missingJudgmentPrototypeIds"], ["closest", "think_small"])
+        self.assertEqual(len(report["actionableMissingJudgmentPrototypeIds"]), 2)
+        self.assertEqual(report["remainingJudgeNormalCalls"], 6)
         self.assertEqual(report["resumePlanByPrototype"]["closest"]["judgeAction"], "dispatch")
+        self.assertEqual(report["resumePlanByPrototype"]["winning_card"]["creatorAction"], "dispatch")
         self.assertFalse(report["strategyWouldDispatch"])
 
 

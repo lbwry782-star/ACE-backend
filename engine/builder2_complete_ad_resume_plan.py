@@ -329,7 +329,7 @@ def build_resume_plan_by_prototype(
         repair_ctx = resolve_judge_repair_resume_context(state, candidate_id) if candidate_id else {"kind": "none"}
         pending = repair_ctx.get("pending") or (resolve_pending_judge_repair(state, candidate_id) if candidate_id else None)
         has_creator = prototype_id not in missing_creators
-        has_judgment = prototype_id not in missing_judges
+        has_judgment = has_creator and prototype_id not in missing_judges
         if has_judgment:
             creator_action = "reuse"
             judge_action = "reuse"
@@ -683,7 +683,7 @@ def resolve_complete_ad_canonical_resume_plan(
         winner_closure = state.get("advertisingClosure") if isinstance(state.get("advertisingClosure"), dict) else {}
         accepted_winner_closure_present = bool(_clean(winner_closure.get("sloganText")))
 
-    return {
+    plan: Dict[str, Any] = {
         "jobId": job_id or None,
         "tournamentId": tournament_id or None,
         "jobStatus": _clean(state.get("status")) or None,
@@ -786,6 +786,99 @@ def resolve_complete_ad_canonical_resume_plan(
         "summary": summary,
         "rolePlan": role_plan,
     }
+    if resume_eligible:
+        executor_ok, executor_reason = validate_controlled_reasoning_resume_partial_state(state, plan)
+        if not executor_ok:
+            plan["executorWouldAcceptState"] = False
+            plan["executorRejectionReason"] = executor_reason
+    return plan
+
+
+def _resolve_single_missing_creator_prototype(state: Dict[str, Any]) -> Optional[str]:
+    missing = missing_creator_prototype_ids(state)
+    return missing[0] if len(missing) == 1 else None
+
+
+def _reasoning_handoff_complete(state: Dict[str, Any]) -> bool:
+    if not is_valid_persisted_winner_development(state):
+        return False
+    progress = _clean(state.get("progressStage"))
+    if state.get("reasoningComplete") and progress in {
+        RESUME_STAGE_MEDIA_PREREQUISITE,
+        RESUME_STAGE_REASONING_COMPLETE,
+        "media_prerequisite_validation",
+    }:
+        return True
+    bucket = state.get("controlledCompleteAdReasoningResume")
+    return isinstance(bucket, dict) and bool(bucket.get("stoppedBeforeMedia"))
+
+
+def validate_controlled_reasoning_resume_partial_state(
+    state: Dict[str, Any],
+    plan: Dict[str, Any],
+    *,
+    expected_missing_prototype: Optional[str] = None,
+) -> tuple[bool, Optional[str]]:
+    """
+    Second-layer controlled reasoning resume validation shared by inspector and executor.
+
+    Uses canonical terminal-slot readiness for winner_selection; legacy 5/5 single-missing
+    patterns remain for incomplete tournaments that still need slot completion.
+    """
+    missing_creators = list(plan.get("missingCreatorPrototypeIds") or [])
+    missing_judges = list(plan.get("missingJudgmentPrototypeIds") or [])
+    accepted_creators = int(plan.get("acceptedCreatorCount") or 0)
+    accepted_judgments = int(plan.get("acceptedJudgmentCount") or 0)
+    stage = _clean(plan.get("resolvedResumeStage"))
+
+    if _reasoning_handoff_complete(state):
+        return True, None
+
+    if accepted_creators == 6 and accepted_judgments == 6:
+        return True, None
+
+    if stage == RESUME_STAGE_JUDGE_GENERATION and accepted_creators == 6 and not missing_creators:
+        return True, None
+
+    if stage == RESUME_STAGE_MIXED_PARTIAL:
+        return True, None
+
+    if stage == RESUME_STAGE_WINNER_SELECTION:
+        if is_reasoning_complete_for_winner_selection(state):
+            return True, None
+        return False, "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
+
+    if stage == RESUME_STAGE_WINNER_DEVELOPMENT:
+        winner_id = _clean(plan.get("finalWinnerCandidateId") or state.get("winnerCandidateId"))
+        if (
+            winner_id
+            and is_reasoning_complete_for_winner_selection(state)
+            and not is_valid_persisted_winner_development(state)
+        ):
+            return True, None
+
+    if stage == RESUME_STAGE_CREATOR_GENERATION:
+        if accepted_creators == 5 and accepted_judgments == 5 and len(missing_creators) == 1:
+            if expected_missing_prototype is None:
+                expected_missing_prototype = _resolve_single_missing_creator_prototype(state)
+            if expected_missing_prototype and missing_creators == [expected_missing_prototype]:
+                return True, None
+        return False, "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
+
+    if accepted_creators != 5 or accepted_judgments != 5:
+        return False, "builder2_complete_ad_reasoning_resume_unexpected_partial_state"
+
+    if expected_missing_prototype is None:
+        expected_missing_prototype = _resolve_single_missing_creator_prototype(state)
+    if not expected_missing_prototype:
+        return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_creator"
+
+    if missing_creators != [expected_missing_prototype]:
+        return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_creator"
+    if expected_missing_prototype not in missing_judges:
+        return False, "builder2_complete_ad_reasoning_resume_unexpected_missing_judge"
+
+    return True, None
 
 
 def evaluate_complete_ad_reasoning_executor_preconditions(
