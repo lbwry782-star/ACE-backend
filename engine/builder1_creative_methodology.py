@@ -8,6 +8,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from engine.builder1_no_logo import deterministic_no_logo_checks
 from engine.builder1_slogan_stage import SLOGAN_REJECTION_CODES, is_slogan_rejection
+from engine.builder1_advertising_comprehension import (
+    ADVERTISING_COMPREHENSION_REJECTION_CODES,
+    scan_advertising_comprehension,
+)
 from engine.builder1_literal_embodiment import (
     LITERAL_EMBODIMENT_REJECTION_CODES,
     scan_literal_embodiment_bias,
@@ -16,6 +20,7 @@ from engine.builder1_literal_embodiment import (
 METHODOLOGY_REJECTION_CODES = frozenset(
     SLOGAN_REJECTION_CODES
     | LITERAL_EMBODIMENT_REJECTION_CODES
+    | ADVERTISING_COMPREHENSION_REJECTION_CODES
     | {
         "conceptual_generator_not_derived_from_slogan",
         "physical_generator_not_derived_from_concept",
@@ -138,6 +143,9 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
             "series_literal_category_trap",
             "expressive_object_weakened",
             "literal_slogan_illustration",
+            "advertising_bridge_unclear",
+            "multi_hop_symbolic_chain",
+            "dominant_object_strategic_role_missing",
         )
     ):
         return "series_ads"
@@ -197,6 +205,9 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
                     "series_literal_category_trap",
                     "expressive_object_weakened",
                     "literal_slogan_illustration",
+                    "advertising_bridge_unclear",
+                    "multi_hop_symbolic_chain",
+                    "dominant_object_strategic_role_missing",
                 }
             ),
         ),
@@ -387,6 +398,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
             reasons.append("no_mechanism_reuse_inside_campaign")
 
     reasons.extend(scan_literal_embodiment_bias(plan_dict))
+    reasons.extend(scan_advertising_comprehension(plan_dict))
 
     return list(dict.fromkeys(reasons))
 

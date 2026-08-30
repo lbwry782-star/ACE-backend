@@ -1147,6 +1147,7 @@ def _builder1_retry_error_response(
         "preservedThroughStage": getattr(session, "preserved_through_stage", None),
         "userMessage": user_message,
         "lastImageViolations": hard_codes,
+        "violations": hard_codes,
         "hardViolationCodes": hard_codes,
         "advisoryCodes": advisory,
         "planRevision": getattr(session, "plan_revision", 1),

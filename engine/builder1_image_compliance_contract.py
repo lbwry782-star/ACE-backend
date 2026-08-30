@@ -16,11 +16,15 @@ from engine.builder1_compliance_product_grounding import (
     parse_product_match,
     product_match_schema_properties,
 )
+from engine.builder1_advertising_comprehension import (
+    EXECUTION_FIDELITY_VIOLATION_CODES,
+    build_planned_execution_compliance_block,
+)
 from engine.builder1_plan_spec import Builder1SeriesPlan
 
 logger = logging.getLogger(__name__)
 
-COMPLIANCE_SCHEMA_VERSION = "builder1_image_compliance_v3"
+COMPLIANCE_SCHEMA_VERSION = "builder1_image_compliance_v4"
 
 IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
     {
@@ -35,6 +39,7 @@ IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
         "product_used_as_physical_generator",
         "product_used_as_main_visual",
     }
+    | EXECUTION_FIDELITY_VIOLATION_CODES
 )
 
 IMAGE_COMPLIANCE_CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
@@ -435,12 +440,14 @@ def build_compliance_responses_request_kwargs(
     if series_plan is not None:
         context = build_compliance_grounding_context(series_plan, ad_index=ad_index)
         grounding_block = build_compliance_grounding_user_block(context)
+        planned_block = build_planned_execution_compliance_block(series_plan, ad_index=ad_index)
+        grounding_block = f"{grounding_block}\n\n{planned_block}" if grounding_block else planned_block
     user_text = (
         f'Product name allowed as plain text only: "{product_name}".\n'
         f"Product visibility policy: {visibility_policy}.\n"
         f"Approved transferred physical generator: {transferred_object or '(see campaign plan)'}.\n"
         f"Product description (for identifying unauthorized product depictions): {product_description}\n"
-        "Review this generated Builder1 advertisement image for logo and product-visibility compliance."
+        "Review this generated Builder1 advertisement image for logo, product-visibility, and planned-execution fidelity."
     )
     if grounding_block:
         user_text = f"{user_text}\n\n{grounding_block}"

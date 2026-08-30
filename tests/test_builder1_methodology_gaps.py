@@ -19,6 +19,7 @@ from engine.builder1_creative_methodology import (
     is_foundational_strategic_rejection,
     scan_prompt_for_reused_mechanisms,
 )
+from engine.builder1_advertising_comprehension import EXECUTION_FIDELITY_VIOLATION_CODES
 from engine.builder1_image_compliance import (
     IMAGE_COMPLIANCE_VIOLATION_CODES,
     ImageComplianceResult,
@@ -236,7 +237,8 @@ class TestImageCompliance(unittest.TestCase):
                     "product_used_as_physical_generator",
                     "product_used_as_main_visual",
                 }
-            ),
+            )
+            | EXECUTION_FIDELITY_VIOLATION_CODES,
         )
 
     def test_compliant_text_only_product_name_passes(self) -> None:

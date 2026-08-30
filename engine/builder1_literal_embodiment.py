@@ -698,6 +698,7 @@ def validate_visual_prompt_expressive_object(
     prompt: str,
     *,
     series_plan: Builder1SeriesPlan,
+    ad_index: int = 1,
 ) -> List[str]:
     reasons: List[str] = []
     transferred = _norm(series_plan.transferred_object or series_plan.physical_generator)
@@ -713,9 +714,6 @@ def validate_visual_prompt_expressive_object(
         if line.strip().startswith(("MAIN VISUAL:", "ACTION:", "Composition execution:"))
     ]
     lowered_main = " ".join(focus_lines) if focus_lines else main_visual.casefold()
-
-    if contains_literal_route_family(transferred):
-        return reasons
 
     if contains_literal_route_family(lowered_main):
         reasons.append("expressive_object_weakened")
@@ -759,9 +757,6 @@ def validate_visual_prompt_slogan_noun_reintroduction(
     ]
     lowered_main = " ".join(focus_lines)
     if not lowered_main:
-        return []
-
-    if contains_literal_route_family(transferred):
         return []
 
     slogan_tokens = extract_slogan_content_tokens(

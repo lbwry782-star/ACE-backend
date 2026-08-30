@@ -90,7 +90,16 @@ Violation codes for hardViolations or evidence.code:
 invented_product_logo, supplied_logo_displayed, logo_like_brand_symbol,
 packaging_contains_brand_mark, campaign_device_used_as_logo, product_name_rendered_as_logo,
 product_visible_without_explicit_request, packaging_visible_without_explicit_request,
-product_used_as_physical_generator, product_used_as_main_visual
+product_used_as_physical_generator, product_used_as_main_visual,
+planned_scene_diverged, planned_mechanism_diverged, central_proof_not_visible,
+unintended_dominant_interpretation, advertising_bridge_not_recoverable,
+relative_advantage_not_expressed, visual_slogan_mechanism_mismatch, dominant_subject_diverged
+
+Execution fidelity (same review call — not aesthetic criticism):
+- Compare generated pixels to PLANNED EXECUTION CONTEXT in the user message.
+- Fail only with concrete visible evidence: wrong object/context, missing central proof,
+  unintended dominant interpretation, or advertising meaning not recoverable from pixels.
+- Do not fail merely because the image is plain or imperfectly composed.
 
 Advisory codes may include:
 possible_product_resemblance, possible_logo_like_shape,

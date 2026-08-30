@@ -17,6 +17,7 @@ from engine.builder1_compliance_product_grounding import (
     log_product_match_decision,
     reference_image_actually_supplied,
 )
+from engine.builder1_advertising_comprehension import EXECUTION_FIDELITY_VIOLATION_CODES
 from engine.builder1_failure_classification import validate_forbidden_plan_visibility
 from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_product_modality import ProductModality, resolve_product_modality
@@ -58,6 +59,8 @@ PIXEL_PRODUCT_VISIBILITY_CODES = frozenset(
         "packaging_visible_without_explicit_request",
     }
 )
+
+EXECUTION_FIDELITY_HARD_CODES = frozenset(EXECUTION_FIDELITY_VIOLATION_CODES)
 
 CONCRETE_DIGITAL_PRODUCT_EVIDENCE = frozenset(
     {
@@ -400,6 +403,13 @@ def adjudicate_compliance_review(
                     advisories.append("low_confidence_product_identification")
             else:
                 advisories.append("possible_product_resemblance")
+            continue
+
+        if code in EXECUTION_FIDELITY_HARD_CODES:
+            if _confidence_rank(confidence) >= 2:
+                hard.append(code)
+            else:
+                advisories.append(f"possible_{code}")
             continue
 
         if code in ADVISORY_CODES:

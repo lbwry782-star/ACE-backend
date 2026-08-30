@@ -6,6 +6,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
+from engine.builder1_advertising_comprehension import (
+    EXECUTION_FIDELITY_VIOLATION_CODES,
+    build_execution_fidelity_correction_block,
+)
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_visibility import (
@@ -173,7 +177,12 @@ def build_positive_main_visual_block(
     )
 
 
-def build_violation_specific_corrections(violations: Sequence[str]) -> List[str]:
+def build_violation_specific_corrections(
+    violations: Sequence[str],
+    *,
+    series_plan: Builder1SeriesPlan,
+    ad_index: int = 1,
+) -> List[str]:
     blocks: List[str] = []
     normalized = set(normalize_violation_union(violations))
     logo_related = normalized & LOGO_VIOLATION_CODES
@@ -186,6 +195,15 @@ def build_violation_specific_corrections(violations: Sequence[str]) -> List[str]
         blocks.append(PRODUCT_VISIBILITY_CORRECTION)
         if "product_visible_without_explicit_request" in normalized or visibility_related:
             blocks.append(BUILDER1_NO_PRODUCT_STRICT_CORRECTION_BLOCK)
+    fidelity_related = normalized & EXECUTION_FIDELITY_VIOLATION_CODES
+    if fidelity_related:
+        blocks.append(
+            build_execution_fidelity_correction_block(
+                violations=list(fidelity_related),
+                series_plan=series_plan,
+                ad_index=ad_index,
+            )
+        )
     return blocks
 
 
@@ -213,7 +231,7 @@ def build_cumulative_image_correction_block(
         "=== ACCUMULATED VIOLATIONS TO CORRECT ===",
         ", ".join(union),
         "=== END ACCUMULATED VIOLATIONS ===",
-        *build_violation_specific_corrections(union),
+        *build_violation_specific_corrections(union, series_plan=series_plan, ad_index=ad_index),
         build_positive_main_visual_block(series_plan=series_plan, ad_plan=ad_plan),
     ]
     return "\n\n".join(section for section in sections if section.strip())
