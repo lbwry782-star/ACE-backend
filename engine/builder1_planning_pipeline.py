@@ -141,6 +141,7 @@ def run_builder1_campaign_pipeline(
     visibility_decision: Optional[Any] = None,
     campaign_id: str = "",
     idea_memory: Optional[Any] = None,
+    job_id: str = "",
 ) -> Builder1PipelineContext:
     from engine.builder1_planner import (
         Builder1PlannerError,
@@ -340,6 +341,10 @@ def run_builder1_campaign_pipeline(
         detected_language=detected_language,
     )
     from engine.builder1_failure_classification import validate_forbidden_plan_visibility
+    from engine.builder1_integrity_diagnostics import (
+        build_integrity_failure_diagnostic,
+        persist_integrity_failure_diagnostic,
+    )
 
     visibility_conflicts = validate_forbidden_plan_visibility(plan)
     if visibility_conflicts:
@@ -348,17 +353,24 @@ def run_builder1_campaign_pipeline(
             visibility_conflicts,
         )
         raise Builder1PlannerError("campaign_visibility_integrity_failed")
-    if integrity.upstream_mutation:
-        logger.error(
-            "BUILDER1_INTEGRITY_FAILED reasons=%s",
-            integrity.reasons,
-        )
-        raise Builder1PlannerError("campaign_integrity_failed")
-    if not integrity.ok:
-        logger.error(
-            "BUILDER1_INTEGRITY_FAILED reasons=%s",
-            integrity.reasons,
-        )
+    if integrity.upstream_mutation or not integrity.ok:
+        if job_id and integrity.rejected_plan_dict is not None:
+            diagnostic = build_integrity_failure_diagnostic(
+                reasons=integrity.reasons,
+                details=integrity.integrity_details or [],
+                rejected_plan=integrity.rejected_plan_dict,
+            )
+            persist_integrity_failure_diagnostic(
+                job_id,
+                diagnostic,
+                campaign_id=campaign_id,
+            )
+        else:
+            logger.error(
+                "BUILDER1_INTEGRITY_FAILED reasons=%s diagnosticPersisted=false jobId=%s",
+                integrity.reasons,
+                job_id or "",
+            )
         raise Builder1PlannerError("campaign_integrity_failed")
 
     logger.info("BUILDER1_INTEGRITY_OK")

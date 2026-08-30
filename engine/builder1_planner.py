@@ -550,6 +550,7 @@ def plan_builder1(
                 visibility_decision=visibility_decision,
                 campaign_id=campaign_id or "",
                 idea_memory=idea_memory,
+                job_id=job_id or "",
             )
         except StrategySelectionExhausted as exc:
             raise Builder1PlannerError("strategy_stage_failed") from exc

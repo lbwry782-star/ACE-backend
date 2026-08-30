@@ -6,8 +6,9 @@ Deterministic checks only; no extra model calls.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Set
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
+from engine.builder1_integrity_diagnostics import record_integrity_evidence
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_identity_guard import extract_product_category_identities
 
@@ -400,6 +401,36 @@ def implies_shortening_or_distance_concept(*texts: str) -> bool:
     return any(term in combined for term in _SHORTENING_CONCEPT_TERMS)
 
 
+def matched_literal_route_terms(text: str) -> List[str]:
+    lowered = _norm(text).casefold()
+    if not lowered:
+        return []
+    matched: List[str] = []
+    for term in _LITERAL_ROUTE_FAMILY:
+        for match in re.finditer(rf"\b{re.escape(term)}\b", lowered):
+            window = lowered[max(0, match.start() - 40) : match.end()]
+            if re.search(
+                rf"\b(?:no|not|without|never|avoid|excluding)\b[^.]{{0,40}}\b{re.escape(term)}\b",
+                window,
+            ):
+                continue
+            matched.append(term)
+    for phrase in (
+        "road trip",
+        "traffic jam",
+        "car park",
+        "parking lot",
+        "city map",
+        "navigation app",
+        "maze runner",
+        "dead end",
+        "one way street",
+    ):
+        if phrase in lowered:
+            matched.append(phrase)
+    return list(dict.fromkeys(matched))
+
+
 def contains_literal_route_family(text: str) -> bool:
     lowered = _norm(text).casefold()
     if not lowered:
@@ -445,16 +476,22 @@ def _ad_visual_blob(ad: Mapping[str, Any]) -> str:
     return " ".join(_norm(ad.get(field)) for field in _AD_VISUAL_FIELDS if _norm(ad.get(field)))
 
 
-def _literal_slogan_noun_in_object(*, slogan_tokens: Set[str], object_text: str) -> bool:
+def _slogan_object_overlap_tokens(*, slogan_tokens: Set[str], object_text: str) -> Set[str]:
     object_tokens = _tokenize(object_text)
     overlap = slogan_tokens & object_tokens
     if not overlap:
-        return False
+        return set()
     concrete_overlap = overlap - _ABSTRACT_NAVIGATION_TOKENS - _SHORTENING_CONCEPT_TERMS
     if concrete_overlap:
-        return True
+        return concrete_overlap
     abstract_overlap = overlap & _ABSTRACT_NAVIGATION_TOKENS
-    return bool(abstract_overlap and contains_literal_route_family(object_text))
+    if abstract_overlap and contains_literal_route_family(object_text):
+        return abstract_overlap
+    return set()
+
+
+def _literal_slogan_noun_in_object(*, slogan_tokens: Set[str], object_text: str) -> bool:
+    return bool(_slogan_object_overlap_tokens(slogan_tokens=slogan_tokens, object_text=object_text))
 
 
 def _structured_plan_proof_text(plan_dict: Mapping[str, Any]) -> str:
@@ -528,7 +565,10 @@ def _object_selected_from_lexical_match(
     return not _claims_independent_visual_proof(rationale_text)
 
 
-def _detect_literal_slogan_illustration(plan_dict: Mapping[str, Any]) -> bool:
+def _detect_literal_slogan_illustration(
+    plan_dict: Mapping[str, Any],
+    evidence_out: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     slogan = _norm(plan_dict.get("brandSlogan"))
     slogan_action = _norm(plan_dict.get("sloganAction"))
     transferred = _norm(plan_dict.get("transferredObject") or plan_dict.get("physicalGenerator"))
@@ -545,42 +585,123 @@ def _detect_literal_slogan_illustration(plan_dict: Mapping[str, Any]) -> bool:
         transferred,
     )
     creative_literal_ok = _plan_has_creative_literal_justification(plan_dict)
+    slogan_token_list = sorted(slogan_tokens)
 
-    for field_text in (transferred, physical):
+    for field_name, field_text in (
+        ("transferredObject", transferred),
+        ("physicalGenerator", physical),
+    ):
         if _object_selected_from_lexical_match(
             slogan_tokens=slogan_tokens,
             object_text=field_text,
             rationale_text=plan_proof,
         ):
+            record_integrity_evidence(
+                evidence_out,
+                code="literal_slogan_illustration",
+                detector="literal_embodiment",
+                branch="plan_object_lexical_match",
+                level="plan",
+                field=field_name,
+                slogan_tokens=slogan_token_list,
+                matched_terms=sorted(_slogan_object_overlap_tokens(slogan_tokens=slogan_tokens, object_text=field_text)),
+                independent_visual_proof_absent=not _claims_independent_visual_proof(plan_proof),
+                field_value_preview=field_text,
+                reason="Physical/transferred object selected mainly from slogan lexical overlap without independent visual proof.",
+            )
             return True
 
     if shortening_concept and not creative_literal_ok:
-        for field_text in (transferred, physical, _norm(plan_dict.get("transferredObjectAction"))):
+        for field_name, field_text in (
+            ("transferredObject", transferred),
+            ("physicalGenerator", physical),
+            ("transferredObjectAction", _norm(plan_dict.get("transferredObjectAction"))),
+        ):
             if contains_literal_route_family(field_text):
+                record_integrity_evidence(
+                    evidence_out,
+                    code="literal_slogan_illustration",
+                    detector="literal_embodiment",
+                    branch="shortening_concept_route_family_plan",
+                    level="plan",
+                    field=field_name,
+                    slogan_tokens=slogan_token_list,
+                    matched_terms=matched_literal_route_terms(field_text),
+                    independent_visual_proof_absent=True,
+                    field_value_preview=field_text,
+                    reason="Shortening/distance concept with literal route/path family on plan field and no creative literal justification.",
+                )
                 return True
 
     external_selected = bool(transferred) and not contains_literal_route_family(transferred)
     for ad in plan_dict.get("ads") or []:
         if not isinstance(ad, dict):
             continue
+        ad_index = ad.get("index")
         ad_proof = _structured_ad_proof_text(ad)
         if _claims_caption_only_illustration(ad_proof):
+            record_integrity_evidence(
+                evidence_out,
+                code="literal_slogan_illustration",
+                detector="literal_embodiment",
+                branch="ad_caption_only_illustration",
+                level="ad",
+                field="structuredAdProof",
+                ad_index=int(ad_index) if ad_index is not None else None,
+                slogan_tokens=slogan_token_list,
+                independent_visual_proof_absent=True,
+                field_value_preview=ad_proof,
+                reason="Ad structured proof reads as caption-only slogan illustration.",
+            )
             return True
         blob = _ad_visual_blob(ad)
         if contains_literal_route_family(blob) and not _ad_has_independent_visual_proof(ad):
             if external_selected or shortening_concept:
+                record_integrity_evidence(
+                    evidence_out,
+                    code="literal_slogan_illustration",
+                    detector="literal_embodiment",
+                    branch="ad_route_family_without_proof",
+                    level="ad",
+                    field="adVisualBlob",
+                    ad_index=int(ad_index) if ad_index is not None else None,
+                    slogan_tokens=slogan_token_list,
+                    matched_terms=matched_literal_route_terms(blob),
+                    independent_visual_proof_absent=True,
+                    field_value_preview=blob,
+                    reason="Ad visual fields contain literal route/path family without independent visual proof.",
+                )
                 return True
+        exec_field = "executionSubject" if _norm(ad.get("executionSubject")) else "physicalExecution"
+        exec_text = _norm(ad.get("executionSubject") or ad.get("physicalExecution"))
         if _object_selected_from_lexical_match(
             slogan_tokens=slogan_tokens,
-            object_text=_norm(ad.get("executionSubject") or ad.get("physicalExecution")),
+            object_text=exec_text,
             rationale_text=ad_proof,
         ):
+            record_integrity_evidence(
+                evidence_out,
+                code="literal_slogan_illustration",
+                detector="literal_embodiment",
+                branch="ad_execution_lexical_match",
+                level="ad",
+                field=exec_field,
+                ad_index=int(ad_index) if ad_index is not None else None,
+                slogan_tokens=slogan_token_list,
+                matched_terms=sorted(_slogan_object_overlap_tokens(slogan_tokens=slogan_tokens, object_text=exec_text)),
+                independent_visual_proof_absent=not _claims_independent_visual_proof(ad_proof),
+                field_value_preview=exec_text,
+                reason="Ad execution subject selected mainly from slogan lexical overlap without independent visual proof.",
+            )
             return True
 
     return False
 
 
-def scan_literal_embodiment_bias(plan_dict: Mapping[str, Any]) -> List[str]:
+def scan_literal_embodiment_bias(
+    plan_dict: Mapping[str, Any],
+    evidence_out: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """Deterministic QA for over-literal product/slogan/category embodiment."""
     reasons: List[str] = []
     slogan = _norm(plan_dict.get("brandSlogan"))
@@ -616,16 +737,51 @@ def scan_literal_embodiment_bias(plan_dict: Mapping[str, Any]) -> List[str]:
                 reasons.append("literal_slogan_object_depiction")
 
     if shortening_concept:
-        for field_text in (transferred, physical, _norm(plan_dict.get("transferredObjectAction"))):
+        slogan_token_list = sorted(slogan_tokens)
+        for field_name, field_text in (
+            ("transferredObject", transferred),
+            ("physicalGenerator", physical),
+            ("transferredObjectAction", _norm(plan_dict.get("transferredObjectAction"))),
+        ):
             if contains_literal_route_family(field_text):
+                record_integrity_evidence(
+                    evidence_out,
+                    code="literal_slogan_illustration",
+                    detector="literal_embodiment",
+                    branch="scan_shortening_route_family_plan",
+                    level="plan",
+                    field=field_name,
+                    slogan_tokens=slogan_token_list,
+                    matched_terms=matched_literal_route_terms(field_text),
+                    independent_visual_proof_absent=True,
+                    field_value_preview=field_text,
+                    reason="Shortening concept with literal route/path family on plan field.",
+                )
                 reasons.append("slogan_word_illustration")
                 reasons.append("literal_slogan_illustration")
 
     ads = [ad for ad in (plan_dict.get("ads") or []) if isinstance(ad, dict)]
     external_selected = bool(transferred) and not contains_literal_route_family(transferred)
+    slogan_token_list = sorted(slogan_tokens)
     if external_selected:
         for ad in ads:
-            if contains_literal_route_family(_ad_visual_blob(ad)) and not _ad_has_independent_visual_proof(ad):
+            ad_index = ad.get("index")
+            blob = _ad_visual_blob(ad)
+            if contains_literal_route_family(blob) and not _ad_has_independent_visual_proof(ad):
+                record_integrity_evidence(
+                    evidence_out,
+                    code="literal_slogan_illustration",
+                    detector="literal_embodiment",
+                    branch="scan_external_selected_ad_route_family",
+                    level="ad",
+                    field="adVisualBlob",
+                    ad_index=int(ad_index) if ad_index is not None else None,
+                    slogan_tokens=slogan_token_list,
+                    matched_terms=matched_literal_route_terms(blob),
+                    independent_visual_proof_absent=True,
+                    field_value_preview=blob,
+                    reason="External object selected but ad visual fields contain literal route/path family without proof.",
+                )
                 reasons.append("literal_slogan_object_depiction")
                 reasons.append("literal_slogan_illustration")
                 break
@@ -637,18 +793,52 @@ def scan_literal_embodiment_bias(plan_dict: Mapping[str, Any]) -> List[str]:
             if contains_literal_route_family(_ad_visual_blob(ad)) and not _ad_has_independent_visual_proof(ad)
         )
         if literal_family_ads >= 2:
+            record_integrity_evidence(
+                evidence_out,
+                code="literal_slogan_illustration",
+                detector="literal_embodiment",
+                branch="scan_series_literal_category_trap_multi_ad",
+                level="plan",
+                field="ads",
+                slogan_tokens=slogan_token_list,
+                independent_visual_proof_absent=True,
+                reason="Multiple ads use literal route/path family without independent visual proof.",
+            )
             reasons.append("series_literal_category_trap")
             reasons.append("literal_slogan_illustration")
         elif literal_family_ads >= 1 and not external_selected:
+            record_integrity_evidence(
+                evidence_out,
+                code="literal_slogan_illustration",
+                detector="literal_embodiment",
+                branch="scan_series_literal_category_trap_single_ad",
+                level="plan",
+                field="ads",
+                slogan_tokens=slogan_token_list,
+                independent_visual_proof_absent=True,
+                reason="Series uses literal route/path family without external object selection.",
+            )
             reasons.append("series_literal_category_trap")
             reasons.append("literal_slogan_illustration")
 
     if not external_selected and shortening_concept and contains_literal_route_family(_plan_visual_blob(plan_dict)):
         if "slogan_word_illustration" not in reasons:
+            record_integrity_evidence(
+                evidence_out,
+                code="literal_slogan_illustration",
+                detector="literal_embodiment",
+                branch="scan_plan_visual_blob_route_family",
+                level="plan",
+                field="planVisualBlob",
+                slogan_tokens=slogan_token_list,
+                matched_terms=matched_literal_route_terms(_plan_visual_blob(plan_dict)),
+                independent_visual_proof_absent=True,
+                reason="Plan-wide visual blob contains literal route/path family under shortening concept.",
+            )
             reasons.append("slogan_word_illustration")
             reasons.append("literal_slogan_illustration")
 
-    if _detect_literal_slogan_illustration(plan_dict):
+    if _detect_literal_slogan_illustration(plan_dict, evidence_out):
         reasons.append("literal_slogan_illustration")
 
     return list(dict.fromkeys(reasons))

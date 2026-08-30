@@ -17,6 +17,8 @@ class Builder1IntegrityResult:
     needs_marketing_text_repair: bool = False
     needs_series_stage_retry: bool = False
     upstream_mutation: bool = False
+    integrity_details: List[Dict[str, Any]] | None = None
+    rejected_plan_dict: Dict[str, Any] | None = None
 
 
 def _graphic_identity(graphic: Any) -> tuple[str, str]:
@@ -156,7 +158,10 @@ def validate_builder1_campaign_integrity(
 
     plan_dict = series_plan_to_store_dict(plan)
     plan_dict["detectedLanguage"] = detected_language
-    reasons.extend(deterministic_builder1_integrity_checks(plan_dict))
+    integrity_details: List[Dict[str, Any]] = []
+    reasons.extend(
+        deterministic_builder1_integrity_checks(plan_dict, integrity_evidence=integrity_details)
+    )
 
     from engine.builder1_failure_classification import validate_forbidden_plan_visibility
 
@@ -170,10 +175,14 @@ def validate_builder1_campaign_integrity(
     if any(code in structural_series_codes for code in reasons):
         needs_series_stage_retry = True
 
+    unique_reasons = list(dict.fromkeys(reasons))
+    failed = len(unique_reasons) > 0
     return Builder1IntegrityResult(
-        ok=len(reasons) == 0,
-        reasons=list(dict.fromkeys(reasons)),
+        ok=not failed,
+        reasons=unique_reasons,
         needs_marketing_text_repair=needs_marketing_text_repair and not upstream_mutation,
         needs_series_stage_retry=needs_series_stage_retry and not upstream_mutation,
         upstream_mutation=upstream_mutation,
+        integrity_details=integrity_details if failed else None,
+        rejected_plan_dict=plan_dict if failed else None,
     )

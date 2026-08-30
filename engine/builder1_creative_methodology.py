@@ -322,6 +322,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
     embodiment: str = "",
     visibility_reason: str = "",
     visibility_policy: str = "CREATIVE_DECISION",
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     reasons: List[str] = []
     if not any([slogan, slogan_action, relative_advantage, conceptual_action, physical]):
@@ -439,17 +440,25 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
         if no_reuse in {"duplicate", "same", "reused"}:
             reasons.append("no_mechanism_reuse_inside_campaign")
 
-    reasons.extend(scan_literal_embodiment_bias(plan_dict))
+    reasons.extend(scan_literal_embodiment_bias(plan_dict, integrity_evidence))
     reasons.extend(scan_advertising_comprehension(plan_dict))
 
     return list(dict.fromkeys(reasons))
 
 
-def deterministic_builder1_integrity_checks(plan_dict: Dict[str, Any]) -> List[str]:
+def deterministic_builder1_integrity_checks(
+    plan_dict: Dict[str, Any],
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """Objective campaign invariants for post-series validation — no creative semantic judging."""
     reasons: List[str] = []
     reasons.extend(deterministic_no_logo_checks(plan_dict))
-    reasons.extend(_deterministic_methodology_checks_without_semantic_concept_derivation(plan_dict))
+    reasons.extend(
+        _deterministic_methodology_checks_without_semantic_concept_derivation(
+            plan_dict,
+            integrity_evidence=integrity_evidence,
+        )
+    )
     return list(dict.fromkeys(reasons))
 
 
