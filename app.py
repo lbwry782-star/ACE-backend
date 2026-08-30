@@ -406,7 +406,7 @@ def handle_preflight():
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = (
-                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Admin-Secret"
+                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Request-Id, X-ACE-Admin-Secret"
             )
             response.headers["Access-Control-Max-Age"] = "86400"
             return response
@@ -423,7 +423,7 @@ def add_cors_headers(response):
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = (
-                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Admin-Secret"
+                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Request-Id, X-ACE-Admin-Secret"
             )
             if "X-ACE-Batch-State" in response.headers:
                 response.headers["Access-Control-Expose-Headers"] = "X-ACE-Batch-State"
