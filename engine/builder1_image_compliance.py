@@ -93,10 +93,18 @@ product_visible_without_explicit_request, packaging_visible_without_explicit_req
 product_used_as_physical_generator, product_used_as_main_visual,
 planned_scene_diverged, planned_mechanism_diverged, central_proof_not_visible,
 unintended_dominant_interpretation, advertising_bridge_not_recoverable,
-relative_advantage_not_expressed, visual_slogan_mechanism_mismatch, dominant_subject_diverged
+relative_advantage_not_expressed, visual_slogan_mechanism_mismatch, dominant_subject_diverged,
+competing_category_visual, advertising_mechanism_not_observable, public_analogy_not_recoverable
 
-Execution fidelity (same review call — not aesthetic criticism):
-- Compare generated pixels to PLANNED EXECUTION CONTEXT in the user message.
+Execution fidelity and category integrity (same review call — not aesthetic criticism):
+- Compare generated pixels to PLANNED EXECUTION CONTEXT and advertisedProductDescription.
+- Category integrity: fail ONLY when pixels could reasonably be mistaken for advertising another
+  business/service/category — cross-domain metaphor objects alone are not failures.
+- Public comprehension: fail when a general-public viewer cannot identify the physical event,
+  recover the causal mechanism, or connect pixels to the relative advantage without specialist knowledge.
+- Observable mechanism: fail when the approved causal relationship is not perceivable and pixels
+  show only its aesthetic result (e.g. autofocus claimed but only sharp/blur sports photo visible).
+- Causal relationships like magnet pulling or umbrella blocking rain ARE sufficient when visible.
 - Fail only with concrete visible evidence: wrong object/context, missing central proof,
   unintended dominant interpretation, or advertising meaning not recoverable from pixels.
 - Do not fail merely because the image is plain or imperfectly composed.
@@ -682,7 +690,7 @@ def _openai_compliance_review_call(
     image_bytes: bytes,
     product_name: str,
     product_description: str = "",
-    visibility_policy: str = "FORBIDDEN",
+    visibility_policy: str = "CREATIVE_DECISION",
     transferred_object: str = "",
     series_plan: Optional[object] = None,
     campaign_id: Optional[str] = None,
@@ -811,7 +819,7 @@ def review_builder1_ad_image_compliance(
     campaign_id: Optional[str] = None,
     job_id: Optional[str] = None,
     product_description: str = "",
-    visibility_policy: str = "FORBIDDEN",
+    visibility_policy: str = "CREATIVE_DECISION",
     transferred_object: str = "",
     reviewer: Optional[ComplianceReviewer] = None,
     series_plan: Optional[object] = None,

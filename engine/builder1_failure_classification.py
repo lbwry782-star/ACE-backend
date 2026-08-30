@@ -7,9 +7,9 @@ import logging
 from enum import Enum
 from typing import List, Sequence
 
-from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
+from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan, series_plan_to_store_dict
 from engine.builder1_product_identity_guard import detect_series_plan_visual_subject_conflicts
-from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_product_visibility import ProductVisibilityPolicy, resolve_product_visibility_policy
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +18,14 @@ PIXEL_PLAN_CONTRADICTION_VIOLATIONS = frozenset(
         "product_used_as_physical_generator",
         "product_used_as_main_visual",
         "packaging_visible_without_explicit_request",
+    }
+)
+
+PLAN_CATEGORY_INTEGRITY_VIOLATIONS = frozenset(
+    {
+        "competing_category_visual",
+        "advertising_mechanism_not_observable",
+        "public_analogy_too_complex",
     }
 )
 
@@ -51,16 +59,9 @@ class PlanContradictionComplianceError(Exception):
 
 
 def _resolve_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
-    raw = (series_plan.product_visibility_policy or "").strip().upper()
-    try:
-        return ProductVisibilityPolicy(raw)
-    except ValueError:
-        internals = series_plan.planning_internals or {}
-        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
-        try:
-            return ProductVisibilityPolicy(raw)
-        except ValueError:
-            return ProductVisibilityPolicy.FORBIDDEN
+    internals = series_plan.planning_internals or {}
+    raw = series_plan.product_visibility_policy or internals.get("productVisibilityPolicy")
+    return resolve_product_visibility_policy(raw)
 
 
 def validate_forbidden_plan_visibility(series_plan: Builder1SeriesPlan) -> List[str]:
@@ -92,7 +93,19 @@ def validate_forbidden_plan_visibility(series_plan: Builder1SeriesPlan) -> List[
 
 
 def _structured_plan_conflict_reasons(series_plan: Builder1SeriesPlan) -> List[str]:
-    return validate_forbidden_plan_visibility(series_plan)
+    reasons = validate_forbidden_plan_visibility(series_plan)
+    from engine.builder1_advertising_comprehension import scan_plan_physical_repair_reasons
+
+    plan_dict = series_plan_to_store_dict(series_plan)
+    reasons.extend(scan_plan_physical_repair_reasons(plan_dict))
+    return list(dict.fromkeys(reasons))
+
+
+def plan_has_category_integrity_violation(series_plan: Builder1SeriesPlan) -> List[str]:
+    from engine.builder1_advertising_comprehension import scan_plan_category_integrity
+
+    reasons = scan_plan_category_integrity(series_plan_to_store_dict(series_plan))
+    return [code for code in reasons if code in PLAN_CATEGORY_INTEGRITY_VIOLATIONS]
 
 
 def classify_compliance_failure(
@@ -112,12 +125,36 @@ def classify_compliance_failure(
         "pixelReviewViolations": list(violations),
         "hardViolations": list(effective_hard),
     }
+    plan_category_failures = [
+        code for code in plan_reasons if code in PLAN_CATEGORY_INTEGRITY_VIOLATIONS
+    ]
+    if plan_category_failures:
+        evidence["planCategoryIntegrityFailure"] = True
 
     if structured_plan_conflict or preflight_conflict:
         return (
             Builder1FailureClass.PLAN_CONTRADICTION,
             Builder1FailureAction.REPAIR_FROM_PHYSICAL,
             list(dict.fromkeys(plan_reasons + list(effective_hard))),
+            evidence,
+        )
+
+    category_violations = violation_set & PLAN_CATEGORY_INTEGRITY_VIOLATIONS
+    if category_violations:
+        plan_category_failures = plan_has_category_integrity_violation(series_plan)
+        if plan_category_failures:
+            evidence["planCategoryIntegrityFailure"] = True
+            return (
+                Builder1FailureClass.PLAN_CONTRADICTION,
+                Builder1FailureAction.REPAIR_FROM_PHYSICAL,
+                list(dict.fromkeys(plan_category_failures + list(effective_hard))),
+                evidence,
+            )
+        evidence["planCategoryIntegrityFailure"] = False
+        return (
+            Builder1FailureClass.IMAGE_EXECUTION,
+            Builder1FailureAction.REGENERATE_IMAGE,
+            list(effective_hard),
             evidence,
         )
 

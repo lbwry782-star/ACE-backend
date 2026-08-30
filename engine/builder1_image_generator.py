@@ -43,7 +43,7 @@ from engine.builder1_image_retry import (
     union_violations_for_ad,
 )
 from engine.builder1_plan_spec import Builder1SeriesPlan
-from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_product_visibility import ProductVisibilityPolicy, resolve_product_visibility_policy
 from engine.builder1_visual_prompt import build_visual_prompt
 
 logger = logging.getLogger(__name__)
@@ -91,16 +91,9 @@ def _retry_after_seconds(exc: Exception) -> Optional[int]:
 
 
 def _resolve_visibility_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
-    raw = (series_plan.product_visibility_policy or "").strip().upper()
-    try:
-        return ProductVisibilityPolicy(raw)
-    except ValueError:
-        internals = series_plan.planning_internals or {}
-        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
-        try:
-            return ProductVisibilityPolicy(raw)
-        except ValueError:
-            return ProductVisibilityPolicy.FORBIDDEN
+    internals = series_plan.planning_internals or {}
+    raw = series_plan.product_visibility_policy or internals.get("productVisibilityPolicy")
+    return resolve_product_visibility_policy(raw)
 
 
 def _load_history(campaign_id: Optional[str], ad_index: int) -> dict:

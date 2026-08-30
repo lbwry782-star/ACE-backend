@@ -10,7 +10,7 @@ import re
 from typing import Any, Mapping, Sequence
 
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
-from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_product_visibility import ProductVisibilityPolicy, policy_prohibits_product_depiction, resolve_product_visibility_policy
 
 CATEGORY_UNIT_TERMS: frozenset[str] = frozenset(
     {
@@ -219,12 +219,12 @@ def detect_product_identity_conflicts(
     transferred_object_action: str = "",
     campaign_rationale: str = "",
     why_clearer_than_showing_product: str = "",
-    visibility_policy: ProductVisibilityPolicy | str = ProductVisibilityPolicy.FORBIDDEN,
+    visibility_policy: ProductVisibilityPolicy | str = ProductVisibilityPolicy.CREATIVE_DECISION,
 ) -> list[str]:
     policy = (
         visibility_policy
         if isinstance(visibility_policy, ProductVisibilityPolicy)
-        else ProductVisibilityPolicy(str(visibility_policy or "FORBIDDEN").upper())
+        else resolve_product_visibility_policy(visibility_policy)
     )
     if policy != ProductVisibilityPolicy.FORBIDDEN:
         return []
@@ -270,7 +270,7 @@ def detect_product_identity_conflicts_from_mapping(
     product_name: str,
     product_description: str,
     physical: Mapping[str, Any],
-    visibility_policy: ProductVisibilityPolicy | str = ProductVisibilityPolicy.FORBIDDEN,
+    visibility_policy: ProductVisibilityPolicy | str = ProductVisibilityPolicy.CREATIVE_DECISION,
 ) -> list[str]:
     return detect_product_identity_conflicts(
         product_name=product_name,
@@ -321,12 +321,8 @@ def detect_ad_visual_subject_identity_conflicts(
 
 
 def detect_series_plan_visual_subject_conflicts(series_plan: Builder1SeriesPlan) -> list[str]:
-    policy_raw = (series_plan.product_visibility_policy or "").strip().upper() or "FORBIDDEN"
-    try:
-        policy = ProductVisibilityPolicy(policy_raw)
-    except ValueError:
-        policy = ProductVisibilityPolicy.FORBIDDEN
-    if policy != ProductVisibilityPolicy.FORBIDDEN:
+    policy = resolve_product_visibility_policy(series_plan.product_visibility_policy)
+    if not policy_prohibits_product_depiction(policy):
         return []
 
     reasons = detect_product_identity_conflicts(

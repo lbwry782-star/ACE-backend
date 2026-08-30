@@ -8,7 +8,7 @@ adding paid model calls.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Mapping, Optional, Set
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from engine.builder1_plan_spec import Builder1SeriesPlan
 
@@ -17,6 +17,24 @@ ADVERTISING_COMPREHENSION_REJECTION_CODES = frozenset(
         "advertising_bridge_unclear",
         "multi_hop_symbolic_chain",
         "dominant_object_strategic_role_missing",
+        "competing_category_visual",
+        "advertising_mechanism_not_observable",
+        "public_analogy_too_complex",
+    }
+)
+
+PLAN_PHYSICAL_REPAIR_CODES = frozenset(
+    {
+        "competing_category_visual",
+        "advertising_mechanism_not_observable",
+        "public_analogy_too_complex",
+    }
+)
+
+CATEGORY_INTEGRITY_VIOLATION_CODES = frozenset(
+    {
+        "competing_category_visual",
+        "advertising_mechanism_not_observable",
     }
 )
 
@@ -30,7 +48,9 @@ EXECUTION_FIDELITY_VIOLATION_CODES = frozenset(
         "relative_advantage_not_expressed",
         "visual_slogan_mechanism_mismatch",
         "dominant_subject_diverged",
+        "public_analogy_not_recoverable",
     }
+    | CATEGORY_INTEGRITY_VIOLATION_CODES
 )
 
 _STOPWORDS = frozenset(
@@ -193,6 +213,482 @@ _GENERIC_EXECUTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Competing commercial service categories — generalized clusters, not object blacklists.
+_SERVICE_CATEGORY_SIGNALS: Dict[str, frozenset[str]] = {
+    "academic_tutoring": frozenset(
+        {
+            "tutor",
+            "tutoring",
+            "teacher",
+            "teaching",
+            "lesson",
+            "lessons",
+            "student",
+            "students",
+            "classroom",
+            "exam",
+            "bagrut",
+            "history",
+            "math",
+            "mathematics",
+            "physics",
+            "chemistry",
+            "academic",
+            "schoolwork",
+            "homework",
+            "preparation",
+            "curriculum",
+            "היסטוריה",
+            "בגרות",
+            "שיעור",
+            "שיעורים",
+            "מורה",
+            "תלמיד",
+            "תלמידים",
+            "לימוד",
+            "חינוך",
+            "הכנה",
+            "פרטי",
+        }
+    ),
+    "sports_coaching": frozenset(
+        {
+            "gymnast",
+            "gymnastics",
+            "gymnasium",
+            "athlete",
+            "athletic",
+            "sports",
+            "sport",
+            "coach",
+            "coaching",
+            "training",
+            "arena",
+            "vault",
+            "beam",
+            "floor",
+            "exercise",
+            "apparatus",
+            "parallel",
+            "bars",
+            "mat",
+            "התעמלות",
+            "התעמל",
+            "התעמלן",
+            "ספורט",
+            "אימון",
+            "מאמן",
+            "מסלול",
+            "קורה",
+        }
+    ),
+    "music_instruction": frozenset(
+        {
+            "piano",
+            "violin",
+            "guitar",
+            "music",
+            "orchestra",
+            "musician",
+            "instrument",
+            "symphony",
+            "conductor",
+            "מוזיקה",
+            "פסנתר",
+            "כינור",
+            "גיטרה",
+            "נגינה",
+        }
+    ),
+    "driving_instruction": frozenset(
+        {
+            "driving lesson",
+            "driving instructor",
+            "driving school",
+            "driver",
+            "license",
+            "steering",
+            "wheel",
+            "נהיגה",
+            "רישיון",
+            "נהג",
+            "מורה נהיגה",
+        }
+    ),
+    "art_instruction": frozenset(
+        {
+            "art",
+            "artist",
+            "painting",
+            "drawing",
+            "canvas",
+            "easel",
+            "sculpture",
+            "studio",
+            "אמנות",
+            "ציור",
+            "מכחול",
+        }
+    ),
+    "language_tutoring": frozenset(
+        {
+            "language",
+            "english",
+            "french",
+            "spanish",
+            "hebrew",
+            "vocabulary",
+            "grammar",
+            "conversation",
+            "fluent",
+            "שפה",
+            "אנגלית",
+            "עברית",
+            "דיבור",
+        }
+    ),
+    "fitness_coaching": frozenset(
+        {
+            "fitness",
+            "gym",
+            "workout",
+            "trainer",
+            "personal",
+            "weights",
+            "yoga",
+            "pilates",
+            "crossfit",
+            "כושר",
+            "מאמן",
+            "אימון",
+        }
+    ),
+    "culinary_instruction": frozenset(
+        {
+            "cooking",
+            "culinary",
+            "chef",
+            "kitchen",
+            "recipe",
+            "baking",
+            "restaurant",
+            "cuisine",
+            "בישול",
+            "מטבח",
+            "שף",
+        }
+    ),
+    "legal_services": frozenset(
+        {
+            "lawyer",
+            "attorney",
+            "legal",
+            "court",
+            "litigation",
+            "law",
+            "counsel",
+            "עורך",
+            "דין",
+            "משפט",
+        }
+    ),
+    "financial_accounting": frozenset(
+        {
+            "accountant",
+            "accounting",
+            "bookkeeping",
+            "tax",
+            "finance",
+            "audit",
+            "cpa",
+            "חשבונאות",
+            "רואה",
+            "חשבון",
+        }
+    ),
+    "dental_care": frozenset(
+        {
+            "dentist",
+            "dental",
+            "teeth",
+            "orthodont",
+            "clinic",
+            "שיניים",
+            "רופא",
+            "שיניים",
+        }
+    ),
+    "automotive_repair": frozenset(
+        {
+            "mechanic",
+            "garage",
+            "automotive",
+            "repair",
+            "engine",
+            "workshop",
+            "מוסך",
+            "מכונאי",
+            "תיקון",
+        }
+    ),
+}
+
+_INSTRUCTIONAL_SERVICE_CLUSTERS = frozenset(
+    {
+        "academic_tutoring",
+        "sports_coaching",
+        "music_instruction",
+        "driving_instruction",
+        "art_instruction",
+        "language_tutoring",
+        "fitness_coaching",
+        "culinary_instruction",
+    }
+)
+
+_PROFESSIONAL_SERVICE_CLUSTERS = frozenset(
+    {
+        "legal_services",
+        "financial_accounting",
+        "dental_care",
+        "automotive_repair",
+    }
+    | _INSTRUCTIONAL_SERVICE_CLUSTERS
+)
+
+_VISUAL_EFFECT_ONLY_MARKERS = (
+    "photography effect",
+    "photo effect",
+    "familiar photo",
+    "familiar photograph",
+    "sports photography",
+    "action photography",
+    "action photo",
+    "sharp foreground",
+    "blurred background",
+    "background blur",
+    "depth of field",
+    "bokeh",
+    "out of focus",
+    "motion blur",
+    "soft background",
+    "sharp subject",
+    "תופעת צילום",
+    "צילום ספורט",
+    "צילום פעולה",
+    "מטושטש",
+    "רקע מטושטש",
+    "חד בחזית",
+    "נחיתה חדה",
+    "אפקט צילום",
+)
+
+_MECHANISM_DEVICE_MARKERS = (
+    "autofocus",
+    "auto-focus",
+    "auto focus",
+    "focus system",
+    "tracking system",
+    "follows one",
+    "continuously follow",
+    "continuously track",
+    "camera lens",
+    "camera screen",
+    "viewfinder",
+    "focus lock",
+    "focus indicator",
+    "focus box",
+    "focus reticle",
+    "lens",
+    "camera",
+    "camcorder",
+    "view screen",
+    "display shows focus",
+    "מצלמה",
+    "מיקוד",
+    "מיקוד אוטומטי",
+    "מערכת מיקוד",
+    "עוקב",
+    "עוקבת",
+    "מסך מיקוד",
+)
+
+_RESULT_ONLY_MARKERS = _VISUAL_EFFECT_ONLY_MARKERS + (
+    "sharp while others blur",
+    "one sharp",
+    "others blurred",
+    "only one in focus",
+    "אחד חד",
+    "אחרים מטושטשים",
+)
+
+_FAMILIARITY_ONLY_CLARITY_MARKERS = (
+    "familiar photographic effect",
+    "familiar photograph",
+    "familiar photo effect",
+    "familiar sports photography",
+    "known industrial process",
+    "viewer recognizes the object",
+    "viewer recognizes",
+    "recognizable object",
+    "familiar effect",
+    "familiar process",
+    "תופעת צילום מוכרת",
+    "תהליך תעשייתי מוכר",
+)
+
+_TECHNICAL_VOCABULARY_MARKERS = (
+    "autofocus plane",
+    "sensor feedback",
+    "calibration",
+    "optical tracking",
+    "throughput",
+    "industrial inspection",
+    "dynamic correction loop",
+    "feedback loop",
+    "quality-control conveyor",
+    "sensor calibration",
+    "optical tracking system",
+    "mechanical transmission",
+    "transmission system",
+    "מיקוד אוטומטי",
+    "לולאת משוב",
+    "כיול",
+    "מעקב אופטי",
+)
+
+_UNIVERSAL_EVERYDAY_MARKERS = (
+    "magnet",
+    "umbrella",
+    "domino",
+    "balloon",
+    "key opens",
+    "key unlock",
+    "lock and key",
+    "parachute",
+    "door opens",
+    "door closes",
+    "train on track",
+    "fits into",
+    "one object receives",
+    "attracts",
+    "attract",
+    "pulls",
+    "pull",
+    "blocks rain",
+    "keeps dry",
+    "מגנט",
+    "מטריה",
+    "דומינו",
+    "בלון",
+    "מפתח",
+    "מנעול",
+    "צנח",
+)
+
+_COMMON_EVERYDAY_MARKERS = (
+    "conveyor",
+    "scale",
+    "filter",
+    "sort",
+    "separate",
+    "weigh",
+    "balance",
+    "mirror",
+    "shadow",
+    "light",
+    "weight",
+    "מסוע",
+    "מאזניים",
+    "מסנן",
+)
+
+_OBSERVABLE_CAUSAL_ACTION_MARKERS = (
+    "attract",
+    "attracts",
+    "pull",
+    "pulls",
+    "pulling",
+    "push",
+    "pushes",
+    "block",
+    "blocks",
+    "blocking",
+    "open",
+    "opens",
+    "opening",
+    "close",
+    "closes",
+    "fall",
+    "falls",
+    "falling",
+    "inflate",
+    "inflates",
+    "deflate",
+    "fit",
+    "fits",
+    "catch",
+    "catches",
+    "drop",
+    "drops",
+    "stick",
+    "sticks",
+    "separate",
+    "separates",
+    "keep dry",
+    "stays dry",
+    "one receives",
+    "only one",
+    "מושך",
+    "נמשך",
+    "דוחף",
+    "חוסם",
+    "נפתח",
+    "נסגר",
+    "נופל",
+    "מתנפח",
+)
+
+_PHYSICAL_ACTION_MARKERS = _OBSERVABLE_CAUSAL_ACTION_MARKERS + (
+    "visible",
+    "shows",
+    "see",
+    "viewer sees",
+    "under rain",
+    "under water",
+    "on track",
+    "רואים",
+    "נראה",
+)
+
+_INSTRUCTIONAL_SCENE_MARKERS = (
+    "gymnast",
+    "gymnastics",
+    "gymnasium",
+    "training floor",
+    "apparatus",
+    "vault",
+    "beam",
+    "parallel bars",
+    "piano",
+    "keyboard",
+    "violin",
+    "orchestra",
+    "easel",
+    "canvas",
+    "art studio",
+    "driving lesson",
+    "steering wheel",
+    "dental chair",
+    "courtroom",
+    "התעמלות",
+    "רצפת אימון",
+    "פסנתר",
+    "כינור",
+    "סטודיו",
+    "מורה נהיגה",
+)
+
 
 def _norm(value: object) -> str:
     return " ".join(str(value or "").strip().split())
@@ -293,6 +789,349 @@ def _strategic_role_explained(term: str, *texts: str) -> bool:
     return _contains_any(window, _STRATEGIC_ROLE_MARKERS) or _contains_any(combined, _ADVANTAGE_BRIDGE_MARKERS)
 
 
+def _category_tokens(text: str) -> Set[str]:
+    lowered = _norm(text).casefold()
+    return set(re.findall(r"[a-zA-Z\u0590-\u05FF]{3,}", lowered))
+
+
+def _active_service_clusters(text: str, *, min_hits: int = 1) -> Set[str]:
+    lowered = _norm(text).casefold()
+    if not lowered:
+        return set()
+    tokens = _category_tokens(lowered)
+    active: Set[str] = set()
+    for cluster_id, signals in _SERVICE_CATEGORY_SIGNALS.items():
+        hits = 0
+        for signal in signals:
+            signal_norm = signal.casefold()
+            if " " in signal_norm:
+                if signal_norm in lowered:
+                    hits += 1
+            elif signal_norm in tokens:
+                hits += 1
+        if hits >= min_hits:
+            active.add(cluster_id)
+    return active
+
+
+def _advertised_service_context(plan_dict: Mapping[str, Any]) -> str:
+    return " ".join(
+        _norm(plan_dict.get(key))
+        for key in (
+            "productDescription",
+            "productName",
+            "productNameResolved",
+            "relativeAdvantage",
+            "strategicProblem",
+        )
+        if _norm(plan_dict.get(key))
+    )
+
+
+def _visual_execution_context(fields: Mapping[str, Any], ad: Mapping[str, Any]) -> str:
+    return " ".join(
+        _norm(fields.get(key)) or _norm(ad.get(key))
+        for key in (
+            "executionScene",
+            "executionSubject",
+            "executionAction",
+            "executionObjectState",
+            "executionPunchline",
+            "physicalExecution",
+            "visualExecution",
+            "sceneDescription",
+        )
+        if (_norm(fields.get(key)) or _norm(ad.get(key)))
+    )
+
+
+def _generator_mechanism_context(plan_dict: Mapping[str, Any]) -> str:
+    return " ".join(
+        _norm(plan_dict.get(key))
+        for key in (
+            "physicalGenerator",
+            "transferredObject",
+            "transferredObjectAction",
+            "physicalGeneratorCampaignRole",
+            "physicalGeneratorNaturalPurpose",
+        )
+        if _norm(plan_dict.get(key))
+    )
+
+
+def _bridge_connects_advantage(
+    *,
+    bridge: str,
+    relative_advantage: str,
+    slogan_connection: str,
+    punchline: str,
+    fields: Mapping[str, Any],
+    ad: Mapping[str, Any],
+) -> bool:
+    return bool(
+        bridge
+        and (
+            _contains_any(bridge, _ADVANTAGE_BRIDGE_MARKERS)
+            or _token_overlap(relative_advantage, bridge)
+            or _token_overlap(relative_advantage, slogan_connection)
+            or _token_overlap(relative_advantage, punchline)
+            or (
+                _contains_any(bridge, ("proves", "shows", "demonstrates", "expresses", "means"))
+                and (
+                    _token_overlap(bridge, _norm(fields.get("singleChangedPropertyOrAction")))
+                    or _token_overlap(bridge, _norm(fields.get("conceptualActionProof")))
+                    or _token_overlap(bridge, _norm(ad.get("conceptualExecution")))
+                )
+            )
+        )
+    )
+
+
+def assess_everyday_familiarity(*texts: str) -> str:
+    """Semantic everyday familiarity: universal > common > specialized > technical."""
+    combined = " ".join(_norm(text) for text in texts if text).casefold()
+    if not combined:
+        return "common"
+    if _contains_any(combined, _UNIVERSAL_EVERYDAY_MARKERS):
+        return "universal"
+    technical_hits = sum(1 for marker in _TECHNICAL_VOCABULARY_MARKERS if marker in combined)
+    technical_hits += sum(1 for marker in _MECHANISM_DEVICE_MARKERS if marker in combined)
+    if technical_hits >= 2:
+        return "technical"
+    if technical_hits >= 1:
+        return "specialized"
+    if _contains_any(combined, _COMMON_EVERYDAY_MARKERS):
+        return "common"
+    return "common"
+
+
+def _immediate_clarity_insufficient(
+    *,
+    immediate: str,
+    bridge: str,
+    relative_advantage: str,
+    execution_blob: str,
+) -> bool:
+    if not immediate:
+        return False
+    familiarity_only = _contains_any(immediate, _FAMILIARITY_ONLY_CLARITY_MARKERS) or (
+        _contains_any(immediate, _PHYSICAL_ONLY_CLARITY_MARKERS)
+        and not _contains_any(immediate, _PHYSICAL_ACTION_MARKERS)
+    )
+    if not familiarity_only:
+        return False
+    describes_action = _contains_any(
+        f"{immediate} {execution_blob}",
+        _PHYSICAL_ACTION_MARKERS,
+    )
+    connects_advantage = _token_overlap(relative_advantage, immediate) or _token_overlap(
+        relative_advantage, bridge
+    )
+    return not describes_action or not connects_advantage
+
+
+def _passes_two_sentence_test(
+    *,
+    immediate: str,
+    bridge: str,
+    relative_advantage: str,
+    execution_blob: str,
+) -> bool:
+    physical_sentence = f"{immediate} {execution_blob}".strip()
+    if not physical_sentence:
+        return False
+    if not _contains_any(physical_sentence, _PHYSICAL_ACTION_MARKERS):
+        if assess_everyday_familiarity(physical_sentence) in ("specialized", "technical"):
+            return False
+    if not bridge:
+        return False
+    if len(re.findall(r"[.!?]", bridge)) > 2:
+        return False
+    return _token_overlap(relative_advantage, bridge) or _contains_any(
+        bridge, _ADVANTAGE_BRIDGE_MARKERS
+    )
+
+
+def detect_public_analogy_too_complex(
+    *,
+    plan_dict: Mapping[str, Any],
+    ad: Mapping[str, Any],
+    fields: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """True when the planned analogy needs too many inferential steps for a general-public viewer."""
+    merged_fields = dict(fields or _ad_internal_fields(plan_dict, ad))
+    relative_advantage = _norm(plan_dict.get("relativeAdvantage"))
+    immediate = _norm(merged_fields.get("immediateClarityReason"))
+    bridge = _norm(merged_fields.get("relativeAdvantageConnection"))
+    slogan_connection = _norm(merged_fields.get("sloganConnection"))
+    punchline = _norm(merged_fields.get("executionPunchline"))
+    generator_blob = _generator_mechanism_context(plan_dict)
+    execution_blob = _visual_execution_context(merged_fields, ad)
+    combined_explanation = " ".join(
+        part for part in (immediate, bridge, slogan_connection, generator_blob) if part
+    )
+
+    bridge_ok = _bridge_connects_advantage(
+        bridge=bridge,
+        relative_advantage=relative_advantage,
+        slogan_connection=slogan_connection,
+        punchline=punchline,
+        fields=merged_fields,
+        ad=ad,
+    )
+    mapping_count = _count_symbolic_mappings(
+        immediate,
+        bridge,
+        slogan_connection,
+        _norm(plan_dict.get("conceptualGenerator")),
+        _norm(plan_dict.get("conceptualGeneratorAction")),
+        _norm(merged_fields.get("conceptualExecution")),
+    )
+    familiarity = assess_everyday_familiarity(combined_explanation, execution_blob)
+    observable_causal = _contains_any(
+        f"{execution_blob} {immediate}",
+        _OBSERVABLE_CAUSAL_ACTION_MARKERS,
+    )
+    simple_physical_event = observable_causal and _contains_any(
+        f"{execution_blob} {immediate}",
+        _PHYSICAL_ACTION_MARKERS,
+    )
+
+    if simple_physical_event and bridge_ok and mapping_count < 3:
+        return False
+
+    if mapping_count >= 3 and not bridge_ok:
+        return True
+
+    if familiarity == "technical" and not (bridge_ok and simple_physical_event):
+        return True
+
+    if familiarity == "specialized" and mapping_count >= 2 and not bridge_ok:
+        return True
+
+    if _contains_any(combined_explanation, _TECHNICAL_VOCABULARY_MARKERS):
+        if not simple_physical_event and not bridge_ok:
+            return True
+
+    if not _passes_two_sentence_test(
+        immediate=immediate,
+        bridge=bridge,
+        relative_advantage=relative_advantage,
+        execution_blob=execution_blob,
+    ):
+        if familiarity in ("specialized", "technical") or mapping_count >= 2:
+            return True
+
+    if _immediate_clarity_insufficient(
+        immediate=immediate,
+        bridge=bridge,
+        relative_advantage=relative_advantage,
+        execution_blob=execution_blob,
+    ):
+        return True
+
+    return False
+
+
+def detect_competing_category_visual(
+    *,
+    plan_dict: Mapping[str, Any],
+    ad: Mapping[str, Any],
+    fields: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """True when dominant execution reads as advertising a different service category."""
+    merged_fields = dict(fields or _ad_internal_fields(plan_dict, ad))
+    advertised_text = _advertised_service_context(plan_dict)
+    visual_text = _visual_execution_context(merged_fields, ad)
+
+    advertised_clusters = _active_service_clusters(advertised_text, min_hits=1)
+    visual_clusters = _active_service_clusters(visual_text, min_hits=1)
+
+    advertised_prof = advertised_clusters & _PROFESSIONAL_SERVICE_CLUSTERS
+    visual_prof = visual_clusters & _PROFESSIONAL_SERVICE_CLUSTERS
+    if not advertised_prof or not visual_prof:
+        return False
+
+    competing_visual = visual_prof - advertised_prof
+    if not competing_visual:
+        return False
+
+    # Cross-domain objects alone are not a category failure — require a plausible
+    # instructional/professional service scene, not merely an external metaphor object.
+    if competing_visual & _INSTRUCTIONAL_SERVICE_CLUSTERS:
+        return _contains_any(visual_text, _INSTRUCTIONAL_SCENE_MARKERS)
+
+    return bool(competing_visual)
+
+
+def detect_mechanism_not_observable(
+    *,
+    plan_dict: Mapping[str, Any],
+    ad: Mapping[str, Any],
+    fields: Optional[Mapping[str, Any]] = None,
+) -> bool:
+    """True when claimed physical mechanism is not recoverable from planned execution."""
+    merged_fields = dict(fields or _ad_internal_fields(plan_dict, ad))
+    generator_blob = _generator_mechanism_context(plan_dict)
+    execution_blob = _visual_execution_context(merged_fields, ad)
+    immediate = _norm(merged_fields.get("immediateClarityReason"))
+
+    mechanism_claimed = _contains_any(generator_blob, _MECHANISM_DEVICE_MARKERS)
+    if not mechanism_claimed:
+        return False
+
+    mechanism_visible = _contains_any(execution_blob, _MECHANISM_DEVICE_MARKERS)
+    if mechanism_visible:
+        return False
+
+    if _contains_any(execution_blob, _OBSERVABLE_CAUSAL_ACTION_MARKERS):
+        return False
+
+    if _contains_any(execution_blob, _RESULT_ONLY_MARKERS) or _contains_any(
+        immediate, _VISUAL_EFFECT_ONLY_MARKERS
+    ):
+        return True
+
+    return False
+
+
+def scan_plan_category_integrity(plan_dict: Mapping[str, Any]) -> List[str]:
+    """Deterministic category-integrity and observable-mechanism scan for a stored plan."""
+    ads = plan_dict.get("ads")
+    if not isinstance(ads, list):
+        return []
+    reasons: List[str] = []
+    for ad in ads:
+        if isinstance(ad, dict):
+            reasons.extend(
+                validate_ad_category_integrity(plan_dict=plan_dict, ad=ad)
+            )
+    return list(dict.fromkeys(reasons))
+
+
+def scan_plan_physical_repair_reasons(plan_dict: Mapping[str, Any]) -> List[str]:
+    """Planning-level violations that should trigger physical/analogy repair."""
+    return [
+        code
+        for code in scan_advertising_comprehension(plan_dict)
+        if code in PLAN_PHYSICAL_REPAIR_CODES
+    ]
+
+
+def validate_ad_category_integrity(
+    *,
+    plan_dict: Mapping[str, Any],
+    ad: Mapping[str, Any],
+) -> List[str]:
+    reasons: List[str] = []
+    fields = _ad_internal_fields(plan_dict, ad)
+    if detect_competing_category_visual(plan_dict=plan_dict, ad=ad, fields=fields):
+        reasons.append("competing_category_visual")
+    if detect_mechanism_not_observable(plan_dict=plan_dict, ad=ad, fields=fields):
+        reasons.append("advertising_mechanism_not_observable")
+    return reasons
+
+
 def validate_ad_advertising_comprehension(
     *,
     plan_dict: Mapping[str, Any],
@@ -308,27 +1147,33 @@ def validate_ad_advertising_comprehension(
     no_reuse = _norm(fields.get("noReuseCheck"))
     transferred = _norm(plan_dict.get("transferredObject") or plan_dict.get("physicalGenerator"))
 
+    bridge_ok = _bridge_connects_advantage(
+        bridge=bridge,
+        relative_advantage=relative_advantage,
+        slogan_connection=slogan_connection,
+        punchline=punchline,
+        fields=fields,
+        ad=ad,
+    )
+
     if immediate and bridge:
         physical_only = (
             _contains_any(immediate, _PHYSICAL_ONLY_CLARITY_MARKERS)
             and not _token_overlap(relative_advantage, immediate)
         )
-        bridge_ok = (
-            _contains_any(bridge, _ADVANTAGE_BRIDGE_MARKERS)
-            or _token_overlap(relative_advantage, bridge)
-            or _token_overlap(relative_advantage, slogan_connection)
-            or _token_overlap(relative_advantage, punchline)
-            or (
-                _contains_any(bridge, ("proves", "shows", "demonstrates", "expresses", "means"))
-                and (
-                    _token_overlap(bridge, _norm(fields.get("singleChangedPropertyOrAction")))
-                    or _token_overlap(bridge, _norm(fields.get("conceptualActionProof")))
-                    or _token_overlap(bridge, _norm(ad.get("conceptualExecution")))
-                )
-            )
-        )
         if physical_only and not bridge_ok:
             reasons.append("advertising_bridge_unclear")
+
+    if immediate and _contains_any(immediate, _VISUAL_EFFECT_ONLY_MARKERS):
+        clarity_is_effect_only = not (
+            _contains_any(immediate, _ADVANTAGE_BRIDGE_MARKERS)
+            or _token_overlap(relative_advantage, immediate)
+            or _token_overlap(relative_advantage, bridge)
+            or _contains_any(immediate, _MECHANISM_DEVICE_MARKERS)
+        )
+        if clarity_is_effect_only and not bridge_ok:
+            if "advertising_bridge_unclear" not in reasons:
+                reasons.append("advertising_bridge_unclear")
 
     mapping_count = _count_symbolic_mappings(
         immediate,
@@ -338,10 +1183,10 @@ def validate_ad_advertising_comprehension(
         _norm(plan_dict.get("conceptualGeneratorAction")),
         _norm(fields.get("conceptualExecution")),
     )
-    if mapping_count >= 3 and not (
-        _contains_any(bridge, _ADVANTAGE_BRIDGE_MARKERS) or _token_overlap(relative_advantage, bridge)
-    ):
+    if mapping_count >= 3 and not bridge_ok:
         reasons.append("multi_hop_symbolic_chain")
+        if "public_analogy_too_complex" not in reasons:
+            reasons.append("public_analogy_too_complex")
 
     scene = " ".join(
         _norm(fields.get(field))
@@ -370,6 +1215,12 @@ def validate_ad_advertising_comprehension(
         ):
             reasons.append("dominant_object_strategic_role_missing")
             break
+
+    reasons.extend(validate_ad_category_integrity(plan_dict=plan_dict, ad=ad))
+
+    if detect_public_analogy_too_complex(plan_dict=plan_dict, ad=ad, fields=fields):
+        if "public_analogy_too_complex" not in reasons:
+            reasons.append("public_analogy_too_complex")
 
     return list(dict.fromkeys(reasons))
 
@@ -431,6 +1282,30 @@ def build_planned_execution_compliance_block(
         f"relativeAdvantageConnection: {_norm(internals.get('relativeAdvantageConnection'))}",
         f"sloganConnection: {_norm(internals.get('sloganConnection'))}",
         f"noReuseCheck: {_norm(internals.get('noReuseCheck'))}",
+        f"categoryRelevanceReason: {_norm(internals.get('categoryRelevanceReason'))}",
+        f"advertisedProductDescription: {series_plan.product_description}",
+        "",
+        "Category integrity (mandatory — separate from categoryRelevanceReason):",
+        "- Before reading copy, what business/service/category would a normal viewer think this ad sells?",
+        "- Fail ONLY when pixels naturally read as advertising a DIFFERENT commercial service/profession/category.",
+        "- Cross-domain metaphor objects (magnet, umbrella, parachute, domino) are NOT failures by themselves.",
+        "- Reject when the scene looks like another teachable discipline or service business",
+        "  (e.g. history tutor vs gymnastics coaching arena, not history tutor vs magnet attracting one object).",
+        "- categoryRelevanceReason does NOT override category integrity failure.",
+        "",
+        "Public comprehension (mandatory — same review call):",
+        "- Can a general-public viewer identify the physical event immediately?",
+        "- Is the intended causal mechanism visible/recoverable without specialist knowledge?",
+        "- Does the image require technical/professional vocabulary to interpret?",
+        "- Can the relative-advantage bridge plausibly be recovered from pixels?",
+        "- Fail when generation made a simple planned analogy look technical or confusing.",
+        "",
+        "Observable mechanism (mandatory):",
+        "- Compare approved physicalGenerator/transferredObjectAction to pixels.",
+        "- The causal relationship carrying the idea must be recoverable (magnet pulling, umbrella blocking rain).",
+        "- Fail when the plan depends on a hidden device/process but pixels show only its aesthetic result",
+        "  (e.g. autofocus camera claimed but only sharp-subject/blur-background sports photo visible).",
+        "- Do NOT require diagrams, labels, or explanatory arrows.",
         "",
         "Evaluate whether the generated pixels faithfully execute this approved mechanism.",
         "This is NOT aesthetic criticism.",
@@ -442,9 +1317,43 @@ def build_planned_execution_compliance_block(
         "- a normal viewer cannot recover the relative advantage from pixels alone (slogan may reinforce, not carry all meaning)",
         "- pixels and slogan communicate unrelated mechanisms",
         "",
-        "Use hardViolations with these codes when confidence is sufficient:",
+        "Category/mechanism/public hard violation codes (same review call):",
+        "competing_category_visual, advertising_mechanism_not_observable, public_analogy_not_recoverable",
+        "",
+        "Execution fidelity hard violation codes:",
         ", ".join(sorted(EXECUTION_FIDELITY_VIOLATION_CODES)),
         "=== END PLANNED EXECUTION CONTEXT ===",
+    ]
+    return "\n".join(lines)
+
+
+ANALOGY_REPAIR_VIOLATION_CODES = frozenset(
+    {
+        "public_analogy_too_complex",
+        "competing_category_visual",
+        "advertising_mechanism_not_observable",
+        "multi_hop_symbolic_chain",
+        "advertising_bridge_unclear",
+        "public_analogy_not_recoverable",
+    }
+)
+
+
+def build_analogy_repair_guidance_block(violations: Sequence[str]) -> str:
+    """Deterministic repair guidance — simpler analogy, never literal category depiction."""
+    codes = {str(code).strip() for code in violations if str(code).strip()}
+    if not codes & ANALOGY_REPAIR_VIOLATION_CODES:
+        return ""
+    lines = [
+        "=== ANALOGY REPAIR (MANDATORY) ===",
+        "Preserve strategy, relative advantage, slogan, and conceptual generator.",
+        "Do NOT replace the visual with literal product/category imagery (teacher, classroom, book, exam, product in use).",
+        "Find a simpler, more universally understood physical analogy for the SAME relative advantage.",
+        "Prefer widely understood everyday mechanisms (magnet attracts, door opens, umbrella blocks rain)",
+        "over technical/industrial/optical systems unless instantly obvious to a general-public viewer.",
+        "Pass the child-comprehension heuristic: one simple sentence for what physically happens,",
+        "one simple sentence for why that expresses the relative advantage.",
+        "=== END ANALOGY REPAIR ===",
     ]
     return "\n".join(lines)
 
@@ -487,6 +1396,10 @@ def build_execution_fidelity_correction_block(
     if "advertising_bridge_not_recoverable" in fidelity or "relative_advantage_not_expressed" in fidelity:
         lines.append(
             "Ensure the visible mechanism makes the relative advantage recoverable without requiring hidden symbolic translation."
+        )
+    if "public_analogy_not_recoverable" in fidelity:
+        lines.append(
+            "Restore immediate public comprehension: show a simple causal physical event a general viewer can read in one glance."
         )
     lines.extend(
         [

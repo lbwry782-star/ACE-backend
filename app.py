@@ -1952,6 +1952,7 @@ def _builder1_run_physical_repair_job_inner(job_id: str, campaign_id: str, retry
         repaired_plan = repair_builder1_campaign_from_physical(
             session.plan,
             model_caller=_openai_reasoning_planning_model_caller,
+            repair_violations=list(session.last_image_violations or []),
         )
         from engine.builder1_physical_repair import validate_repaired_plan_preserves_generated_ads
 

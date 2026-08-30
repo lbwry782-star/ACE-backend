@@ -113,6 +113,10 @@ class BrandPhysicalOutput:
     medium_participates: bool
     medium_role: str
     campaign_rationale: str
+    product_evidence_required: bool = False
+    product_evidence_reason: str = ""
+    clearer_than_conventional_product_shot: bool = True
+    survives_product_removal: bool = True
 
 
 @dataclass
@@ -309,12 +313,12 @@ def _validate_brand_physical_candidates(
     if selected_id and selected_id not in eligible_ids:
         reasons.append("physical_selected_not_eligible")
 
-    policy = visibility_policy or ProductVisibilityPolicy.FORBIDDEN
+    policy = visibility_policy or ProductVisibilityPolicy.CREATIVE_DECISION
     if isinstance(policy, str):
         try:
             policy = ProductVisibilityPolicy(policy.upper())
         except ValueError:
-            policy = ProductVisibilityPolicy.FORBIDDEN
+            policy = ProductVisibilityPolicy.CREATIVE_DECISION
 
     product_evidence_required = bool(obj.get("productEvidenceRequired"))
     product_evidence_reason = _norm_text(obj.get("productEvidenceReason"))
@@ -391,11 +395,40 @@ def parse_brand_physical_output(
         physical_generator_is_packaging = True
         works_without_product_visible = False
 
-    if physical_generator_is_product:
+    campaign_rationale = _norm_text(obj.get("campaignRationale"))
+    physical_campaign_role = _norm_text(obj.get("physicalGeneratorCampaignRole"))
+
+    from engine.builder1_product_visibility import ProductVisibilityPolicy, policy_prohibits_product_depiction, policy_uses_route_selection
+
+    policy = visibility_policy or ProductVisibilityPolicy.CREATIVE_DECISION
+    if isinstance(policy, str):
+        try:
+            policy = ProductVisibilityPolicy(policy.upper())
+        except ValueError:
+            policy = ProductVisibilityPolicy.CREATIVE_DECISION
+
+    product_evidence_required = bool(obj.get("productEvidenceRequired"))
+    if physical_generator_is_product and policy_prohibits_product_depiction(policy):
         reasons.append("physical_generator_is_product")
+    elif physical_generator_is_product and policy_uses_route_selection(policy):
+        if not campaign_rationale and not physical_campaign_role:
+            reasons.append("product_led_missing_creative_mechanism")
+    elif physical_generator_is_product:
+        reasons.append("physical_generator_is_product")
+
     if physical_generator_is_packaging:
         reasons.append("physical_generator_is_packaging")
-    if not works_without_product_visible:
+
+    if policy_prohibits_product_depiction(policy) and not product_evidence_required:
+        if not works_without_product_visible:
+            reasons.append("physical_generator_requires_product_visible")
+    elif (
+        policy_uses_route_selection(policy)
+        and not physical_generator_is_product
+        and not product_evidence_required
+        and not works_without_product_visible
+        and policy != ProductVisibilityPolicy.PRODUCT_VISIBILITY_REQUIRED
+    ):
         reasons.append("physical_generator_requires_product_visible")
 
     try:
@@ -411,18 +444,6 @@ def parse_brand_physical_output(
         reasons.append("medium_role_required_when_participates")
     if medium_participates is False and _norm_text(obj.get("mediumRole")):
         medium_role = ""
-
-    campaign_rationale = _norm_text(obj.get("campaignRationale"))
-    physical_campaign_role = _norm_text(obj.get("physicalGeneratorCampaignRole"))
-
-    from engine.builder1_product_visibility import ProductVisibilityPolicy
-
-    policy = visibility_policy or ProductVisibilityPolicy.FORBIDDEN
-    if isinstance(policy, str):
-        try:
-            policy = ProductVisibilityPolicy(policy.upper())
-        except ValueError:
-            policy = ProductVisibilityPolicy.FORBIDDEN
 
     reasons.extend(
         _validate_brand_physical_candidates(
@@ -477,6 +498,10 @@ def parse_brand_physical_output(
         medium_participates=medium_participates,
         medium_role=medium_role,
         campaign_rationale=campaign_rationale,
+        product_evidence_required=product_evidence_required,
+        product_evidence_reason=_norm_text(obj.get("productEvidenceReason")),
+        clearer_than_conventional_product_shot=bool(obj.get("clearerThanConventionalProductShot", True)),
+        survives_product_removal=bool(obj.get("survivesProductRemoval", True)),
     )
 
 
@@ -571,6 +596,7 @@ def parse_series_ads_output(
     expected_ad_count: int,
     product_description: str = "",
     visibility_policy: Optional[Any] = None,
+    brand_physical: Optional[Any] = None,
 ) -> SeriesAdsOutput:
     reasons: List[str] = []
     try:
@@ -605,7 +631,9 @@ def parse_series_ads_output(
     if visibility_policy is not None:
         from engine.builder1_product_visibility import enforce_series_ad_visibility_fields
 
-        normalized_ads = enforce_series_ad_visibility_fields(normalized_ads, policy=visibility_policy)
+        normalized_ads = enforce_series_ad_visibility_fields(
+            normalized_ads, policy=visibility_policy, brand_physical=brand_physical
+        )
     reasons.extend(
         validate_series_ads_boundary_text(normalized_ads, product_description=product_description)
     )
@@ -640,10 +668,11 @@ def assemble_builder1_campaign(
     from engine.builder1_product_visibility import (
         ProductVisibilityPolicy,
         ProductVisibilitySource,
+        infer_visual_execution_route,
     )
 
     if visibility_policy is None:
-        visibility_policy = ProductVisibilityPolicy.FORBIDDEN
+        visibility_policy = ProductVisibilityPolicy.CREATIVE_DECISION
     if visibility_source is None:
         visibility_source = ProductVisibilitySource.DEFAULT
     evidence = strategy.brief_support
@@ -764,6 +793,13 @@ def assemble_builder1_campaign(
             "competitorTransferTest": selected_slogan.competitor_transfer_risk,
             "transferRisk": selected_slogan.competitor_transfer_risk,
             "sloganPlacementReason": getattr(graphic, "slogan_placement_reason", ""),
+            "productEvidenceRequired": brand_physical.product_evidence_required,
+            "productEvidenceReason": brand_physical.product_evidence_reason,
+            "visualExecutionRoute": infer_visual_execution_route(
+                physical_generator_is_product=brand_physical.physical_generator_is_product,
+                physical_generator_is_packaging=brand_physical.physical_generator_is_packaging,
+                product_evidence_required=brand_physical.product_evidence_required,
+            ).value,
             "adInternals": ad_internals,
         },
     )

@@ -71,6 +71,71 @@ _GENERIC_BOILERPLATE = frozenset(
     }
 )
 
+_PHYSICAL_GENERATOR_FAMILIES: Dict[str, Tuple[str, ...]] = {
+    "conveyor_production": (
+        "conveyor",
+        "production line",
+        "inspection station",
+        "assembly line",
+        "testing line",
+        "quality control line",
+        "inspection line",
+        "מסוע",
+        "פס ייצור",
+        "תחנת בדיקה",
+    ),
+    "rail_path_navigation": (
+        "railway",
+        "rail track",
+        "train track",
+        "navigation path",
+        "route map",
+        "highway route",
+        "מסילה",
+        "מסלול ניווט",
+    ),
+    "lock_key": (
+        "lock and key",
+        "key opens",
+        "key unlock",
+        "matching opening",
+        "מפתח ומנעול",
+        "פותח מנעול",
+    ),
+    "domino_chain": (
+        "domino",
+        "dominoes",
+        "chain reaction",
+        "דומינו",
+        "תגובה שרשרתית",
+    ),
+    "camera_focus": (
+        "autofocus",
+        "focus system",
+        "depth of field",
+        "bokeh",
+        "camera lens",
+        "מיקוד",
+        "מיקוד אוטומטי",
+    ),
+    "sorting_filtering": (
+        "sorting line",
+        "filter funnel",
+        "sieve",
+        "separator",
+        "מסנן",
+        "מיון",
+    ),
+    "mechanical_transmission": (
+        "gear train",
+        "transmission system",
+        "pulley system",
+        "mechanical transmission",
+        "גלגל שיניים",
+        "מערכת העברה",
+    ),
+}
+
 GLOBAL_IDEA_MEMORY_SCOPE = None  # initialized after IdeaMemoryScope definition
 
 
@@ -879,6 +944,65 @@ def _compact_line(record: IdeaMemoryRecord, *, fields: Sequence[str]) -> str:
     return "; ".join(parts)
 
 
+def classify_physical_generator_family(text: str) -> Optional[str]:
+    lowered = normalize_execution_text(text)
+    if not lowered:
+        return None
+    for family_id, signals in _PHYSICAL_GENERATOR_FAMILIES.items():
+        if any(signal in lowered for signal in signals):
+            return family_id
+    return None
+
+
+def recent_physical_family_counts(
+    snapshot: "IdeaMemorySnapshot",
+    *,
+    exclude_campaign_id: str = "",
+) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for record in snapshot.historical_records(exclude_campaign_id=exclude_campaign_id):
+        families_for_record: Set[str] = set()
+        for field in (
+            record.physical_generator,
+            record.transferred_object,
+            record.transferred_object_action,
+            record.physical_execution,
+        ):
+            family = classify_physical_generator_family(field)
+            if family:
+                families_for_record.add(family)
+        for family in families_for_record:
+            counts[family] = counts.get(family, 0) + 1
+    return counts
+
+
+def build_physical_family_novelty_block(
+    snapshot: "IdeaMemorySnapshot",
+    *,
+    exclude_campaign_id: str = "",
+) -> str:
+    counts = recent_physical_family_counts(snapshot, exclude_campaign_id=exclude_campaign_id)
+    if not counts:
+        return ""
+    lines = [
+        "Recent global physical-generator families (semantic — not exact word match):",
+    ]
+    for family_id, count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        if count >= 2:
+            lines.append(
+                f"- {family_id}: appeared {count} times in recent campaigns — lower preference; "
+                "search for a different everyday analogy first unless materially stronger justification."
+            )
+        elif count == 1:
+            lines.append(f"- {family_id}: appeared once recently — avoid repeating unless clearly superior.")
+    if len(lines) == 1:
+        return ""
+    lines.append(
+        "Conveyors/production lines are NOT banned — require stronger justification when overused."
+    )
+    return "\n".join(lines) + "\n"
+
+
 def build_stage_memory_block(stage: str, snapshot: IdeaMemorySnapshot, *, exclude_campaign_id: str = "") -> str:
     records = snapshot.historical_records(exclude_campaign_id=exclude_campaign_id)
     if not records:
@@ -921,6 +1045,9 @@ def build_stage_memory_block(stage: str, snapshot: IdeaMemorySnapshot, *, exclud
         "Similar underlying idea/mechanism is forbidden even with new wording, product, scene, crop, palette, or language. "
         "Current campaign sibling ads may share series-level generators; compare only against prior campaigns.\n"
     )
+    novelty_block = ""
+    if stage in {"brand_physical", "series_ads"}:
+        novelty_block = build_physical_family_novelty_block(snapshot, exclude_campaign_id=exclude_campaign_id)
     logger.info(
         "BUILDER1_IDEA_MEMORY_INJECTED memoryScope=%s stage=%s recordCount=%s summaryCount=%s",
         MEMORY_SCOPE_GLOBAL_IDEA,
@@ -928,7 +1055,11 @@ def build_stage_memory_block(stage: str, snapshot: IdeaMemorySnapshot, *, exclud
         len(records),
         len(lines),
     )
-    return header + "\n".join(lines)
+    body = header
+    if novelty_block:
+        body += novelty_block + "\n"
+    body += "\n".join(lines)
+    return body
 
 
 def find_historical_duplicate(

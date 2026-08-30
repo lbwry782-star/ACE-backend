@@ -15,6 +15,9 @@ from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_visibility import (
     BUILDER1_NO_PRODUCT_STRICT_CORRECTION_BLOCK,
     ProductVisibilityPolicy,
+    build_policy_aware_global_image_constraints,
+    resolve_product_visibility_policy,
+    visual_route_for_plan,
 )
 
 logger = logging.getLogger(__name__)
@@ -226,8 +229,10 @@ def build_cumulative_image_correction_block(
         plan_revision,
         union,
     )
+    policy = resolve_product_visibility_policy(series_plan.product_visibility_policy)
+    route = visual_route_for_plan(series_plan)
     sections = [
-        PERMANENT_FORBIDDEN_GLOBAL_CONSTRAINTS,
+        build_policy_aware_global_image_constraints(policy=policy, visual_route=route),
         "=== ACCUMULATED VIOLATIONS TO CORRECT ===",
         ", ".join(union),
         "=== END ACCUMULATED VIOLATIONS ===",

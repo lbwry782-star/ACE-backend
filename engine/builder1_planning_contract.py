@@ -27,7 +27,9 @@ from engine.builder1_methodology_reasons import (
 from engine.builder1_product_shot_methodology import (
     BUILDER1_CLARITY_OVER_CATEGORY,
     BUILDER1_PERCEPTION_FIRST,
+    BUILDER1_POPULAR_ANALOGY_FIRST,
     BUILDER1_PRODUCT_EVIDENCE_EXCEPTION,
+    BUILDER1_PUBLIC_SIMPLICITY,
     BUILDER1_REMOVAL_TEST,
     BUILDER1_SERIES_TRANSFERRED_OBJECT_RULES,
     BUILDER1_VISIBILITY_POLICY_METHODOLOGY,
@@ -398,6 +400,8 @@ Return JSON only. Return exactly this object and no additional top-level keys:
 {BUILDER1_SLOGAN_COMPLEMENTARITY_RULE}
 {BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_CLARITY_OVER_CATEGORY}
+{BUILDER1_POPULAR_ANALOGY_FIRST}
+{BUILDER1_PUBLIC_SIMPLICITY}
 {BUILDER1_REMOVAL_TEST}
 {BUILDER1_PRODUCT_EVIDENCE_EXCEPTION}
 {BUILDER1_VISIBILITY_POLICY_METHODOLOGY}
@@ -413,6 +417,9 @@ Rules:
 - The selected physical generator must NOT be the advertised product, its packaging, or a category package unless productEvidenceRequired=true with a convincing productEvidenceReason.
 - physicalGeneratorIsProduct, physicalGeneratorIsPackaging must be false and worksWithoutProductVisible must be true when policy is FORBIDDEN.
 - clearerThanConventionalProductShot and survivesProductRemoval must be true for the selected candidate when policy is FORBIDDEN.
+- When policy is CREATIVE_DECISION or PRODUCT_VISIBILITY_REQUIRED, choose the strongest route: external analogy OR product-as-generator OR product-integrated analogy.
+- If physicalGeneratorIsProduct is true, set worksWithoutProductVisible false and explain the product's creative mechanism in campaignRationale.
+- Do not choose the product merely because analogy search failed; product-led requires a genuine relative-advantage mechanism.
 - transferredObject is the external familiar object that performs the fixed slogan action.
 - transferredObjectAction is one concrete visual action the transferred object performs.
 - whyClearerThanShowingProduct: one sentence maximum explaining why this object is clearer than showing the product.
@@ -475,6 +482,8 @@ Return JSON only. Return exactly this object and no additional top-level keys:
 {BUILDER1_SLOGAN_COMPLEMENTARITY_RULE}
 {BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_VISIBILITY_POLICY_METHODOLOGY}
+{BUILDER1_POPULAR_ANALOGY_FIRST}
+{BUILDER1_PUBLIC_SIMPLICITY}
 {NO_LOGO_REASON}
 Rules:
 - seriesGenerator must be an object with type, principle, progression.
@@ -966,7 +975,7 @@ def build_brand_physical_user_prompt(
     implied_action: str,
     conceptual: Dict[str, str],
     brand_guidelines: Optional[Dict[str, Any]] = None,
-    visibility_policy: str = "FORBIDDEN",
+    visibility_policy: str = "CREATIVE_DECISION",
     idea_memory_block: str = "",
 ) -> str:
     guidelines = ""
@@ -989,6 +998,9 @@ def build_brand_physical_user_prompt(
         "Explore at least 4 serious physicalCandidates from different physicalWorld values before selecting.\n"
         "For each candidate state why it is clearer than showing the product and whether it survives product removal.\n"
         "When policy is FORBIDDEN, do not choose the product or its packaging as the physical generator.\n"
+        "When policy is CREATIVE_DECISION or PRODUCT_VISIBILITY_REQUIRED, prefer the route that expresses the relative advantage most clearly — "
+        "including the product itself when that is simpler and stronger than any external analogy.\n"
+        "When policy is PRODUCT_VISIBILITY_REQUIRED, the product must appear in the final image — choose hierarchy by creative strength, not by default secondary placement.\n"
         "Compare transferred-object embodiments only. Return physical-generator system only. Do NOT return or modify the brand slogan."
         "Do not reuse a previous physical generator and transferred action for this product."
         f"{guidelines}{memory}"
@@ -996,6 +1008,10 @@ def build_brand_physical_user_prompt(
 
 
 def build_brand_physical_repair_prompt(*, broken_json: str, reasons: List[str]) -> str:
+    from engine.builder1_advertising_comprehension import build_analogy_repair_guidance_block
+
+    analogy_block = build_analogy_repair_guidance_block(reasons)
+    analogy_section = f"\n{analogy_block}\n" if analogy_block else ""
     return (
         "Repair ONLY the physical-system JSON object. Return exactly:\n"
         '{"physicalCandidates":[{"id":"P01","externalObject":"...","physicalWorld":"...",'
@@ -1014,6 +1030,7 @@ def build_brand_physical_repair_prompt(*, broken_json: str, reasons: List[str]) 
         '"productEvidenceRequired":false,"productEvidenceReason":"",'
         '"mediumParticipates":false,"mediumRole":"",'
         '"campaignRationale":"..."}\n'
+        f"{analogy_section}"
         f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"
     )
@@ -1130,7 +1147,7 @@ def build_series_ads_user_prompt(
     conceptual: Dict[str, str],
     brand_physical: Dict[str, Any],
     graphic_generator: Dict[str, Any],
-    visibility_policy: str = "FORBIDDEN",
+    visibility_policy: str = "CREATIVE_DECISION",
     idea_memory_block: str = "",
 ) -> str:
     indexes = ", ".join(str(i) for i in range(1, ad_count + 1))

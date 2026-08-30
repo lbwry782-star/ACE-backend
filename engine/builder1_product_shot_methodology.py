@@ -83,6 +83,31 @@ Selection test: "Does this object make the intended perception understandable in
 Do not reward category literalness by itself.
 """.strip()
 
+BUILDER1_POPULAR_ANALOGY_FIRST = """
+POPULAR ANALOGY FIRST:
+When several physical analogies can express the same relative advantage, prefer the most widely understood
+object, action, cause/effect, or everyday situation — not the most technically precise or professionally elegant mechanism.
+Why: advertising clarity beats engineering sophistication.
+Failure prevented: autofocus loops, industrial inspection lines, or optical systems that ordinary viewers cannot read instantly.
+Instead: magnet attracts, door opens, umbrella blocks rain, domino falls, key opens lock — familiar mechanisms with immediate causal readability.
+Selection test: "Could a reasonably observant child describe what is physically happening in one simple sentence?"
+Do NOT hard-ban technical objects — use them only when instantly obvious without specialist knowledge.
+Never choose the popular object first and retrofit meaning afterward; derive it from the relative advantage.
+""".strip()
+
+BUILDER1_PUBLIC_SIMPLICITY = """
+PUBLIC SIMPLICITY (child-comprehension heuristic — not childish art direction):
+Treat the viewer as general public without assuming technical, professional, academic, or industrial knowledge.
+The idea may be sophisticated; the physical action must be simple.
+Every planned analogy must satisfy two sentences:
+1) What is physically happening? — one short ordinary-language sentence.
+2) Why does that express the relative advantage? — one short ordinary-language sentence.
+If the explanation needs specialist vocabulary, invisible machinery, or three+ hidden symbolic mappings, reject or repair.
+immediateClarityReason must prove: what the viewer sees happen, that ordinary viewers understand that action,
+and how that action connects directly to the relative advantage — not merely that an effect or object is familiar.
+Do NOT prefer mechanisms because they sound engineered, systematic, scientific, or professional.
+""".strip()
+
 BUILDER1_DISTINCTIVENESS = """
 DISTINCTIVENESS:
 A product shot is often transferable to any competitor.
@@ -112,12 +137,29 @@ BUILDER1_VISIBILITY_POLICY_METHODOLOGY = """
 RELATION TO SERVER VISIBILITY POLICY:
 The server owns productVisibilityPolicy. Do not override it.
 
-When policy=FORBIDDEN:
+When policy=CREATIVE_DECISION (default):
+- There is no necessity to show the product — but showing it may be the strongest idea.
+- Choose AFTER strategy, relative advantage, and slogan are fixed.
+- Three valid routes: ANALOGY_LED (external transferred object), PRODUCT_LED (product itself carries the idea),
+  PRODUCT_INTEGRATED_ANALOGY (product participates in a larger mechanism).
+- Prefer whichever route most clearly expresses the relative advantage with public simplicity.
+- Do NOT manufacture an external analogy merely to avoid showing a simple everyday product.
+- Do NOT show the product merely because no better idea was found — product-led requires a genuine creative mechanism.
+- Product Name may appear only as plain typography; no invented logo or packaging brand mark.
+
+When policy=PRODUCT_VISIBILITY_REQUIRED (explicit user show-product request):
+- The product must appear in the image — presence is mandatory.
+- Visual hierarchy is NOT predetermined: choose the strongest route after strategy.
+- Valid routes remain PRODUCT_LED, PRODUCT_INTEGRATED_ANALOGY, or ANALOGY_LED with visible product.
+- Do NOT default to a generic packshot; product-led still requires a genuine creative mechanism.
+- Do NOT force secondary placement when product-led or integrated analogy is stronger.
+
+When policy=FORBIDDEN (explicit user hide-product request or legacy stored campaigns):
 - use an external transferred object;
 - the advertised product and packaging must not appear;
 - Product Name may appear only as plain typography.
 
-When an explicit user request permits secondary product visibility:
+When policy=SECONDARY_EXPLICIT_EXCEPTION (legacy stored campaigns only):
 - product presence remains secondary;
 - the transferred generator must still carry the idea;
 - the product must not become the default main visual;

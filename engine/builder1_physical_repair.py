@@ -184,6 +184,7 @@ def repair_builder1_campaign_from_physical(
     *,
     model_caller: Any,
     brand_guidelines: Optional[Dict[str, Any]] = None,
+    repair_violations: Optional[List[str]] = None,
 ) -> Builder1SeriesPlan:
     """Rerun brand_physical, graphic_system, and series_ads while preserving upstream identity."""
     from engine.builder1_paid_stage_guard import checkpoint_before_paid_call
@@ -191,7 +192,7 @@ def repair_builder1_campaign_from_physical(
     checkpoint_before_paid_call("physical_repair_start")
     strategy, strategy_selection, selected_slogan, selected_conceptual = _reconstruct_upstream_from_plan(plan)
     conceptual_fixed = _conceptual_to_dict(selected_conceptual)
-    visibility_policy = ProductVisibilityPolicy.FORBIDDEN
+    visibility_policy = ProductVisibilityPolicy.CREATIVE_DECISION
     raw_policy = (plan.product_visibility_policy or "").strip().upper()
     try:
         visibility_policy = ProductVisibilityPolicy(raw_policy)
@@ -218,6 +219,11 @@ def repair_builder1_campaign_from_physical(
         brand_guidelines=brand_guidelines,
         visibility_policy=visibility_policy.value,
     )
+    from engine.builder1_advertising_comprehension import build_analogy_repair_guidance_block
+
+    analogy_block = build_analogy_repair_guidance_block(repair_violations or [])
+    if analogy_block:
+        user_prompt = f"{user_prompt}\n\n{analogy_block}"
 
     brand_physical = _run_brand_physical_with_identity_guard(
         model_caller=model_caller,
@@ -292,6 +298,7 @@ def repair_builder1_campaign_from_physical(
             expected_ad_count=plan.ad_count,
             product_description=plan.product_description,
             visibility_policy=visibility_policy,
+            brand_physical=brand_physical,
         ),
         repair_builder=lambda broken, reasons: build_series_ads_repair_prompt(
             broken_json=broken, reasons=reasons, ad_count=plan.ad_count

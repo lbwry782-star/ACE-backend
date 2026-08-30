@@ -677,7 +677,7 @@ def validate_series_plan_structure(
             transferred_object_action=_norm_text(
                 obj.get("transferredObjectAction") or obj.get("physicalGeneratorCampaignRole")
             ),
-            product_visibility_policy=_norm_text(obj.get("productVisibilityPolicy") or "FORBIDDEN"),
+            product_visibility_policy=_norm_text(obj.get("productVisibilityPolicy") or "CREATIVE_DECISION"),
             graphic_generator=graphic,  # type: ignore[arg-type]
             series_generator=series_gen,  # type: ignore[arg-type]
             medium_participates=medium_participates,

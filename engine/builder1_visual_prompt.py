@@ -8,7 +8,16 @@ from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_shot_methodology import BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE
 from engine.builder1_literal_embodiment import BUILDER1_IMAGE_EXPRESSIVE_OBJECT_RULE
-from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_product_visibility import (
+    ProductVisibilityPolicy,
+    VisualExecutionRoute,
+    infer_visual_execution_route,
+    plan_approves_product_as_main_visual,
+    policy_is_legacy_secondary_only,
+    policy_prohibits_product_depiction,
+    policy_uses_route_selection,
+    resolve_product_visibility_policy,
+)
 
 MEDIUM_PROHIBITION = (
     "Do not show this advertisement inside a billboard, framed poster mockup, phone screen, "
@@ -17,16 +26,23 @@ MEDIUM_PROHIBITION = (
 
 
 def _resolve_visibility_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
-    raw = (series_plan.product_visibility_policy or "").strip().upper()
-    try:
-        return ProductVisibilityPolicy(raw)
-    except ValueError:
-        internals = series_plan.planning_internals or {}
-        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
+    return resolve_product_visibility_policy(series_plan.product_visibility_policy)
+
+
+def _visual_route(series_plan: Builder1SeriesPlan) -> VisualExecutionRoute:
+    internals = series_plan.planning_internals or {}
+    raw = str(internals.get("visualExecutionRoute") or "").strip().upper()
+    if raw:
         try:
-            return ProductVisibilityPolicy(raw)
+            return VisualExecutionRoute(raw)
         except ValueError:
-            return ProductVisibilityPolicy.FORBIDDEN
+            pass
+    return infer_visual_execution_route(
+        physical_generator_is_product=bool(
+            internals.get("physicalGeneratorIsProduct") or internals.get("productIsPhysicalGenerator")
+        ),
+        product_evidence_required=bool(internals.get("productEvidenceRequired")),
+    )
 
 
 def build_campaign_graphic_identity_block(series_plan: Builder1SeriesPlan) -> str:
@@ -109,6 +125,41 @@ def _forbidden_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Build
     )
 
 
+def _product_led_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
+    action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
+    return "\n".join(
+        [
+            "=== MAIN VISUAL (PRODUCT-LED — APPROVED) ===",
+            f"MAIN VISUAL: the advertised product itself — {series_plan.product_description}",
+            f"ACTION: {action}",
+            f"Ad variation: {ad_plan.variation_label}.",
+            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            "The product itself carries the advertising idea through its form, property, arrangement, or transformation.",
+            "This is an approved product-led execution — not a generic packshot.",
+            "Product Name and slogan appear only as plain typography — never as an invented logo or packaging mark.",
+            "=== END MAIN VISUAL ===",
+        ]
+    )
+
+
+def _integrated_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
+    transferred = series_plan.transferred_object or series_plan.physical_generator
+    action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
+    return "\n".join(
+        [
+            "=== MAIN VISUAL (PRODUCT-INTEGRATED ANALOGY — APPROVED) ===",
+            f"MAIN VISUAL: {transferred}",
+            f"ACTION: {action}",
+            f"Ad variation: {ad_plan.variation_label}.",
+            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            "The advertised product may appear as a participant in this mechanism.",
+            "The transferred analogy remains the governing visual law.",
+            "Product Name as plain typography only — no invented logo or packaging mark.",
+            "=== END MAIN VISUAL ===",
+        ]
+    )
+
+
 def _secondary_exception_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
     transferred = series_plan.transferred_object or series_plan.physical_generator
     action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
@@ -125,8 +176,42 @@ def _secondary_exception_main_visual_block(series_plan: Builder1SeriesPlan, ad_p
     )
 
 
+def _creative_analogy_main_visual_block(
+    series_plan: Builder1SeriesPlan,
+    ad_plan: Builder1AdPlan,
+    *,
+    product_required: bool = False,
+) -> str:
+    transferred = series_plan.transferred_object or series_plan.physical_generator
+    action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
+    if product_required:
+        product_line = (
+            "ADVERTISED PRODUCT: must appear in the image. "
+            "The transferred object may remain the main visual while the product appears as required participant or secondary element."
+        )
+        header = "=== MAIN VISUAL (ANALOGY-LED — PRODUCT VISIBILITY REQUIRED) ==="
+    else:
+        product_line = "ADVERTISED PRODUCT: not depicted unless explicitly integrated in the approved mechanism above."
+        header = "=== MAIN VISUAL (ANALOGY-LED — APPROVED) ==="
+    return "\n".join(
+        [
+            header,
+            f"MAIN VISUAL: {transferred}",
+            f"ACTION: {action}",
+            f"Ad variation: {ad_plan.variation_label}.",
+            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            "Center the transferred external object and its physical action as the advertisement's visual proof.",
+            "=== END MAIN VISUAL ===",
+            "=== ADVERTISED PRODUCT ===",
+            product_line,
+            "=== END ADVERTISED PRODUCT ===",
+        ]
+    )
+
+
 def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
     policy = _resolve_visibility_policy(series_plan)
+    route = _visual_route(series_plan)
     medium_block = (
         f"Medium participation (justified): {series_plan.medium_role}."
         if series_plan.medium_participates
@@ -143,11 +228,41 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
         if ad_plan.headline
         else "No ad headline for this execution — do not invent headline text."
     )
-    main_visual_block = (
-        _forbidden_main_visual_block(series_plan, ad_plan)
-        if policy == ProductVisibilityPolicy.FORBIDDEN
-        else _secondary_exception_main_visual_block(series_plan, ad_plan)
-    )
+    if policy_prohibits_product_depiction(policy):
+        main_visual_block = _forbidden_main_visual_block(series_plan, ad_plan)
+        preserve_object_rule = (
+            "Preserve the selected external expressive object as MAIN VISUAL. "
+            "Do not substitute the advertised product, product category, literal slogan noun, road/path/maze/car/train imagery, "
+            "or other literal illustration unless that object was explicitly selected in planning."
+        )
+    elif policy_is_legacy_secondary_only(policy):
+        main_visual_block = _secondary_exception_main_visual_block(series_plan, ad_plan)
+        preserve_object_rule = "Preserve the transferred object as MAIN VISUAL."
+    elif policy_uses_route_selection(policy) and (
+        route == VisualExecutionRoute.PRODUCT_LED or plan_approves_product_as_main_visual(
+            series_plan, ad_index=ad_plan.index
+        )
+    ):
+        main_visual_block = _product_led_main_visual_block(series_plan, ad_plan)
+        preserve_object_rule = (
+            "Execute the approved product-led creative mechanism faithfully. "
+            "Do not substitute an external analogy when the plan selected the product itself as the idea carrier."
+        )
+    elif route == VisualExecutionRoute.PRODUCT_INTEGRATED_ANALOGY and policy_uses_route_selection(policy):
+        main_visual_block = _integrated_main_visual_block(series_plan, ad_plan)
+        preserve_object_rule = "Preserve both the transferred analogy and approved product participation."
+    elif policy_uses_route_selection(policy):
+        main_visual_block = _creative_analogy_main_visual_block(
+            series_plan,
+            ad_plan,
+            product_required=policy == ProductVisibilityPolicy.PRODUCT_VISIBILITY_REQUIRED,
+        )
+        preserve_object_rule = (
+            "Preserve the selected external expressive object as MAIN VISUAL when the plan is analogy-led."
+            if policy == ProductVisibilityPolicy.CREATIVE_DECISION
+            else "Product visibility is required; hierarchy follows the approved route."
+        )
+
     parts = [
         "Create a complete finished advertisement that fills the entire image frame edge to edge.",
         f"Format: {series_plan.format}. The output is the final ad itself, not a background for later overlay.",
@@ -155,22 +270,27 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
         main_visual_block,
         POSITIVE_IMAGE_PROMPT_REASON,
         NO_LOGO_REASON,
-        BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE,
-        BUILDER1_IMAGE_EXPRESSIVE_OBJECT_RULE,
-        "Preserve the selected external expressive object as MAIN VISUAL. Do not substitute the advertised product, product category, literal slogan noun, road/path/maze/car/train imagery, or other literal illustration unless that object was explicitly selected in planning.",
-        "Do not add discarded slogan nouns back into the scene when planning selected a non-literal expressive object.",
-        f"Fixed brand slogan (typography only): {series_plan.brand_slogan}.",
-        f"Slogan-implied action performed by the selected external object: {series_plan.slogan_action}.",
-        "MARKETING TEXT must NOT appear inside the image.",
-        headline_rule,
-        hebrew_block,
-        build_campaign_graphic_identity_block(series_plan),
-        build_text_to_render_block(series_plan, ad_plan),
-        medium_block,
-        "Prohibit any text beyond the exact brand name, brand slogan, and optional headline specified above.",
-        "Prohibit additional slogans, paragraphs, captions, UI elements, stock watermarks, or decorative logos.",
-        "Marketing body copy must NOT appear in the image.",
-        "Object colors must not redefine the campaign palette.",
-        "The final advertisement must visibly demonstrate the shared art direction, palette, typography hierarchy, and recurring graphic device.",
     ]
+    if policy_prohibits_product_depiction(policy):
+        parts.append(BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE)
+    parts.extend(
+        [
+            BUILDER1_IMAGE_EXPRESSIVE_OBJECT_RULE,
+            preserve_object_rule,
+            "Do not add discarded slogan nouns back into the scene when planning selected a non-literal expressive object.",
+            f"Fixed brand slogan (typography only): {series_plan.brand_slogan}.",
+            f"Slogan-implied action: {series_plan.slogan_action}.",
+            "MARKETING TEXT must NOT appear inside the image.",
+            headline_rule,
+            hebrew_block,
+            build_campaign_graphic_identity_block(series_plan),
+            build_text_to_render_block(series_plan, ad_plan),
+            medium_block,
+            "Prohibit any text beyond the exact brand name, brand slogan, and optional headline specified above.",
+            "Prohibit additional slogans, paragraphs, captions, UI elements, stock watermarks, or decorative logos.",
+            "Marketing body copy must NOT appear in the image.",
+            "Object colors must not redefine the campaign palette.",
+            "The final advertisement must visibly demonstrate the shared art direction, palette, typography hierarchy, and recurring graphic device.",
+        ]
+    )
     return "\n".join(parts)

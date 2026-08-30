@@ -298,7 +298,7 @@ class TestProductionShapedRegression(unittest.TestCase):
                 model_caller=model_caller,
                 ad_count=2,
             )
-            self.assertEqual(plan.product_visibility_policy, "FORBIDDEN")
+            self.assertEqual(plan.product_visibility_policy, "CREATIVE_DECISION")
             self.assertTrue(plan.transferred_object)
             self.assertEqual(stages[:5], [
                 "strategy_slogan_stage",
@@ -312,8 +312,7 @@ class TestProductionShapedRegression(unittest.TestCase):
             prompt = __import__(
                 "engine.builder1_visual_prompt", fromlist=["build_visual_prompt"]
             ).build_visual_prompt(plan, plan.ads[0])
-            self.assertIn("ADVERTISED PRODUCT: not depicted", prompt)
-            self.assertIn("PACKAGING: not depicted", prompt)
+            self.assertIn("ANALOGY-LED", prompt)
             self.assertIn(plan.transferred_object, prompt)
 
 

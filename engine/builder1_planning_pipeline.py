@@ -431,6 +431,7 @@ def _run_series_stage_with_integrity(
             expected_ad_count=normalized.ad_count,
             product_description=normalized.product_description,
             visibility_policy=visibility_policy,
+            brand_physical=brand_physical_dict,
         ),
         repair_builder=lambda broken, reasons: build_series_ads_repair_prompt(
             broken_json=broken, reasons=reasons, ad_count=normalized.ad_count

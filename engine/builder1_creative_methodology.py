@@ -10,6 +10,7 @@ from engine.builder1_no_logo import deterministic_no_logo_checks
 from engine.builder1_slogan_stage import SLOGAN_REJECTION_CODES, is_slogan_rejection
 from engine.builder1_advertising_comprehension import (
     ADVERTISING_COMPREHENSION_REJECTION_CODES,
+    CATEGORY_INTEGRITY_VIOLATION_CODES,
     scan_advertising_comprehension,
 )
 from engine.builder1_literal_embodiment import (
@@ -21,12 +22,14 @@ METHODOLOGY_REJECTION_CODES = frozenset(
     SLOGAN_REJECTION_CODES
     | LITERAL_EMBODIMENT_REJECTION_CODES
     | ADVERTISING_COMPREHENSION_REJECTION_CODES
+    | CATEGORY_INTEGRITY_VIOLATION_CODES
     | {
         "conceptual_generator_not_derived_from_slogan",
         "physical_generator_not_derived_from_concept",
         "physical_generator_is_product",
         "physical_generator_is_packaging",
         "unauthorized_product_visibility",
+        "product_led_without_creative_mechanism",
         "visual_requires_explanatory_headline",
         "campaign_transferable_to_competitor",
         "category_relevance_patched",
@@ -130,6 +133,9 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
             "literal_category_depiction",
             "literal_product_embodiment",
             "slogan_word_illustration",
+            "competing_category_visual",
+            "advertising_mechanism_not_observable",
+            "public_analogy_too_complex",
         )
     ):
         return "brand_physical"
@@ -146,6 +152,9 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
             "advertising_bridge_unclear",
             "multi_hop_symbolic_chain",
             "dominant_object_strategic_role_missing",
+            "competing_category_visual",
+            "advertising_mechanism_not_observable",
+            "public_analogy_too_complex",
         )
     ):
         return "series_ads"
@@ -182,6 +191,9 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
                     "literal_category_depiction",
                     "literal_product_embodiment",
                     "slogan_word_illustration",
+                    "competing_category_visual",
+                    "advertising_mechanism_not_observable",
+                    "public_analogy_too_complex",
                 }
             ),
         ),
@@ -208,6 +220,9 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
                     "advertising_bridge_unclear",
                     "multi_hop_symbolic_chain",
                     "dominant_object_strategic_role_missing",
+                    "competing_category_visual",
+                    "advertising_mechanism_not_observable",
+                    "public_analogy_too_complex",
                 }
             ),
         ),
@@ -266,7 +281,7 @@ def deterministic_methodology_checks(plan_dict: Dict[str, Any]) -> List[str]:
     detected = _norm(plan_dict.get("detectedLanguage")).lower()
     embodiment = _norm(plan_dict.get("embodimentChoice")).lower()
     visibility_reason = _norm(plan_dict.get("productVisibilityJustification"))
-    visibility_policy = _norm(plan_dict.get("productVisibilityPolicy")).upper() or "FORBIDDEN"
+    visibility_policy = _norm(plan_dict.get("productVisibilityPolicy")).upper() or "CREATIVE_DECISION"
 
     if slogan_action and conceptual_action:
         why_slogan = _norm(plan_dict.get("conceptualGeneratorWhyItExpressesSlogan"))
@@ -306,7 +321,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
     detected: str = "",
     embodiment: str = "",
     visibility_reason: str = "",
-    visibility_policy: str = "FORBIDDEN",
+    visibility_policy: str = "CREATIVE_DECISION",
 ) -> List[str]:
     reasons: List[str] = []
     if not any([slogan, slogan_action, relative_advantage, conceptual_action, physical]):
@@ -319,7 +334,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
         detected = _norm(plan_dict.get("detectedLanguage")).lower()
         embodiment = _norm(plan_dict.get("embodimentChoice")).lower()
         visibility_reason = _norm(plan_dict.get("productVisibilityJustification"))
-        visibility_policy = _norm(plan_dict.get("productVisibilityPolicy")).upper() or "FORBIDDEN"
+        visibility_policy = _norm(plan_dict.get("productVisibilityPolicy")).upper() or "CREATIVE_DECISION"
 
     if physical and conceptual_action:
         physical_role = _norm(plan_dict.get("physicalGeneratorCampaignRole"))
@@ -347,6 +362,33 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
             reasons.append("unauthorized_product_visibility")
         if visibility_reason and "show" in visibility_reason.lower():
             reasons.append("unauthorized_product_visibility")
+
+    if visibility_policy in {"CREATIVE_DECISION", "PRODUCT_VISIBILITY_REQUIRED"}:
+        internals = plan_dict.get("planningInternals") or plan_dict.get("planning_internals") or {}
+        ad_internals = internals.get("adInternals") if isinstance(internals.get("adInternals"), dict) else {}
+        relative_advantage = _norm(plan_dict.get("relativeAdvantage"))
+        for ad in _ads_from_plan(plan_dict):
+            idx = ad.get("index")
+            extra = {}
+            if isinstance(ad_internals, dict) and idx is not None:
+                extra = ad_internals.get(idx) or ad_internals.get(str(idx)) or {}
+            if not isinstance(extra, dict):
+                extra = {}
+            product_led = (
+                extra.get("productIsMainVisual") is True
+                or extra.get("productIsPhysicalGenerator") is True
+                or ad.get("productIsMainVisual") is True
+                or ad.get("productIsPhysicalGenerator") is True
+            )
+            if not product_led:
+                continue
+            bridge = _norm(extra.get("relativeAdvantageConnection") or ad.get("relativeAdvantageConnection"))
+            campaign_role = _norm(plan_dict.get("physicalGeneratorCampaignRole"))
+            rationale = _norm(plan_dict.get("campaignRationale"))
+            bridge_tokens = set(re.findall(r"[a-zA-Z\u0590-\u05FF]{4,}", relative_advantage.lower()))
+            bridge_hits = sum(1 for token in bridge_tokens if token in bridge.lower()) if bridge else 0
+            if not bridge or (bridge_hits < 1 and not campaign_role and not rationale):
+                reasons.append("product_led_without_creative_mechanism")
 
     transfer = _norm(plan_dict.get("competitorTransferTest")).lower()
     if transfer in {"yes", "true", "transferable", "high"}:

@@ -143,19 +143,19 @@ class TestVisibilityTiming(unittest.TestCase):
         self.assertIn("policy_logged", events)
         self.assertLess(events.index("policy_logged"), events.index("brand_physical"))
 
-    def test_default_policy_is_forbidden(self) -> None:
+    def test_default_policy_is_creative_decision(self) -> None:
         decision = derive_product_visibility_policy(
             product_name="",
             product_description=BRIEF,
         )
-        self.assertEqual(decision.policy, ProductVisibilityPolicy.FORBIDDEN)
+        self.assertEqual(decision.policy, ProductVisibilityPolicy.CREATIVE_DECISION)
 
 
 class TestImagePreflightAndCorrection(unittest.TestCase):
     def test_preflight_blocks_missing_transferred_object(self) -> None:
-        from tests.test_builder1_product_visibility import TestImagePromptVisibility
+        from tests.test_builder1_product_visibility import forbidden_test_plan
 
-        plan = TestImagePromptVisibility()._plan()
+        plan = forbidden_test_plan()
         plan.transferred_object = ""
         plan.physical_generator = ""
         ad = plan.ads[0]
@@ -175,7 +175,7 @@ class TestImagePreflightAndCorrection(unittest.TestCase):
         self.assertIn("Rubber ball", block)
 
     def test_same_ad_correction_uses_no_product_strict(self) -> None:
-        from tests.test_builder1_product_visibility import TestImagePromptVisibility
+        from tests.test_builder1_product_visibility import forbidden_test_plan
 
         prompts: List[str] = []
 
@@ -210,7 +210,7 @@ class TestImagePreflightAndCorrection(unittest.TestCase):
                 )
             return ImageComplianceResult(passed=True, violations=[], confidence="high")
 
-        plan = TestImagePromptVisibility()._plan()
+        plan = forbidden_test_plan()
         with self.assertLogs("engine.builder1_image_retry", level="INFO") as logs:
             generate_builder1_ad_image(plan, 1, caller, compliance_reviewer=reviewer)
         self.assertIn("NO_PRODUCT_STRICT", prompts[1])

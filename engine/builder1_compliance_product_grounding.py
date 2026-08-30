@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_product_modality import ProductModality, resolve_product_modality
-from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_product_visibility import ProductVisibilityPolicy, resolve_product_visibility_policy
 
 logger = logging.getLogger(__name__)
 
@@ -253,16 +253,11 @@ def classify_advertised_product_type(
 
 
 def _resolve_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
-    raw = (series_plan.product_visibility_policy or "").strip().upper()
-    try:
-        return ProductVisibilityPolicy(raw)
-    except ValueError:
+    raw = series_plan.product_visibility_policy
+    if not raw:
         internals = series_plan.planning_internals or {}
-        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
-        try:
-            return ProductVisibilityPolicy(raw)
-        except ValueError:
-            return ProductVisibilityPolicy.FORBIDDEN
+        raw = internals.get("productVisibilityPolicy")
+    return resolve_product_visibility_policy(raw)
 
 
 def _ad_for_index(series_plan: Builder1SeriesPlan, ad_index: int):

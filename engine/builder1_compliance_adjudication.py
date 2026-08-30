@@ -21,7 +21,14 @@ from engine.builder1_advertising_comprehension import EXECUTION_FIDELITY_VIOLATI
 from engine.builder1_failure_classification import validate_forbidden_plan_visibility
 from engine.builder1_plan_spec import Builder1SeriesPlan
 from engine.builder1_product_modality import ProductModality, resolve_product_modality
-from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_product_visibility import (
+    ProductVisibilityPolicy,
+    plan_approves_product_as_main_visual,
+    plan_approves_product_as_physical_generator,
+    plan_approves_product_visibility,
+    policy_prohibits_product_depiction,
+    resolve_product_visibility_policy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,16 +181,9 @@ def _concrete_product_evidence(item: Optional[ComplianceEvidenceItem]) -> bool:
 
 
 def _resolve_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
-    raw = (series_plan.product_visibility_policy or "").strip().upper()
-    try:
-        return ProductVisibilityPolicy(raw)
-    except ValueError:
-        internals = series_plan.planning_internals or {}
-        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
-        try:
-            return ProductVisibilityPolicy(raw)
-        except ValueError:
-            return ProductVisibilityPolicy.FORBIDDEN
+    internals = series_plan.planning_internals or {}
+    raw = series_plan.product_visibility_policy or internals.get("productVisibilityPolicy")
+    return resolve_product_visibility_policy(raw)
 
 
 def log_compliance_findings(
@@ -276,7 +276,7 @@ def adjudicate_compliance_review(
     if plan is not None and not structured_conflict:
         structured_conflict = bool(validate_forbidden_plan_visibility(plan))
 
-    policy = _resolve_policy(plan) if plan is not None else ProductVisibilityPolicy.FORBIDDEN
+    policy = _resolve_policy(plan) if plan is not None else ProductVisibilityPolicy.CREATIVE_DECISION
     modality = (
         resolve_product_modality(
             product_name=plan.product_name_resolved if plan else "",
@@ -323,6 +323,8 @@ def adjudicate_compliance_review(
             continue
 
         if code == "product_used_as_physical_generator":
+            if plan is not None and plan_approves_product_as_physical_generator(plan, ad_index=ad_index):
+                continue
             if structured_conflict or preflight_conflict:
                 hard.append(code)
             else:
@@ -330,9 +332,11 @@ def adjudicate_compliance_review(
             continue
 
         if code == "product_used_as_main_visual":
+            if plan is not None and plan_approves_product_as_main_visual(plan, ad_index=ad_index):
+                continue
             if structured_conflict or preflight_conflict:
                 hard.append(code)
-            elif modality == ProductModality.PHYSICAL_PRODUCT and policy == ProductVisibilityPolicy.FORBIDDEN:
+            elif modality == ProductModality.PHYSICAL_PRODUCT and policy_prohibits_product_depiction(policy):
                 if _confidence_rank(confidence) >= 2:
                     hard.append(code)
                 else:
@@ -344,6 +348,17 @@ def adjudicate_compliance_review(
             continue
 
         if code == "product_visible_without_explicit_request":
+            if plan is not None and plan_approves_product_visibility(plan, ad_index=ad_index):
+                continue
+            if not policy_prohibits_product_depiction(policy) and policy != ProductVisibilityPolicy.CREATIVE_DECISION:
+                continue
+            if policy == ProductVisibilityPolicy.CREATIVE_DECISION and plan is not None:
+                if not plan_approves_product_visibility(plan, ad_index=ad_index):
+                    if _confidence_rank(confidence) >= 2:
+                        hard.append(code)
+                    else:
+                        advisories.append("possible_product_resemblance")
+                continue
             if policy != ProductVisibilityPolicy.FORBIDDEN:
                 continue
             resolved_match = _resolve_product_match_for_review(

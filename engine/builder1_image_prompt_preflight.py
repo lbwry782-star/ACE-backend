@@ -15,7 +15,11 @@ from engine.builder1_failure_classification import (
 )
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_identity_guard import extract_product_category_identities
-from engine.builder1_product_visibility import ProductVisibilityPolicy
+from engine.builder1_product_visibility import (
+    ProductVisibilityPolicy,
+    policy_prohibits_product_depiction,
+    resolve_product_visibility_policy,
+)
 from engine.builder1_literal_embodiment import validate_visual_prompt_expressive_object
 
 logger = logging.getLogger(__name__)
@@ -60,16 +64,9 @@ def _norm(value: object) -> str:
 
 
 def _resolve_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
-    raw = (series_plan.product_visibility_policy or "").strip().upper()
-    try:
-        return ProductVisibilityPolicy(raw)
-    except ValueError:
-        internals = series_plan.planning_internals or {}
-        raw = str(internals.get("productVisibilityPolicy") or "FORBIDDEN").strip().upper()
-        try:
-            return ProductVisibilityPolicy(raw)
-        except ValueError:
-            return ProductVisibilityPolicy.FORBIDDEN
+    internals = series_plan.planning_internals or {}
+    raw = series_plan.product_visibility_policy or internals.get("productVisibilityPolicy")
+    return resolve_product_visibility_policy(raw)
 
 
 def _extract_prompt_section(prompt: str, start_marker: str, end_marker: str) -> str:
@@ -89,7 +86,7 @@ def classify_image_prompt_plan(
     prompt: str = "",
 ) -> ImagePromptPreflightResult:
     policy = _resolve_policy(series_plan)
-    if policy != ProductVisibilityPolicy.FORBIDDEN:
+    if not policy_prohibits_product_depiction(policy):
         transferred = _norm(series_plan.transferred_object or series_plan.physical_generator)
         if not transferred:
             return ImagePromptPreflightResult(
@@ -128,7 +125,7 @@ def validate_forbidden_visual_prompt_text(
 ) -> ImagePromptPreflightResult:
     reasons: List[str] = []
     policy = _resolve_policy(series_plan)
-    if policy != ProductVisibilityPolicy.FORBIDDEN:
+    if not policy_prohibits_product_depiction(policy):
         return ImagePromptPreflightResult(
             ok=True,
             classification=ImagePromptPreflightClassification.PLAN_VALID_NO_PRODUCT,
