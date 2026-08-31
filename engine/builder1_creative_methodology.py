@@ -441,7 +441,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
             reasons.append("no_mechanism_reuse_inside_campaign")
 
     reasons.extend(scan_literal_embodiment_bias(plan_dict, integrity_evidence))
-    reasons.extend(scan_advertising_comprehension(plan_dict))
+    reasons.extend(scan_advertising_comprehension(plan_dict, integrity_evidence))
 
     return list(dict.fromkeys(reasons))
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
+from engine.builder1_integrity_diagnostics import record_integrity_evidence
 from engine.builder1_plan_spec import Builder1SeriesPlan
 
 ADVERTISING_COMPREHENSION_REJECTION_CODES = frozenset(
@@ -658,7 +659,37 @@ _PHYSICAL_ACTION_MARKERS = _OBSERVABLE_CAUSAL_ACTION_MARKERS + (
     "under water",
     "on track",
     "רואים",
+    "רואה",
     "נראה",
+)
+
+# Hebrew verb inflections for ordinary visible physical actions (word-boundary safe).
+_HEBREW_OBSERVABLE_CAUSAL_ACTION_RE = re.compile(
+    r"(?<![\u0590-\u05FF])("
+    r"עול(?:ה|ים|ות)|"
+    r"יורד(?:|ה|ת|ים|ות)|"
+    r"מעלה|מרים|מוריד|"
+    r"מניח(?:|ים|ות)?|מונח|"
+    r"נופל(?:|ה|ת|ים|ות)?|"
+    r"דוחף|דוחפת|"
+    r"מושך|מושכת|"
+    r"נ(?:ע|וע)(?:|ה|ת|ים|ות)?|זז(?:|ה|ת|ים|ות)?|"
+    r"נפתח(?:|ה|ת|ים|ות)?|"
+    r"נסגר(?:|ה|ת|ים|ות)?|"
+    r"חוצ(?:ה|ים|ות)|"
+    r"נוט(?:ה|ים|ות)|"
+    r"מתאז(?:ן|נ(?:|ה|ת|ים|ות)?)|איזון"
+    r")(?![\u0590-\u05FF])",
+    re.UNICODE,
+)
+
+_HEBREW_VISIBLE_ACTION_RE = re.compile(
+    r"(?<![\u0590-\u05FF])(רוא(?:ה|ים|ות)|נרא(?:ה|ים|ות))(?![\u0590-\u05FF])",
+    re.UNICODE,
+)
+
+_ALL_TECHNICAL_FAMILIARITY_MARKERS: tuple[str, ...] = (
+    _TECHNICAL_VOCABULARY_MARKERS + _MECHANISM_DEVICE_MARKERS
 )
 
 _INSTRUCTIONAL_SCENE_MARKERS = (
@@ -711,6 +742,92 @@ def _token_overlap(left: str, right: str) -> bool:
 def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
     lowered = _norm(text).casefold()
     return any(marker in lowered for marker in markers)
+
+
+def _non_overlapping_marker_matches(
+    text: str,
+    markers: Sequence[str],
+) -> List[Dict[str, Any]]:
+    """Find marker spans; overlapping hits on the same text count once (longest marker wins)."""
+    lowered = _norm(text).casefold()
+    if not lowered:
+        return []
+    raw: List[tuple[int, int, str]] = []
+    for marker in markers:
+        needle = marker.casefold()
+        if not needle:
+            continue
+        start = 0
+        while True:
+            idx = lowered.find(needle, start)
+            if idx < 0:
+                break
+            raw.append((idx, idx + len(needle), marker))
+            start = idx + len(needle)
+    if not raw:
+        return []
+    raw.sort(key=lambda item: (item[0], -(item[1] - item[0])))
+    merged: List[tuple[int, int, str]] = []
+    for start, end, marker in raw:
+        if not merged:
+            merged.append((start, end, marker))
+            continue
+        prev_start, prev_end, prev_marker = merged[-1]
+        if start >= prev_end:
+            merged.append((start, end, marker))
+            continue
+        new_end = max(prev_end, end)
+        best = marker if len(marker) >= len(prev_marker) else prev_marker
+        merged[-1] = (prev_start, new_end, best)
+    return [
+        {
+            "marker": marker,
+            "start": start,
+            "end": end,
+            "matchedSubstring": lowered[start:end],
+        }
+        for start, end, marker in merged
+    ]
+
+
+def count_technical_familiarity_occurrences(text: str) -> tuple[int, List[Dict[str, Any]]]:
+    """Overlap-safe technical/mechanism occurrence count for familiarity assessment."""
+    matches = _non_overlapping_marker_matches(text, _ALL_TECHNICAL_FAMILIARITY_MARKERS)
+    enriched: List[Dict[str, Any]] = []
+    for item in matches:
+        marker = item["marker"]
+        family = (
+            "technical_vocab"
+            if marker in _TECHNICAL_VOCABULARY_MARKERS
+            else "mechanism_device"
+        )
+        enriched.append({**item, "family": family})
+    return len(enriched), enriched
+
+
+def collect_common_familiarity_matches(text: str) -> List[Dict[str, str]]:
+    lowered = _norm(text).casefold()
+    hits: List[Dict[str, str]] = []
+    for marker in _COMMON_EVERYDAY_MARKERS:
+        if marker in lowered:
+            hits.append({"marker": marker, "family": "common_everyday"})
+    return hits
+
+
+def _contains_observable_causal_action(text: str) -> bool:
+    lowered = _norm(text).casefold()
+    if _HEBREW_OBSERVABLE_CAUSAL_ACTION_RE.search(lowered):
+        return True
+    return _contains_any(text, _OBSERVABLE_CAUSAL_ACTION_MARKERS)
+
+
+def _contains_physical_action(text: str) -> bool:
+    lowered = _norm(text).casefold()
+    if _HEBREW_OBSERVABLE_CAUSAL_ACTION_RE.search(lowered):
+        return True
+    if _HEBREW_VISIBLE_ACTION_RE.search(lowered):
+        return True
+    return _contains_any(text, _PHYSICAL_ACTION_MARKERS)
 
 
 def _count_symbolic_mappings(*texts: str) -> int:
@@ -894,8 +1011,7 @@ def assess_everyday_familiarity(*texts: str) -> str:
         return "common"
     if _contains_any(combined, _UNIVERSAL_EVERYDAY_MARKERS):
         return "universal"
-    technical_hits = sum(1 for marker in _TECHNICAL_VOCABULARY_MARKERS if marker in combined)
-    technical_hits += sum(1 for marker in _MECHANISM_DEVICE_MARKERS if marker in combined)
+    technical_hits, _ = count_technical_familiarity_occurrences(combined)
     if technical_hits >= 2:
         return "technical"
     if technical_hits >= 1:
@@ -916,14 +1032,11 @@ def _immediate_clarity_insufficient(
         return False
     familiarity_only = _contains_any(immediate, _FAMILIARITY_ONLY_CLARITY_MARKERS) or (
         _contains_any(immediate, _PHYSICAL_ONLY_CLARITY_MARKERS)
-        and not _contains_any(immediate, _PHYSICAL_ACTION_MARKERS)
+        and not _contains_physical_action(immediate)
     )
     if not familiarity_only:
         return False
-    describes_action = _contains_any(
-        f"{immediate} {execution_blob}",
-        _PHYSICAL_ACTION_MARKERS,
-    )
+    describes_action = _contains_physical_action(f"{immediate} {execution_blob}")
     connects_advantage = _token_overlap(relative_advantage, immediate) or _token_overlap(
         relative_advantage, bridge
     )
@@ -940,7 +1053,7 @@ def _passes_two_sentence_test(
     physical_sentence = f"{immediate} {execution_blob}".strip()
     if not physical_sentence:
         return False
-    if not _contains_any(physical_sentence, _PHYSICAL_ACTION_MARKERS):
+    if not _contains_physical_action(physical_sentence):
         if assess_everyday_familiarity(physical_sentence) in ("specialized", "technical"):
             return False
     if not bridge:
@@ -952,31 +1065,53 @@ def _passes_two_sentence_test(
     )
 
 
-def detect_public_analogy_too_complex(
+def _public_analogy_branch_reason(branch: str) -> str:
+    reasons = {
+        "mapping_count_ge_3_without_bridge": "Three or more symbolic mappings without a recoverable advantage bridge.",
+        "technical_familiarity_without_simple_physical_event": (
+            "Technical familiarity without a simple observable physical event and clear bridge."
+        ),
+        "specialized_mapping_ge_2_without_bridge": (
+            "Specialized vocabulary with two or more mappings and no recoverable bridge."
+        ),
+        "technical_vocab_without_simple_or_bridge": (
+            "Technical vocabulary present without simple physical event or bridge."
+        ),
+        "two_sentence_fail_with_familiarity_or_mapping": (
+            "Two-sentence public comprehension test failed with specialized/technical familiarity or multi-mapping."
+        ),
+        "immediate_clarity_insufficient": (
+            "Immediate clarity names familiarity or static scene without action and advantage connection."
+        ),
+    }
+    return reasons.get(branch, branch)
+
+
+def _evaluate_public_analogy_complexity(
     *,
     plan_dict: Mapping[str, Any],
     ad: Mapping[str, Any],
-    fields: Optional[Mapping[str, Any]] = None,
-) -> bool:
-    """True when the planned analogy needs too many inferential steps for a general-public viewer."""
-    merged_fields = dict(fields or _ad_internal_fields(plan_dict, ad))
+    fields: Mapping[str, Any],
+) -> tuple[bool, Optional[str], Dict[str, Any]]:
     relative_advantage = _norm(plan_dict.get("relativeAdvantage"))
-    immediate = _norm(merged_fields.get("immediateClarityReason"))
-    bridge = _norm(merged_fields.get("relativeAdvantageConnection"))
-    slogan_connection = _norm(merged_fields.get("sloganConnection"))
-    punchline = _norm(merged_fields.get("executionPunchline"))
+    immediate = _norm(fields.get("immediateClarityReason"))
+    bridge = _norm(fields.get("relativeAdvantageConnection"))
+    slogan_connection = _norm(fields.get("sloganConnection"))
+    punchline = _norm(fields.get("executionPunchline"))
     generator_blob = _generator_mechanism_context(plan_dict)
-    execution_blob = _visual_execution_context(merged_fields, ad)
+    execution_blob = _visual_execution_context(fields, ad)
     combined_explanation = " ".join(
         part for part in (immediate, bridge, slogan_connection, generator_blob) if part
     )
+    physical_blob = f"{execution_blob} {immediate}".strip()
+    familiarity_blob = f"{combined_explanation} {execution_blob}".strip()
 
     bridge_ok = _bridge_connects_advantage(
         bridge=bridge,
         relative_advantage=relative_advantage,
         slogan_connection=slogan_connection,
         punchline=punchline,
-        fields=merged_fields,
+        fields=fields,
         ad=ad,
     )
     mapping_count = _count_symbolic_mappings(
@@ -985,42 +1120,52 @@ def detect_public_analogy_too_complex(
         slogan_connection,
         _norm(plan_dict.get("conceptualGenerator")),
         _norm(plan_dict.get("conceptualGeneratorAction")),
-        _norm(merged_fields.get("conceptualExecution")),
+        _norm(fields.get("conceptualExecution")),
     )
     familiarity = assess_everyday_familiarity(combined_explanation, execution_blob)
-    observable_causal = _contains_any(
-        f"{execution_blob} {immediate}",
-        _OBSERVABLE_CAUSAL_ACTION_MARKERS,
-    )
-    simple_physical_event = observable_causal and _contains_any(
-        f"{execution_blob} {immediate}",
-        _PHYSICAL_ACTION_MARKERS,
-    )
-
-    if simple_physical_event and bridge_ok and mapping_count < 3:
-        return False
-
-    if mapping_count >= 3 and not bridge_ok:
-        return True
-
-    if familiarity == "technical" and not (bridge_ok and simple_physical_event):
-        return True
-
-    if familiarity == "specialized" and mapping_count >= 2 and not bridge_ok:
-        return True
-
-    if _contains_any(combined_explanation, _TECHNICAL_VOCABULARY_MARKERS):
-        if not simple_physical_event and not bridge_ok:
-            return True
-
-    if not _passes_two_sentence_test(
+    _, technical_matches = count_technical_familiarity_occurrences(familiarity_blob)
+    common_matches = collect_common_familiarity_matches(familiarity_blob)
+    observable_causal = _contains_observable_causal_action(physical_blob)
+    physical_action_detected = _contains_physical_action(physical_blob)
+    simple_physical_event = observable_causal and physical_action_detected
+    two_sentence_passed = _passes_two_sentence_test(
         immediate=immediate,
         bridge=bridge,
         relative_advantage=relative_advantage,
         execution_blob=execution_blob,
-    ):
+    )
+
+    context: Dict[str, Any] = {
+        "mappingCount": mapping_count,
+        "bridgeOk": bridge_ok,
+        "twoSentenceTestPassed": two_sentence_passed,
+        "everydayFamiliarity": familiarity,
+        "simplePhysicalEvent": simple_physical_event,
+        "observableCausal": observable_causal,
+        "physicalActionDetected": physical_action_detected,
+        "technicalMatches": technical_matches,
+        "commonMatches": common_matches,
+    }
+
+    if simple_physical_event and bridge_ok and mapping_count < 3:
+        return False, None, context
+
+    if mapping_count >= 3 and not bridge_ok:
+        return True, "mapping_count_ge_3_without_bridge", context
+
+    if familiarity == "technical" and not (bridge_ok and simple_physical_event):
+        return True, "technical_familiarity_without_simple_physical_event", context
+
+    if familiarity == "specialized" and mapping_count >= 2 and not bridge_ok:
+        return True, "specialized_mapping_ge_2_without_bridge", context
+
+    if _contains_any(combined_explanation, _TECHNICAL_VOCABULARY_MARKERS):
+        if not simple_physical_event and not bridge_ok:
+            return True, "technical_vocab_without_simple_or_bridge", context
+
+    if not two_sentence_passed:
         if familiarity in ("specialized", "technical") or mapping_count >= 2:
-            return True
+            return True, "two_sentence_fail_with_familiarity_or_mapping", context
 
     if _immediate_clarity_insufficient(
         immediate=immediate,
@@ -1028,9 +1173,39 @@ def detect_public_analogy_too_complex(
         relative_advantage=relative_advantage,
         execution_blob=execution_blob,
     ):
-        return True
+        return True, "immediate_clarity_insufficient", context
 
-    return False
+    return False, None, context
+
+
+def detect_public_analogy_too_complex(
+    *,
+    plan_dict: Mapping[str, Any],
+    ad: Mapping[str, Any],
+    fields: Optional[Mapping[str, Any]] = None,
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
+    """True when the planned analogy needs too many inferential steps for a general-public viewer."""
+    merged_fields = dict(fields or _ad_internal_fields(plan_dict, ad))
+    too_complex, branch, context = _evaluate_public_analogy_complexity(
+        plan_dict=plan_dict,
+        ad=ad,
+        fields=merged_fields,
+    )
+    if too_complex and branch:
+        record_integrity_evidence(
+            integrity_evidence,
+            code="public_analogy_too_complex",
+            detector="advertising_comprehension",
+            branch=branch,
+            reason=_public_analogy_branch_reason(branch),
+            level="ad",
+            ad_index=int(ad.get("index") or 0) or None,
+            field="relativeAdvantageConnection",
+            field_value_preview=_norm(merged_fields.get("relativeAdvantageConnection")),
+            extra=context,
+        )
+    return too_complex
 
 
 def detect_competing_category_visual(
@@ -1136,6 +1311,7 @@ def validate_ad_advertising_comprehension(
     *,
     plan_dict: Mapping[str, Any],
     ad: Mapping[str, Any],
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     reasons: List[str] = []
     fields = _ad_internal_fields(plan_dict, ad)
@@ -1218,21 +1394,35 @@ def validate_ad_advertising_comprehension(
 
     reasons.extend(validate_ad_category_integrity(plan_dict=plan_dict, ad=ad))
 
-    if detect_public_analogy_too_complex(plan_dict=plan_dict, ad=ad, fields=fields):
+    if detect_public_analogy_too_complex(
+        plan_dict=plan_dict,
+        ad=ad,
+        fields=fields,
+        integrity_evidence=integrity_evidence,
+    ):
         if "public_analogy_too_complex" not in reasons:
             reasons.append("public_analogy_too_complex")
 
     return list(dict.fromkeys(reasons))
 
 
-def scan_advertising_comprehension(plan_dict: Mapping[str, Any]) -> List[str]:
+def scan_advertising_comprehension(
+    plan_dict: Mapping[str, Any],
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     ads = plan_dict.get("ads")
     if not isinstance(ads, list):
         return []
     reasons: List[str] = []
     for ad in ads:
         if isinstance(ad, dict):
-            reasons.extend(validate_ad_advertising_comprehension(plan_dict=plan_dict, ad=ad))
+            reasons.extend(
+                validate_ad_advertising_comprehension(
+                    plan_dict=plan_dict,
+                    ad=ad,
+                    integrity_evidence=integrity_evidence,
+                )
+            )
     return list(dict.fromkeys(reasons))
 
 

@@ -29,6 +29,7 @@ def record_integrity_evidence(
     matched_terms: Optional[List[str]] = None,
     independent_visual_proof_absent: Optional[bool] = None,
     field_value_preview: str = "",
+    extra: Optional[Dict[str, Any]] = None,
 ) -> None:
     if evidence is None:
         return
@@ -54,6 +55,10 @@ def record_integrity_evidence(
         if len(preview) > 240:
             preview = preview[:237] + "..."
         entry["fieldValuePreview"] = preview
+    if extra:
+        for key, value in extra.items():
+            if value is not None:
+                entry[key] = value
     if isinstance(evidence, list):
         evidence.append(entry)
     elif isinstance(evidence, Mapping):
