@@ -189,6 +189,8 @@ def _execution_identity(*, ad_index: int) -> Dict[str, Any]:
 
 
 def _internal_ad_fields(*, headline: str | None = None, ad_index: int = 1) -> Dict[str, Any]:
+    from engine.builder1_object_design_integrity import default_canonical_object_design
+
     return {
         "familiarExpectation": "Everyday object survives normal use",
         "singleChangedPropertyOrAction": f"Changed property variant {ad_index}",
@@ -203,6 +205,9 @@ def _internal_ad_fields(*, headline: str | None = None, ad_index: int = 1) -> Di
         "distinctFromOtherAdsReason": f"Different drop context {ad_index}",
         "noReuseCheck": f"Distinct execution {ad_index}",
         **_execution_identity(ad_index=ad_index),
+        **default_canonical_object_design(
+            "Ordinary immediately recognizable rubber ball with everyday outdoor appearance"
+        ),
     }
 
 

@@ -150,6 +150,9 @@ _AD_INTERNAL_FIELD_KEYS = frozenset(
         "executionObjectState",
         "executionScene",
         "executionPunchline",
+        "objectDesignMode",
+        "objectDesignDescription",
+        "objectDesignDeviationReason",
         "brandSlogan",
     }
 )
@@ -637,6 +640,9 @@ def parse_series_ads_output(
     reasons.extend(
         validate_series_ads_boundary_text(normalized_ads, product_description=product_description)
     )
+    from engine.builder1_object_design_integrity import validate_series_ads_object_design
+
+    reasons.extend(validate_series_ads_object_design(normalized_ads))
 
     if reasons:
         log_stage_parse_failure("series_ads", obj, reasons)

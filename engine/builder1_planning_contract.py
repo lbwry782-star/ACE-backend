@@ -34,6 +34,7 @@ from engine.builder1_product_shot_methodology import (
     BUILDER1_SERIES_TRANSFERRED_OBJECT_RULES,
     BUILDER1_VISIBILITY_POLICY_METHODOLOGY,
 )
+from engine.builder1_object_design_integrity import BUILDER1_OBJECT_DESIGN_INTEGRITY
 from engine.builder1_literal_embodiment import (
     BUILDER1_CONCEPT_FIRST_RULE,
     BUILDER1_EXPRESSIVE_OBJECT_DECISION,
@@ -483,7 +484,8 @@ Rules:
 STAGE_SERIES_ADS_SYSTEM = f"""
 You are a Builder1 series and ads builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"...","executionSubject":"...","executionAction":"...","executionObjectState":"...","executionScene":"...","executionPunchline":"..."}}]}}
+{{"seriesGenerator":{{"type":"...","principle":"...","progression":"..."}},"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"...","executionSubject":"...","executionAction":"...","executionObjectState":"...","executionScene":"...","executionPunchline":"...","objectDesignMode":"CANONICAL_FAMILIAR","objectDesignDescription":"...","objectDesignDeviationReason":""}}]}}
+{BUILDER1_OBJECT_DESIGN_INTEGRITY}
 {SERIES_STAGE_METHODOLOGY}
 {BUILDER1_SERIES_TRANSFERRED_OBJECT_RULES}
 {BUILDER1_SERIES_EXTERNAL_OBJECT_RULE}
@@ -515,6 +517,13 @@ Rules:
 - Changing only camera angle, crop, color, background, or headline does not count as a new execution.
 - Populate executionSubject, executionAction, executionObjectState, executionScene, and executionPunchline on every ad
   with compact machine-readable ad-specific values that differ meaningfully between ads.
+- physicalExecution = what physically happens. visualExecution = camera/composition/rendering only — not object material/color.
+- Populate objectDesignMode, objectDesignDescription, and objectDesignDeviationReason on every ad.
+- objectDesignMode must be CANONICAL_FAMILIAR or JUSTIFIED_DEVIATION.
+- objectDesignDescription = concrete intended appearance of the selected physical object(s).
+- objectDesignDeviationReason is required only for JUSTIFIED_DEVIATION; leave empty for CANONICAL_FAMILIAR.
+- Apply the object-design replacement test before choosing JUSTIFIED_DEVIATION.
+- Do not recolor real-world objects merely to match the campaign palette.
 - Before returning, self-check every ad pair: same campaign family, distinct execution, no repeated
   subject/action/state/event combination, no cosmetic-only variation, no duplicated visual punchline.
 - For two-ad campaigns, Ad 1 and Ad 2 must differ in at least two meaningful ad-specific dimensions such as
@@ -534,7 +543,7 @@ Rules:
 STAGE_SERIES_EXECUTION_REPAIR_SYSTEM = f"""
 You are a Builder1 series execution repair assistant.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"...","executionSubject":"...","executionAction":"...","executionObjectState":"...","executionScene":"...","executionPunchline":"..."}}]}}
+{{"ads":[{{"index":1,"variationLabel":"...","newContribution":"...","conceptualExecution":"...","conceptualActionProof":"...","physicalExecution":"...","visualExecution":"...","sceneDescription":"...","headline":null,"headlineNeededReason":"...","marketingText":"...","familiarExpectation":"...","singleChangedPropertyOrAction":"...","immediateClarityReason":"...","sloganConnection":"...","relativeAdvantageConnection":"...","brandOwnershipReason":"...","categoryRelevanceReason":"...","headlineRequired":false,"headlineReason":"...","sameVisualLawProof":"...","distinctFromOtherAdsReason":"...","noReuseCheck":"...","executionSubject":"...","executionAction":"...","executionObjectState":"...","executionScene":"...","executionPunchline":"...","objectDesignMode":"CANONICAL_FAMILIAR","objectDesignDescription":"...","objectDesignDeviationReason":""}}]}}
 Rules:
 - Repair ONLY the duplicated advertisement records requested in the user prompt.
 - Preserve the frozen strategy, slogan, conceptual generator, physical generator, and graphic system.
@@ -1223,7 +1232,9 @@ def build_series_ads_repair_prompt(*, broken_json: str, reasons: List[str], ad_c
         '"visualExecution":"...","sceneDescription":"...","headline":null,'
         '"headlineNeededReason":"...","marketingText":"...",'
         '"executionSubject":"...","executionAction":"...","executionObjectState":"...",'
-        '"executionScene":"...","executionPunchline":"..."}]}\n'
+        '"executionScene":"...","executionPunchline":"...",'
+        '"objectDesignMode":"CANONICAL_FAMILIAR","objectDesignDescription":"...",'
+        '"objectDesignDeviationReason":""}]}\n'
         f"Required ad count: {ad_count}\n"
         f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"

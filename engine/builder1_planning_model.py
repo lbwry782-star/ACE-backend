@@ -437,6 +437,12 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "executionObjectState": {"type": "string"},
                     "executionScene": {"type": "string"},
                     "executionPunchline": {"type": "string"},
+                    "objectDesignMode": {
+                        "type": "string",
+                        "enum": ["CANONICAL_FAMILIAR", "JUSTIFIED_DEVIATION"],
+                    },
+                    "objectDesignDescription": {"type": "string", "minLength": 12},
+                    "objectDesignDeviationReason": {"type": "string"},
                 },
                 "required": [
                     "index",
@@ -467,6 +473,9 @@ SERIES_ADS_JSON_SCHEMA: Dict[str, Any] = {
                     "executionObjectState",
                     "executionScene",
                     "executionPunchline",
+                    "objectDesignMode",
+                    "objectDesignDescription",
+                    "objectDesignDeviationReason",
                 ],
             },
         },

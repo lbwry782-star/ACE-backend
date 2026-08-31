@@ -15,6 +15,7 @@ from engine.builder1_graphic_device_necessity import (
     has_recurring_graphic_device,
     normalize_recurring_graphic_device_value,
 )
+from engine.builder1_object_design_integrity import get_ad_object_design_fields
 from engine.builder1_plan_spec import Builder1SeriesPlan
 
 ADVERTISING_COMPREHENSION_REJECTION_CODES = frozenset(
@@ -1466,6 +1467,7 @@ def build_planned_execution_compliance_block(
         )
     else:
         approved_device = "recurringGraphicDevice: none (do not add explanatory bounding boxes or callout overlays)"
+    object_design = get_ad_object_design_fields(internals)
     lines = [
         "=== PLANNED EXECUTION CONTEXT (AUTHORITATIVE — JUDGE FIDELITY, NOT BEAUTY) ===",
         f'relativeAdvantage: "{series_plan.relative_advantage}"',
@@ -1481,6 +1483,9 @@ def build_planned_execution_compliance_block(
         f"executionObjectState: {_norm(internals.get('executionObjectState'))}",
         f"executionScene: {_norm(internals.get('executionScene') or ad_fields.get('sceneDescription'))}",
         f"executionPunchline: {_norm(internals.get('executionPunchline'))}",
+        f"objectDesignMode: {_norm(object_design.get('objectDesignMode'))}",
+        f"objectDesignDescription: {_norm(object_design.get('objectDesignDescription'))}",
+        f"objectDesignDeviationReason: {_norm(object_design.get('objectDesignDeviationReason'))}",
         f"immediateClarityReason: {_norm(internals.get('immediateClarityReason'))}",
         f"relativeAdvantageConnection: {_norm(internals.get('relativeAdvantageConnection'))}",
         f"sloganConnection: {_norm(internals.get('sloganConnection'))}",
@@ -1524,7 +1529,7 @@ def build_planned_execution_compliance_block(
         "competing_category_visual, advertising_mechanism_not_observable, public_analogy_not_recoverable",
         "",
         "Execution fidelity hard violation codes:",
-        ", ".join(sorted(EXECUTION_FIDELITY_VIOLATION_CODES | {"unplanned_annotation_overlay"})),
+        ", ".join(sorted(EXECUTION_FIDELITY_VIOLATION_CODES | {"unplanned_annotation_overlay", "unplanned_object_design_deviation"})),
         "=== END PLANNED EXECUTION CONTEXT ===",
     ]
     return "\n".join(lines)

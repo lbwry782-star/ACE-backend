@@ -74,9 +74,9 @@ def _plan_dict_with_ad_fields(**ad_overrides: Any) -> Dict[str, Any]:
     raw["productDescription"] = "Private history tutor for Bagrut preparation"
     raw["productName"] = "Amir Gottlieb"
     raw["productNameResolved"] = "Amir Gottlieb"
-    ad = raw["ads"][0]
-    ad.update(_internal_ad_fields(headline=None, ad_index=1))
-    ad.update(ad_overrides)
+    for i, ad in enumerate(raw["ads"], start=1):
+        ad.update(_internal_ad_fields(headline=ad.get("headline"), ad_index=i))
+    raw["ads"][0].update(ad_overrides)
     return raw
 
 
@@ -356,9 +356,9 @@ def _tutor_series_plan(**ad_overrides: Any):
     )
     data["physicalGenerator"] = "Sports camera autofocus continuously following one gymnast"
     data["transferredObject"] = data["physicalGenerator"]
-    ad = data["ads"][0]
-    ad.update(_internal_ad_fields(headline=None, ad_index=1))
-    ad.update(ad_overrides)
+    for i, ad in enumerate(data["ads"], start=1):
+        ad.update(_internal_ad_fields(headline=ad.get("headline"), ad_index=i))
+    data["ads"][0].update(ad_overrides)
     return _parse(data, 2)
 
 

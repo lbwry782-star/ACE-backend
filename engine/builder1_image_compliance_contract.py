@@ -39,6 +39,7 @@ IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
         "product_used_as_physical_generator",
         "product_used_as_main_visual",
         "unplanned_annotation_overlay",
+        "unplanned_object_design_deviation",
     }
     | EXECUTION_FIDELITY_VIOLATION_CODES
 )

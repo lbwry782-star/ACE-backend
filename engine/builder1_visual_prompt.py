@@ -3,6 +3,8 @@ Builder1 campaign-series visual prompt builder (active production).
 """
 from __future__ import annotations
 
+from typing import List
+
 from engine.builder1_graphic_device_necessity import (
     build_no_device_annotation_guard_block,
     has_recurring_graphic_device,
@@ -12,6 +14,12 @@ from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_shot_methodology import BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE
 from engine.builder1_literal_embodiment import BUILDER1_IMAGE_EXPRESSIVE_OBJECT_RULE
 from engine.builder1_methodology_reasons import NO_LOGO_REASON, POSITIVE_IMAGE_PROMPT_REASON
+from engine.builder1_object_design_integrity import (
+    BUILDER1_OBJECT_DESIGN_PALETTE_BOUNDARY,
+    build_composition_execution_lines,
+    build_object_design_prompt_block,
+    object_design_fields_for_ad_index,
+)
 from engine.builder1_product_visibility import (
     ProductVisibilityPolicy,
     VisualExecutionRoute,
@@ -27,6 +35,20 @@ MEDIUM_PROHIBITION = (
     "Do not show this advertisement inside a billboard, framed poster mockup, phone screen, "
     "presentation board, magazine mockup, or floating canvas. The image itself IS the finished advertisement."
 )
+
+
+def _composition_lines(ad_plan: Builder1AdPlan) -> List[str]:
+    return build_composition_execution_lines(
+        physical_execution=ad_plan.physical_execution,
+        visual_execution=ad_plan.visual_execution,
+    )
+
+
+def _object_design_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan, *, product_led: bool) -> str:
+    return build_object_design_prompt_block(
+        object_design_fields_for_ad_index(series_plan, ad_plan.index),
+        skip_for_product_led=product_led,
+    )
 
 
 def _resolve_visibility_policy(series_plan: Builder1SeriesPlan) -> ProductVisibilityPolicy:
@@ -111,13 +133,14 @@ def build_text_to_render_block(
 def _forbidden_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
     transferred = series_plan.transferred_object or series_plan.physical_generator
     action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
+    composition = _composition_lines(ad_plan)
     return "\n".join(
         [
             "=== MAIN VISUAL (ONLY SUBJECT) ===",
             f"MAIN VISUAL: {transferred}",
             f"ACTION: {action}",
             f"Ad variation: {ad_plan.variation_label}.",
-            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            *composition,
             "Center the selected external expressive object and its physical action as the advertisement's visual proof.",
             "Product Name and slogan appear only as plain typography — not on objects, packaging, or signs.",
             "=== END MAIN VISUAL ===",
@@ -137,13 +160,14 @@ def _forbidden_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Build
 
 def _product_led_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
     action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
+    composition = _composition_lines(ad_plan)
     return "\n".join(
         [
             "=== MAIN VISUAL (PRODUCT-LED — APPROVED) ===",
             f"MAIN VISUAL: the advertised product itself — {series_plan.product_description}",
             f"ACTION: {action}",
             f"Ad variation: {ad_plan.variation_label}.",
-            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            *composition,
             "The product itself carries the advertising idea through its form, property, arrangement, or transformation.",
             "This is an approved product-led execution — not a generic packshot.",
             "Product Name and slogan appear only as plain typography — never as an invented logo or packaging mark.",
@@ -155,13 +179,14 @@ def _product_led_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Bui
 def _integrated_main_visual_block(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan) -> str:
     transferred = series_plan.transferred_object or series_plan.physical_generator
     action = series_plan.transferred_object_action or series_plan.physical_generator_campaign_role
+    composition = _composition_lines(ad_plan)
     return "\n".join(
         [
             "=== MAIN VISUAL (PRODUCT-INTEGRATED ANALOGY — APPROVED) ===",
             f"MAIN VISUAL: {transferred}",
             f"ACTION: {action}",
             f"Ad variation: {ad_plan.variation_label}.",
-            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            *composition,
             "The advertised product may appear as a participant in this mechanism.",
             "The transferred analogy remains the governing visual law.",
             "Product Name as plain typography only — no invented logo or packaging mark.",
@@ -203,13 +228,14 @@ def _creative_analogy_main_visual_block(
     else:
         product_line = "ADVERTISED PRODUCT: not depicted unless explicitly integrated in the approved mechanism above."
         header = "=== MAIN VISUAL (ANALOGY-LED — APPROVED) ==="
+    composition = _composition_lines(ad_plan)
     return "\n".join(
         [
             header,
             f"MAIN VISUAL: {transferred}",
             f"ACTION: {action}",
             f"Ad variation: {ad_plan.variation_label}.",
-            f"Composition execution: {ad_plan.physical_execution or ad_plan.visual_execution}.",
+            *composition,
             "Center the transferred external object and its physical action as the advertisement's visual proof.",
             "=== END MAIN VISUAL ===",
             "=== ADVERTISED PRODUCT ===",
@@ -273,11 +299,18 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
             else "Product visibility is required; hierarchy follows the approved route."
         )
 
+    product_led = policy_uses_route_selection(policy) and (
+        route == VisualExecutionRoute.PRODUCT_LED
+        or plan_approves_product_as_main_visual(series_plan, ad_index=ad_plan.index)
+    )
+    object_design_block = _object_design_block(series_plan, ad_plan, product_led=product_led)
+
     parts = [
         "Create a complete finished advertisement that fills the entire image frame edge to edge.",
         f"Format: {series_plan.format}. The output is the final ad itself, not a background for later overlay.",
         BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK,
         main_visual_block,
+        object_design_block,
         POSITIVE_IMAGE_PROMPT_REASON,
         NO_LOGO_REASON,
     ]
@@ -300,6 +333,7 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
             "Prohibit additional slogans, paragraphs, captions, UI elements, stock watermarks, or decorative logos.",
             "Marketing body copy must NOT appear in the image.",
             "Object colors must not redefine the campaign palette.",
+            BUILDER1_OBJECT_DESIGN_PALETTE_BOUNDARY.strip(),
             (
                 "The final advertisement must visibly demonstrate the shared art direction, palette, typography hierarchy, and recurring graphic device."
                 if has_recurring_graphic_device(

@@ -650,6 +650,13 @@ def validate_series_plan_structure(
         duplicate_reasons, _findings = validate_ad_execution_distinctness(raw_ads_for_distinctness)
         reasons.extend(duplicate_reasons)
 
+    if raw_ads_for_distinctness and any(
+        isinstance(ad, dict) and "objectDesignMode" in ad for ad in raw_ads_for_distinctness
+    ):
+        from engine.builder1_object_design_integrity import validate_series_ads_object_design
+
+        reasons.extend(validate_series_ads_object_design(raw_ads_for_distinctness))
+
     if reasons:
         return None, reasons
 

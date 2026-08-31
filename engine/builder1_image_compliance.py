@@ -95,7 +95,7 @@ planned_scene_diverged, planned_mechanism_diverged, central_proof_not_visible,
 unintended_dominant_interpretation, advertising_bridge_not_recoverable,
 relative_advantage_not_expressed, visual_slogan_mechanism_mismatch, dominant_subject_diverged,
 competing_category_visual, advertising_mechanism_not_observable, public_analogy_not_recoverable,
-unplanned_annotation_overlay
+unplanned_annotation_overlay, unplanned_object_design_deviation
 
 Annotation overlay fidelity (same review call):
 - Compare generated pixels to the approved recurring graphic device in the plan (if any).
@@ -104,6 +104,17 @@ Annotation overlay fidelity (same review call):
   object-highlighting overlays that merely point to visible mechanism parts.
 - When the plan explicitly requires a recurring graphic device or campaign border, do NOT fail those
   planned elements as unplanned overlays.
+
+Object design fidelity (same review call — not aesthetic taste):
+- Compare rendered pixels to approved objectDesignMode and objectDesignDescription in PLANNED EXECUTION CONTEXT.
+- CANONICAL_FAMILIAR: fail unplanned_object_design_deviation only when the central transferred object shows a
+  conspicuous material, color, form, transparency, or styling deviation that materially changes its familiar
+  identity or visual reading versus the approved familiar description.
+- JUSTIFIED_DEVIATION: fail only when pixels omit the approved deviation or replace it with a different
+  conspicuous redesign not in the approved description.
+- Do NOT fail harmless normal variation between valid instances (minor metal finish, wood grain, weathering).
+- Do NOT fail because one shade is prettier or wood looks aesthetically superior.
+- Campaign palette recoloring of real-world objects without approved deviation is unplanned_object_design_deviation.
 
 Execution fidelity and category integrity (same review call — not aesthetic criticism):
 - Compare generated pixels to PLANNED EXECUTION CONTEXT and advertisedProductDescription.

@@ -14,6 +14,7 @@ from engine.builder1_advertising_comprehension import (
     scan_advertising_comprehension,
 )
 from engine.builder1_graphic_device_necessity import scan_graphic_device_necessity
+from engine.builder1_object_design_integrity import scan_object_design_integrity
 from engine.builder1_literal_embodiment import (
     LITERAL_EMBODIMENT_REJECTION_CODES,
     scan_literal_embodiment_bias,
@@ -38,6 +39,13 @@ METHODOLOGY_REJECTION_CODES = frozenset(
         "graphic_generator_inconsistent",
         "graphic_generator_inconsistent_recurring_device",
         "redundant_explanatory_graphic_device",
+        "object_design_intent_missing",
+        "object_design_mode_invalid",
+        "object_design_description_missing",
+        "object_design_deviation_unjustified",
+        "object_design_deviation_reason_forbidden",
+        "object_design_deviation_reason_missing",
+        "object_design_salient_language_unjustified",
         "hebrew_composition_rule_broken",
         "no_mechanism_reuse_inside_campaign",
         "same_image_different_headlines",
@@ -97,6 +105,9 @@ INTERNAL_AD_FIELDS = (
     "noReuseCheck",
     "competitorTransferTest",
     "transferRisk",
+    "objectDesignMode",
+    "objectDesignDescription",
+    "objectDesignDeviationReason",
 )
 
 
@@ -448,8 +459,17 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
     reasons.extend(scan_literal_embodiment_bias(plan_dict, integrity_evidence))
     reasons.extend(scan_advertising_comprehension(plan_dict, integrity_evidence))
     reasons.extend(scan_graphic_device_necessity(plan_dict))
+    if _plan_ads_include_object_design_fields(plan_dict):
+        reasons.extend(scan_object_design_integrity(plan_dict))
 
     return list(dict.fromkeys(reasons))
+
+
+def _plan_ads_include_object_design_fields(plan_dict: Dict[str, Any]) -> bool:
+    ads = plan_dict.get("ads")
+    if not isinstance(ads, list):
+        return False
+    return any(isinstance(ad, dict) and "objectDesignMode" in ad for ad in ads)
 
 
 def deterministic_builder1_integrity_checks(
