@@ -94,7 +94,16 @@ product_used_as_physical_generator, product_used_as_main_visual,
 planned_scene_diverged, planned_mechanism_diverged, central_proof_not_visible,
 unintended_dominant_interpretation, advertising_bridge_not_recoverable,
 relative_advantage_not_expressed, visual_slogan_mechanism_mismatch, dominant_subject_diverged,
-competing_category_visual, advertising_mechanism_not_observable, public_analogy_not_recoverable
+competing_category_visual, advertising_mechanism_not_observable, public_analogy_not_recoverable,
+unplanned_annotation_overlay
+
+Annotation overlay fidelity (same review call):
+- Compare generated pixels to the approved recurring graphic device in the plan (if any).
+- When the plan has NO recurring graphic device, fail unplanned_annotation_overlay when pixels show
+  bounding boxes, highlight rectangles, callout frames, selection outlines, explanatory arrows, or
+  object-highlighting overlays that merely point to visible mechanism parts.
+- When the plan explicitly requires a recurring graphic device or campaign border, do NOT fail those
+  planned elements as unplanned overlays.
 
 Execution fidelity and category integrity (same review call — not aesthetic criticism):
 - Compare generated pixels to PLANNED EXECUTION CONTEXT and advertisedProductDescription.

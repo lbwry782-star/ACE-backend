@@ -59,8 +59,13 @@ def _run_graphic_system_stage(
     *,
     user_prompt: str,
     run_stage: Any,
+    brand_physical: Optional[Dict[str, Any]] = None,
+    conceptual: Optional[Dict[str, str]] = None,
 ) -> Any:
     from engine.builder1_graphic_contract import is_graphic_contract_mismatch
+    from engine.builder1_graphic_device_necessity import (
+        evaluate_redundant_explanatory_graphic_device,
+    )
     from engine.builder1_planning_metrics import get_planning_metrics
     from engine.builder1_planning_profile import (
         execution_optimization_active,
@@ -69,6 +74,25 @@ def _run_graphic_system_stage(
         stage_model_override,
     )
     from engine.builder1_planner import Builder1PlannerError
+    from engine.builder1_staged_parsers import StageParseError
+
+    physical = brand_physical or {}
+    conceptual = conceptual or {}
+
+    def _parse_with_necessity(raw: object) -> Any:
+        graphic = parse_graphic_system_output(raw)
+        violation = evaluate_redundant_explanatory_graphic_device(
+            device=graphic.recurring_graphic_device,
+            device_rule=graphic.recurring_graphic_device_rule,
+            physical_generator=str(physical.get("physicalGenerator") or ""),
+            transferred_object=str(physical.get("transferredObject") or physical.get("physicalGenerator") or ""),
+            transferred_object_action=str(physical.get("transferredObjectAction") or ""),
+            conceptual_generator=str(conceptual.get("generator") or conceptual.get("conceptualGenerator") or ""),
+            border_treatment=str(graphic.border_treatment or ""),
+        )
+        if violation:
+            raise StageParseError("graphic_system", [violation])
+        return graphic
 
     def _attempt() -> Any:
         return run_stage(
@@ -76,7 +100,7 @@ def _run_graphic_system_stage(
             model_caller,
             STAGE_GRAPHIC_SYSTEM_SYSTEM,
             user_prompt,
-            parse_graphic_system_output,
+            _parse_with_necessity,
             repair_builder=lambda broken, reasons: build_graphic_system_repair_prompt(
                 broken_json=broken, reasons=reasons
             ),
@@ -274,6 +298,8 @@ def run_builder1_campaign_pipeline(
             idea_memory_block=stage_memory_block("graphic_system", idea_memory, campaign_id=campaign_id),
         ),
         run_stage=_run_stage,
+        brand_physical=brand_physical_dict,
+        conceptual=conceptual_fixed,
     )
     graphic_dict = _graphic_to_dict(graphic)
 

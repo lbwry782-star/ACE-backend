@@ -11,6 +11,10 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from engine.builder1_integrity_diagnostics import record_integrity_evidence
+from engine.builder1_graphic_device_necessity import (
+    has_recurring_graphic_device,
+    normalize_recurring_graphic_device_value,
+)
 from engine.builder1_plan_spec import Builder1SeriesPlan
 
 ADVERTISING_COMPREHENSION_REJECTION_CODES = frozenset(
@@ -1454,6 +1458,14 @@ def build_planned_execution_compliance_block(
     """Authoritative planned execution context for the existing compliance review call."""
     internals = _ad_internals_for_index(series_plan, ad_index)
     ad_fields = _ad_plan_fields(series_plan, ad_index)
+    graphic = series_plan.graphic_generator
+    if graphic and has_recurring_graphic_device(graphic.recurring_graphic_device, graphic.recurring_graphic_device_rule):
+        approved_device = (
+            f'recurringGraphicDevice: "{normalize_recurring_graphic_device_value(graphic.recurring_graphic_device)}"; '
+            f'recurringGraphicDeviceRule: "{normalize_recurring_graphic_device_value(graphic.recurring_graphic_device_rule)}"'
+        )
+    else:
+        approved_device = "recurringGraphicDevice: none (do not add explanatory bounding boxes or callout overlays)"
     lines = [
         "=== PLANNED EXECUTION CONTEXT (AUTHORITATIVE — JUDGE FIDELITY, NOT BEAUTY) ===",
         f'relativeAdvantage: "{series_plan.relative_advantage}"',
@@ -1463,6 +1475,7 @@ def build_planned_execution_compliance_block(
         f'transferredObject: "{series_plan.transferred_object or series_plan.physical_generator}"',
         f'transferredObjectAction: "{series_plan.transferred_object_action or series_plan.physical_generator_campaign_role}"',
         f'conceptualGenerator: "{series_plan.conceptual_generator}"',
+        f"approvedGraphicDevice: {approved_device}",
         f"executionSubject: {_norm(internals.get('executionSubject') or ad_fields.get('physicalExecution'))}",
         f"executionAction: {_norm(internals.get('executionAction'))}",
         f"executionObjectState: {_norm(internals.get('executionObjectState'))}",
@@ -1511,7 +1524,7 @@ def build_planned_execution_compliance_block(
         "competing_category_visual, advertising_mechanism_not_observable, public_analogy_not_recoverable",
         "",
         "Execution fidelity hard violation codes:",
-        ", ".join(sorted(EXECUTION_FIDELITY_VIOLATION_CODES)),
+        ", ".join(sorted(EXECUTION_FIDELITY_VIOLATION_CODES | {"unplanned_annotation_overlay"})),
         "=== END PLANNED EXECUTION CONTEXT ===",
     ]
     return "\n".join(lines)

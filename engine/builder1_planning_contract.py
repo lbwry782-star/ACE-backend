@@ -462,7 +462,17 @@ Rules:
 - All five palette colors required as #RRGGBB hex.
 - Structured enum fields must use exactly one allowed value from the lists above.
 - typographyStyle, imageStyle, and backgroundTreatment are descriptive campaign-direction strings — not closed enums.
-- recurringGraphicDevice must be visibly repeatable across ads and must remain a campaign composition device, not a product logo or packaging brand mark.
+- recurringGraphicDevice and recurringGraphicDeviceRule are OPTIONAL. When the physical/visual mechanism already communicates the idea, set both to empty string or NO_RECURRING_GRAPHIC_DEVICE.
+- Before defining a recurring device, decide:
+  1) Does the physical/visual mechanism already show the causal event?
+  2) Would a viewer understand the visual without annotations?
+  3) Does the proposed device add advertising meaning?
+  4) Or does it merely highlight/label already-visible objects?
+  5) Would removing the device leave the core idea intact?
+  If #5 is YES and the device mainly points/explains, omit the device and prefer visual cleanliness.
+- Do NOT add explanatory overlays (frames/boxes/arrows/callouts) around already-visible mechanism stages.
+- A recurring device remains valid when it is itself the conceptual generator, essential brand ownership, or structurally inseparable from the ad idea.
+- recurringGraphicDevice must remain a campaign composition device when present, not a product logo or packaging brand mark.
 - For Hebrew campaigns default sloganPlacement to bottom_left to preserve RTL reading flow: see visual → understand → read brand interpretation.
 - Use another sloganPlacement only when sloganPlacementReason explains the strategic RTL-preserving reason.
 - Do not return ads, physical generator, or strategy fields.

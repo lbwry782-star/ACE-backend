@@ -3,11 +3,15 @@ Builder1 campaign-series visual prompt builder (active production).
 """
 from __future__ import annotations
 
-from engine.builder1_methodology_reasons import NO_LOGO_REASON, POSITIVE_IMAGE_PROMPT_REASON
+from engine.builder1_graphic_device_necessity import (
+    build_no_device_annotation_guard_block,
+    has_recurring_graphic_device,
+)
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_IMAGE_PROMPT_BLOCK
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
 from engine.builder1_product_shot_methodology import BUILDER1_FORBIDDEN_PRODUCT_SHOT_LANGUAGE
 from engine.builder1_literal_embodiment import BUILDER1_IMAGE_EXPRESSIVE_OBJECT_RULE
+from engine.builder1_methodology_reasons import NO_LOGO_REASON, POSITIVE_IMAGE_PROMPT_REASON
 from engine.builder1_product_visibility import (
     ProductVisibilityPolicy,
     VisualExecutionRoute,
@@ -49,24 +53,30 @@ def build_campaign_graphic_identity_block(series_plan: Builder1SeriesPlan) -> st
     g = series_plan.graphic_generator
     p = g.palette
     c = g.copy_safe_area
-    return "\n".join(
-        [
-            "=== CAMPAIGN GRAPHIC IDENTITY (IDENTICAL IN EVERY AD — REPRODUCE EXACTLY) ===",
-            f"Exact palette — dominant {p.dominant}, secondary {p.secondary}, accent {p.accent}, background {p.background}, text {p.text}.",
-            f"Layout template: {g.layout_template}. Visual/copy division must match this template.",
-            f"Typography style: {g.typography_style}. Headline scale: {g.headline_scale}. Brand scale: {g.brand_scale}. Slogan scale: {g.slogan_scale}.",
-            f"Headline position: {g.headline_placement}, alignment {g.headline_alignment}, max width {g.headline_max_width_percent}%.",
-            f"Brand block position: {g.brand_block_placement}. Slogan position: {g.slogan_placement}.",
-            f"Copy composition zone: {c.width_percent}% on the {c.side} — typeset brand name, slogan and optional headline inside this zone as integrated ad design.",
-            f"Image style: {g.image_style}. Background: {g.background_treatment}. Border: {g.border_treatment}.",
-            f"Shape language: {g.shape_language}. Framing rule: {g.framing_rule}. Spacing rule: {g.spacing_rule}.",
-            f"Recurring graphic device: {g.recurring_graphic_device}.",
-            f"Recurring device rule (must be visibly present in this ad): {g.recurring_graphic_device_rule}.",
-            "The recurring graphic device is a campaign composition element only — not a product logo, packaging brand mark, or symbol beside the product name.",
-            "Render the recurring graphic device prominently. Do not omit it.",
-            "=== END CAMPAIGN GRAPHIC IDENTITY ===",
-        ]
-    )
+    lines = [
+        "=== CAMPAIGN GRAPHIC IDENTITY (IDENTICAL IN EVERY AD — REPRODUCE EXACTLY) ===",
+        f"Exact palette — dominant {p.dominant}, secondary {p.secondary}, accent {p.accent}, background {p.background}, text {p.text}.",
+        f"Layout template: {g.layout_template}. Visual/copy division must match this template.",
+        f"Typography style: {g.typography_style}. Headline scale: {g.headline_scale}. Brand scale: {g.brand_scale}. Slogan scale: {g.slogan_scale}.",
+        f"Headline position: {g.headline_placement}, alignment {g.headline_alignment}, max width {g.headline_max_width_percent}%.",
+        f"Brand block position: {g.brand_block_placement}. Slogan position: {g.slogan_placement}.",
+        f"Copy composition zone: {c.width_percent}% on the {c.side} — typeset brand name, slogan and optional headline inside this zone as integrated ad design.",
+        f"Image style: {g.image_style}. Background: {g.background_treatment}. Border: {g.border_treatment}.",
+        f"Shape language: {g.shape_language}. Framing rule: {g.framing_rule}. Spacing rule: {g.spacing_rule}.",
+    ]
+    if has_recurring_graphic_device(g.recurring_graphic_device, g.recurring_graphic_device_rule):
+        lines.extend(
+            [
+                f"Recurring graphic device: {g.recurring_graphic_device}.",
+                f"Recurring device rule (must be visibly present in this ad): {g.recurring_graphic_device_rule}.",
+                "The recurring graphic device is a campaign composition element only — not a product logo, packaging brand mark, or symbol beside the product name.",
+                "Render the recurring graphic device prominently. Do not omit it.",
+            ]
+        )
+    else:
+        lines.append(build_no_device_annotation_guard_block(border_treatment=g.border_treatment))
+    lines.append("=== END CAMPAIGN GRAPHIC IDENTITY ===")
+    return "\n".join(lines)
 
 
 def build_text_to_render_block(
@@ -290,7 +300,14 @@ def build_visual_prompt(series_plan: Builder1SeriesPlan, ad_plan: Builder1AdPlan
             "Prohibit additional slogans, paragraphs, captions, UI elements, stock watermarks, or decorative logos.",
             "Marketing body copy must NOT appear in the image.",
             "Object colors must not redefine the campaign palette.",
-            "The final advertisement must visibly demonstrate the shared art direction, palette, typography hierarchy, and recurring graphic device.",
+            (
+                "The final advertisement must visibly demonstrate the shared art direction, palette, typography hierarchy, and recurring graphic device."
+                if has_recurring_graphic_device(
+                    series_plan.graphic_generator.recurring_graphic_device,
+                    series_plan.graphic_generator.recurring_graphic_device_rule,
+                )
+                else "The final advertisement must visibly demonstrate the shared art direction, palette, typography hierarchy, and composition rules."
+            ),
         ]
     )
     return "\n".join(parts)

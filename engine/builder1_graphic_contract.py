@@ -28,11 +28,16 @@ GRAPHIC_DESCRIPTIVE_FIELDS = frozenset(
         "typographyStyle",
         "imageStyle",
         "backgroundTreatment",
-        "recurringGraphicDevice",
-        "recurringGraphicDeviceRule",
         "shapeLanguage",
         "framingRule",
         "spacingRule",
+    }
+)
+
+OPTIONAL_RECURRING_GRAPHIC_DEVICE_FIELDS = frozenset(
+    {
+        "recurringGraphicDevice",
+        "recurringGraphicDeviceRule",
     }
 )
 
@@ -79,9 +84,9 @@ REASON_TO_FIELD: Dict[str, str] = {
     "graphic_generator_typography_style_too_short": "typographyStyle",
     "graphic_generator_image_style_too_short": "imageStyle",
     "graphic_generator_background_treatment_too_short": "backgroundTreatment",
-    "graphic_generator_missing_recurring_device": "recurringGraphicDevice",
-    "graphic_generator_missing_device_rule": "recurringGraphicDeviceRule",
+    "graphic_generator_inconsistent_recurring_device": "recurringGraphicDevice",
     "graphic_generator_missing_framing_rule": "framingRule",
+    "redundant_explanatory_graphic_device": "recurringGraphicDevice",
     "graphic_generator_missing_shape_language": "shapeLanguage",
     "graphic_generator_missing_spacing_rule": "spacingRule",
 }
@@ -115,6 +120,25 @@ def log_graphic_field_rejected(*, field: str, reason: str, value: object) -> Non
         reason,
         _preview(value),
     )
+
+
+def validate_optional_recurring_graphic_text(value: object, *, field: str) -> Optional[str]:
+    from engine.builder1_graphic_device_necessity import normalize_recurring_graphic_device_value
+
+    text = normalize_recurring_graphic_device_value(value)
+    if not text:
+        return None
+    if len(text) < GRAPHIC_DESCRIPTIVE_MIN_LENGTH:
+        log_graphic_field_rejected(
+            field=field,
+            reason=f"graphic_generator_{field}_too_short",
+            value=value,
+        )
+        return f"graphic_generator_{field}_too_short"
+    if len(text) > GRAPHIC_DESCRIPTIVE_MAX_LENGTH:
+        log_graphic_field_rejected(field=field, reason=f"graphic_generator_{field}_too_long", value=value)
+        return f"graphic_generator_{field}_too_long"
+    return None
 
 
 def validate_descriptive_graphic_text(value: object, *, field: str) -> Optional[str]:
@@ -176,14 +200,21 @@ def structured_enum_prompt_lines() -> str:
 
 
 def descriptive_field_prompt_lines() -> str:
+    from engine.builder1_graphic_device_necessity import NO_RECURRING_GRAPHIC_DEVICE
+
     return "\n".join(
         [
             "Descriptive campaign-direction fields (concise non-empty prose, not closed enums):",
             "- typographyStyle: how type behaves in this campaign (weight, geometry, readability).",
             "- imageStyle: photography/illustration direction for the main visual.",
             "- backgroundTreatment: how the ad background should look and behave.",
-            "- recurringGraphicDevice, recurringGraphicDeviceRule, shapeLanguage, framingRule, spacingRule: concrete repeatable visual rules.",
+            "- shapeLanguage, framingRule, spacingRule: concrete repeatable visual rules.",
             f"Each descriptive field must be {GRAPHIC_DESCRIPTIVE_MIN_LENGTH}-{GRAPHIC_DESCRIPTIVE_MAX_LENGTH} characters.",
+            "- recurringGraphicDevice / recurringGraphicDeviceRule are OPTIONAL.",
+            f"- When no recurring graphic device is necessary, set both to empty string or {NO_RECURRING_GRAPHIC_DEVICE}.",
+            "- Before defining a recurring device, decide whether the physical/visual mechanism already communicates the idea.",
+            "- Reject explanatory overlays (frames/boxes/arrows around already-visible mechanism stages).",
+            "- Keep legitimate conceptual devices when the graphic element itself carries the advertising idea.",
         ]
     )
 
@@ -233,4 +264,8 @@ def graphic_schema_enum_properties() -> Dict[str, Dict[str, object]]:
 
 def graphic_schema_descriptive_properties() -> Dict[str, Dict[str, object]]:
     spec = {"type": "string", "minLength": GRAPHIC_DESCRIPTIVE_MIN_LENGTH, "maxLength": GRAPHIC_DESCRIPTIVE_MAX_LENGTH}
-    return {field: dict(spec) for field in sorted(GRAPHIC_DESCRIPTIVE_FIELDS)}
+    optional_spec = {"type": "string", "minLength": 0, "maxLength": GRAPHIC_DESCRIPTIVE_MAX_LENGTH}
+    props = {field: dict(spec) for field in sorted(GRAPHIC_DESCRIPTIVE_FIELDS)}
+    for field in sorted(OPTIONAL_RECURRING_GRAPHIC_DEVICE_FIELDS):
+        props[field] = dict(optional_spec)
+    return props

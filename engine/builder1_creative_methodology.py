@@ -13,6 +13,7 @@ from engine.builder1_advertising_comprehension import (
     CATEGORY_INTEGRITY_VIOLATION_CODES,
     scan_advertising_comprehension,
 )
+from engine.builder1_graphic_device_necessity import scan_graphic_device_necessity
 from engine.builder1_literal_embodiment import (
     LITERAL_EMBODIMENT_REJECTION_CODES,
     scan_literal_embodiment_bias,
@@ -35,6 +36,8 @@ METHODOLOGY_REJECTION_CODES = frozenset(
         "category_relevance_patched",
         "series_lacks_shared_visual_law",
         "graphic_generator_inconsistent",
+        "graphic_generator_inconsistent_recurring_device",
+        "redundant_explanatory_graphic_device",
         "hebrew_composition_rule_broken",
         "no_mechanism_reuse_inside_campaign",
         "same_image_different_headlines",
@@ -202,6 +205,8 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
             frozenset(
                 {
                     "graphic_generator_inconsistent",
+                    "graphic_generator_inconsistent_recurring_device",
+                    "redundant_explanatory_graphic_device",
                     "hebrew_composition_rule_broken",
                 }
             ),
@@ -442,6 +447,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
 
     reasons.extend(scan_literal_embodiment_bias(plan_dict, integrity_evidence))
     reasons.extend(scan_advertising_comprehension(plan_dict, integrity_evidence))
+    reasons.extend(scan_graphic_device_necessity(plan_dict))
 
     return list(dict.fromkeys(reasons))
 

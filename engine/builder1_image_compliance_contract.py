@@ -38,6 +38,7 @@ IMAGE_COMPLIANCE_VIOLATION_CODES = frozenset(
         "packaging_visible_without_explicit_request",
         "product_used_as_physical_generator",
         "product_used_as_main_visual",
+        "unplanned_annotation_overlay",
     }
     | EXECUTION_FIDELITY_VIOLATION_CODES
 )

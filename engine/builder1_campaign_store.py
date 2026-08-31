@@ -1209,6 +1209,29 @@ def apply_repaired_campaign_plan(campaign_id: str, plan: Builder1SeriesPlan) -> 
     return session
 
 
+def apply_proactive_plan_revision(campaign_id: str, plan: Builder1SeriesPlan) -> Builder1CampaignSession:
+    """Persist a corrected plan for future ads without entering image retry/repair modes."""
+    cid = (campaign_id or "").strip()
+    raw = _load_raw(cid)
+    if raw is None:
+        raise CampaignStoreError("campaign_not_found")
+    raw = dict(raw)
+    previous_revision = max(1, int(raw.get("planRevision") or 1))
+    raw["plan"] = series_plan_to_store_dict(plan)
+    raw["planRevision"] = previous_revision + 1
+    _save_raw(cid, raw)
+    session = _session_from_raw(cid, raw)
+    logger.info(
+        "BUILDER1_PROACTIVE_PLAN_REVISION campaignId=%s planRevision=%s generatedCount=%s nextAdIndex=%s retryMode=%s",
+        cid,
+        session.plan_revision,
+        session.generated_count,
+        session.next_ad_index,
+        session.retry_mode,
+    )
+    return session
+
+
 def update_campaign_plan(campaign_id: str, plan: Builder1SeriesPlan) -> Builder1CampaignSession:
     return apply_repaired_campaign_plan(campaign_id, plan)
 

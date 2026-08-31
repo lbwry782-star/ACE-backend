@@ -29,7 +29,12 @@ from engine.builder1_plan_spec import (
 from engine.builder1_graphic_contract import (
     GRAPHIC_DESCRIPTIVE_FIELDS,
     validate_descriptive_graphic_text,
+    validate_optional_recurring_graphic_text,
     validate_structured_enum,
+)
+from engine.builder1_graphic_device_necessity import (
+    normalize_recurring_graphic_device_value,
+    validate_recurring_graphic_device_pair,
 )
 from engine.builder1_series_distinctness import validate_ad_execution_distinctness
 
@@ -339,14 +344,21 @@ def _parse_graphic_generator(raw: object, reasons: List[str]) -> Optional[Builde
     if (code := _validate_structured(border, field="borderTreatment", allowed=BORDER_TREATMENT_ENUMS)):
         reasons.append(code)
 
-    device = _norm_text(raw.get("recurringGraphicDevice"))
-    device_rule = _norm_text(raw.get("recurringGraphicDeviceRule"))
+    device = normalize_recurring_graphic_device_value(_norm_text(raw.get("recurringGraphicDevice")))
+    device_rule = normalize_recurring_graphic_device_value(_norm_text(raw.get("recurringGraphicDeviceRule")))
     framing = _norm_text(raw.get("framingRule"))
     shape_language = _norm_text(raw.get("shapeLanguage"))
     spacing_rule = _norm_text(raw.get("spacingRule"))
+
+    if code := validate_recurring_graphic_device_pair(device, device_rule):
+        reasons.append(code)
     for value, field in (
         (device, "recurringGraphicDevice"),
         (device_rule, "recurringGraphicDeviceRule"),
+    ):
+        if code := validate_optional_recurring_graphic_text(value, field=field):
+            reasons.append(code)
+    for value, field in (
         (framing, "framingRule"),
         (shape_language, "shapeLanguage"),
         (spacing_rule, "spacingRule"),
