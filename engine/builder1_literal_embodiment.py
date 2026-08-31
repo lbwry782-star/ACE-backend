@@ -335,8 +335,19 @@ _STRUCTURED_AD_PROOF_FIELDS = (
     "executionPunchline",
     "sloganConnection",
     "relativeAdvantageConnection",
+    "categoryRelevanceReason",
     "distinctFromOtherAdsReason",
 )
+
+_STRUCTURED_INDEPENDENT_PROOF_AD_FIELDS = (
+    "conceptualActionProof",
+    "categoryRelevanceReason",
+    "relativeAdvantageConnection",
+    "immediateClarityReason",
+    "singleChangedPropertyOrAction",
+)
+
+_MIN_STRUCTURED_PROOF_CHARS = 20
 
 _CAPTION_ONLY_MARKERS = (
     "illustrates the slogan",
@@ -377,6 +388,19 @@ _INDEPENDENT_PROOF_MARKERS = (
     "visibly shorter",
 )
 
+_HEBREW_INDEPENDENT_PROOF_MARKERS = (
+    "מנגנון",
+    "הוכחה",
+    "עצמא",
+    "אובייקט חיצוני",
+    "בלי לחזור",
+    "לא ממש",
+    "הפצלה",
+    "מחיצ",
+    "מבטא",
+    "מראה",
+)
+
 
 def _norm(value: object) -> str:
     return " ".join(str(value or "").strip().split())
@@ -390,7 +414,18 @@ def _tokenize(text: str) -> Set[str]:
     }
 
 
+def extract_public_slogan_content_tokens(*, slogan: str) -> Set[str]:
+    """User-visible brand slogan tokens — canonical source for lexical literalism checks."""
+    return _tokenize(slogan)
+
+
+def extract_internal_slogan_action_tokens(*, implied_action: str) -> Set[str]:
+    """Internal strategic slogan-action tokens — diagnostic only, not standalone rejection evidence."""
+    return _tokenize(implied_action)
+
+
 def extract_slogan_content_tokens(*, slogan: str, implied_action: str = "") -> Set[str]:
+    """Combined slogan + action tokens (shortening/route scans and legacy callers)."""
     return _tokenize(f"{slogan} {implied_action}")
 
 
@@ -494,12 +529,96 @@ def _literal_slogan_noun_in_object(*, slogan_tokens: Set[str], object_text: str)
     return bool(_slogan_object_overlap_tokens(slogan_tokens=slogan_tokens, object_text=object_text))
 
 
+def _planning_internals_dict(plan_dict: Mapping[str, Any]) -> Dict[str, Any]:
+    internals = plan_dict.get("planningInternals") or plan_dict.get("planning_internals") or {}
+    return dict(internals) if isinstance(internals, dict) else {}
+
+
+def _merged_ad_dict(plan_dict: Mapping[str, Any], ad: Mapping[str, Any]) -> Dict[str, Any]:
+    merged = dict(ad)
+    ad_internals = _planning_internals_dict(plan_dict).get("adInternals")
+    if not isinstance(ad_internals, dict):
+        return merged
+    extra = ad_internals.get(ad.get("index")) or ad_internals.get(str(ad.get("index")))
+    if isinstance(extra, dict):
+        merged.update(extra)
+    return merged
+
+
 def _structured_plan_proof_text(plan_dict: Mapping[str, Any]) -> str:
-    return " ".join(_norm(plan_dict.get(field)) for field in _STRUCTURED_PLAN_PROOF_FIELDS)
+    parts: List[str] = []
+    internals = _planning_internals_dict(plan_dict)
+    for field in _STRUCTURED_PLAN_PROOF_FIELDS:
+        parts.append(_norm(plan_dict.get(field)))
+        parts.append(_norm(internals.get(field)))
+    return " ".join(part for part in parts if part)
 
 
 def _structured_ad_proof_text(ad: Mapping[str, Any]) -> str:
-    return " ".join(_norm(ad.get(field)) for field in _STRUCTURED_AD_PROOF_FIELDS)
+    return " ".join(_norm(ad.get(field)) for field in _STRUCTURED_AD_PROOF_FIELDS if _norm(ad.get(field)))
+
+
+def _substantial_proof_segment(text: str) -> bool:
+    return len(_norm(text)) >= _MIN_STRUCTURED_PROOF_CHARS
+
+
+def _structured_ad_independent_proof(ad: Mapping[str, Any]) -> bool:
+    filled = sum(
+        1
+        for field in _STRUCTURED_INDEPENDENT_PROOF_AD_FIELDS
+        if _substantial_proof_segment(str(ad.get(field) or ""))
+    )
+    return filled >= 2
+
+
+def _structured_plan_independent_proof(plan_dict: Mapping[str, Any]) -> bool:
+    internals = _planning_internals_dict(plan_dict)
+    rationale = _norm(plan_dict.get("campaignRationale"))
+    why_clearer = _norm(internals.get("whyClearerThanShowingProduct") or plan_dict.get("whyClearerThanShowingProduct"))
+    why_slogan = _norm(
+        internals.get("conceptualGeneratorWhyItExpressesSlogan") or plan_dict.get("conceptualGeneratorWhyItExpressesSlogan")
+    )
+    if _substantial_proof_segment(rationale) and (
+        _substantial_proof_segment(why_clearer) or _substantial_proof_segment(why_slogan)
+    ):
+        return True
+    ads = [ad for ad in (plan_dict.get("ads") or []) if isinstance(ad, dict)]
+    if ads and all(_structured_ad_independent_proof(_merged_ad_dict(plan_dict, ad)) for ad in ads[:2]):
+        return True
+    return False
+
+
+def _collect_independent_proof_text(
+    plan_dict: Mapping[str, Any],
+    *,
+    ad: Optional[Mapping[str, Any]] = None,
+) -> str:
+    parts = [_structured_plan_proof_text(plan_dict)]
+    if ad is not None:
+        parts.append(_structured_ad_proof_text(_merged_ad_dict(plan_dict, ad)))
+    else:
+        for raw_ad in plan_dict.get("ads") or []:
+            if isinstance(raw_ad, dict):
+                parts.append(_structured_ad_proof_text(_merged_ad_dict(plan_dict, raw_ad)))
+    return " ".join(part for part in parts if part)
+
+
+def _has_independent_visual_proof(
+    plan_dict: Mapping[str, Any],
+    *,
+    ad: Optional[Mapping[str, Any]] = None,
+    rationale_text: str = "",
+) -> bool:
+    if ad is not None and _structured_ad_independent_proof(_merged_ad_dict(plan_dict, ad)):
+        return True
+    if _structured_plan_independent_proof(plan_dict):
+        return True
+    combined = _collect_independent_proof_text(plan_dict, ad=ad)
+    if combined and _claims_independent_visual_proof(combined):
+        return True
+    if rationale_text and _claims_independent_visual_proof(rationale_text):
+        return True
+    return False
 
 
 def _claims_caption_only_illustration(text: str) -> bool:
@@ -529,13 +648,40 @@ def _claims_independent_visual_proof(text: str) -> bool:
         )
     ):
         return False
-    return any(marker in lowered for marker in _INDEPENDENT_PROOF_MARKERS)
+    return any(marker in lowered for marker in _INDEPENDENT_PROOF_MARKERS) or any(
+        marker in lowered for marker in _HEBREW_INDEPENDENT_PROOF_MARKERS
+    )
+
+
+def _single_public_overlap_is_literal_object_name(*, overlap: Set[str], object_text: str) -> bool:
+    if len(overlap) != 1:
+        return False
+    token = next(iter(overlap))
+    object_tokens = _tokenize(object_text)
+    if object_tokens == {token}:
+        return True
+    return _norm(object_text).casefold() == token.casefold()
+
+
+def _public_overlap_triggers_literal_rejection(
+    *,
+    public_overlap: Set[str],
+    object_text: str,
+    rationale_text: str,
+) -> bool:
+    if not public_overlap:
+        return False
+    if _claims_caption_only_illustration(rationale_text):
+        return True
+    if len(public_overlap) >= 2:
+        return True
+    return _single_public_overlap_is_literal_object_name(overlap=public_overlap, object_text=object_text)
 
 
 def _plan_has_creative_literal_justification(plan_dict: Mapping[str, Any]) -> bool:
     combined = " ".join(
         [
-            _structured_plan_proof_text(plan_dict),
+            _collect_independent_proof_text(plan_dict),
             _norm(plan_dict.get("conceptualGenerator")),
             _norm(plan_dict.get("conceptualGeneratorAction")),
             _norm(plan_dict.get("transferredObjectAction")),
@@ -544,25 +690,35 @@ def _plan_has_creative_literal_justification(plan_dict: Mapping[str, Any]) -> bo
     return _claims_independent_visual_proof(combined)
 
 
-def _ad_has_independent_visual_proof(ad: Mapping[str, Any]) -> bool:
-    return _claims_independent_visual_proof(_structured_ad_proof_text(ad))
+def _ad_has_independent_visual_proof(plan_dict: Mapping[str, Any], ad: Mapping[str, Any]) -> bool:
+    return _has_independent_visual_proof(plan_dict, ad=ad)
 
 
 def _object_selected_from_lexical_match(
     *,
-    slogan_tokens: Set[str],
+    public_slogan_tokens: Set[str],
     object_text: str,
+    plan_dict: Mapping[str, Any],
     rationale_text: str,
+    ad: Optional[Mapping[str, Any]] = None,
 ) -> bool:
     if not object_text:
         return False
-    if _claims_independent_visual_proof(rationale_text):
+    if _has_independent_visual_proof(plan_dict, ad=ad, rationale_text=rationale_text):
         return False
     if _claims_caption_only_illustration(rationale_text):
         return True
-    if not _literal_slogan_noun_in_object(slogan_tokens=slogan_tokens, object_text=object_text):
+    public_overlap = _slogan_object_overlap_tokens(
+        slogan_tokens=public_slogan_tokens,
+        object_text=object_text,
+    )
+    if not public_overlap:
         return False
-    return not _claims_independent_visual_proof(rationale_text)
+    return _public_overlap_triggers_literal_rejection(
+        public_overlap=public_overlap,
+        object_text=object_text,
+        rationale_text=rationale_text,
+    )
 
 
 def _detect_literal_slogan_illustration(
@@ -575,8 +731,9 @@ def _detect_literal_slogan_illustration(
     physical = _norm(plan_dict.get("physicalGenerator"))
     conceptual = _norm(plan_dict.get("conceptualGenerator"))
     conceptual_action = _norm(plan_dict.get("conceptualGeneratorAction"))
-    slogan_tokens = extract_slogan_content_tokens(slogan=slogan, implied_action=slogan_action)
+    public_slogan_tokens = extract_public_slogan_content_tokens(slogan=slogan)
     plan_proof = _structured_plan_proof_text(plan_dict)
+    full_plan_proof = _collect_independent_proof_text(plan_dict)
     shortening_concept = implies_shortening_or_distance_concept(
         slogan,
         slogan_action,
@@ -585,15 +742,16 @@ def _detect_literal_slogan_illustration(
         transferred,
     )
     creative_literal_ok = _plan_has_creative_literal_justification(plan_dict)
-    slogan_token_list = sorted(slogan_tokens)
+    slogan_token_list = sorted(public_slogan_tokens)
 
     for field_name, field_text in (
         ("transferredObject", transferred),
         ("physicalGenerator", physical),
     ):
         if _object_selected_from_lexical_match(
-            slogan_tokens=slogan_tokens,
+            public_slogan_tokens=public_slogan_tokens,
             object_text=field_text,
+            plan_dict=plan_dict,
             rationale_text=plan_proof,
         ):
             record_integrity_evidence(
@@ -604,10 +762,30 @@ def _detect_literal_slogan_illustration(
                 level="plan",
                 field=field_name,
                 slogan_tokens=slogan_token_list,
-                matched_terms=sorted(_slogan_object_overlap_tokens(slogan_tokens=slogan_tokens, object_text=field_text)),
-                independent_visual_proof_absent=not _claims_independent_visual_proof(plan_proof),
+                matched_terms=sorted(
+                    _slogan_object_overlap_tokens(
+                        slogan_tokens=public_slogan_tokens,
+                        object_text=field_text,
+                    )
+                ),
+                independent_visual_proof_absent=not _has_independent_visual_proof(
+                    plan_dict,
+                    rationale_text=full_plan_proof,
+                ),
                 field_value_preview=field_text,
-                reason="Physical/transferred object selected mainly from slogan lexical overlap without independent visual proof.",
+                reason="Physical/transferred object selected mainly from public-slogan lexical overlap without independent visual proof.",
+                extra={
+                    "internalActionOnlyOverlap": sorted(
+                        _slogan_object_overlap_tokens(
+                            slogan_tokens=extract_internal_slogan_action_tokens(implied_action=slogan_action),
+                            object_text=field_text,
+                        )
+                        - _slogan_object_overlap_tokens(
+                            slogan_tokens=public_slogan_tokens,
+                            object_text=field_text,
+                        )
+                    ),
+                },
             )
             return True
 
@@ -655,7 +833,7 @@ def _detect_literal_slogan_illustration(
             )
             return True
         blob = _ad_visual_blob(ad)
-        if contains_literal_route_family(blob) and not _ad_has_independent_visual_proof(ad):
+        if contains_literal_route_family(blob) and not _ad_has_independent_visual_proof(plan_dict, ad):
             if external_selected or shortening_concept:
                 record_integrity_evidence(
                     evidence_out,
@@ -675,9 +853,11 @@ def _detect_literal_slogan_illustration(
         exec_field = "executionSubject" if _norm(ad.get("executionSubject")) else "physicalExecution"
         exec_text = _norm(ad.get("executionSubject") or ad.get("physicalExecution"))
         if _object_selected_from_lexical_match(
-            slogan_tokens=slogan_tokens,
+            public_slogan_tokens=public_slogan_tokens,
             object_text=exec_text,
+            plan_dict=plan_dict,
             rationale_text=ad_proof,
+            ad=ad,
         ):
             record_integrity_evidence(
                 evidence_out,
@@ -688,10 +868,19 @@ def _detect_literal_slogan_illustration(
                 field=exec_field,
                 ad_index=int(ad_index) if ad_index is not None else None,
                 slogan_tokens=slogan_token_list,
-                matched_terms=sorted(_slogan_object_overlap_tokens(slogan_tokens=slogan_tokens, object_text=exec_text)),
-                independent_visual_proof_absent=not _claims_independent_visual_proof(ad_proof),
+                matched_terms=sorted(
+                    _slogan_object_overlap_tokens(
+                        slogan_tokens=public_slogan_tokens,
+                        object_text=exec_text,
+                    )
+                ),
+                independent_visual_proof_absent=not _has_independent_visual_proof(
+                    plan_dict,
+                    ad=ad,
+                    rationale_text=ad_proof,
+                ),
                 field_value_preview=exec_text,
-                reason="Ad execution subject selected mainly from slogan lexical overlap without independent visual proof.",
+                reason="Ad execution subject selected mainly from public-slogan lexical overlap without independent visual proof.",
             )
             return True
 
@@ -767,7 +956,7 @@ def scan_literal_embodiment_bias(
         for ad in ads:
             ad_index = ad.get("index")
             blob = _ad_visual_blob(ad)
-            if contains_literal_route_family(blob) and not _ad_has_independent_visual_proof(ad):
+            if contains_literal_route_family(blob) and not _ad_has_independent_visual_proof(plan_dict, ad):
                 record_integrity_evidence(
                     evidence_out,
                     code="literal_slogan_illustration",
@@ -790,7 +979,7 @@ def scan_literal_embodiment_bias(
         literal_family_ads = sum(
             1
             for ad in ads
-            if contains_literal_route_family(_ad_visual_blob(ad)) and not _ad_has_independent_visual_proof(ad)
+            if contains_literal_route_family(_ad_visual_blob(ad)) and not _ad_has_independent_visual_proof(plan_dict, ad)
         )
         if literal_family_ads >= 2:
             record_integrity_evidence(
@@ -865,6 +1054,12 @@ def scan_series_plan_literal_embodiment(series_plan: Builder1SeriesPlan) -> List
                 "executionObjectState",
                 "executionScene",
                 "executionPunchline",
+                "conceptualActionProof",
+                "categoryRelevanceReason",
+                "relativeAdvantageConnection",
+                "immediateClarityReason",
+                "singleChangedPropertyOrAction",
+                "sloganConnection",
             ):
                 if extra.get(key):
                     payload[key] = extra.get(key)
@@ -879,8 +1074,11 @@ def scan_series_plan_literal_embodiment(series_plan: Builder1SeriesPlan) -> List
         "transferredObjectAction": series_plan.transferred_object_action,
         "conceptualGenerator": series_plan.conceptual_generator,
         "conceptualGeneratorAction": series_plan.conceptual_generator_action,
+        "campaignRationale": series_plan.campaign_rationale,
         "ads": ads_payload,
     }
+    if internals:
+        plan_dict["planningInternals"] = dict(internals)
     return scan_literal_embodiment_bias(plan_dict)
 
 

@@ -1846,6 +1846,37 @@ def _builder1_generate_initial(
     )
 
 
+def _builder1_run_resume_integrity_recovered_job(
+    job_id: str,
+    campaign_id: str,
+    target_ad_count: int,
+) -> None:
+    """Resume image generation after integrity recovery — no planning calls."""
+    from engine.builder1_job_cancellation import Builder1JobCancelledError
+    from engine.builder1_paid_stage_guard import builder1_paid_stage_context
+
+    logger.info(
+        "BUILDER1_INTEGRITY_RECOVERY_RESUME jobId=%s campaignId=%s targetAdCount=%s",
+        job_id,
+        campaign_id,
+        target_ad_count,
+    )
+    _builder1_mark_worker_started(job_id)
+    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+        try:
+            result = _builder1_generate_single_ad(
+                job_id=job_id,
+                campaign_id=campaign_id,
+                ad_index=1,
+                already_reserved=False,
+            )
+            _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
+        except Builder1JobCancelledError:
+            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+        except Exception as e:
+            _builder1_handle_background_job_exception(job_id, e)
+
+
 def _builder1_run_initial_job(
     job_id: str,
     campaign_id: str,
