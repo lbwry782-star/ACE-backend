@@ -12,9 +12,15 @@ from typing import Any, Dict
 from engine.builder1_final_stages import parse_graphic_system_output
 from engine.builder1_graphic_device_campaign_repair import (
     TARGET_RAIN_GUTTER_CAMPAIGN_ID,
+    _AD2_CONCEPTUAL_EXECUTION_CANONICAL,
+    _AD2_SLOGAN_CONNECTION_CANONICAL,
+    _AD2_VISUAL_EXECUTION_CANONICAL,
+    find_ad_entry,
+    list_ad_list_position,
     plan_matches_rain_gutter_frame_repair,
     repair_redundant_frame_references_in_plan,
     run_graphic_device_campaign_cleanup,
+    scan_ad_overlay_semantics,
 )
 from engine.builder1_graphic_device_necessity import (
     NO_RECURRING_GRAPHIC_DEVICE,
@@ -71,6 +77,32 @@ def _rain_gutter_campaign() -> Dict[str, Any]:
             1: {"sameVisualLawProof": "שתי תחימות מסמנות את השלבים"},
             2: {"sameVisualLawProof": "בדיוק שתי מסגרות נחושת חוזרות"},
         }
+    }
+    return plan
+
+
+def _production_shaped_rain_gutter_campaign() -> Dict[str, Any]:
+    plan = _rain_gutter_campaign()
+    ad2 = plan["ads"][1]
+    ad2["index"] = 2
+    ad2["visualExecution"] = (
+        "צילום ריאליסטי לרוחב מזווית חזיתית־מעט־עליונה. "
+        "עמק הגג, ברך הצינור ורגע ההתזה בחבית גלויים במרכז־ימין. "
+        "מסגרת נחושת אחת מקיפה את מרזב העמק והשנייה את החבית. "
+        "אותו רקע חורפי בהיר ואותו אזור טקסט שמאלי נשמרים."
+    )
+    ad2["conceptualExecution"] = (
+        "גם כאשר המשאב מגיע בבת אחת משני כיוונים, "
+        "שתי מסגרות נחושת מסמנות את שני שלבי הריכוז סביב המרזב והחבית."
+    )
+    ad2["sloganConnection"] = (
+        "הסיסמה מספקת את ההבחנה המילולית בין עזרה כללית לבין מקצוע ובחינה מסוימים; "
+        "החזות מוסיפה הוכחה עצמאית לכך ששתי מסגרות נחושת לוכדות גם משאב שמגיע מכמה כיוונים."
+    )
+    plan["graphicGenerator"]["palette"]["accent"] = "#D98245"
+    plan["planningInternals"]["adInternals"][2] = {
+        "sameVisualLawProof": "בדיוק שתי מסגרות נחושת מסמנות את שלבי הריכוז.",
+        "visualExecution": ad2["visualExecution"],
     }
     return plan
 
@@ -172,31 +204,57 @@ class TestRainGutterCampaignRepair(unittest.TestCase):
     def setUp(self) -> None:
         clear_memory_store_for_tests()
 
-    def test_repair_removes_frame_references_from_ad2(self) -> None:
-        repaired, changes = repair_redundant_frame_references_in_plan(_rain_gutter_campaign())
-        ad2 = repaired["ads"][1]["visualExecution"]
-        self.assertNotIn("מסגרות נחושת", ad2)
-        self.assertNotIn("תחימ", ad2)
-        self.assertTrue(any(c["path"].endswith("recurringGraphicDevice") for c in changes))
+    def test_list_index_one_is_semantic_ad_two(self) -> None:
+        plan = _production_shaped_rain_gutter_campaign()
+        self.assertEqual(list_ad_list_position(plan, 2), 1)
+        ad2 = find_ad_entry(plan, 2)
+        self.assertIsNotNone(ad2)
+        self.assertEqual(ad2.get("index"), 2)
+        self.assertIn("מסגרת נחושת אחת", ad2["visualExecution"])
 
-    def test_repaired_ad2_prompt_has_no_frame_instruction(self) -> None:
-        repaired_dict, _ = repair_redundant_frame_references_in_plan(_rain_gutter_campaign())
-        from engine.builder1_plan_parser import parse_builder1_series_plan
+    def test_production_ad2_visual_execution_is_rewritten(self) -> None:
+        repaired, changes = repair_redundant_frame_references_in_plan(_production_shaped_rain_gutter_campaign())
+        ad2 = find_ad_entry(repaired, 2)
+        self.assertIsNotNone(ad2)
+        self.assertEqual(ad2["visualExecution"], _AD2_VISUAL_EXECUTION_CANONICAL)
+        self.assertTrue(any("visualExecution" in c["path"] and c["path"].startswith("ads[2]") for c in changes))
 
-        plan = parse_builder1_series_plan(
-            repaired_dict,
-            expected_format="portrait",
-            expected_ad_count=2,
-            product_name="",
-            product_description="Rain collection service",
-            require_internal_scans=False,
-        )
-        prompt = build_visual_prompt(plan, plan.ads[1])
-        self.assertNotIn("Render the recurring graphic device prominently", prompt)
-        self.assertNotIn("מסגרת", prompt)
+    def test_production_ad2_conceptual_and_slogan_rewrites_are_grammatical(self) -> None:
+        repaired, _ = repair_redundant_frame_references_in_plan(_production_shaped_rain_gutter_campaign())
+        ad2 = find_ad_entry(repaired, 2)
+        self.assertEqual(ad2["conceptualExecution"], _AD2_CONCEPTUAL_EXECUTION_CANONICAL)
+        self.assertEqual(ad2["sloganConnection"], _AD2_SLOGAN_CONNECTION_CANONICAL)
+        combined = f"{ad2['conceptualExecution']} {ad2['sloganConnection']}"
+        self.assertNotIn("הזרימה הפיזית עצמאיות", combined)
+        self.assertNotIn("הזרימה הפיזית לוכדות", combined)
+
+    def test_complete_ad2_overlay_scan_is_clean(self) -> None:
+        repaired, _ = repair_redundant_frame_references_in_plan(_production_shaped_rain_gutter_campaign())
+        hits = scan_ad_overlay_semantics(repaired, semantic_index=2)
+        self.assertEqual(hits, [])
+
+    def test_accent_palette_preserved(self) -> None:
+        repaired, _ = repair_redundant_frame_references_in_plan(_production_shaped_rain_gutter_campaign())
+        self.assertEqual(repaired["graphicGenerator"]["palette"]["accent"], "#D98245")
+
+    def test_dry_run_reports_clean_ad2_prompt(self) -> None:
+        raw = _production_shaped_rain_gutter_campaign()
+        plan = _parse(raw, 2)
+        cid = TARGET_RAIN_GUTTER_CAMPAIGN_ID
+        create_campaign_session(campaign_id=cid, plan=plan, target_ad_count=2)
+        reserve_next_ad_index(cid, 1, job_id="job-1")
+        mark_ad_generated(cid, 1)
+
+        report = run_graphic_device_campaign_cleanup(cid, dry_run=True)
+        self.assertTrue(report["eligible"])
+        self.assertEqual(report["ad2PromptOverlayHits"], [])
+        self.assertIn("Do not add bounding boxes", report["ad2PromptRelevantExcerpt"])
+        self.assertIn("חבית", report["ad2VisualExecutionAfter"])
+        self.assertIn("עמק הגג", report["ad2VisualExecutionAfter"])
+        self.assertNotIn("מסגרת נחושת", report["ad2VisualExecutionAfter"])
 
     def test_dry_run_preserves_generated_count_and_artifact(self) -> None:
-        raw = _rain_gutter_campaign()
+        raw = _production_shaped_rain_gutter_campaign()
         plan = _parse(raw, 2)
         cid = TARGET_RAIN_GUTTER_CAMPAIGN_ID
         create_campaign_session(campaign_id=cid, plan=plan, target_ad_count=2)
@@ -218,7 +276,7 @@ class TestRainGutterCampaignRepair(unittest.TestCase):
         self.assertEqual(report["before"]["nextAdIndex"], 2)
 
     def test_apply_bumps_revision_without_retry_mode(self) -> None:
-        raw = _rain_gutter_campaign()
+        raw = _production_shaped_rain_gutter_campaign()
         plan = _parse(raw, 2)
         cid = "cmp-apply-repair"
         create_campaign_session(campaign_id=cid, plan=plan, target_ad_count=2)
@@ -235,13 +293,22 @@ class TestRainGutterCampaignRepair(unittest.TestCase):
         validate_next_ad_request(cid, 2)
 
     def test_repair_makes_no_paid_calls(self) -> None:
-        raw = _rain_gutter_campaign()
+        raw = _production_shaped_rain_gutter_campaign()
         plan = _parse(raw, 2)
         cid = TARGET_RAIN_GUTTER_CAMPAIGN_ID
         create_campaign_session(campaign_id=cid, plan=plan, target_ad_count=2)
         report = run_graphic_device_campaign_cleanup(cid, dry_run=True)
         self.assertEqual(report["paidCalls"], 0)
         self.assertEqual(report.get("planningCalls", 0), 0)
+
+    def test_eligibility_fails_when_overlay_survives(self) -> None:
+        from engine.builder1_graphic_device_campaign_repair import evaluate_repair_eligibility
+
+        raw = _production_shaped_rain_gutter_campaign()
+        plan = _parse(raw, 2)
+        eligible, reasons = evaluate_repair_eligibility(raw, plan)
+        self.assertFalse(eligible)
+        self.assertTrue(any("overlay" in r or "visualExecution" in r for r in reasons))
 
 
 class TestAnnotationGuardBlock(unittest.TestCase):
