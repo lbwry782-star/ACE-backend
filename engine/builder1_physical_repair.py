@@ -188,9 +188,24 @@ def repair_builder1_campaign_from_physical(
 ) -> Builder1SeriesPlan:
     """Rerun brand_physical, graphic_system, and series_ads while preserving upstream identity."""
     from engine.builder1_paid_stage_guard import checkpoint_before_paid_call
+    from engine.builder1_selected_creative_brief import selected_creative_brief_from_plan
+    from engine.builder1_server_mandatory_constraints import (
+        effective_creative_brief_for_prompts,
+        effective_mandatory_constraints_for_brief,
+        resolve_server_mandatory_constraints_for_plan,
+    )
 
     checkpoint_before_paid_call("physical_repair_start")
     strategy, strategy_selection, selected_slogan, selected_conceptual = _reconstruct_upstream_from_plan(plan)
+    selected_brief = selected_creative_brief_from_plan(plan)
+    server_mandatory = resolve_server_mandatory_constraints_for_plan(
+        plan,
+        product_description=plan.product_description,
+        brand_guidelines=brand_guidelines,
+        product_name=plan.product_name_resolved,
+    )
+    effective_brief = effective_creative_brief_for_prompts(selected_brief, server_mandatory)
+    effective_mandatory = effective_mandatory_constraints_for_brief(selected_brief, server_mandatory)
     conceptual_fixed = _conceptual_to_dict(selected_conceptual)
     visibility_policy = ProductVisibilityPolicy.CREATIVE_DECISION
     raw_policy = (plan.product_visibility_policy or "").strip().upper()
@@ -218,6 +233,7 @@ def repair_builder1_campaign_from_physical(
         conceptual=conceptual_fixed,
         brand_guidelines=brand_guidelines,
         visibility_policy=visibility_policy.value,
+        selected_creative_brief=effective_brief,
     )
     from engine.builder1_advertising_comprehension import build_analogy_repair_guidance_block
 
@@ -259,6 +275,7 @@ def repair_builder1_campaign_from_physical(
             conceptual=conceptual_fixed,
             brand_physical=brand_physical_dict,
             format_value=plan.format,
+            selected_creative_brief=effective_brief,
         ),
         parse_graphic_system_output,
         repair_builder=lambda broken, reasons: build_graphic_system_repair_prompt(
@@ -292,6 +309,7 @@ def repair_builder1_campaign_from_physical(
             brand_physical=brand_physical_dict,
             graphic_generator=graphic_dict,
             visibility_policy=visibility_policy.value,
+            effective_mandatory_constraints=effective_mandatory,
         ),
         lambda raw: parse_series_ads_output(
             raw,
@@ -333,6 +351,8 @@ def repair_builder1_campaign_from_physical(
         series_ads=series_ads,
         visibility_policy=visibility_policy,
         visibility_source=visibility_source,
+        selected_creative_brief=selected_brief,
+        server_mandatory_constraints=server_mandatory,
     )
 
     visibility_reasons = validate_forbidden_plan_visibility(repaired)

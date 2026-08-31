@@ -21,6 +21,10 @@ from engine.builder1_staged_parsers import (
     StrategySelection,
     coerce_json_dict,
 )
+from engine.builder1_selected_creative_brief import (
+    SelectedCreativeBrief,
+    parse_selected_creative_brief,
+)
 from engine.builder1_strategy_scan import validate_strategy_candidate_item
 
 FINAL_STRATEGY_ID = "FINAL"
@@ -113,7 +117,8 @@ def parse_strategy_final_section(
     *,
     product_description: str,
     allow_legacy_candidates: bool = False,
-) -> Tuple[StrategySelection, StrategyCandidate]:
+    require_selected_creative_brief: bool = True,
+) -> Tuple[StrategySelection, StrategyCandidate, SelectedCreativeBrief]:
     try:
         obj = coerce_json_dict(raw_payload)
     except Exception as exc:
@@ -124,7 +129,14 @@ def parse_strategy_final_section(
     else:
         _reject_exposed_candidate_fields(obj, label="strategy")
 
+    brief_raw = obj.get("selectedCreativeBrief")
+    selected_brief = parse_selected_creative_brief(
+        brief_raw,
+        required=require_selected_creative_brief,
+    )
+
     item = copy.deepcopy(obj)
+    item.pop("selectedCreativeBrief", None)
     item["id"] = FINAL_STRATEGY_ID
     result = validate_strategy_candidate_item(
         item,
@@ -145,7 +157,7 @@ def parse_strategy_final_section(
         strategy_family=result.candidate.lens,
         scores=dict(DEFAULT_STRATEGY_SCORES),
     )
-    return selection, result.candidate
+    return selection, result.candidate, selected_brief
 
 
 def parse_slogan_final_section(

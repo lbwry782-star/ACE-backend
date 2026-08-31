@@ -42,6 +42,11 @@ from engine.builder1_product_visibility import (
     derive_product_visibility_policy,
     log_builder1_product_visibility_policy,
 )
+from engine.builder1_server_mandatory_constraints import (
+    effective_creative_brief_for_prompts,
+    effective_mandatory_constraints_for_brief,
+    extract_builder1_server_mandatory_constraints,
+)
 from engine.builder1_slogan_stage import slogan_candidate_to_dict
 from engine.builder1_series_distinctness import (
     duplicate_assembly_reasons,
@@ -175,6 +180,20 @@ def run_builder1_campaign_pipeline(
         _run_stage,
     )
 
+    if visibility_decision is None:
+        visibility_decision = derive_product_visibility_policy(
+            product_name=product_name_resolved,
+            product_description=normalized.product_description,
+            brand_guidelines=brand_guidelines,
+        )
+
+    server_mandatory_constraints = extract_builder1_server_mandatory_constraints(
+        product_description=normalized.product_description,
+        brand_guidelines=brand_guidelines,
+        product_name=product_name_resolved,
+    )
+    visibility_policy_value = visibility_decision.policy.value
+
     try:
         (
             strategy_selection,
@@ -184,6 +203,7 @@ def run_builder1_campaign_pipeline(
             _slogan_selection,
             selected_slogan,
             slogan_candidates,
+            selected_creative_brief,
         ) = run_strategy_slogan_with_memory_guard(
             _run_stage,
             model_caller,
@@ -198,9 +218,20 @@ def run_builder1_campaign_pipeline(
             idea_memory_block=stage_memory_block(
                 "strategy_slogan_stage", idea_memory, campaign_id=campaign_id
             ),
+            server_mandatory_constraints=server_mandatory_constraints,
+            visibility_policy=visibility_policy_value,
         )
     except StrategySelectionExhausted as exc:
         raise Builder1PlannerError("strategy_slogan_stage_failed") from exc
+
+    effective_creative_brief = effective_creative_brief_for_prompts(
+        selected_creative_brief,
+        server_mandatory_constraints,
+    )
+    effective_mandatory_constraints = effective_mandatory_constraints_for_brief(
+        selected_creative_brief,
+        server_mandatory_constraints,
+    )
 
     slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
 
@@ -214,6 +245,7 @@ def run_builder1_campaign_pipeline(
         product_name_resolved=product_name_resolved,
         selected_strategy=selected_strategy,
         selected_slogan=selected_slogan,
+        selected_creative_brief=effective_creative_brief,
         exploration_seed=exploration_seed,
     )
     conc_dicts = [
@@ -233,13 +265,6 @@ def run_builder1_campaign_pipeline(
     ]
     conceptual_fixed = _conceptual_to_dict(selected_conceptual)
 
-    if visibility_decision is None:
-        visibility_decision = derive_product_visibility_policy(
-            product_name=product_name_resolved,
-            product_description=normalized.product_description,
-            brand_guidelines=brand_guidelines,
-        )
-
     log_builder1_product_visibility_policy(
         policy=visibility_decision.policy,
         source=visibility_decision.source,
@@ -258,6 +283,7 @@ def run_builder1_campaign_pipeline(
         conceptual=conceptual_fixed,
         brand_guidelines=brand_guidelines,
         visibility_policy=visibility_decision.policy.value,
+        selected_creative_brief=effective_creative_brief,
         idea_memory_block=stage_memory_block("brand_physical", idea_memory, campaign_id=campaign_id),
     )
     brand_physical = run_brand_physical_with_memory_guard(
@@ -296,6 +322,7 @@ def run_builder1_campaign_pipeline(
             brand_physical=brand_physical_dict,
             format_value=normalized.format,
             idea_memory_block=stage_memory_block("graphic_system", idea_memory, campaign_id=campaign_id),
+            selected_creative_brief=effective_creative_brief,
         ),
         run_stage=_run_stage,
         brand_physical=brand_physical_dict,
@@ -327,6 +354,7 @@ def run_builder1_campaign_pipeline(
         visibility_policy=visibility_decision.policy,
         campaign_id=campaign_id,
         idea_memory=idea_memory,
+        effective_mandatory_constraints=effective_mandatory_constraints,
     )
 
     plan = _assemble_campaign_with_duplicate_recovery(
@@ -346,6 +374,9 @@ def run_builder1_campaign_pipeline(
         series_ads=series_ads,
         visibility_policy=visibility_decision.policy,
         visibility_source=visibility_decision.source,
+        selected_creative_brief=selected_creative_brief,
+        server_mandatory_constraints=server_mandatory_constraints,
+        effective_mandatory_constraints=effective_mandatory_constraints,
         conceptual_fixed=conceptual_fixed,
         brand_physical_dict=brand_physical_dict,
         graphic_dict=graphic_dict,
@@ -443,6 +474,7 @@ def _run_series_stage_with_integrity(
     visibility_policy: Any,
     campaign_id: str = "",
     idea_memory: Optional[Any] = None,
+    effective_mandatory_constraints: Optional[List[str]] = None,
 ) -> SeriesAdsOutput:
     from engine.builder1_planner import Builder1PlannerError
 
@@ -463,6 +495,7 @@ def _run_series_stage_with_integrity(
             graphic_generator=graphic_dict,
             visibility_policy=getattr(visibility_policy, "value", str(visibility_policy)),
             idea_memory_block=stage_memory_block("series_ads", idea_memory, campaign_id=campaign_id),
+            effective_mandatory_constraints=effective_mandatory_constraints,
         ),
         lambda raw: parse_series_ads_output(
             raw,
@@ -518,6 +551,7 @@ def _run_series_stage_with_integrity(
             visibility_policy=visibility_policy,
             campaign_id=campaign_id,
             idea_memory=idea_memory,
+            effective_mandatory_constraints=effective_mandatory_constraints,
         )
     return series_ads
 
@@ -540,6 +574,9 @@ def _assemble_campaign_with_duplicate_recovery(
     series_ads: SeriesAdsOutput,
     visibility_policy: Any,
     visibility_source: Any,
+    selected_creative_brief: Any,
+    server_mandatory_constraints: Optional[List[str]] = None,
+    effective_mandatory_constraints: Optional[List[str]] = None,
     conceptual_fixed: Dict[str, str],
     brand_physical_dict: Dict[str, Any],
     graphic_dict: Dict[str, Any],
@@ -569,6 +606,8 @@ def _assemble_campaign_with_duplicate_recovery(
                 series_ads=current_series,
                 visibility_policy=visibility_policy,
                 visibility_source=visibility_source,
+                selected_creative_brief=selected_creative_brief,
+                server_mandatory_constraints=server_mandatory_constraints or [],
             )
         except StageParseError as exc:
             if exc.stage != "assemble":
@@ -596,6 +635,7 @@ def _assemble_campaign_with_duplicate_recovery(
                 detected_language=detected_language,
                 model_caller=model_caller,
                 run_stage=run_stage,
+                effective_mandatory_constraints=effective_mandatory_constraints,
             )
             repair_used = True
 

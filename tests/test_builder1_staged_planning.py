@@ -373,9 +373,12 @@ def _slogan_quality_review_payload() -> Dict[str, Any]:
 
 
 def _strategy_final_payload(**overrides: Any) -> Dict[str, Any]:
+    from engine.builder1_selected_creative_brief import default_selected_creative_brief_for_tests
+
     base = copy.deepcopy(_strategy_scan_payload()["candidates"][0])
     base.pop("id", None)
     base["selectionReason"] = "Strongest brief-grounded path"
+    base["selectedCreativeBrief"] = default_selected_creative_brief_for_tests().to_dict()
     base.update(overrides)
     return base
 

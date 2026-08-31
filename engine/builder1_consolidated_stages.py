@@ -41,9 +41,8 @@ from engine.builder1_staged_parsers import (
     coerce_json_dict,
     parse_conceptual_scan,
 )
+from engine.builder1_selected_creative_brief import SelectedCreativeBrief
 from engine.builder1_strategy_slogan_final import (
-    FINAL_SLOGAN_ID,
-    FINAL_STRATEGY_ID,
     parse_slogan_final_section,
     parse_strategy_final_section,
 )
@@ -137,9 +136,10 @@ def process_strategy_stage_response(
     model_caller: PlanningModelCaller,
 ) -> Tuple[StrategySelection, StrategyCandidate, List[StrategyCandidate], Dict[str, StrategyCandidateReview]]:
     del product_name, model_caller
-    strategy_selection, selected_strategy = parse_strategy_final_section(
+    strategy_selection, selected_strategy, _selected_brief = parse_strategy_final_section(
         raw_payload,
         product_description=product_description,
+        require_selected_creative_brief=False,
     )
     return strategy_selection, selected_strategy, [selected_strategy], {}
 
@@ -196,6 +196,7 @@ def process_strategy_slogan_stage_response(
     Any,
     Any,
     List[Any],
+    SelectedCreativeBrief,
 ]:
     del product_name, product_name_resolved, model_caller, run_stage
     try:
@@ -209,7 +210,7 @@ def process_strategy_slogan_stage_response(
         raise StageParseError("strategy_slogan_stage", ["strategy_slogan_stage_invalid_structure"])
 
     try:
-        strategy_selection, selected_strategy = parse_strategy_final_section(
+        strategy_selection, selected_strategy, selected_brief = parse_strategy_final_section(
             strategy_raw,
             product_description=product_description,
         )
@@ -244,6 +245,7 @@ def process_strategy_slogan_stage_response(
         slogan_selection,
         selected_slogan,
         [selected_slogan],
+        selected_brief,
     )
 
 
@@ -258,6 +260,8 @@ def run_strategy_slogan_stage(
     lens_order: List[str],
     exploration_seed: str,
     idea_memory_block: str = "",
+    server_mandatory_constraints: Optional[List[str]] = None,
+    visibility_policy: str = "CREATIVE_DECISION",
 ) -> Tuple[
     StrategySelection,
     StrategyCandidate,
@@ -266,6 +270,7 @@ def run_strategy_slogan_stage(
     SloganSelection,
     SloganCandidate,
     List[SloganCandidate],
+    SelectedCreativeBrief,
 ]:
     user_prompt = build_strategy_slogan_stage_user_prompt(
         product_name=product_name,
@@ -274,6 +279,8 @@ def run_strategy_slogan_stage(
         lens_order=lens_order,
         exploration_seed=exploration_seed,
         idea_memory_block=idea_memory_block,
+        server_mandatory_constraints=server_mandatory_constraints,
+        visibility_policy=visibility_policy,
     )
 
     def _parse(raw: object):
@@ -293,6 +300,8 @@ def run_strategy_slogan_stage(
             reasons=reasons,
             product_name=product_name_resolved,
             product_description=product_description,
+            server_mandatory_constraints=server_mandatory_constraints,
+            visibility_policy=visibility_policy,
         )
 
     return run_stage(
@@ -388,6 +397,7 @@ def _run_conceptual_evaluation_repair(
     relative_advantage: str,
     strategic_problem: str,
     repair_attempt: int,
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> Dict[str, Dict[str, Any]]:
     user_prompt = build_conceptual_evaluation_repair_user_prompt(
         invalid_candidate_ids=invalid_ids,
@@ -399,6 +409,7 @@ def _run_conceptual_evaluation_repair(
         implied_action=implied_action,
         relative_advantage=relative_advantage,
         strategic_problem=strategic_problem,
+        selected_creative_brief=selected_creative_brief,
     )
 
     def _parse(raw: object):
@@ -433,6 +444,7 @@ def _ensure_conceptual_evaluations(
     strategic_problem: str,
     model_caller: PlanningModelCaller,
     run_stage: RunStageFn,
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> Dict[str, ConceptualCandidateReview]:
     obj = coerce_json_dict(raw_payload)
     obj, _action_log = normalize_conceptual_evaluations_in_payload(obj)
@@ -470,6 +482,7 @@ def _ensure_conceptual_evaluations(
                 relative_advantage=relative_advantage,
                 strategic_problem=strategic_problem,
                 repair_attempt=repair_attempt,
+                selected_creative_brief=selected_creative_brief,
             )
         except StageParseError as repair_exc:
             logger.info(
@@ -582,6 +595,7 @@ def process_conceptual_stage_response(
     strategic_problem: str,
     model_caller: PlanningModelCaller,
     run_stage: RunStageFn,
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> Tuple[ConceptualSelection, ConceptualCandidate, List[ConceptualCandidate]]:
     try:
         candidates = parse_conceptual_scan(
@@ -614,6 +628,7 @@ def process_conceptual_stage_response(
         strategic_problem=strategic_problem,
         model_caller=model_caller,
         run_stage=run_stage,
+        selected_creative_brief=selected_creative_brief,
     )
     obj = coerce_json_dict(raw_payload)
     preferred_id = _norm_id(obj.get("selectedCandidateId"))
@@ -665,6 +680,7 @@ def run_conceptual_stage(
     selected_slogan: SloganCandidate,
     exploration_seed: str,
     idea_memory_block: str = "",
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> Tuple[ConceptualSelection, ConceptualCandidate, List[ConceptualCandidate]]:
     user_prompt = build_conceptual_stage_user_prompt(
         product_description=product_description,
@@ -676,6 +692,7 @@ def run_conceptual_stage(
         implied_action=selected_slogan.implied_action,
         exploration_seed=exploration_seed,
         idea_memory_block=idea_memory_block,
+        selected_creative_brief=selected_creative_brief,
     )
 
     def _parse(raw: object):
@@ -689,6 +706,7 @@ def run_conceptual_stage(
             strategic_problem=selected_strategy.strategic_problem,
             model_caller=model_caller,
             run_stage=run_stage,
+            selected_creative_brief=selected_creative_brief,
         )
 
     return run_stage(

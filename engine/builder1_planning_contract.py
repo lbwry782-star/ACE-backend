@@ -7,6 +7,10 @@ import json
 from typing import Any, Dict, List, Optional
 
 from engine.builder1_plan_spec import AD_COUNT_MAX, AD_COUNT_MIN
+from engine.builder1_brand_identity_guidelines import (
+    brand_identity_guidelines_for_physical_prompt,
+    format_brand_visual_identity_block,
+)
 from engine.builder1_no_logo import BUILDER1_NO_LOGO_PLANNING_RULE, brand_guidelines_for_prompt
 from engine.builder1_conceptual_evaluations import CONCEPTUAL_REJECTION_CODE_LIST
 from engine.builder1_physical_evaluations import PHYSICAL_REJECTION_CODE_LIST
@@ -29,10 +33,20 @@ from engine.builder1_product_shot_methodology import (
     BUILDER1_PERCEPTION_FIRST,
     BUILDER1_POPULAR_ANALOGY_FIRST,
     BUILDER1_PRODUCT_EVIDENCE_EXCEPTION,
-    BUILDER1_PUBLIC_SIMPLICITY,
     BUILDER1_REMOVAL_TEST,
     BUILDER1_SERIES_TRANSFERRED_OBJECT_RULES,
     BUILDER1_VISIBILITY_POLICY_METHODOLOGY,
+)
+from engine.builder1_target_audience_methodology import TARGET_AUDIENCE_METHODOLOGY
+from engine.builder1_selected_creative_brief import (
+    SelectedCreativeBrief,
+    format_graphic_creative_brief_block,
+    format_product_identity_block,
+    format_selected_creative_brief_block,
+)
+from engine.builder1_server_mandatory_constraints import (
+    format_effective_mandatory_constraints_block,
+    format_server_mandatory_constraints_block,
 )
 from engine.builder1_object_design_integrity import BUILDER1_OBJECT_DESIGN_INTEGRITY
 from engine.builder1_literal_embodiment import (
@@ -223,20 +237,32 @@ Rules:
 STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM = f"""
 You are a Builder1 strategy-and-slogan planner for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"strategy":{{"lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null,"selectionReason":"..."}},"slogan":{{"brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"...","selectionReason":"..."}}}}
+{{"strategy":{{"lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null,"selectionReason":"...","selectedCreativeBrief":{{"essentialFacts":["..."],"supportingEvidence":["..."],"mandatoryConstraints":["..."]}}}},"slogan":{{"brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"...","selectionReason":"..."}}}}
 {STRATEGY_STAGE_METHODOLOGY}
 {SLOGAN_STAGE_METHODOLOGY}
 {NO_LOGO_REASON}
+The product description input is RAW INFORMATION from the user — not a professional creative brief.
+Read the complete information before selecting strategy. Do not prematurely discard facts during diagnosis.
+While determining strategicProblem and relativeAdvantage, decide which facts actually matter for THIS campaign.
+Once strategicProblem and relativeAdvantage are resolved, commit selectedCreativeBrief — the smallest sufficient set of
+campaign-relative facts for downstream creative work.
+Include a fact in selectedCreativeBrief only if needed to understand, express, substantiate, or constrain the chosen
+strategy and relative advantage. Do NOT summarize the product, list main benefits, or include facts merely because they
+are true, positive, mentioned by the user, or could support a different campaign idea.
+essentialFacts: facts this campaign actually needs — not a product overview.
+supportingEvidence: facts that substantiate the chosen relativeAdvantage when relevant.
+mandatoryConstraints: binding user instructions or factual limits creative must obey even if not ad message.
 Build one final campaign strategy and one final brand slogan in a single response.
-1. Identify the strongest real strategic or perceptual problem grounded in the brief.
+1. Identify the strongest real strategic or perceptual problem grounded in the full raw information.
 2. Derive one relative advantage directly from that problem.
-3. Produce one short, distinctive brand slogan derived from that advantage.
-4. Explain why the slogan expresses the relative advantage in derivationFromAdvantage.
+3. Commit selectedCreativeBrief after strategy and relative advantage are resolved.
+4. Produce one short, distinctive brand slogan derived from that advantage.
+5. Explain why the slogan expresses the relative advantage in derivationFromAdvantage.
 Do not return alternatives, candidate lists, rankings, eliminations, or internal deliberation.
 Do not imitate a tournament. Do not use Creator, Judge, or tournament-manager roles.
 Complete the strategy object first, then the slogan object from that frozen strategy only.
 Do not let slogan cleverness change the strategic problem or relative advantage.
-Final self-check: one strategic path, one slogan, slogan derives from relative advantage only, both ready before conceptual work.
+Final self-check: one strategic path, one slogan, selectedCreativeBrief committed, slogan derives from relative advantage only.
 """.strip()
 
 
@@ -244,10 +270,11 @@ STAGE_STRATEGY_SLOGAN_REPAIR_SYSTEM = f"""
 You are a Builder1 strategy-and-slogan repair assistant.
 Return JSON only with exactly two top-level keys: strategy and slogan.
 Each section must contain one final completed strategy and one final completed slogan only.
+The strategy object must include selectedCreativeBrief with essentialFacts, supportingEvidence, and mandatoryConstraints.
 Do not return candidate arrays, evaluations, selectedCandidateId, or alternatives.
 {STRATEGY_STAGE_METHODOLOGY}
 {SLOGAN_STAGE_METHODOLOGY}
-When strategy fields change, regenerate the slogan from the repaired strategy only.
+When strategy fields change, regenerate the slogan and selectedCreativeBrief from the repaired strategy only.
 """.strip()
 
 
@@ -402,7 +429,7 @@ Return JSON only. Return exactly this object and no additional top-level keys:
 {BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_CLARITY_OVER_CATEGORY}
 {BUILDER1_POPULAR_ANALOGY_FIRST}
-{BUILDER1_PUBLIC_SIMPLICITY}
+{TARGET_AUDIENCE_METHODOLOGY}
 {BUILDER1_REMOVAL_TEST}
 {BUILDER1_PRODUCT_EVIDENCE_EXCEPTION}
 {BUILDER1_VISIBILITY_POLICY_METHODOLOGY}
@@ -495,7 +522,7 @@ Return JSON only. Return exactly this object and no additional top-level keys:
 {BUILDER1_SLOGAN_LITERALNESS_SCAN}
 {BUILDER1_VISIBILITY_POLICY_METHODOLOGY}
 {BUILDER1_POPULAR_ANALOGY_FIRST}
-{BUILDER1_PUBLIC_SIMPLICITY}
+{TARGET_AUDIENCE_METHODOLOGY}
 {NO_LOGO_REASON}
 Rules:
 - seriesGenerator must be an object with type, principle, progression.
@@ -659,14 +686,27 @@ def build_strategy_slogan_stage_user_prompt(
     lens_order: List[str],
     exploration_seed: str,
     idea_memory_block: str = "",
+    server_mandatory_constraints: Optional[List[str]] = None,
+    visibility_policy: str = "CREATIVE_DECISION",
 ) -> str:
     memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
+    server_block = format_server_mandatory_constraints_block(server_mandatory_constraints or [])
+    server_section = f"\n{server_block}\n" if server_block else ""
     return (
         f"Product name: {product_name or '(infer from description)'}\n"
-        f"Product description: {product_description}\n"
+        f"Product description (raw information — read completely): {product_description}\n"
         f"Language context: {detected_language}\n"
         f"Campaign exploration seed: {exploration_seed}\n"
         f"Lens order: {', '.join(lens_order)}\n"
+        f"Server product visibility policy (binding): {visibility_policy}\n"
+        f"{server_section}"
+        "The product description is raw user information, not a professional creative brief.\n"
+        "Read all of it before strategy selection. Do not filter facts before strategic reasoning.\n"
+        "Server mandatory user constraints are binding and must not be violated by the chosen strategy.\n"
+        "While choosing strategicProblem and relativeAdvantage, decide which facts matter for this campaign.\n"
+        "After strategy and relative advantage are resolved, commit selectedCreativeBrief with only campaign-relevant facts.\n"
+        "You may add additional execution constraints in selectedCreativeBrief.mandatoryConstraints, "
+        "but you must not omit or contradict server mandatory user constraints.\n"
         "Build one final campaign strategy and one final brand slogan.\n"
         "Identify the strongest real strategic or perceptual problem, derive one relative advantage, "
         "and produce one distinctive slogan from that advantage.\n"
@@ -683,11 +723,17 @@ def build_strategy_slogan_repair_user_prompt(
     reasons: List[str],
     product_name: str,
     product_description: str,
+    server_mandatory_constraints: Optional[List[str]] = None,
+    visibility_policy: str = "CREATIVE_DECISION",
 ) -> str:
+    server_block = format_server_mandatory_constraints_block(server_mandatory_constraints or [])
+    server_section = f"\n{server_block}\n" if server_block else ""
     return (
         "Repair the combined strategy and slogan response.\n"
         f"Product name: {product_name}\n"
         f"Product description: {product_description}\n"
+        f"Server product visibility policy (binding): {visibility_policy}\n"
+        f"{server_section}"
         f"Validation errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken output:\n{broken_json}\n"
         "Return one final strategy object and one final slogan object only. "
@@ -822,10 +868,15 @@ def build_conceptual_scan_user_prompt(
     slogan_derivation: str,
     implied_action: str,
     exploration_seed: str,
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> str:
+    if selected_creative_brief is not None:
+        information_block = format_selected_creative_brief_block(selected_creative_brief)
+    else:
+        information_block = f"Brief: {product_description}\n"
     return (
         f"Product name (fixed): {product_name_resolved}\n"
-        f"Brief: {product_description}\n"
+        f"{information_block}\n"
         f"Selected strategic problem: {strategic_problem}\n"
         f"Selected relative advantage: {relative_advantage}\n"
         f"Fixed brand slogan: {brand_slogan}\n"
@@ -835,6 +886,7 @@ def build_conceptual_scan_user_prompt(
         "Every conceptual candidate must derive from the slogan action and the perception to create. "
         "Apply the removal test and expressive-object decision. "
         "Run the slogan-literalness scan. Do not begin from product shape, packaging, conventional product shots, or literal slogan nouns.\n"
+        "Use only the selected creative brief and fixed strategy — do not introduce alternate product benefits.\n"
         "Answer: what external object physically proves the perception more clearly than showing the product or copying a slogan noun?\n"
         "Return exactly 6 conceptual-generator candidates C01-C06 as objects."
     )
@@ -851,6 +903,7 @@ def build_conceptual_stage_user_prompt(
     implied_action: str,
     exploration_seed: str,
     idea_memory_block: str = "",
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> str:
     base = build_conceptual_scan_user_prompt(
         product_description=product_description,
@@ -861,6 +914,7 @@ def build_conceptual_stage_user_prompt(
         slogan_derivation=slogan_derivation,
         implied_action=implied_action,
         exploration_seed=exploration_seed,
+        selected_creative_brief=selected_creative_brief,
     )
     memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
     return (
@@ -899,6 +953,7 @@ def build_conceptual_evaluation_repair_user_prompt(
     implied_action: str,
     relative_advantage: str,
     strategic_problem: str,
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> str:
     requested = [
         {
@@ -917,6 +972,10 @@ def build_conceptual_evaluation_repair_user_prompt(
         for candidate in candidates
         if getattr(candidate, "id", "") in invalid_candidate_ids
     ]
+    if selected_creative_brief is not None:
+        information_block = format_selected_creative_brief_block(selected_creative_brief)
+    else:
+        information_block = f"Product description:\n{product_description.strip()}\n"
     return (
         "Repair ONLY the listed evaluation objects.\n"
         "Return exactly:\n"
@@ -930,7 +989,7 @@ def build_conceptual_evaluation_repair_user_prompt(
         f"Implied slogan action: {implied_action}\n"
         f"Relative advantage: {relative_advantage}\n"
         f"Strategic problem: {strategic_problem}\n"
-        f"Product description:\n{product_description.strip()}\n"
+        f"{information_block}"
         f"Allowed rejectionCodes only:\n{', '.join(CONCEPTUAL_REJECTION_CODE_LIST)}\n"
         f"Invalid candidate ids: {', '.join(invalid_candidate_ids)}\n"
         f"Requested repairs:\n{json.dumps(requested, ensure_ascii=False, indent=2)}\n"
@@ -996,15 +1055,25 @@ def build_brand_physical_user_prompt(
     brand_guidelines: Optional[Dict[str, Any]] = None,
     visibility_policy: str = "CREATIVE_DECISION",
     idea_memory_block: str = "",
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> str:
     guidelines = ""
-    safe_guidelines = brand_guidelines_for_prompt(brand_guidelines)
-    if safe_guidelines:
-        guidelines = "\nBrand guidelines:\n" + json.dumps(safe_guidelines, ensure_ascii=False, indent=2)
+    identity = brand_identity_guidelines_for_physical_prompt(brand_guidelines)
+    if identity:
+        guidelines = "\n" + format_brand_visual_identity_block(identity) + "\n"
     memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
+    if selected_creative_brief is not None:
+        factual_block = (
+            f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
+            f"{format_selected_creative_brief_block(selected_creative_brief)}\n"
+        )
+    else:
+        factual_block = (
+            f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
+            f"Description: {product_description}\n"
+        )
     return (
-        f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
-        f"Description: {product_description}\n"
+        f"{factual_block}"
         f"Language context: {detected_language}\n"
         f"Format context: {format_value}\n"
         f"Fixed strategic problem: {strategic_problem}\n"
@@ -1022,6 +1091,7 @@ def build_brand_physical_user_prompt(
         "When policy is PRODUCT_VISIBILITY_REQUIRED, the product must appear in the final image — choose hierarchy by creative strength, not by default secondary placement.\n"
         "Compare transferred-object embodiments only. Return physical-generator system only. Do NOT return or modify the brand slogan."
         "Do not reuse a previous physical generator and transferred action for this product."
+        "Use only the selected creative brief for product facts — do not introduce unrelated product details."
         f"{guidelines}{memory}"
     )
 
@@ -1119,6 +1189,7 @@ def build_graphic_system_user_prompt(
     brand_physical: Dict[str, Any],
     format_value: str,
     idea_memory_block: str = "",
+    selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> str:
     hebrew_rule = ""
     if detected_language == "he":
@@ -1127,8 +1198,13 @@ def build_graphic_system_user_prompt(
             "unless sloganPlacementReason provides a strategic RTL-preserving alternative.\n"
         )
     memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
+    if selected_creative_brief is not None:
+        brief_block = format_graphic_creative_brief_block(selected_creative_brief)
+        brief_section = f"{brief_block}\n" if brief_block else ""
+    else:
+        brief_section = f"Brief: {product_description}\n"
     return (
-        f"Brief: {product_description}\n"
+        f"{brief_section}"
         f"Language: {detected_language}\n"
         f"Fixed brand slogan: {brand_slogan}\n"
         f"Relative advantage: {relative_advantage}\n"
@@ -1168,10 +1244,13 @@ def build_series_ads_user_prompt(
     graphic_generator: Dict[str, Any],
     visibility_policy: str = "CREATIVE_DECISION",
     idea_memory_block: str = "",
+    effective_mandatory_constraints: Optional[List[str]] = None,
 ) -> str:
     indexes = ", ".join(str(i) for i in range(1, ad_count + 1))
     lang_name = "Hebrew" if detected_language == "he" else "English"
     memory = f"\n{idea_memory_block}\n" if idea_memory_block else ""
+    mandatory_block = format_effective_mandatory_constraints_block(effective_mandatory_constraints or [])
+    mandatory_section = f"\n{mandatory_block}\n" if mandatory_block else ""
     return (
         f"Required ad count: {ad_count}\n"
         f"Required ad indexes: {indexes}\n"
@@ -1179,6 +1258,7 @@ def build_series_ads_user_prompt(
         f"TARGET LANGUAGE FOR ALL MARKETING TEXT: {lang_name} ({detected_language})\n"
         f"Fixed brand slogan across all ads (immutable, server-owned): {brand_slogan}\n"
         f"Fixed implied slogan action: {implied_action}\n"
+        f"{mandatory_section}"
         "The campaign slogan is already selected. Do not generate, rewrite, paraphrase, translate, "
         "or alter punctuation or spacing for the slogan.\n"
         "Do not return brandSlogan or any per-ad slogan field. Use sloganConnection only to explain "
@@ -1252,12 +1332,16 @@ def build_series_execution_repair_user_prompt(
     brand_physical: Dict[str, Any],
     graphic_generator: Dict[str, Any],
     detected_language: str,
+    effective_mandatory_constraints: Optional[List[str]] = None,
 ) -> str:
+    mandatory_block = format_effective_mandatory_constraints_block(effective_mandatory_constraints or [])
+    mandatory_section = f"\n{mandatory_block}\n" if mandatory_block else ""
     return (
         "Repair ONLY the duplicated advertisement records listed below.\n"
         f"Duplicate reasons: {', '.join(duplicate_reasons)}\n"
         f"Repair ad indexes: {', '.join(str(idx) for idx in duplicate_ad_indexes)}\n"
         f"Fixed brand slogan (immutable): {brand_slogan}\n"
+        f"{mandatory_section}"
         f"Frozen conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
         f"Frozen physical system:\n{json.dumps(brand_physical, ensure_ascii=False, indent=2)}\n"
         f"Frozen graphic system:\n{json.dumps(graphic_generator, ensure_ascii=False, indent=2)}\n"

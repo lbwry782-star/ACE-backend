@@ -49,7 +49,7 @@ class TestFinalStageSchema(unittest.TestCase):
 
     def test_valid_payload_parses_final_path(self) -> None:
         payload = _strategy_slogan_stage_payload()
-        strategy_selection, strategy = parse_strategy_final_section(
+        strategy_selection, strategy, brief = parse_strategy_final_section(
             payload["strategy"],
             product_description=BRIEF,
         )
@@ -63,6 +63,7 @@ class TestFinalStageSchema(unittest.TestCase):
         self.assertEqual(slogan_selection.selected_candidate_id, FINAL_SLOGAN_ID)
         self.assertTrue(strategy.strategic_problem)
         self.assertTrue(slogan.brand_slogan)
+        self.assertTrue(brief.essential_facts)
 
     def test_candidate_arrays_rejected_for_new_payloads(self) -> None:
         payload = _legacy_strategy_slogan_candidate_payload()
@@ -142,10 +143,11 @@ class TestBackwardCompatibility(unittest.TestCase):
         normalized = normalize_stored_strategy_slogan_payload(payload)
         self.assertNotIn("candidates", normalized["strategy"])
         self.assertNotIn("candidates", normalized["slogan"])
-        strategy_selection, strategy = parse_strategy_final_section(
+        strategy_selection, strategy, _brief = parse_strategy_final_section(
             normalized["strategy"],
             product_description=BRIEF,
             allow_legacy_candidates=True,
+            require_selected_creative_brief=False,
         )
         self.assertEqual(strategy.id, FINAL_STRATEGY_ID)
         self.assertTrue(strategy_selection.selection_reason)

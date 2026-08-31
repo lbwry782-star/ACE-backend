@@ -669,6 +669,8 @@ def assemble_builder1_campaign(
     series_ads: SeriesAdsOutput,
     visibility_policy: Any = None,
     visibility_source: Any = None,
+    selected_creative_brief: Any = None,
+    server_mandatory_constraints: Any = None,
 ) -> Builder1SeriesPlan:
     """Deterministic final plan assembly — server injects authoritative fields."""
     from engine.builder1_product_visibility import (
@@ -676,6 +678,9 @@ def assemble_builder1_campaign(
         ProductVisibilitySource,
         infer_visual_execution_route,
     )
+    from engine.builder1_selected_creative_brief import SelectedCreativeBrief
+    from engine.builder1_server_mandatory_constraints import validate_server_mandatory_constraints
+    from engine.builder1_target_audience_methodology import TARGET_AUDIENCE_DECODING_MODE
 
     if visibility_policy is None:
         visibility_policy = ProductVisibilityPolicy.CREATIVE_DECISION
@@ -781,10 +786,19 @@ def assemble_builder1_campaign(
         selected_slogan=selected_slogan,
         selected_conceptual=conceptual,
     )
+    brief_dict = (
+        selected_creative_brief.to_dict()
+        if isinstance(selected_creative_brief, SelectedCreativeBrief)
+        else None
+    )
+    server_constraints = validate_server_mandatory_constraints(server_mandatory_constraints)
     return replace(
         plan,
         planning_internals={
             "conceptualLineage": conceptual_lineage,
+            "targetAudienceDecodingMode": TARGET_AUDIENCE_DECODING_MODE,
+            "selectedCreativeBrief": brief_dict,
+            "serverMandatoryConstraints": server_constraints,
             "conceptualGeneratorWhyItExpressesSlogan": conceptual.why_it_expresses_slogan,
             "productVisibilityPolicy": getattr(visibility_policy, "value", str(visibility_policy)),
             "productVisibilitySource": getattr(visibility_source, "value", str(visibility_source)),

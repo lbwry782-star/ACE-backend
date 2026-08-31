@@ -11,6 +11,7 @@ import unittest
 from typing import Any, Dict, List
 from unittest.mock import patch
 
+from engine.builder1_selected_creative_brief import default_selected_creative_brief_for_tests
 from engine.builder1_idea_memory import (
     BUILDER1_IDEA_MEMORY_MAX_ADS,
     GLOBAL_IDEA_MEMORY_SCOPE,
@@ -49,6 +50,8 @@ from engine.builder1_plan_spec import (
 from engine.builder1_planning_metrics import NORMAL_PLANNING_CALLS_WITH_NAME
 from engine.builder1_planner import Builder1PlannerError
 from engine.builder1_series_distinctness import validate_ad_execution_distinctness
+
+BRIEF = default_selected_creative_brief_for_tests()
 
 
 def _graphic() -> Builder1GraphicGenerator:
@@ -517,11 +520,11 @@ class TestStrategyMemoryGuard(IdeaMemoryTestCase):
 
         def fake_run_stage(stage, model_caller, system, user, parse, **kwargs):
             if stage == "strategy_slogan_repair":
-                return (None, Strategy(), [], {}, None, Slogan(), [])
+                return (None, Strategy(), [], {}, None, Slogan(), [], BRIEF)
             return parse({})
 
         def fake_run_strategy(*args, **kwargs):
-            return (None, Strategy(), [], {}, None, Slogan(), [])
+            return (None, Strategy(), [], {}, None, Slogan(), [], BRIEF)
 
         with patch(
             "engine.builder1_idea_memory_pipeline.run_strategy_slogan_stage",

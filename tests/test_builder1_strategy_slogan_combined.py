@@ -72,11 +72,12 @@ class TestCombinedStageContract(unittest.TestCase):
             model_caller=lambda *_a, **_k: {},
             run_stage=_run_stage,
         )
-        self.assertEqual(len(result), 7)
+        self.assertEqual(len(result), 8)
         self.assertEqual(result[1].id, FINAL_STRATEGY_ID)
         self.assertEqual(result[5].id, FINAL_SLOGAN_ID)
         self.assertEqual(len(result[2]), 1)
         self.assertEqual(len(result[6]), 1)
+        self.assertTrue(result[7].essential_facts)
 
 
 class TestCombinedCallCounts(unittest.TestCase):

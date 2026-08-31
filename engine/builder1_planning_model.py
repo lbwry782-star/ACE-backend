@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, Optional
 
 from engine.builder1_conceptual_evaluations import CONCEPTUAL_REJECTION_CODE_LIST
 from engine.builder1_physical_evaluations import PHYSICAL_REJECTION_CODE_LIST
+from engine.builder1_selected_creative_brief import selected_creative_brief_json_schema
 from engine.builder1_strict_schema import (
     StrictSchemaConfigurationError,
     find_strict_schema_errors,
@@ -590,6 +591,7 @@ STRATEGY_FINAL_JSON_SCHEMA: Dict[str, Any] = {
         "implementationCostLevel",
         "simpleStrategicAction",
         "selectionReason",
+        "selectedCreativeBrief",
     ],
     "properties": {
         "lens": {"type": "string"},
@@ -610,6 +612,7 @@ STRATEGY_FINAL_JSON_SCHEMA: Dict[str, Any] = {
         },
         "simpleStrategicAction": {"type": ["string", "null"]},
         "selectionReason": {"type": "string"},
+        "selectedCreativeBrief": selected_creative_brief_json_schema(),
     },
 }
 

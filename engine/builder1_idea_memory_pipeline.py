@@ -129,6 +129,8 @@ def run_strategy_slogan_with_memory_guard(
     lens_order: List[str],
     exploration_seed: str,
     idea_memory_block: str,
+    server_mandatory_constraints: Optional[List[str]] = None,
+    visibility_policy: str = "CREATIVE_DECISION",
 ):
     result = run_strategy_slogan_stage(
         run_stage,
@@ -140,10 +142,12 @@ def run_strategy_slogan_with_memory_guard(
         lens_order=lens_order,
         exploration_seed=exploration_seed,
         idea_memory_block=idea_memory_block,
+        server_mandatory_constraints=server_mandatory_constraints,
+        visibility_policy=visibility_policy,
     )
     if idea_memory is None:
         return result
-    strategy_selection, selected_strategy, sc, sr, slogan_selection, selected_slogan, sgc = result
+    strategy_selection, selected_strategy, sc, sr, slogan_selection, selected_slogan, sgc, selected_brief = result
     finding = find_historical_duplicate(
         stage="strategy_slogan_stage",
         snapshot=idea_memory,
@@ -179,7 +183,7 @@ def run_strategy_slogan_with_memory_guard(
         repair_prompt,
         _parse,
     )
-    strategy_selection, selected_strategy, sc, sr, slogan_selection, selected_slogan, sgc = repaired
+    strategy_selection, selected_strategy, sc, sr, slogan_selection, selected_slogan, sgc, selected_brief = repaired
     finding2 = find_historical_duplicate(
         stage="strategy_slogan_stage",
         snapshot=idea_memory,
@@ -205,6 +209,7 @@ def run_conceptual_with_memory_guard(
     selected_strategy: Any,
     selected_slogan: Any,
     exploration_seed: str,
+    selected_creative_brief: Optional[Any] = None,
     **kwargs: Any,
 ):
     from engine.builder1_consolidated_stages import process_conceptual_stage_response
@@ -218,6 +223,7 @@ def run_conceptual_with_memory_guard(
         selected_slogan=selected_slogan,
         exploration_seed=exploration_seed,
         idea_memory_block=idea_memory_block,
+        selected_creative_brief=selected_creative_brief,
     )
     if idea_memory is None:
         return result
@@ -241,6 +247,7 @@ def run_conceptual_with_memory_guard(
         implied_action=selected_slogan.implied_action,
         exploration_seed=exploration_seed,
         idea_memory_block=idea_memory_block,
+        selected_creative_brief=selected_creative_brief,
     )
     repair_prompt = _conceptual_historical_repair_prompt(finding=finding, base_user_prompt=base_prompt)
 
@@ -255,6 +262,7 @@ def run_conceptual_with_memory_guard(
             strategic_problem=selected_strategy.strategic_problem,
             model_caller=model_caller,
             run_stage=run_stage,
+            selected_creative_brief=selected_creative_brief,
         )
 
     repaired = run_stage(

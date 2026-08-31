@@ -98,6 +98,7 @@ def attempt_series_execution_repair(
     detected_language: str,
     model_caller: Callable[..., Any],
     run_stage: Callable[..., Any],
+    effective_mandatory_constraints: Optional[List[str]] = None,
 ) -> SeriesAdsOutput:
     repair_indexes = duplicated_ad_indexes(findings)
     if not repair_indexes:
@@ -117,6 +118,7 @@ def attempt_series_execution_repair(
         brand_physical=brand_physical,
         graphic_generator=graphic_generator,
         detected_language=detected_language,
+        effective_mandatory_constraints=effective_mandatory_constraints,
     )
 
     def _parse(payload: object) -> List[Dict[str, Any]]:
