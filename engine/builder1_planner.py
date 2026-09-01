@@ -484,8 +484,37 @@ def plan_builder1(
         ad_count=ad_count,
         brand_guidelines=brand_guidelines,
     )
-    exploration_seed = str(uuid.uuid4())
-    lens_order = shuffled_exploration_lens_order()
+    checkpoint_session = None
+    checkpoint_token = None
+    if (job_id or "").strip():
+        from engine.builder1_planning_checkpoint import (
+            PlanningCheckpointSession,
+            build_planning_checkpoint_identity,
+            set_planning_checkpoint_session,
+        )
+
+        checkpoint_session = PlanningCheckpointSession.open(
+            build_planning_checkpoint_identity(
+                job_id=job_id or "",
+                campaign_id=campaign_id or "",
+                product_name=normalized.product_name,
+                product_description=normalized.product_description,
+                format_value=normalized.format,
+                ad_count=normalized.ad_count,
+                brand_guidelines=brand_guidelines,
+            )
+        )
+        checkpoint_token = set_planning_checkpoint_session(checkpoint_session)
+        prior_context = checkpoint_session.get_execution_context()
+        if prior_context:
+            exploration_seed = prior_context["explorationSeed"]
+            lens_order = list(prior_context["lensOrder"])
+        else:
+            exploration_seed = str(uuid.uuid4())
+            lens_order = shuffled_exploration_lens_order()
+    else:
+        exploration_seed = str(uuid.uuid4())
+        lens_order = shuffled_exploration_lens_order()
     detected_language = detect_brief_language(
         normalized.product_description,
         normalized.product_name,
@@ -526,13 +555,25 @@ def plan_builder1(
     metrics_token = set_planning_metrics(metrics)
 
     try:
-        product_name_resolved = _resolve_builder1_product_name(
-            model_caller,
-            product_name=normalized.product_name,
-            product_description=normalized.product_description,
-            detected_language=detected_language,
-            brand_guidelines=brand_guidelines,
-        )
+        prior_resolved = ""
+        if checkpoint_session is not None:
+            prior_resolved = str((checkpoint_session.get_execution_context() or {}).get("productNameResolved") or "")
+        if prior_resolved:
+            product_name_resolved = prior_resolved
+        else:
+            product_name_resolved = _resolve_builder1_product_name(
+                model_caller,
+                product_name=normalized.product_name,
+                product_description=normalized.product_description,
+                detected_language=detected_language,
+                brand_guidelines=brand_guidelines,
+            )
+            if checkpoint_session is not None:
+                checkpoint_session.bind_execution_context(
+                    exploration_seed=exploration_seed,
+                    lens_order=lens_order,
+                    product_name_resolved=product_name_resolved,
+                )
 
         metrics.begin_pipeline_pass("initial")
         idea_memory = None
@@ -562,3 +603,7 @@ def plan_builder1(
     finally:
         metrics.log_summary()
         reset_planning_metrics(metrics_token)
+        if checkpoint_token is not None:
+            from engine.builder1_planning_checkpoint import reset_planning_checkpoint_session
+
+            reset_planning_checkpoint_session(checkpoint_token)

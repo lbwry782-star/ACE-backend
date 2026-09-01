@@ -24,6 +24,45 @@ class RecommendedVisualRoute(str, Enum):
     ANALOGY_LED = "ANALOGY_LED"
 
 
+DIRECT_PRODUCT_ROUTE_ASSESSMENT_NESTED_FIELDS: tuple[str, ...] = (
+    "productOrCategoryImmediatelyReadable",
+    "relativeAdvantageDirectlyExpressibleWithProduct",
+    "productLedAdvertisingMechanismAvailable",
+    "productLedMechanismSummary",
+    "externalAnalogyAddsUniquePersuasiveGain",
+    "externalAnalogyUniqueGain",
+    "additionalTranslationCost",
+    "recommendedRoute",
+    "routeDecisionReason",
+)
+
+
+def direct_product_route_assessment_json_schema() -> Dict[str, Any]:
+    """Canonical strict JSON schema for directProductRouteAssessment (brand_physical)."""
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(DIRECT_PRODUCT_ROUTE_ASSESSMENT_NESTED_FIELDS),
+        "properties": {
+            "productOrCategoryImmediatelyReadable": {"type": "boolean"},
+            "relativeAdvantageDirectlyExpressibleWithProduct": {"type": "boolean"},
+            "productLedAdvertisingMechanismAvailable": {"type": "boolean"},
+            "productLedMechanismSummary": {"type": "string"},
+            "externalAnalogyAddsUniquePersuasiveGain": {"type": "boolean"},
+            "externalAnalogyUniqueGain": {"type": "string"},
+            "additionalTranslationCost": {
+                "type": "string",
+                "enum": [item.value for item in AdditionalTranslationCost],
+            },
+            "recommendedRoute": {
+                "type": "string",
+                "enum": [item.value for item in RecommendedVisualRoute],
+            },
+            "routeDecisionReason": {"type": "string"},
+        },
+    }
+
+
 BUILDER1_SIMPLE_PRODUCT_DIRECT_ADVANTAGE_PRIORITY = """
 SIMPLE PRODUCT / DIRECT ADVANTAGE PRIORITY — mandatory pre-route gate:
 Before selecting an external transferred object, compare direct product/category expression against external analogy.

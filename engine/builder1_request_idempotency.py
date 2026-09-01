@@ -30,6 +30,7 @@ OPERATION_INITIAL_GENERATE = "initial_generate"
 OPERATION_GENERATE_NEXT = "generate_next"
 OPERATION_RETRY_IMAGE = "retry_image"
 OPERATION_REPAIR_PHYSICAL = "repair_physical"
+OPERATION_RESUME_PLANNING = "resume_planning"
 
 STATE_RESERVED = "reserved"
 STATE_JOB_CREATED = "job_created"
@@ -185,6 +186,15 @@ def fingerprint_repair_physical(*, campaign_id: str, retry_ad_index: int) -> str
     return _hash_token(json.dumps(canonical, sort_keys=True, ensure_ascii=False))
 
 
+def fingerprint_resume_planning(*, job_id: str) -> str:
+    from engine.builder1_job_ownership import _hash_token
+
+    canonical = {
+        "jobId": _clean(job_id),
+    }
+    return _hash_token(json.dumps(canonical, sort_keys=True, ensure_ascii=False))
+
+
 def _load_record(key: str) -> Optional[Dict[str, Any]]:
     if _redis_configured():
         try:
@@ -253,7 +263,12 @@ def job_blocks_automatic_worker_resubmit(job: Optional[Dict[str, Any]]) -> bool:
     return _clean(job.get("lastPaidStageStatus")) in _BLOCKING_PAID_STAGE_STATUSES
 
 
-def execution_is_proven(record: Optional[Dict[str, Any]], job_id: str) -> bool:
+def execution_is_proven(
+    record: Optional[Dict[str, Any]],
+    job_id: str,
+    *,
+    operation: str = "",
+) -> bool:
     if isinstance(record, dict) and record.get("workerStartedAt"):
         return True
     job = _job_record(job_id)
@@ -262,6 +277,14 @@ def execution_is_proven(record: Optional[Dict[str, Any]], job_id: str) -> bool:
     if job.get("workerStartedAt"):
         return True
     status = _clean(job.get("status"))
+    if operation == OPERATION_RESUME_PLANNING:
+        if status == "done":
+            return True
+        if isinstance(record, dict) and (
+            record.get("executorEnqueuedAt") or record.get("submissionClaimedAt")
+        ):
+            return True
+        return False
     return status in {"done", "cancelled", "error"}
 
 
@@ -280,21 +303,32 @@ def submission_claim_is_live(record: Optional[Dict[str, Any]]) -> bool:
     return age < SUBMISSION_CLAIM_LEASE_SECONDS
 
 
-def should_replay_without_worker_resubmit(record: Optional[Dict[str, Any]], job_id: str) -> bool:
-    if execution_is_proven(record, job_id):
+def should_replay_without_worker_resubmit(
+    record: Optional[Dict[str, Any]],
+    job_id: str,
+    *,
+    operation: str = "",
+) -> bool:
+    if execution_is_proven(record, job_id, operation=operation):
         return True
     if submission_claim_is_live(record):
         return True
-    job = _job_record(job_id)
-    if job_blocks_automatic_worker_resubmit(job):
-        return True
+    if operation != OPERATION_RESUME_PLANNING:
+        job = _job_record(job_id)
+        if job_blocks_automatic_worker_resubmit(job):
+            return True
     return False
 
 
-def should_recover_stale_submission(record: Optional[Dict[str, Any]], job_id: str) -> bool:
+def should_recover_stale_submission(
+    record: Optional[Dict[str, Any]],
+    job_id: str,
+    *,
+    operation: str = "",
+) -> bool:
     if not isinstance(record, dict):
         return False
-    if execution_is_proven(record, job_id):
+    if execution_is_proven(record, job_id, operation=operation):
         return False
     if submission_claim_is_live(record):
         return False
@@ -304,11 +338,11 @@ def should_recover_stale_submission(record: Optional[Dict[str, Any]], job_id: st
     return bool(record.get("submissionClaimedAt") or record.get("executorEnqueuedAt"))
 
 
-def _begin_kind_for_record(record: Dict[str, Any], *, job_id: str) -> BeginKind:
+def _begin_kind_for_record(record: Dict[str, Any], *, job_id: str, operation: str = "") -> BeginKind:
     authoritative_job = _clean(record.get("jobId") or job_id)
-    if should_replay_without_worker_resubmit(record, authoritative_job):
+    if should_replay_without_worker_resubmit(record, authoritative_job, operation=operation):
         return "replay"
-    if should_recover_stale_submission(record, authoritative_job):
+    if should_recover_stale_submission(record, authoritative_job, operation=operation):
         return "recover"
     if _clean(record.get("jobId")) != _clean(job_id):
         return "recover"
@@ -366,7 +400,7 @@ def begin_builder1_idempotent_request(
     if stored.get("requestFingerprint") != request_fingerprint:
         return IdempotencyBeginResult(kind="conflict", record=stored, key=key)
 
-    kind = _begin_kind_for_record(stored, job_id=job_id)
+    kind = _begin_kind_for_record(stored, job_id=job_id, operation=_clean(operation))
     return IdempotencyBeginResult(kind=kind, record=stored, key=key)
 
 
@@ -496,6 +530,7 @@ def finalize_idempotent_worker_dispatch(
     job_id: str,
     response_body: Dict[str, Any],
     submit_fn: Any,
+    operation: str = "",
 ) -> Tuple[Dict[str, Any], bool]:
     """
     Resolve submission lease, enqueue worker once, return (response_dict, is_replay).
@@ -510,7 +545,7 @@ def finalize_idempotent_worker_dispatch(
     record = _load_record(idem_key) or dict(idem_record)
     jid = _clean(job_id or response_body.get("jobId"))
 
-    if should_replay_without_worker_resubmit(record, jid):
+    if should_replay_without_worker_resubmit(record, jid, operation=_clean(operation)):
         return replay_response_from_record(record), True
 
     claim_token = uuid.uuid4().hex

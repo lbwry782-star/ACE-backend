@@ -179,6 +179,48 @@ def run_builder1_campaign_pipeline(
         _graphic_to_dict,
         _run_stage,
     )
+    from engine.builder1_planning_checkpoint import (
+        PlanningCheckpointSession,
+        brand_physical_dependency_fingerprint,
+        build_planning_checkpoint_identity,
+        conceptual_dependency_fingerprint,
+        deserialize_brand_physical_checkpoint_output,
+        deserialize_conceptual_stage_output,
+        deserialize_graphic_system_checkpoint_output,
+        deserialize_series_ads_checkpoint_output,
+        deserialize_strategy_slogan_stage_output,
+        get_planning_checkpoint_session,
+        graphic_system_dependency_fingerprint,
+        run_checkpointed_planning_stage,
+        serialize_brand_physical_checkpoint_output,
+        serialize_conceptual_stage_output,
+        serialize_graphic_system_checkpoint_output,
+        serialize_series_ads_checkpoint_output,
+        serialize_strategy_slogan_stage_output,
+        series_ads_dependency_fingerprint,
+        strategy_slogan_dependency_fingerprint,
+    )
+
+    checkpoint_session = get_planning_checkpoint_session()
+    checkpoint_identity = None
+    if job_id:
+        checkpoint_identity = build_planning_checkpoint_identity(
+            job_id=job_id,
+            campaign_id=campaign_id,
+            product_name=normalized.product_name,
+            product_description=normalized.product_description,
+            format_value=normalized.format,
+            ad_count=normalized.ad_count,
+            brand_guidelines=brand_guidelines,
+        )
+    if checkpoint_session is None and checkpoint_identity is not None:
+        checkpoint_session = PlanningCheckpointSession.open(checkpoint_identity)
+    if checkpoint_session is not None:
+        checkpoint_session.bind_execution_context(
+            exploration_seed=exploration_seed,
+            lens_order=lens_order,
+            product_name_resolved=product_name_resolved,
+        )
 
     if visibility_decision is None:
         visibility_decision = derive_product_visibility_policy(
@@ -194,17 +236,20 @@ def run_builder1_campaign_pipeline(
     )
     visibility_policy_value = visibility_decision.policy.value
 
-    try:
-        (
-            strategy_selection,
-            selected_strategy,
-            _strategy_candidates,
-            _strategy_reviews,
-            _slogan_selection,
-            selected_slogan,
-            slogan_candidates,
-            selected_creative_brief,
-        ) = run_strategy_slogan_with_memory_guard(
+    strategy_dep_fp = ""
+    if checkpoint_session is not None:
+        strategy_dep_fp = strategy_slogan_dependency_fingerprint(
+            identity=checkpoint_session.identity,
+            product_description=normalized.product_description,
+            product_name_resolved=product_name_resolved,
+            server_mandatory_constraints=server_mandatory_constraints,
+            visibility_policy=visibility_policy_value,
+            exploration_seed=exploration_seed,
+            lens_order=lens_order,
+        )
+
+    def _run_strategy_slogan_stage() -> tuple[Any, ...]:
+        return run_strategy_slogan_with_memory_guard(
             _run_stage,
             model_caller,
             campaign_id=campaign_id,
@@ -221,6 +266,35 @@ def run_builder1_campaign_pipeline(
             server_mandatory_constraints=server_mandatory_constraints,
             visibility_policy=visibility_policy_value,
         )
+
+    try:
+        strategy_result = run_checkpointed_planning_stage(
+            "strategy_slogan_stage",
+            _run_strategy_slogan_stage,
+            session=checkpoint_session,
+            dependency_fingerprint=strategy_dep_fp,
+            serialize=lambda result: serialize_strategy_slogan_stage_output(
+                strategy_selection=result[0],
+                selected_strategy=result[1],
+                strategy_candidates=result[2],
+                strategy_reviews=result[3],
+                slogan_selection=result[4],
+                selected_slogan=result[5],
+                slogan_candidates=result[6],
+                selected_creative_brief=result[7],
+            ),
+            deserialize=deserialize_strategy_slogan_stage_output,
+        )
+        (
+            strategy_selection,
+            selected_strategy,
+            _strategy_candidates,
+            _strategy_reviews,
+            _slogan_selection,
+            selected_slogan,
+            slogan_candidates,
+            selected_creative_brief,
+        ) = strategy_result
     except StrategySelectionExhausted as exc:
         raise Builder1PlannerError("strategy_slogan_stage_failed") from exc
 
@@ -235,19 +309,48 @@ def run_builder1_campaign_pipeline(
 
     slogan_dicts = [slogan_candidate_to_dict(c) for c in slogan_candidates]
 
-    _conceptual_selection, selected_conceptual, conceptual_candidates = run_conceptual_with_memory_guard(
-        _run_stage,
-        model_caller,
-        campaign_id=campaign_id,
-        idea_memory=idea_memory,
-        idea_memory_block=stage_memory_block("conceptual_stage", idea_memory, campaign_id=campaign_id),
-        product_description=normalized.product_description,
-        product_name_resolved=product_name_resolved,
-        selected_strategy=selected_strategy,
-        selected_slogan=selected_slogan,
-        selected_creative_brief=effective_creative_brief,
-        exploration_seed=exploration_seed,
+    strategy_output_fp = (
+        checkpoint_session.get_stage_output_fingerprint("strategy_slogan_stage")
+        if checkpoint_session is not None
+        else ""
     )
+    conceptual_dep_fp = ""
+    if checkpoint_session is not None and strategy_output_fp:
+        conceptual_dep_fp = conceptual_dependency_fingerprint(
+            identity=checkpoint_session.identity,
+            exploration_seed=exploration_seed,
+            selected_creative_brief=effective_creative_brief.to_dict(),
+            strategy_output_fingerprint=strategy_output_fp,
+        )
+
+    def _run_conceptual_stage() -> tuple[Any, Any, List[Any]]:
+        return run_conceptual_with_memory_guard(
+            _run_stage,
+            model_caller,
+            campaign_id=campaign_id,
+            idea_memory=idea_memory,
+            idea_memory_block=stage_memory_block("conceptual_stage", idea_memory, campaign_id=campaign_id),
+            product_description=normalized.product_description,
+            product_name_resolved=product_name_resolved,
+            selected_strategy=selected_strategy,
+            selected_slogan=selected_slogan,
+            selected_creative_brief=effective_creative_brief,
+            exploration_seed=exploration_seed,
+        )
+
+    conceptual_result = run_checkpointed_planning_stage(
+        "conceptual_stage",
+        _run_conceptual_stage,
+        session=checkpoint_session,
+        dependency_fingerprint=conceptual_dep_fp,
+        serialize=lambda result: serialize_conceptual_stage_output(
+            conceptual_selection=result[0],
+            selected_conceptual=result[1],
+            conceptual_candidates=result[2],
+        ),
+        deserialize=deserialize_conceptual_stage_output,
+    )
+    _conceptual_selection, selected_conceptual, conceptual_candidates = conceptual_result
     conc_dicts = [
         {
             "id": c.id,
@@ -286,47 +389,103 @@ def run_builder1_campaign_pipeline(
         selected_creative_brief=effective_creative_brief,
         idea_memory_block=stage_memory_block("brand_physical", idea_memory, campaign_id=campaign_id),
     )
-    brand_physical = run_brand_physical_with_memory_guard(
-        model_caller=model_caller,
-        run_stage=_run_stage,
-        campaign_id=campaign_id,
-        idea_memory=idea_memory,
-        user_prompt=brand_physical_user_prompt,
-        parse_kwargs={
-            "product_description": normalized.product_description,
-            "product_name_resolved": product_name_resolved,
-        },
-        visibility_policy=visibility_decision.policy,
-        repair_context={
-            "strategic_problem": selected_strategy.strategic_problem,
-            "relative_advantage": selected_strategy.relative_advantage,
-            "brand_slogan": selected_slogan.brand_slogan,
-            "implied_action": selected_slogan.implied_action,
-            "conceptual": conceptual_fixed,
-        },
+    conceptual_output_fp = (
+        checkpoint_session.get_stage_output_fingerprint("conceptual_stage")
+        if checkpoint_session is not None
+        else ""
     )
-    brand_physical = enforce_authoritative_product_name(
-        brand_physical,
-        product_name_resolved=product_name_resolved,
+    brand_physical_dep_fp = ""
+    if checkpoint_session is not None and strategy_output_fp and conceptual_output_fp:
+        brand_physical_dep_fp = brand_physical_dependency_fingerprint(
+            identity=checkpoint_session.identity,
+            visibility_policy=visibility_decision.policy.value,
+            selected_creative_brief=effective_creative_brief.to_dict(),
+            strategy_output_fingerprint=strategy_output_fp,
+            conceptual_output_fingerprint=conceptual_output_fp,
+        )
+
+    def _run_brand_physical_stage() -> Any:
+        physical = run_brand_physical_with_memory_guard(
+            model_caller=model_caller,
+            run_stage=_run_stage,
+            campaign_id=campaign_id,
+            idea_memory=idea_memory,
+            user_prompt=brand_physical_user_prompt,
+            parse_kwargs={
+                "product_description": normalized.product_description,
+                "product_name_resolved": product_name_resolved,
+            },
+            visibility_policy=visibility_decision.policy,
+            repair_context={
+                "strategic_problem": selected_strategy.strategic_problem,
+                "relative_advantage": selected_strategy.relative_advantage,
+                "brand_slogan": selected_slogan.brand_slogan,
+                "implied_action": selected_slogan.implied_action,
+                "conceptual": conceptual_fixed,
+            },
+        )
+        return enforce_authoritative_product_name(
+            physical,
+            product_name_resolved=product_name_resolved,
+        )
+
+    brand_physical = run_checkpointed_planning_stage(
+        "brand_physical",
+        _run_brand_physical_stage,
+        session=checkpoint_session,
+        dependency_fingerprint=brand_physical_dep_fp,
+        serialize=serialize_brand_physical_checkpoint_output,
+        deserialize=deserialize_brand_physical_checkpoint_output,
     )
     brand_physical_dict = _brand_physical_to_dict(brand_physical)
 
-    graphic = _run_graphic_system_stage(
-        model_caller,
-        user_prompt=build_graphic_system_user_prompt(
-            product_description=normalized.product_description,
-            detected_language=detected_language,
-            relative_advantage=selected_strategy.relative_advantage,
-            brand_slogan=selected_slogan.brand_slogan,
-            conceptual=conceptual_fixed,
-            brand_physical=brand_physical_dict,
-            format_value=normalized.format,
-            idea_memory_block=stage_memory_block("graphic_system", idea_memory, campaign_id=campaign_id),
-            selected_creative_brief=effective_creative_brief,
-        ),
-        run_stage=_run_stage,
-        brand_physical=brand_physical_dict,
+    graphic_user_prompt = build_graphic_system_user_prompt(
+        product_description=normalized.product_description,
+        detected_language=detected_language,
+        relative_advantage=selected_strategy.relative_advantage,
+        brand_slogan=selected_slogan.brand_slogan,
         conceptual=conceptual_fixed,
+        brand_physical=brand_physical_dict,
+        format_value=normalized.format,
+        idea_memory_block=stage_memory_block("graphic_system", idea_memory, campaign_id=campaign_id),
+        selected_creative_brief=effective_creative_brief,
+    )
+    brand_physical_output_fp = (
+        checkpoint_session.get_stage_output_fingerprint("brand_physical")
+        if checkpoint_session is not None
+        else ""
+    )
+    graphic_dep_fp = ""
+    if (
+        checkpoint_session is not None
+        and strategy_output_fp
+        and conceptual_output_fp
+        and brand_physical_output_fp
+    ):
+        graphic_dep_fp = graphic_system_dependency_fingerprint(
+            identity=checkpoint_session.identity,
+            selected_creative_brief=effective_creative_brief.to_dict(),
+            strategy_output_fingerprint=strategy_output_fp,
+            conceptual_output_fingerprint=conceptual_output_fp,
+            brand_physical_output_fingerprint=brand_physical_output_fp,
+        )
+
+    def _run_graphic_stage() -> Any:
+        return _run_graphic_system_stage(
+            model_caller,
+            user_prompt=graphic_user_prompt,
+            run_stage=_run_stage,
+            brand_physical=brand_physical_dict,
+            conceptual=conceptual_fixed,
+        )
+
+    graphic = run_checkpointed_planning_stage(
+        "graphic_system",
+        _run_graphic_stage,
+        session=checkpoint_session,
+        dependency_fingerprint=graphic_dep_fp,
+        serialize=serialize_graphic_system_checkpoint_output,
+        deserialize=deserialize_graphic_system_checkpoint_output,
     )
     graphic_dict = _graphic_to_dict(graphic)
 
@@ -339,22 +498,57 @@ def run_builder1_campaign_pipeline(
         graphic=graphic,
     )
 
-    series_ads = _run_series_stage_with_integrity(
-        normalized=normalized,
-        detected_language=detected_language,
-        selected_strategy=selected_strategy,
-        selected_slogan=selected_slogan,
-        conceptual_fixed=conceptual_fixed,
-        brand_physical_dict=brand_physical_dict,
-        graphic_dict=graphic_dict,
-        upstream_snapshot=upstream_snapshot,
-        model_caller=model_caller,
-        run_stage=_run_stage,
-        series_retry_used=False,
-        visibility_policy=visibility_decision.policy,
-        campaign_id=campaign_id,
-        idea_memory=idea_memory,
-        effective_mandatory_constraints=effective_mandatory_constraints,
+    graphic_output_fp = (
+        checkpoint_session.get_stage_output_fingerprint("graphic_system")
+        if checkpoint_session is not None
+        else ""
+    )
+    series_dep_fp = ""
+    if (
+        checkpoint_session is not None
+        and strategy_output_fp
+        and conceptual_output_fp
+        and brand_physical_output_fp
+        and graphic_output_fp
+    ):
+        series_dep_fp = series_ads_dependency_fingerprint(
+            identity=checkpoint_session.identity,
+            ad_count=normalized.ad_count,
+            format_value=normalized.format,
+            visibility_policy=visibility_decision.policy.value,
+            effective_mandatory_constraints=effective_mandatory_constraints,
+            strategy_output_fingerprint=strategy_output_fp,
+            conceptual_output_fingerprint=conceptual_output_fp,
+            brand_physical_output_fingerprint=brand_physical_output_fp,
+            graphic_output_fingerprint=graphic_output_fp,
+        )
+
+    def _run_series_stage() -> SeriesAdsOutput:
+        return _run_series_stage_with_integrity(
+            normalized=normalized,
+            detected_language=detected_language,
+            selected_strategy=selected_strategy,
+            selected_slogan=selected_slogan,
+            conceptual_fixed=conceptual_fixed,
+            brand_physical_dict=brand_physical_dict,
+            graphic_dict=graphic_dict,
+            upstream_snapshot=upstream_snapshot,
+            model_caller=model_caller,
+            run_stage=_run_stage,
+            series_retry_used=False,
+            visibility_policy=visibility_decision.policy,
+            campaign_id=campaign_id,
+            idea_memory=idea_memory,
+            effective_mandatory_constraints=effective_mandatory_constraints,
+        )
+
+    series_ads = run_checkpointed_planning_stage(
+        "series_ads",
+        _run_series_stage,
+        session=checkpoint_session,
+        dependency_fingerprint=series_dep_fp,
+        serialize=serialize_series_ads_checkpoint_output,
+        deserialize=deserialize_series_ads_checkpoint_output,
     )
 
     plan = _assemble_campaign_with_duplicate_recovery(

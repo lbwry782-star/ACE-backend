@@ -202,6 +202,7 @@ def _builder1_idempotency_finish(
     idem_record: Optional[dict[str, Any]],
     response_body: dict[str, Any],
     submit_fn: Any,
+    operation: str = "",
 ) -> tuple[Any, int]:
     from engine.builder1_request_idempotency import finalize_idempotent_worker_dispatch
     from flask import jsonify
@@ -212,6 +213,7 @@ def _builder1_idempotency_finish(
         job_id=str(response_body.get("jobId") or ""),
         response_body=response_body,
         submit_fn=submit_fn,
+        operation=operation,
     )
     return jsonify(body), 202
 
@@ -1877,6 +1879,49 @@ def _builder1_run_resume_integrity_recovered_job(
             _builder1_handle_background_job_exception(job_id, e)
 
 
+def _builder1_run_resume_planning_job(job_id: str, campaign_id: str) -> None:
+    from engine.builder1_job_planning_request import planning_request_snapshot_from_job
+    from engine.builder1_planning_resume import (
+        clear_builder1_planning_resume_requested,
+        log_builder1_planning_resume_completed,
+        log_builder1_planning_resume_started,
+    )
+
+    job = get_builder1_job(job_id) or {}
+    snapshot = planning_request_snapshot_from_job(job)
+    if snapshot is None:
+        log_builder1_planning_resume_completed(job_id, campaign_id=campaign_id, ok=False, error="snapshot_missing")
+        update_builder1_job(
+            job_id,
+            status="error",
+            error="planning_resume_snapshot_missing",
+            planningResumeRequested=False,
+        )
+        return
+
+    log_builder1_planning_resume_started(job_id, campaign_id=campaign_id)
+    try:
+        _builder1_run_initial_job(
+            job_id,
+            campaign_id,
+            str(snapshot.get("productName") or ""),
+            str(snapshot.get("productDescription") or ""),
+            str(snapshot.get("format") or "portrait"),
+            int(snapshot.get("adCount") or job.get("targetAdCount") or 2),
+            snapshot.get("brandGuidelines"),
+        )
+    finally:
+        clear_builder1_planning_resume_requested(job_id)
+    reloaded = get_builder1_job(job_id) or {}
+    status = str(reloaded.get("status") or "")
+    log_builder1_planning_resume_completed(
+        job_id,
+        campaign_id=campaign_id,
+        ok=status == "done",
+        error=str(reloaded.get("error") or ""),
+    )
+
+
 def _builder1_run_initial_job(
     job_id: str,
     campaign_id: str,
@@ -2132,6 +2177,15 @@ def builder1_generate():
         return early
 
     ownership_fields = _builder1_ownership_fields_for_create(body)
+    from engine.builder1_job_planning_request import build_planning_request_snapshot
+
+    planning_request_snapshot = build_planning_request_snapshot(
+        product_name=product_name,
+        product_description=product_description,
+        format_value=format_val,
+        ad_count=ad_count,
+        brand_guidelines=brand_guidelines,
+    )
     if get_builder1_job(job_id) is None:
         create_builder1_job(
             job_id=job_id,
@@ -2140,6 +2194,7 @@ def builder1_generate():
             stage="planning",
             ownership_fields=ownership_fields,
         )
+        update_builder1_job(job_id, planningRequestSnapshot=planning_request_snapshot)
         logger.info("BUILDER1_JOB_CREATED jobId=%s campaignId=%s targetAdCount=%s", job_id, campaign_id, ad_count)
 
     response_body = {
@@ -2170,6 +2225,114 @@ def builder1_generate():
         idem_record=idem_record,
         response_body=response_body,
         submit_fn=_submit,
+    )
+
+
+@app.route("/api/builder1-resume-planning", methods=["POST"])
+def builder1_resume_planning():
+    prod_err = _builder1_require_production_ready()
+    if prod_err is not None:
+        return prod_err
+    req_id_err = _builder1_require_request_id()
+    if req_id_err is not None:
+        return req_id_err
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON body"}), 200
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"ok": False, "error": "invalid_input", "message": "expected JSON object"}), 200
+
+    job_id = (body.get("jobId") or "").strip()
+    if not job_id:
+        return jsonify({"ok": False, "error": "invalid_input", "message": "jobId is required"}), 200
+
+    from engine.builder1_request_idempotency import (
+        OPERATION_RESUME_PLANNING,
+        fingerprint_resume_planning,
+    )
+
+    peek_job = get_builder1_job(job_id)
+    campaign_id_peek = str((peek_job or {}).get("campaignId") or "")
+    fingerprint = fingerprint_resume_planning(job_id=job_id)
+    early, idem_key, idem_record, job_id, campaign_id = _builder1_idempotency_begin(
+        operation=OPERATION_RESUME_PLANNING,
+        request_fingerprint=fingerprint,
+        job_id=job_id,
+        campaign_id=campaign_id_peek,
+    )
+    if early is not None:
+        err_body = early[0].get_json(silent=True) or {}
+        if err_body.get("error") == "builder1_idempotency_conflict":
+            return early
+
+    from engine.builder1_request_idempotency import (
+        replay_response_from_record,
+        should_replay_without_worker_resubmit,
+    )
+
+    if idem_record and should_replay_without_worker_resubmit(
+        idem_record,
+        job_id,
+        operation=OPERATION_RESUME_PLANNING,
+    ):
+        return jsonify(replay_response_from_record(idem_record)), 202
+
+    job, deny = _builder1_verify_job_access(job_id)
+    if deny is not None:
+        return deny
+    assert job is not None
+
+    from engine.builder1_planning_resume import (
+        assess_builder1_planning_resume,
+        log_builder1_planning_resume_rejected,
+        mark_builder1_planning_resume_requested,
+    )
+
+    assessment = assess_builder1_planning_resume(job_id)
+    if not assessment.get("eligible"):
+        reasons = list(assessment.get("rejectionReasons") or [])
+        log_builder1_planning_resume_rejected(job_id, reasons)
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": "planning_resume_not_eligible",
+                    "jobId": job_id,
+                    "rejectionReasons": reasons,
+                }
+            ),
+            200,
+        )
+
+    campaign_id = str(job.get("campaignId") or assessment.get("campaignId") or campaign_id or "")
+
+    from engine.builder1_request_idempotency import extract_request_id
+
+    mark_builder1_planning_resume_requested(
+        job_id,
+        source="api",
+        request_id=extract_request_id(request),
+    )
+
+    response_body = {
+        "ok": True,
+        "status": "running",
+        "jobId": job_id,
+        "campaignId": campaign_id,
+        "stage": "planning",
+        "planningResume": True,
+        "pollUrl": f"/api/builder1-status?jobId={job_id}",
+    }
+
+    def _submit() -> None:
+        _builder1_executor.submit(_builder1_run_resume_planning_job, job_id, campaign_id)
+
+    return _builder1_idempotency_finish(
+        idem_key=idem_key,
+        idem_record=idem_record,
+        response_body=response_body,
+        submit_fn=_submit,
+        operation=OPERATION_RESUME_PLANNING,
     )
 
 

@@ -10,7 +10,9 @@ from typing import Any, Callable, Dict, Optional
 
 from engine.builder1_conceptual_evaluations import CONCEPTUAL_REJECTION_CODE_LIST
 from engine.builder1_physical_evaluations import PHYSICAL_REJECTION_CODE_LIST
+from engine.builder1_direct_product_route import direct_product_route_assessment_json_schema
 from engine.builder1_selected_creative_brief import selected_creative_brief_json_schema
+from engine.builder1_stage_contract_preflight import verify_stage_parser_api_contract
 from engine.builder1_strict_schema import (
     StrictSchemaConfigurationError,
     find_strict_schema_errors,
@@ -273,6 +275,7 @@ BRAND_PHYSICAL_JSON_SCHEMA: Dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
+        "directProductRouteAssessment",
         "physicalCandidates",
         "physicalEvaluations",
         "selectedPhysicalCandidateId",
@@ -295,6 +298,7 @@ BRAND_PHYSICAL_JSON_SCHEMA: Dict[str, Any] = {
         "campaignRationale",
     ],
     "properties": {
+        "directProductRouteAssessment": direct_product_route_assessment_json_schema(),
         "physicalCandidates": {
             "type": "array",
             "items": BRAND_PHYSICAL_CANDIDATE_ITEM_SCHEMA,
@@ -880,6 +884,14 @@ def build_text_format_for_stage(stage: Optional[str]) -> Optional[Dict[str, Any]
     if not schema:
         return None
     prepared = prepare_strict_json_schema(schema)
+    contract_errors = verify_stage_parser_api_contract(stage, prepared)
+    if contract_errors:
+        logger.error(
+            "BUILDER1_STAGE_CONTRACT_MISMATCH stage=%s errors=%s",
+            stage,
+            contract_errors[:8],
+        )
+        raise StrictSchemaConfigurationError(contract_errors)
     return {
         "format": {
             "type": "json_schema",

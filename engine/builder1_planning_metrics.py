@@ -40,6 +40,13 @@ class Builder1PlanningMetrics:
     physical_stage_calls: int = 0
     graphic_stage_calls: int = 0
     series_stage_calls: int = 0
+    strategy_stage_checkpoint_hits: int = 0
+    conceptual_stage_checkpoint_hits: int = 0
+    physical_stage_checkpoint_hits: int = 0
+    graphic_stage_checkpoint_hits: int = 0
+    series_stage_checkpoint_hits: int = 0
+    reused_planning_stages: int = 0
+    new_planning_calls: int = 0
     focused_repair_calls: int = 0
     stage_repair_calls: int = 0
     stage_retry_calls: int = 0
@@ -68,8 +75,22 @@ class Builder1PlanningMetrics:
     def end_stage(self, stage: str, *, attempt: int = 1) -> None:
         self._stage_starts.pop(f"{stage}:{attempt}", None)
 
+    def record_stage_checkpoint_hit(self, stage: str) -> None:
+        self.reused_planning_stages += 1
+        if stage == "strategy_slogan_stage":
+            self.strategy_stage_checkpoint_hits += 1
+        elif stage == "conceptual_stage":
+            self.conceptual_stage_checkpoint_hits += 1
+        elif stage == "brand_physical":
+            self.physical_stage_checkpoint_hits += 1
+        elif stage == "graphic_system":
+            self.graphic_stage_checkpoint_hits += 1
+        elif stage == "series_ads":
+            self.series_stage_checkpoint_hits += 1
+
     def record_model_call(self, stage: Optional[str]) -> None:
         self.total_planning_model_calls += 1
+        self.new_planning_calls += 1
         if not stage:
             return
         if stage == "product_name_resolution":
@@ -137,7 +158,8 @@ class Builder1PlanningMetrics:
         preferred_ms = int(
             os.environ.get("BUILDER1_PLANNING_LATENCY_PREFERRED_MS", str(PLANNING_LATENCY_PREFERRED_MS))
         )
-        actual_planning_calls = self.total_planning_model_calls
+        actual_planning_calls = self.new_planning_calls
+        reused_planning_stages = self.reused_planning_stages
         if self.total_planning_duration_ms > alert_ms:
             logger.error(
                 "BUILDER1_PLANNING_LATENCY_ALERT campaignId=%s jobId=%s durationMs=%s thresholdMs=%s",
@@ -181,7 +203,10 @@ class Builder1PlanningMetrics:
             "productNameCallUsed=%s productNameStageCalls=%s strategyStageCalls=%s sloganStageCalls=%s "
             "strategySloganStageCalls=%s strategySloganRepairCalls=%s sloganOnlyRepairCalls=%s "
             "strategyCandidateRepairCalls=%s conceptualCandidateRepairCalls=%s physicalEvaluationRepairCalls=%s conceptualStageCalls=%s physicalStageCalls=%s "
-            "graphicStageCalls=%s seriesStageCalls=%s marketingTextRepairCalls=%s "
+            "graphicStageCalls=%s seriesStageCalls=%s "
+            "strategyStageCheckpointHits=%s conceptualStageCheckpointHits=%s "
+            "physicalStageCheckpointHits=%s graphicStageCheckpointHits=%s seriesStageCheckpointHits=%s "
+            "reusedPlanningStages=%s newPlanningCalls=%s marketingTextRepairCalls=%s "
             "stageRepairCalls=%s stageRetryCalls=%s stageModelFallbackCalls=%s "
             "normalExpectedCalls=%s actualPlanningCalls=%s totalPlanningModelCalls=%s "
             "promptTokens=%s outputTokens=%s totalTokens=%s totalPlanningDurationMs=%s",
@@ -201,6 +226,13 @@ class Builder1PlanningMetrics:
             self.physical_stage_calls,
             self.graphic_stage_calls,
             self.series_stage_calls,
+            self.strategy_stage_checkpoint_hits,
+            self.conceptual_stage_checkpoint_hits,
+            self.physical_stage_checkpoint_hits,
+            self.graphic_stage_checkpoint_hits,
+            self.series_stage_checkpoint_hits,
+            reused_planning_stages,
+            self.new_planning_calls,
             self.focused_repair_calls,
             self.stage_repair_calls,
             self.stage_retry_calls,
