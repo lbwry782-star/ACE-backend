@@ -49,6 +49,7 @@ from engine.builder1_server_mandatory_constraints import (
     format_server_mandatory_constraints_block,
 )
 from engine.builder1_object_design_integrity import BUILDER1_OBJECT_DESIGN_INTEGRITY
+from engine.builder1_direct_product_route import BUILDER1_SIMPLE_PRODUCT_DIRECT_ADVANTAGE_PRIORITY
 from engine.builder1_literal_embodiment import (
     BUILDER1_CONCEPT_FIRST_RULE,
     BUILDER1_EXPRESSIVE_OBJECT_DECISION,
@@ -342,7 +343,8 @@ Rules:
 - Exactly 6 candidates with ids C01 through C06.
 - Every candidate must be an object with all string fields non-empty.
 - Begin from the exact perception to create and the clearest physical demonstration of that perception — NOT from how to show the advertised product.
-- Do not illustrate slogan nouns literally when a stronger external object can embody the action.
+- The conceptual generator may later be expressed through the product, product-integrated mechanism, or external analogy — do not assume external transfer is required at this stage.
+- Do not illustrate slogan nouns literally when a stronger embodiment exists — product/category or external.
 - perceptionToCreate: the belief or clarity the viewer must acquire.
 - impliedPhysicalLaw: the action or physical law that makes that perception visible.
 - The conceptual generator must answer: what action or transformation makes the selected brand slogan visible?
@@ -421,7 +423,8 @@ Rules:
 STAGE_BRAND_PHYSICAL_SYSTEM = f"""
 You are a Builder1 physical-system builder.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"physicalCandidates":[{{"id":"P01","externalObject":"...","physicalWorld":"...","physicalAction":"...","perceptionDemonstrated":"...","sloganActionConnection":"...","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"seriesPotential":"...","whyClearerThanShowingProduct":"..."}}],"physicalEvaluations":[{{"candidateId":"P01","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"supportsTransferredObject":true,"distinctiveToBrand":true,"eligible":true,"rejectionCodes":[]}}],"selectedPhysicalCandidateId":"P01","productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","physicalGeneratorIsProduct":false,"physicalGeneratorIsPackaging":false,"worksWithoutProductVisible":true,"transferredObject":"...","transferredObjectAction":"...","whyClearerThanShowingProduct":"...","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"productEvidenceRequired":false,"productEvidenceReason":"","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
+{{"directProductRouteAssessment":{{"productOrCategoryImmediatelyReadable":true,"relativeAdvantageDirectlyExpressibleWithProduct":true,"productLedAdvertisingMechanismAvailable":true,"productLedMechanismSummary":"...","externalAnalogyAddsUniquePersuasiveGain":false,"externalAnalogyUniqueGain":"","additionalTranslationCost":"NONE","recommendedRoute":"PRODUCT_LED","routeDecisionReason":"..."}},"physicalCandidates":[{{"id":"P01","externalObject":"...","physicalWorld":"...","physicalAction":"...","perceptionDemonstrated":"...","sloganActionConnection":"...","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"seriesPotential":"...","whyClearerThanShowingProduct":"..."}}],"physicalEvaluations":[{{"candidateId":"P01","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"supportsTransferredObject":true,"distinctiveToBrand":true,"eligible":true,"rejectionCodes":[]}}],"selectedPhysicalCandidateId":"P01","productNameResolved":"...","physicalGenerator":"...","physicalGeneratorNaturalPurpose":"...","physicalGeneratorCampaignRole":"...","physicalGeneratorIsProduct":false,"physicalGeneratorIsPackaging":false,"worksWithoutProductVisible":true,"transferredObject":"...","transferredObjectAction":"...","whyClearerThanShowingProduct":"...","clearerThanConventionalProductShot":true,"survivesProductRemoval":true,"productEvidenceRequired":false,"productEvidenceReason":"","mediumParticipates":false,"mediumRole":"","campaignRationale":"..."}}
+{BUILDER1_SIMPLE_PRODUCT_DIRECT_ADVANTAGE_PRIORITY}
 {BRAND_PHYSICAL_STAGE_METHODOLOGY}
 {BUILDER1_CONCEPT_FIRST_RULE}
 {BUILDER1_EXPRESSIVE_OBJECT_DECISION}
@@ -436,21 +439,29 @@ Return JSON only. Return exactly this object and no additional top-level keys:
 Rules:
 - Do NOT create, replace, or modify the brand slogan. It is fixed before this stage.
 - productNameResolved must exactly match the fixed productNameResolved value provided in the user prompt. Do not rename it.
+- BEFORE selecting any external transferred object, complete directProductRouteAssessment with honest answers to all six pre-route questions.
+- directProductRouteAssessment is mandatory and must agree with the final physical selection and flags.
+- additionalTranslationCost must be one of: NONE, LOW, MEANINGFUL.
+- recommendedRoute must be one of: PRODUCT_LED, PRODUCT_INTEGRATED_ANALOGY, ANALOGY_LED.
+- When product/category is immediately readable AND relative advantage is directly expressible AND a genuine product-led advertising mechanism exists AND external analogy adds no unique persuasive gain: pure ANALOGY_LED is forbidden.
+- When recommendedRoute is ANALOGY_LED, externalAnalogyAddsUniquePersuasiveGain must be true and externalAnalogyUniqueGain must state the specific capability gained — not generic creativity/familiarity.
+- When recommendedRoute is PRODUCT_LED, physicalGeneratorIsProduct must be true and productLedMechanismSummary must describe a real advertising mechanism — not a generic packshot.
 - Generate at least 4 physicalCandidates P01-P04 from different physicalWorld values before selecting.
 - Do not allow all candidates to be minor variations of the advertised product, its category, or literal slogan nouns.
-- Search broadly across different physical worlds for the strongest expressive object — restart the object search for this brand only.
+- Search broadly across different physical worlds — but only after the direct-product gate is completed.
 - Apply the removal test and expressive-object decision to every candidate before selection.
-- Prefer an external object that makes the perception clearer than showing the product, category, or literal slogan object.
+- IF the direct-product gate does not provide an equally strong product-led advertising mechanism, then prefer the strongest external object over showing the product, category, or literal slogan object.
 - Top-level physical fields must match the selectedPhysicalCandidateId.
-- The selected physical generator must NOT be the advertised product, its packaging, or a category package unless productEvidenceRequired=true with a convincing productEvidenceReason.
+- The selected physical generator must NOT be the advertised product, its packaging, or a category package unless productEvidenceRequired=true with a convincing productEvidenceReason OR recommendedRoute is PRODUCT_LED / PRODUCT_INTEGRATED_ANALOGY with a genuine mechanism.
 - physicalGeneratorIsProduct, physicalGeneratorIsPackaging must be false and worksWithoutProductVisible must be true when policy is FORBIDDEN.
 - clearerThanConventionalProductShot and survivesProductRemoval must be true for the selected candidate when policy is FORBIDDEN.
+- When policy is FORBIDDEN, recommendedRoute must be ANALOGY_LED regardless of direct-product viability.
 - When policy is CREATIVE_DECISION or PRODUCT_VISIBILITY_REQUIRED, choose the strongest route: external analogy OR product-as-generator OR product-integrated analogy.
 - If physicalGeneratorIsProduct is true, set worksWithoutProductVisible false and explain the product's creative mechanism in campaignRationale.
 - Do not choose the product merely because analogy search failed; product-led requires a genuine relative-advantage mechanism.
-- transferredObject is the external familiar object that performs the fixed slogan action.
+- transferredObject is the familiar object that performs the fixed slogan action — product/category when product-led, external object when analogy-led.
 - transferredObjectAction is one concrete visual action the transferred object performs.
-- whyClearerThanShowingProduct: one sentence maximum explaining why this object is clearer than showing the product.
+- whyClearerThanShowingProduct: one sentence maximum explaining why this object/route is clearer than a conventional product shot.
 - The physical generator must derive from: relative advantage → fixed slogan → implied action → selected conceptual generator.
 - Do not include graphic generator, series generator, ads, format, adCount, detectedLanguage, strategy fields, or slogan fields.
 - mediumParticipates must be JSON boolean true or false, never a string.
@@ -1084,6 +1095,8 @@ def build_brand_physical_user_prompt(
         f"Fixed conceptual generator:\n{json.dumps(conceptual, ensure_ascii=False, indent=2)}\n"
         f"Server product visibility policy: {visibility_policy}\n"
         "Explore at least 4 serious physicalCandidates from different physicalWorld values before selecting.\n"
+        "Complete directProductRouteAssessment BEFORE selecting an external transferred object.\n"
+        "Compare direct product/category expression against external analogy using the six pre-route questions.\n"
         "For each candidate state why it is clearer than showing the product and whether it survives product removal.\n"
         "When policy is FORBIDDEN, do not choose the product or its packaging as the physical generator.\n"
         "When policy is CREATIVE_DECISION or PRODUCT_VISIBILITY_REQUIRED, prefer the route that expresses the relative advantage most clearly — "
@@ -1118,7 +1131,14 @@ def build_brand_physical_repair_prompt(*, broken_json: str, reasons: List[str]) 
         '"clearerThanConventionalProductShot":true,"survivesProductRemoval":true,'
         '"productEvidenceRequired":false,"productEvidenceReason":"",'
         '"mediumParticipates":false,"mediumRole":"",'
-        '"campaignRationale":"..."}\n'
+        '"campaignRationale":"...",'
+        '"directProductRouteAssessment":{"productOrCategoryImmediatelyReadable":true,'
+        '"relativeAdvantageDirectlyExpressibleWithProduct":false,'
+        '"productLedAdvertisingMechanismAvailable":false,"productLedMechanismSummary":"",'
+        '"externalAnalogyAddsUniquePersuasiveGain":true,'
+        '"externalAnalogyUniqueGain":"...",'
+        '"additionalTranslationCost":"NONE","recommendedRoute":"ANALOGY_LED",'
+        '"routeDecisionReason":"..."}}\n'
         f"{analogy_section}"
         f"Missing or invalid fields:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"

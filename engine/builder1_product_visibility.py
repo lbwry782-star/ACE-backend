@@ -197,12 +197,22 @@ def infer_visual_execution_route(
     physical_generator_is_product: bool = False,
     physical_generator_is_packaging: bool = False,
     product_evidence_required: bool = False,
+    direct_product_route_assessment: Optional[Any] = None,
 ) -> VisualExecutionRoute:
-    if physical_generator_is_product and not physical_generator_is_packaging:
-        return VisualExecutionRoute.PRODUCT_LED
-    if product_evidence_required:
-        return VisualExecutionRoute.PRODUCT_INTEGRATED_ANALOGY
-    return VisualExecutionRoute.ANALOGY_LED
+    from engine.builder1_direct_product_route import (
+        DirectProductRouteAssessment,
+        resolve_visual_execution_route,
+    )
+
+    assessment: Optional[DirectProductRouteAssessment] = None
+    if isinstance(direct_product_route_assessment, DirectProductRouteAssessment):
+        assessment = direct_product_route_assessment
+    return resolve_visual_execution_route(
+        physical_generator_is_product=physical_generator_is_product,
+        physical_generator_is_packaging=physical_generator_is_packaging,
+        product_evidence_required=product_evidence_required,
+        direct_product_route_assessment=assessment,
+    )
 
 
 def _brand_physical_route_kwargs(brand_physical: Any) -> Dict[str, bool]:
@@ -351,6 +361,8 @@ def plan_approves_product_as_main_visual(series_plan: Any, *, ad_index: int = 1)
 
 
 def visual_route_for_plan(series_plan: Any) -> VisualExecutionRoute:
+    from engine.builder1_direct_product_route import assessment_from_planning_internals
+
     internals = getattr(series_plan, "planning_internals", None) or {}
     if isinstance(series_plan, Mapping):
         internals = series_plan.get("planningInternals") or series_plan.get("planning_internals") or {}
@@ -363,6 +375,7 @@ def visual_route_for_plan(series_plan: Any) -> VisualExecutionRoute:
     return infer_visual_execution_route(
         physical_generator_is_product=bool(internals.get("physicalGeneratorIsProduct")),
         product_evidence_required=bool(internals.get("productEvidenceRequired")),
+        direct_product_route_assessment=assessment_from_planning_internals(internals),
     )
 
 

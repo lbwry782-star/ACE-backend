@@ -108,3 +108,63 @@ def marketing_text_with_punctuation() -> str:
     words[0] = "Hello,"
     words.append("finished.")
     return " ".join(words)
+
+
+def direct_product_route_assessment(
+    *,
+    readable: bool = True,
+    advantage_direct: bool = False,
+    mechanism_available: bool = False,
+    mechanism_summary: str = "",
+    unique_gain: bool = True,
+    unique_gain_text: str = "External object demonstrates the advantage through a causal mechanism unavailable from a generic product presentation.",
+    translation_cost: str = "NONE",
+    recommended_route: str = "ANALOGY_LED",
+    route_reason: str = "External analogy supplies stronger causal proof than a direct product presentation.",
+) -> Dict[str, Any]:
+    return {
+        "productOrCategoryImmediatelyReadable": readable,
+        "relativeAdvantageDirectlyExpressibleWithProduct": advantage_direct,
+        "productLedAdvertisingMechanismAvailable": mechanism_available,
+        "productLedMechanismSummary": mechanism_summary,
+        "externalAnalogyAddsUniquePersuasiveGain": unique_gain,
+        "externalAnalogyUniqueGain": unique_gain_text if unique_gain else "",
+        "additionalTranslationCost": translation_cost,
+        "recommendedRoute": recommended_route,
+        "routeDecisionReason": route_reason,
+    }
+
+
+def direct_product_route_assessment_product_led(
+    *,
+    mechanism_summary: str = "Product form demonstrates the relative advantage through a visible transformation.",
+    route_reason: str = "Direct product mechanism is the strongest advertising route.",
+) -> Dict[str, Any]:
+    return direct_product_route_assessment(
+        readable=True,
+        advantage_direct=True,
+        mechanism_available=True,
+        mechanism_summary=mechanism_summary,
+        unique_gain=False,
+        unique_gain_text="",
+        recommended_route="PRODUCT_LED",
+        route_reason=route_reason,
+    )
+
+
+def direct_product_route_assessment_integrated(
+    *,
+    mechanism_summary: str = "Product participates as evidence inside a larger external mechanism.",
+    unique_gain_text: str = "External mechanism proves the advantage while product supplies necessary physical evidence.",
+    route_reason: str = "Integrated route combines product evidence with external analogy.",
+) -> Dict[str, Any]:
+    return direct_product_route_assessment(
+        readable=True,
+        advantage_direct=True,
+        mechanism_available=True,
+        mechanism_summary=mechanism_summary,
+        unique_gain=True,
+        unique_gain_text=unique_gain_text,
+        recommended_route="PRODUCT_INTEGRATED_ANALOGY",
+        route_reason=route_reason,
+    )

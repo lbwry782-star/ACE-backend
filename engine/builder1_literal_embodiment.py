@@ -23,25 +23,25 @@ It is NOT required to show:
 - the literal object named in the slogan
 - the literal environment implied by the product or slogan wording
 
-Prefer the strongest visual embodiment of the concept — often a different external object,
-proxy, metaphor, or surprising but simple embodiment.
+Prefer the strongest visual embodiment of the concept — which may be the product/category itself when it carries
+a genuine advertising mechanism, or an external proxy when that adds a capability the direct route cannot match.
 
 Mandatory decision before choosing any visual object:
 1. What perceptual/business idea must be understood?
-2. What is the clearest, simplest way to embody that idea visually?
-3. Is showing the product necessary?
+2. Can the product/category express it directly with a real advertising mechanism (not merely a packshot)?
+3. If not, what is the clearest external embodiment?
 4. Is showing the literal slogan object necessary?
-5. Would a different external object communicate the concept more clearly, simply, or memorably?
-If #5 is yes, prefer the external object.
+5. Would a different external object communicate the concept more clearly ONLY IF the direct product route is weaker?
+If the direct product route is equally strong, prefer it over unnecessary cross-domain translation.
 
 Bad: slogan about shortening the way → road, maze, car, route, navigation map.
 Better: another long thing becoming short — short-neck giraffe, short snake, shortened ruler/rope/ladder/queue.
 
-Bad: product promise in slogan → visual repeats the same category object.
-Better: a clearer, more surprising embodiment of the same underlying idea.
+Bad: product promise in slogan → visual repeats the same category object with no mechanism.
+Better: the product/category participating in a transformation — OR a clearer external embodiment when direct proof is weak.
 
 Ownability comes from the recurring conceptual mechanism, visual law, transformation, and graphic language —
-not from literal product imagery.
+not from literal product imagery alone, and not from analogy merely because a structural parallel exists.
 """.strip()
 
 BUILDER1_EXPRESSIVE_OBJECT_DECISION = """

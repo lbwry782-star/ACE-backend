@@ -147,6 +147,13 @@ def _physical_evaluations(candidate_ids: List[str] | None = None) -> List[Dict[s
     ]
 
 
+from tests.builder1_test_helpers import direct_product_route_assessment
+
+
+def _direct_product_route_assessment(**kwargs: Any) -> Dict[str, Any]:
+    return direct_product_route_assessment(**kwargs)
+
+
 def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False) -> Dict[str, Any]:
     candidates = _physical_candidates()
     payload = {
@@ -170,6 +177,7 @@ def _brand_physical(*, missing_natural: bool = False, missing_role: bool = False
         "mediumParticipates": False,
         "mediumRole": "",
         "campaignRationale": "Ownable durability story",
+        "directProductRouteAssessment": _direct_product_route_assessment(),
     }
     if missing_natural:
         del payload["physicalGeneratorNaturalPurpose"]

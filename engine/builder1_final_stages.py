@@ -117,6 +117,7 @@ class BrandPhysicalOutput:
     product_evidence_reason: str = ""
     clearer_than_conventional_product_shot: bool = True
     survives_product_removal: bool = True
+    direct_product_route_assessment: Optional[Any] = None
 
 
 @dataclass
@@ -483,6 +484,29 @@ def parse_brand_physical_output(
         )
     )
 
+    from engine.builder1_direct_product_route import (
+        parse_direct_product_route_assessment,
+        validate_direct_product_route_consistency,
+    )
+
+    assessment_raw = obj.get("directProductRouteAssessment")
+    direct_assessment = None
+    if assessment_raw is None:
+        reasons.append("physical_route_assessment_missing")
+    else:
+        direct_assessment, assessment_reasons = parse_direct_product_route_assessment(assessment_raw)
+        reasons.extend(assessment_reasons)
+        if direct_assessment is not None:
+            reasons.extend(
+                validate_direct_product_route_consistency(
+                    direct_assessment,
+                    physical_generator_is_product=physical_generator_is_product,
+                    physical_generator_is_packaging=physical_generator_is_packaging,
+                    product_evidence_required=product_evidence_required,
+                    visibility_policy=policy,
+                )
+            )
+
     if reasons:
         log_stage_parse_failure("brand_physical", obj, reasons)
         raise StageParseError("brand_physical", reasons)
@@ -505,6 +529,7 @@ def parse_brand_physical_output(
         product_evidence_reason=_norm_text(obj.get("productEvidenceReason")),
         clearer_than_conventional_product_shot=bool(obj.get("clearerThanConventionalProductShot", True)),
         survives_product_removal=bool(obj.get("survivesProductRemoval", True)),
+        direct_product_route_assessment=direct_assessment,
     )
 
 
@@ -673,10 +698,10 @@ def assemble_builder1_campaign(
     server_mandatory_constraints: Any = None,
 ) -> Builder1SeriesPlan:
     """Deterministic final plan assembly — server injects authoritative fields."""
+    from engine.builder1_direct_product_route import resolve_visual_execution_route
     from engine.builder1_product_visibility import (
         ProductVisibilityPolicy,
         ProductVisibilitySource,
-        infer_visual_execution_route,
     )
     from engine.builder1_selected_creative_brief import SelectedCreativeBrief
     from engine.builder1_server_mandatory_constraints import validate_server_mandatory_constraints
@@ -815,10 +840,16 @@ def assemble_builder1_campaign(
             "sloganPlacementReason": getattr(graphic, "slogan_placement_reason", ""),
             "productEvidenceRequired": brand_physical.product_evidence_required,
             "productEvidenceReason": brand_physical.product_evidence_reason,
-            "visualExecutionRoute": infer_visual_execution_route(
+            "directProductRouteAssessment": (
+                brand_physical.direct_product_route_assessment.to_dict()
+                if brand_physical.direct_product_route_assessment is not None
+                else None
+            ),
+            "visualExecutionRoute": resolve_visual_execution_route(
                 physical_generator_is_product=brand_physical.physical_generator_is_product,
                 physical_generator_is_packaging=brand_physical.physical_generator_is_packaging,
                 product_evidence_required=brand_physical.product_evidence_required,
+                direct_product_route_assessment=brand_physical.direct_product_route_assessment,
             ).value,
             "adInternals": ad_internals,
         },

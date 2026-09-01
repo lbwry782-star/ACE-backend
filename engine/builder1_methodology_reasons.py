@@ -134,11 +134,15 @@ Exception: the product may participate only when a genuine physical property is 
 """.strip()
 
 TRANSFERRED_OBJECT_REASON = """
-Prefer a recognizable external object that performs the slogan's implied action.
+When the direct-product pre-route gate does not provide an equally strong product-led advertising mechanism,
+prefer a recognizable external object that performs the slogan's implied action.
 Why: a familiar object lets the viewer understand an abstract advantage through a physical law they already know.
-Failure prevented: an unrelated surreal object chosen merely because it is surprising.
-Instead: choose an object whose familiar identity makes the intended change immediately understandable. Surprise without clarity is not enough; relevance without surprise may be banal; the strongest object combines familiarity, clarity, and unexpected use. It need not belong to the product category.
-Selection test: "Does the viewer understand why this particular object is doing this particular action, or is the connection dependent on an explanation?"
+Failure prevented: an unrelated surreal object chosen merely because it is surprising — OR an external analogy chosen
+merely because a structural parallel exists when the product/category could carry the idea directly.
+Instead: choose an object whose familiar identity makes the intended change immediately understandable AND adds a
+specific persuasive capability the direct route cannot match equally well.
+Selection test: "Does the viewer understand why this particular object is doing this particular action, and why
+leaving the product domain was necessary?"
 """.strip()
 
 DO_NOT_SHOW_THING_ITSELF = """

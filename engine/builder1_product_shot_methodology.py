@@ -78,13 +78,17 @@ BUILDER1_CLARITY_OVER_CATEGORY = """
 CLARITY OVER CATEGORY LITERALNESS:
 Why: category literalness feels obvious but often fails to demonstrate the relative advantage.
 Failure prevented: choosing the product category object because it "matches" the brief without proving the perception.
-Instead: prefer the object that explains the intended perception most clearly — even from another physical world when the analogy is immediate.
+Instead: prefer the object that explains the intended perception most clearly — product/category first when it carries
+a genuine advertising mechanism; otherwise an external object when it adds a capability the direct route cannot match.
 Selection test: "Does this object make the intended perception understandable in seconds, regardless of category?"
-Do not reward category literalness by itself.
+Do not reward category literalness by itself — but do not reject a direct category route merely because an external analogy also exists.
 """.strip()
 
 BUILDER1_POPULAR_ANALOGY_FIRST = """
-POPULAR ANALOGY FIRST:
+POPULAR ANALOGY FIRST — scope: ONLY after ANALOGY_LED is already justified by the direct-product pre-route gate.
+This rule does NOT decide PRODUCT_LED vs ANALOGY_LED.
+
+Once external analogy is justified and ANALOGY_LED is the chosen route:
 When several physical analogies can express the same relative advantage, prefer the most widely understood
 object, action, cause/effect, or everyday situation — not the most technically precise or professionally elegant mechanism.
 Why: advertising clarity beats engineering sophistication.
@@ -93,19 +97,24 @@ Instead: magnet attracts, door opens, umbrella blocks rain, domino falls, key op
 Selection test: "Could a reasonably observant child describe what is physically happening in one simple sentence?"
 Do NOT hard-ban technical objects — use them only when instantly obvious without specialist knowledge.
 Never choose the popular object first and retrofit meaning afterward; derive it from the relative advantage.
+Never select an external analogy merely because a familiar popular analogy exists.
 """.strip()
 
 BUILDER1_PUBLIC_SIMPLICITY = """
 PUBLIC SIMPLICITY (child-comprehension heuristic — not childish art direction):
 Treat the viewer as general public without assuming technical, professional, academic, or industrial knowledge.
 The idea may be sophisticated; the physical action must be simple.
-Every planned analogy must satisfy two sentences:
+Every planned execution must satisfy two sentences:
 1) What is physically happening? — one short ordinary-language sentence.
 2) Why does that express the relative advantage? — one short ordinary-language sentence.
 If the explanation needs specialist vocabulary, invisible machinery, or three+ hidden symbolic mappings, reject or repair.
 immediateClarityReason must prove: what the viewer sees happen, that ordinary viewers understand that action,
 and how that action connects directly to the relative advantage — not merely that an effect or object is familiar.
 Do NOT prefer mechanisms because they sound engineered, systematic, scientific, or professional.
+
+Public Simplicity means the audience decodes the ad simply — it does NOT mean "use a simple everyday analogy."
+When the product/category is already simple and readable, replacing it with another simple domain (food, tray, etc.)
+does not improve Public Simplicity unless the transfer creates a clearly stronger advertising mechanism.
 """.strip()
 
 BUILDER1_DISTINCTIVENESS = """
@@ -124,13 +133,16 @@ Attractive but generically transferable candidates must not win.
 """.strip()
 
 BUILDER1_PRODUCT_EVIDENCE_EXCEPTION = """
-PRODUCT APPEARANCE IS AN EXCEPTION, NOT THE STARTING POINT:
-Why: showing the product tells what is sold but rarely proves why this option is better.
-Failure prevented: attractive product presentation mistaken for an advertising idea.
-Instead: use an external transferred object unless a genuine physical property of the product is necessary evidence for the selected advantage.
-Selection test: "Is the product required as proof of a specific physical property, or merely for recognition?"
+PRODUCT / DIRECT ROUTE MUST BE TESTED BEFORE EXTERNAL ANALOGY:
+Why: when the product or category is simple and the relative advantage can be shown directly, forcing an external
+domain adds translation cost without persuasive gain.
+Failure prevented: attractive product presentation mistaken for an advertising idea — AND unnecessary cross-domain
+analogy when the product/category itself can carry a genuine advertising mechanism.
+Instead: first test whether a PRODUCT_LED or PRODUCT_INTEGRATED_ANALOGY mechanism exists; only then consider external
+transferred objects when they add a specific capability the direct route cannot provide equally well.
+Selection test: "Can the product/category demonstrate the advantage through a real advertising mechanism — not merely recognition?"
 When productEvidenceRequired is true, state in productEvidenceReason why external proof is insufficient and what mechanism the product performs.
-Attractive presentation alone is not proof.
+Attractive presentation alone is not proof — but a meaningful product-led transformation is valid advertising.
 """.strip()
 
 BUILDER1_VISIBILITY_POLICY_METHODOLOGY = """
@@ -208,5 +220,9 @@ PHYSICAL_PRODUCT_SHOT_REJECTION_CODES = frozenset(
         "physical_missing_evidence_reason",
         "physical_literal_slogan_object",
         "physical_slogan_word_illustration",
+        "physical_route_assessment_missing",
+        "physical_route_assessment_inconsistent",
+        "physical_analogy_without_unique_gain",
+        "physical_unjustified_external_analogy",
     }
 )

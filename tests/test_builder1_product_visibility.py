@@ -186,6 +186,9 @@ class TestSeriesVisibilityEnforcement(unittest.TestCase):
         bp = _brand_physical()
         bp["physicalGeneratorIsProduct"] = True
         bp["campaignRationale"] = "Product form demonstrates reinforced shell"
+        from tests.builder1_test_helpers import direct_product_route_assessment_product_led
+
+        bp["directProductRouteAssessment"] = direct_product_route_assessment_product_led()
         ads = apply_creative_visibility_fields([{}], brand_physical=bp)
         self.assertTrue(ads[0]["productVisible"])
         self.assertTrue(ads[0]["productIsMainVisual"])
@@ -208,6 +211,9 @@ class TestSeriesVisibilityEnforcement(unittest.TestCase):
         bp = _brand_physical()
         bp["physicalGeneratorIsProduct"] = True
         bp["campaignRationale"] = "Shell geometry demonstrates reinforced durability"
+        from tests.builder1_test_helpers import direct_product_route_assessment_product_led
+
+        bp["directProductRouteAssessment"] = direct_product_route_assessment_product_led()
         ads = enforce_series_ad_visibility_fields(
             [{}],
             policy=ProductVisibilityPolicy.PRODUCT_VISIBILITY_REQUIRED,
@@ -245,9 +251,12 @@ class TestBrandPhysicalInvariants(unittest.TestCase):
         self.assertIn("physical_generator_is_product", str(ctx.exception))
 
     def test_creative_allows_product_with_rationale(self) -> None:
+        from tests.builder1_test_helpers import direct_product_route_assessment_product_led
+
         payload = _brand_physical()
         payload["physicalGeneratorIsProduct"] = True
         payload["campaignRationale"] = "Product shell geometry is the proof"
+        payload["directProductRouteAssessment"] = direct_product_route_assessment_product_led()
         result = parse_brand_physical_output(payload, visibility_policy="CREATIVE_DECISION")
         self.assertTrue(result.physical_generator_is_product)
 
