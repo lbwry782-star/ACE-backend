@@ -120,7 +120,6 @@ def video_job_create(
     extra_fields: Optional[Dict[str, str]] = None,
 ) -> None:
     """Persist job hash and push job_id onto the queue."""
-    r = get_redis()
     key = job_key(job_id)
     now = int(time.time())
     now_iso = _utc_now_iso()
@@ -144,6 +143,12 @@ def video_job_create(
         for field_key, field_value in extra_fields.items():
             if field_key and field_value is not None:
                 mapping[str(field_key)] = str(field_value)
+    if _use_memory_jobs:
+        _memory_job_hashes[job_id] = {k: str(v) for k, v in mapping.items()}
+        logger.info("VIDEO_JOB_REDIS_ENQUEUE jobId=%s", job_id)
+        logger.info("VIDEO_TIMING_STAGE_END stage=enqueue jobId=%s enqueued_ts=%s", job_id, now)
+        return
+    r = get_redis()
     pipe = r.pipeline()
     pipe.hset(key, mapping=mapping)
     pipe.expire(key, _JOB_TTL_SECONDS)
@@ -155,10 +160,15 @@ def video_job_create(
 
 def video_job_get(job_id: str) -> Optional[Dict[str, Any]]:
     """Return job dict for /api/video-status or None if missing/expired."""
-    r = get_redis()
-    data = r.hgetall(job_key(job_id))
-    if not data:
-        return None
+    if _use_memory_jobs:
+        data = _memory_job_hashes.get(job_id)
+        if not data:
+            return None
+    else:
+        r = get_redis()
+        data = r.hgetall(job_key(job_id))
+        if not data:
+            return None
     rp = (data.get("resolved_product_name") or "").strip()
     st = (data.get("status") or "running").strip()
     infra = (data.get("infrastructure_failure") or "").strip() == "1"

@@ -126,14 +126,18 @@ class TestBuilder2DurableResumeCore(unittest.TestCase):
         self.assertEqual(result.get("jobId"), job_id)
 
     def test_explicit_new_submission_creates_new_job_id(self) -> None:
-        with patch("engine.video_jobs_redis.get_redis") as redis_mock:
-            pipe = MagicMock()
-            redis_mock.return_value.pipeline.return_value = pipe
-            video_job_create("job-a", "Name", "desc", "https://example.com", extra_fields={"builder": "builder2"})
-            video_job_create("job-b", "Name", "desc", "https://example.com", extra_fields={"builder": "builder2"})
-        self.assertEqual(pipe.lpush.call_count, 2)
-        pushed_ids = [call.args[1] for call in pipe.lpush.call_args_list]
-        self.assertNotEqual(pushed_ids[0], pushed_ids[1])
+        disable_memory_jobs()
+        try:
+            with patch("engine.video_jobs_redis.get_redis") as redis_mock:
+                pipe = MagicMock()
+                redis_mock.return_value.pipeline.return_value = pipe
+                video_job_create("job-a", "Name", "desc", "https://example.com", extra_fields={"builder": "builder2"})
+                video_job_create("job-b", "Name", "desc", "https://example.com", extra_fields={"builder": "builder2"})
+            self.assertEqual(pipe.lpush.call_count, 2)
+            pushed_ids = [call.args[1] for call in pipe.lpush.call_args_list]
+            self.assertNotEqual(pushed_ids[0], pushed_ids[1])
+        finally:
+            enable_memory_jobs()
 
     def test_strategy_checkpoint_is_reused(self) -> None:
         state = new_tournament_state(job_id="job-strategy", language="he", active_prototype_ids=["closest"], random_seed="s")

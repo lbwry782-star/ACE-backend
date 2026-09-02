@@ -716,18 +716,39 @@ def generate_video():
         if not product_description:
             return jsonify({"ok": False, "error": "video_generation_failed"}), 200
         product_name = (payload.get("productName") or "").strip()
+        try:
+            from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
+            from engine.builder2_video_allowance import parse_target_video_count
+
+            target_video_count, target_err = parse_target_video_count(payload.get("targetVideoCount"))
+            if target_err:
+                return jsonify({"ok": False, "error": target_err}), 400
+            tournament_enabled = resolve_builder2_tournament_enabled()
+        except Exception:
+            target_video_count = 1
+            target_err = None
+            tournament_enabled = False
         base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
         job_id = str(uuid.uuid4())
         logger.info("VIDEO_TIMING_STAGE_START stage=request_received jobId=%s", job_id)
         extra_fields = None
+        video_allowance_id = ""
         try:
-            from engine.builder2_tournament_config import resolve_builder2_tournament_enabled
             from engine.builder2_job_ownership import ownership_fields_for_job_create
+            from engine.builder2_video_allowance import create_initial_allowance_and_job_fields
 
-            if resolve_builder2_tournament_enabled():
-                extra_fields = ownership_fields_for_job_create(request, payload)
+            if tournament_enabled:
+                extra_fields, video_allowance_id = create_initial_allowance_and_job_fields(
+                    request=request,
+                    payload=payload,
+                    target_video_count=target_video_count,
+                    job_id=job_id,
+                    product_name=product_name,
+                    product_description=product_description,
+                )
         except Exception:
             extra_fields = None
+            video_allowance_id = ""
         try:
             video_job_create(job_id, product_name, product_description, base, extra_fields=extra_fields)
         except Exception as e:
@@ -739,13 +760,20 @@ def generate_video():
             job_id,
             (_time.monotonic() - t_req0) * 1000.0,
         )
-        return jsonify(
-            {
-                "ok": True,
-                "jobId": job_id,
-                "status": "queued",
-            }
-        ), 200
+        response_body = {
+            "ok": True,
+            "jobId": job_id,
+            "status": "queued",
+        }
+        if video_allowance_id:
+            response_body.update(
+                {
+                    "videoAllowanceId": video_allowance_id,
+                    "targetVideoCount": target_video_count,
+                    "videoIndex": 1,
+                }
+            )
+        return jsonify(response_body), 200
     except Exception as e:
         logger.error("generate_video enqueue failed: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": "video_generation_failed"}), 200
@@ -804,6 +832,11 @@ def video_status():
             raw = video_job_get_raw(job_id) or {}
             if raw.get("builder") == "builder2" or raw.get("builder2ResumeContractVersion"):
                 out.update(build_builder2_status_payload(job_id, raw, request=request))
+            from engine.builder2_video_allowance import enrich_status_with_allowance
+
+            allowance_fields = enrich_status_with_allowance(job_id, raw, request=request)
+            if allowance_fields:
+                out.update(allowance_fields)
     except Exception as e:
         logger.debug("BUILDER2_STATUS_ENRICH_SKIP jobId=%s err=%s", job_id, e)
     if status == "interrupted":
@@ -868,6 +901,44 @@ def builder2_job_cancel(job_id: str):
     if not result.get("ok"):
         code = 404 if result.get("error") == "not_found" else 400 if result.get("error") == "not_builder2_job" else 400
         return jsonify(result), code
+    return jsonify(result), 200
+
+
+@app.route("/api/generate-video-next", methods=["POST"])
+def generate_video_next():
+    """Start Video #2 under an existing Builder2 video purchase allowance (same product snapshot)."""
+    if not redis_configured():
+        return jsonify({"ok": False, "error": "video_jobs_unconfigured"}), 503
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "error": "invalid_request"}), 400
+    if (payload.get("productName") or "").strip() or (payload.get("productDescription") or "").strip():
+        return jsonify({"ok": False, "error": "product_input_not_allowed"}), 400
+    video_allowance_id = (payload.get("videoAllowanceId") or "").strip()
+    if not video_allowance_id:
+        return jsonify({"ok": False, "error": "missing_param", "message": "videoAllowanceId is required"}), 400
+    base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
+    try:
+        from engine.builder2_video_allowance import request_generate_video_next
+
+        result = request_generate_video_next(
+            video_allowance_id=video_allowance_id,
+            request=request,
+            public_base_url=base,
+        )
+    except Exception as e:
+        logger.error("GENERATE_VIDEO_NEXT_FAILED videoAllowanceId=%s err=%s", video_allowance_id, e, exc_info=True)
+        return jsonify({"ok": False, "error": "generate_video_next_failed", "videoAllowanceId": video_allowance_id}), 500
+    if not result.get("ok"):
+        code = result.get("error") or "generate_video_next_failed"
+        status = 403 if code in {"ownership_mismatch", "ownership_required", "ownership_required_historical_job"} else 409 if code in {
+            "allowance_consumed",
+            "video_one_not_complete",
+            "target_video_count_not_two",
+        } else 404 if code == "allowance_not_found" else 400
+        return jsonify(result), status
     return jsonify(result), 200
 
 
@@ -2913,12 +2984,33 @@ def builder2_download_zip():
     if not isinstance(body, dict):
         return jsonify({"ok": False, "error": "invalid_input"}), 400
 
+    job_id = (body.get("jobId") or "").strip()
     video_url = (body.get("videoUrl") or "").strip()
     marketing_text = body.get("marketingText")
     if marketing_text is None:
         marketing_text = ""
     else:
         marketing_text = str(marketing_text)
+
+    if job_id:
+        from engine.builder2_video_allowance import resolve_zip_payload_from_job
+
+        resolved_url, resolved_text, zip_err = resolve_zip_payload_from_job(
+            job_id,
+            request=request,
+            supplied_video_url=video_url,
+            supplied_marketing_text=marketing_text,
+        )
+        if zip_err:
+            status = 403 if zip_err in {
+                "ownership_mismatch",
+                "ownership_required",
+                "ownership_required_historical_job",
+            } else 404 if zip_err == "not_found" else 409 if zip_err == "video_not_ready" else 400
+            return jsonify({"ok": False, "error": zip_err, "jobId": job_id}), status
+        video_url = resolved_url or ""
+        marketing_text = resolved_text
+
     if not video_url:
         return jsonify({"ok": False, "error": "missing_video_url"}), 400
 
