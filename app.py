@@ -729,12 +729,80 @@ def generate_video():
             target_err = None
             tournament_enabled = False
         base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
-        job_id = str(uuid.uuid4())
+
+        from engine.builder2_initial_generate_idempotency import (
+            begin_initial_generate_idempotency,
+            build_in_progress_response,
+            claim_initial_generate_enqueue,
+            extract_request_id,
+            fingerprint_initial_generate_video,
+            mark_initial_generate_enqueued,
+            replay_response_from_record,
+            validate_request_id_format,
+        )
+        from engine.builder2_job_ownership import extract_owner_context_from_request
+        from engine.video_jobs_redis import video_job_get_raw
+
+        request_id = extract_request_id(request)
+        if request_id and not validate_request_id_format(request_id):
+            return jsonify({"ok": False, "error": "builder2_initial_generate_request_id_invalid"}), 400
+
+        idem_key = ""
+        if request_id:
+            owner_ref = extract_owner_context_from_request(request).get("ownerContextRef") or ""
+            req_fingerprint = fingerprint_initial_generate_video(payload, target_video_count=target_video_count)
+            proposed_job_id = str(uuid.uuid4())
+            proposed_allowance_id = str(uuid.uuid4())
+            begin = begin_initial_generate_idempotency(
+                request_id=request_id,
+                owner_context_ref=owner_ref,
+                request_fingerprint=req_fingerprint,
+                job_id=proposed_job_id,
+                video_allowance_id=proposed_allowance_id if tournament_enabled else "",
+                target_video_count=target_video_count,
+            )
+            idem_key = begin.key
+            if begin.kind == "conflict":
+                return jsonify({"ok": False, "error": "builder2_idempotency_conflict"}), 409
+            job_id = str(begin.record.get("jobId") or proposed_job_id)
+            video_allowance_id = str(begin.record.get("videoAllowanceId") or proposed_allowance_id)
+            if begin.kind == "replay":
+                if begin.record.get("response"):
+                    return jsonify(replay_response_from_record(begin.record)), 200
+                return jsonify(build_in_progress_response(begin.record)), 200
+
+            claimed, should_replay, idem_record = claim_initial_generate_enqueue(idem_key)
+            if should_replay:
+                if idem_record.get("response"):
+                    return jsonify(replay_response_from_record(idem_record)), 200
+                return jsonify(build_in_progress_response(idem_record)), 200
+            if not claimed:
+                return jsonify(build_in_progress_response(idem_record or begin.record)), 200
+
+            if video_job_get_raw(job_id):
+                response_body = replay_response_from_record(idem_record or begin.record)
+                if not (idem_record or begin.record).get("response"):
+                    response_body = {
+                        "ok": True,
+                        "jobId": job_id,
+                        "status": "queued",
+                        "videoAllowanceId": video_allowance_id or None,
+                        "targetVideoCount": target_video_count,
+                        "videoIndex": 1,
+                    }
+                    if not tournament_enabled:
+                        response_body.pop("videoAllowanceId", None)
+                        response_body.pop("targetVideoCount", None)
+                        response_body.pop("videoIndex", None)
+                    mark_initial_generate_enqueued(idem_key, response=response_body)
+                return jsonify(response_body), 200
+        else:
+            job_id = str(uuid.uuid4())
+            video_allowance_id = ""
+
         logger.info("VIDEO_TIMING_STAGE_START stage=request_received jobId=%s", job_id)
         extra_fields = None
-        video_allowance_id = ""
         try:
-            from engine.builder2_job_ownership import ownership_fields_for_job_create
             from engine.builder2_video_allowance import create_initial_allowance_and_job_fields
 
             if tournament_enabled:
@@ -745,6 +813,7 @@ def generate_video():
                     job_id=job_id,
                     product_name=product_name,
                     product_description=product_description,
+                    video_allowance_id=video_allowance_id,
                 )
         except Exception:
             extra_fields = None
@@ -773,6 +842,8 @@ def generate_video():
                     "videoIndex": 1,
                 }
             )
+        if idem_key:
+            mark_initial_generate_enqueued(idem_key, response=response_body)
         return jsonify(response_body), 200
     except Exception as e:
         logger.error("generate_video enqueue failed: %s", e, exc_info=True)
@@ -888,6 +959,18 @@ def builder2_job_cancel(job_id: str):
         return jsonify({"ok": False, "error": "missing_param", "message": "jobId is required"}), 400
     try:
         from engine.builder2_job_cancellation import CANCEL_REASON_FRONTEND_REFRESH, request_builder2_job_cancellation
+        from engine.builder2_job_ownership import (
+            is_historical_job_without_ownership,
+            owner_context_present_in_job,
+            verify_owner_context,
+        )
+        from engine.video_jobs_redis import video_job_get_raw
+
+        raw = video_job_get_raw(jid)
+        if raw and owner_context_present_in_job(raw) and not is_historical_job_without_ownership(raw):
+            ok, reason = verify_owner_context(raw, request)
+            if not ok:
+                return jsonify({"ok": False, "error": reason or "ownership_required", "jobId": jid}), 403
 
         reason = CANCEL_REASON_FRONTEND_REFRESH
         if request.is_json:

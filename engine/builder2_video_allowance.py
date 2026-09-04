@@ -197,18 +197,20 @@ def create_initial_allowance_and_job_fields(
     job_id: str,
     product_name: str,
     product_description: str,
+    video_allowance_id: str = "",
 ) -> Tuple[Dict[str, str], str]:
     owner_fields = ownership_fields_for_job_create(request, payload)
     owner_ref = _clean(owner_fields.get("ownerContextRef"))
-    allowance_id = str(uuid.uuid4())
-    create_video_allowance(
-        video_allowance_id=allowance_id,
-        owner_context_ref=owner_ref,
-        target_video_count=target_video_count,
-        product_name=product_name,
-        product_description=product_description,
-        first_job_id=job_id,
-    )
+    allowance_id = _clean(video_allowance_id) or str(uuid.uuid4())
+    if get_video_allowance(allowance_id) is None:
+        create_video_allowance(
+            video_allowance_id=allowance_id,
+            owner_context_ref=owner_ref,
+            target_video_count=target_video_count,
+            product_name=product_name,
+            product_description=product_description,
+            first_job_id=job_id,
+        )
     owner_fields.update(allowance_job_fields(video_allowance_id=allowance_id, video_index=1))
     return owner_fields, allowance_id
 
