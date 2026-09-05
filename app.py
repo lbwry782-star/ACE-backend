@@ -111,6 +111,11 @@ from engine.builder1_zip import build_builder1_zip_bytes, build_builder1_zip_fro
 
 app = Flask(__name__)
 
+# Temporary iCount protocol diagnostic harness — remove after discovery (see engine/icount_diagnostic_routes.py).
+from engine.icount_diagnostic_routes import register_icount_diagnostic_routes
+
+register_icount_diagnostic_routes(app)
+
 # Configure logging early (handlers use logger at request time)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
