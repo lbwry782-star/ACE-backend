@@ -439,6 +439,15 @@ def run_builder1_campaign_pipeline(
     )
     brand_physical_dict = _brand_physical_to_dict(brand_physical)
 
+    from engine.builder1_literal_embodiment import scan_brand_physical_early_literal_product_embodiment
+
+    early_literal_product_reasons = scan_brand_physical_early_literal_product_embodiment(
+        product_name_resolved=product_name_resolved,
+        brand_physical=brand_physical,
+    )
+    if early_literal_product_reasons:
+        raise StageParseError("brand_physical", early_literal_product_reasons)
+
     graphic_user_prompt = build_graphic_system_user_prompt(
         product_description=normalized.product_description,
         detected_language=detected_language,

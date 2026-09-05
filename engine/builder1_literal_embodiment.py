@@ -10,7 +10,10 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
 from engine.builder1_integrity_diagnostics import record_integrity_evidence
 from engine.builder1_plan_spec import Builder1AdPlan, Builder1SeriesPlan
-from engine.builder1_product_identity_guard import extract_product_category_identities
+from engine.builder1_product_identity_guard import (
+    _exact_visual_object_is_product_name,
+    extract_product_category_identities,
+)
 
 BUILDER1_CONCEPT_FIRST_RULE = """
 CONCEPT FIRST — PRODUCT OPTIONAL — LITERAL OBJECT OPTIONAL:
@@ -887,6 +890,208 @@ def _detect_literal_slogan_illustration(
     return False
 
 
+def _resolve_literal_product_embodiment_context(plan_dict: Mapping[str, Any]) -> Dict[str, Any]:
+    internals = plan_dict.get("planningInternals")
+    if not isinstance(internals, dict):
+        internals = {}
+
+    is_product = bool(
+        plan_dict.get("physicalGeneratorIsProduct") or internals.get("physicalGeneratorIsProduct")
+    )
+    is_packaging = bool(
+        plan_dict.get("physicalGeneratorIsPackaging") or internals.get("physicalGeneratorIsPackaging")
+    )
+
+    assessment_raw = plan_dict.get("directProductRouteAssessment") or internals.get(
+        "directProductRouteAssessment"
+    )
+    route = ""
+    mechanism_available = False
+    if isinstance(assessment_raw, dict):
+        route = _norm(assessment_raw.get("recommendedRoute")).upper()
+        mechanism_available = bool(assessment_raw.get("productLedAdvertisingMechanismAvailable"))
+    elif assessment_raw is not None and hasattr(assessment_raw, "recommended_route"):
+        route_value = getattr(assessment_raw.recommended_route, "value", assessment_raw.recommended_route)
+        route = _norm(route_value).upper()
+        mechanism_available = bool(
+            getattr(assessment_raw, "product_led_advertising_mechanism_available", False)
+        )
+
+    return {
+        "is_product": is_product,
+        "is_packaging": is_packaging,
+        "route": route,
+        "mechanism_available": mechanism_available,
+    }
+
+
+def _product_name_mentioned_in_field(field_text: str, product_name: str) -> bool:
+    text = _norm(field_text)
+    name = _norm(product_name)
+    if not text or not name or len(name) < 4:
+        return False
+    return name.casefold() in text.casefold()
+
+
+def _record_literal_product_embodiment_evidence(
+    evidence_out: Optional[List[Dict[str, Any]]],
+    *,
+    field: str,
+    field_text: str,
+    product_name: str,
+    route: str,
+    is_product: bool,
+    is_packaging: bool,
+    branch: str,
+    embodiment_basis: str,
+    reason: str,
+) -> None:
+    record_integrity_evidence(
+        evidence_out,
+        code="literal_product_embodiment",
+        detector="literal_embodiment",
+        branch=branch,
+        level="plan",
+        field=field,
+        matched_terms=[product_name],
+        field_value_preview=field_text,
+        reason=reason,
+        extra={
+            "productIdentity": product_name,
+            "normalizedVisualObject": _norm(field_text),
+            "recommendedRoute": route or None,
+            "physicalGeneratorIsProduct": is_product,
+            "physicalGeneratorIsPackaging": is_packaging,
+            "embodimentBasis": embodiment_basis,
+        },
+    )
+
+
+def _detect_literal_product_embodiment(
+    plan_dict: Mapping[str, Any],
+    evidence_out: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
+    """Detect actual product embodiment — not mere product-name mention in copy/label prose."""
+    product_name = _norm(plan_dict.get("productNameResolved") or plan_dict.get("productName"))
+    if len(product_name) < 4:
+        return []
+
+    ctx = _resolve_literal_product_embodiment_context(plan_dict)
+    route = str(ctx["route"])
+    is_product = bool(ctx["is_product"])
+    is_packaging = bool(ctx["is_packaging"])
+    mechanism_available = bool(ctx["mechanism_available"])
+
+    transferred = _norm(plan_dict.get("transferredObject"))
+    physical = _norm(plan_dict.get("physicalGenerator"))
+
+    if route == "PRODUCT_LED" and is_product and not is_packaging and mechanism_available:
+        return []
+
+    reasons: List[str] = []
+    for field_name, field_text in (("transferredObject", transferred), ("physicalGenerator", physical)):
+        if not field_text:
+            continue
+
+        if _exact_visual_object_is_product_name(field_value=field_text, product_name=product_name):
+            _record_literal_product_embodiment_evidence(
+                evidence_out,
+                field=field_name,
+                field_text=field_text,
+                product_name=product_name,
+                route=route,
+                is_product=is_product,
+                is_packaging=is_packaging,
+                branch="exact_visual_object_is_product_name",
+                embodiment_basis="exact_visual_object_match",
+                reason=(
+                    "Physical/transferred object field equals the product name — the advertised product "
+                    "is the visual generator rather than typography or signage."
+                ),
+            )
+            reasons.append("literal_product_embodiment")
+            continue
+
+        if not _product_name_mentioned_in_field(field_text, product_name):
+            continue
+
+        if field_name == "physicalGenerator" and route == "ANALOGY_LED" and not is_product:
+            continue
+
+        if is_product and route in {"PRODUCT_LED", "PRODUCT_INTEGRATED_ANALOGY"}:
+            continue
+
+        if not route:
+            continue
+
+        if route == "ANALOGY_LED" and not is_product:
+            if field_name != "transferredObject":
+                continue
+            _record_literal_product_embodiment_evidence(
+                evidence_out,
+                field=field_name,
+                field_text=field_text,
+                product_name=product_name,
+                route=route,
+                is_product=is_product,
+                is_packaging=is_packaging,
+                branch="analogy_led_transferred_object_product_identity",
+                embodiment_basis="product_name_in_transferred_object",
+                reason=(
+                    "Product identity appears in transferredObject under ANALOGY_LED while "
+                    "physicalGeneratorIsProduct is false — external generator contract violated."
+                ),
+            )
+            reasons.append("literal_product_embodiment")
+            continue
+
+        if not is_product and route != "PRODUCT_LED":
+            _record_literal_product_embodiment_evidence(
+                evidence_out,
+                field=field_name,
+                field_text=field_text,
+                product_name=product_name,
+                route=route,
+                is_product=is_product,
+                is_packaging=is_packaging,
+                branch="forbidden_product_identity_in_object_field",
+                embodiment_basis="product_name_in_visual_object_descriptor",
+                reason=(
+                    "Product identity appears in the visual object descriptor while route/methodology "
+                    "does not approve direct product embodiment."
+                ),
+            )
+            reasons.append("literal_product_embodiment")
+
+    return list(dict.fromkeys(reasons))
+
+
+def scan_brand_physical_early_literal_product_embodiment(
+    *,
+    product_name_resolved: str,
+    brand_physical: Any,
+) -> List[str]:
+    """Deterministic early gate after brand_physical — skips ambiguous substring-only cases."""
+    assessment = getattr(brand_physical, "direct_product_route_assessment", None)
+    assessment_dict = (
+        assessment.to_dict()
+        if assessment is not None and hasattr(assessment, "to_dict")
+        else None
+    )
+    plan_dict: Dict[str, Any] = {
+        "productNameResolved": _norm(product_name_resolved)
+        or _norm(getattr(brand_physical, "product_name_resolved", "")),
+        "physicalGenerator": _norm(getattr(brand_physical, "physical_generator", "")),
+        "transferredObject": _norm(getattr(brand_physical, "transferred_object", "")),
+        "physicalGeneratorIsProduct": bool(getattr(brand_physical, "physical_generator_is_product", False)),
+        "physicalGeneratorIsPackaging": bool(
+            getattr(brand_physical, "physical_generator_is_packaging", False)
+        ),
+        "directProductRouteAssessment": assessment_dict,
+    }
+    return _detect_literal_product_embodiment(plan_dict)
+
+
 def scan_literal_embodiment_bias(
     plan_dict: Mapping[str, Any],
     evidence_out: Optional[List[Dict[str, Any]]] = None,
@@ -910,10 +1115,7 @@ def scan_literal_embodiment_bias(
         transferred,
     )
 
-    if product_name and len(product_name) >= 4:
-        for field_text in (transferred, physical):
-            if field_text and product_name.casefold() in field_text.casefold():
-                reasons.append("literal_product_embodiment")
+    reasons.extend(_detect_literal_product_embodiment(plan_dict, evidence_out))
 
     for identity in extract_product_category_identities(product_description=product_description):
         for field_text in (transferred, physical):
