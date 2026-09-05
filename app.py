@@ -111,10 +111,9 @@ from engine.builder1_zip import build_builder1_zip_bytes, build_builder1_zip_fro
 
 app = Flask(__name__)
 
-# Temporary iCount protocol diagnostic harness — remove after discovery (see engine/icount_diagnostic_routes.py).
-from engine.icount_diagnostic_routes import register_icount_diagnostic_routes
+from engine.ace_payment_routes import ace_payment_bp
 
-register_icount_diagnostic_routes(app)
+app.register_blueprint(ace_payment_bp)
 
 # Configure logging early (handlers use logger at request time)
 logging.basicConfig(level=logging.INFO)
@@ -282,6 +281,98 @@ def _builder1_verify_campaign_access(
     return session, None
 
 
+def _ace_security_guard_builder1_create(
+    *,
+    client_ad_count: Any,
+    campaign_id: str,
+    initial_create: bool = False,
+) -> tuple[Optional[int], Optional[str], Optional[tuple[Any, int]]]:
+    from engine.ace_payment_authorization import authorize_builder_create
+
+    purchased, checkout_id, _bind_code, deny = authorize_builder_create(
+        request=request,
+        builder="builder1",
+        client_quantity=client_ad_count,
+        resource_id=campaign_id,
+        resource_type="builder1_campaign",
+        initial_create=initial_create,
+    )
+    if deny is not None:
+        return None, None, deny
+    return purchased, checkout_id, None
+
+
+def _ace_security_peek_builder1_create(
+    *,
+    client_ad_count: Any,
+) -> tuple[Optional[int], Optional[str], Optional[str], Optional[tuple[Any, int]]]:
+    from engine.ace_payment_authorization import peek_builder_checkout_entitlement
+
+    return peek_builder_checkout_entitlement(
+        request=request,
+        builder="builder1",
+        client_quantity=client_ad_count,
+    )
+
+
+def _ace_security_guard_builder1_campaign(request_obj: Any, campaign_id: str) -> Optional[tuple[Any, int]]:
+    from engine.ace_payment_authorization import authorize_builder1_campaign_access
+
+    return authorize_builder1_campaign_access(request_obj, campaign_id)
+
+
+def _ace_security_guard_builder1_job(request_obj: Any, job: dict) -> Optional[tuple[Any, int]]:
+    campaign_id = str(job.get("campaignId") or "").strip()
+    if not campaign_id:
+        from engine.ace_payment_authorization import auth_reject
+
+        return auth_reject("ace_checkout_campaign_missing")
+    return _ace_security_guard_builder1_campaign(request_obj, campaign_id)
+
+
+def _ace_security_guard_builder2_create(
+    *,
+    client_video_count: Any,
+    video_allowance_id: str,
+) -> tuple[Optional[int], Optional[str], Optional[tuple[Any, int]]]:
+    from engine.ace_payment_authorization import authorize_builder_create
+
+    resource_id = (video_allowance_id or "").strip()
+    if not resource_id:
+        from engine.ace_payment_authorization import auth_reject
+
+        return None, None, auth_reject("ace_checkout_allowance_missing")
+    purchased, checkout_id, _bind_code, deny = authorize_builder_create(
+        request=request,
+        builder="builder2",
+        client_quantity=client_video_count,
+        resource_id=resource_id,
+        resource_type="builder2_allowance",
+        initial_create=True,
+    )
+    if deny is not None:
+        return None, None, deny
+    return purchased, checkout_id, None
+
+
+def _ace_security_guard_builder2_job(request_obj: Any, job: dict) -> Optional[tuple[Any, int]]:
+    from engine.ace_payment_authorization import authorize_builder2_job_access
+
+    return authorize_builder2_job_access(request_obj, job)
+
+
+def _ace_security_guard_builder2_allowance(request_obj: Any, allowance_id: str) -> Optional[tuple[Any, int]]:
+    from engine.ace_payment_authorization import authorize_builder2_allowance_access
+
+    return authorize_builder2_allowance_access(request_obj, allowance_id)
+
+
+def _ace_security_config_or_fail() -> Optional[tuple[Any, int]]:
+    from engine.ace_security_config import assert_protected_route_security_config
+
+    return assert_protected_route_security_config()
+
+
 def _builder1_persist_ad_artifact(
     *,
     campaign_id: str,
@@ -389,11 +480,9 @@ ALLOWED_ORIGINS = [
 
 
 def is_security_enabled() -> bool:
-    """Read ACE_SECURITY_ENABLED from env. Only 'false' disables; missing or 'true' = enabled. Default True."""
-    raw = (os.environ.get("ACE_SECURITY_ENABLED", "") or "").strip().lower()
-    if raw == "false":
-        return False
-    return True
+    from engine.ace_security_config import is_security_enabled as _ace_security_enabled
+
+    return _ace_security_enabled()
 
 
 def is_origin_allowed(origin: Optional[str]) -> bool:
@@ -413,7 +502,8 @@ def handle_preflight():
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = (
-                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Request-Id, X-ACE-Admin-Secret"
+                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Request-Id, "
+                "X-ACE-Admin-Secret, X-ACE-Checkout-Id"
             )
             response.headers["Access-Control-Max-Age"] = "86400"
             return response
@@ -430,15 +520,17 @@ def add_cors_headers(response):
             response.headers["Vary"] = "Origin"
             response.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
             response.headers["Access-Control-Allow-Headers"] = (
-                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Request-Id, X-ACE-Admin-Secret"
+                "Content-Type, Authorization, X-ACE-Batch-State, X-ACE-Request-Id, "
+                "X-ACE-Admin-Secret, X-ACE-Checkout-Id"
             )
             if "X-ACE-Batch-State" in response.headers:
                 response.headers["Access-Control-Expose-Headers"] = "X-ACE-Batch-State"
     return response
 
 
-if not is_security_enabled():
-    logger.info("ACE_SECURITY_ENABLED=false security_checks_bypassed=true")
+from engine.ace_security_config import log_security_config_on_startup
+
+log_security_config_on_startup()
 
 
 # -----------------------------------------------------------------------------
@@ -573,8 +665,12 @@ def internal_builder2_final_video_artifact():
 @app.route("/builder2-final-video/<token>", methods=["GET"], strict_slashes=False)
 def serve_builder2_final_video(token):
     """Serve Builder2 closure-inclusive final MP4 from durable disk-backed store."""
+    from engine.ace_payment_authorization import authorize_builder2_artifact_access
     from engine.builder2_final_video_store import get_builder2_final_video_path
 
+    sec_deny = authorize_builder2_artifact_access(request, token)
+    if sec_deny is not None:
+        return sec_deny
     path = get_builder2_final_video_path((token or "").strip())
     if not path or not path.is_file():
         from engine.builder2_final_video_web_storage import log_builder2_final_video_served
@@ -641,9 +737,13 @@ def internal_builder2_music_artifact():
 @app.route("/builder2-music-artifact/<token>", methods=["GET"], strict_slashes=False)
 def serve_builder2_music_artifact(token):
     """Serve Builder2 Lyria MP3 from durable disk-backed store."""
+    from engine.ace_payment_authorization import authorize_builder2_artifact_access
     from engine.builder2_music_artifact_store import get_builder2_music_artifact_path
     from engine.builder2_music_artifact_web_storage import log_builder2_music_artifact_served
 
+    sec_deny = authorize_builder2_artifact_access(request, token)
+    if sec_deny is not None:
+        return sec_deny
     path = get_builder2_music_artifact_path((token or "").strip())
     if not path or not path.is_file():
         log_builder2_music_artifact_served(stored_byte_count=0, request_accepted=False)
@@ -664,6 +764,11 @@ def serve_builder2_music_artifact(token):
 @app.route("/video-headline/<token>", methods=["GET"], strict_slashes=False)
 def serve_video_headline(token):
     """Serve ffmpeg-processed MP4 from disk-backed store (token from videoUrl); survives worker restart."""
+    from engine.ace_payment_authorization import authorize_builder2_artifact_access
+
+    sec_deny = authorize_builder2_artifact_access(request, token)
+    if sec_deny is not None:
+        return sec_deny
     path = get_headline_video_path((token or "").strip())
     if not path or not path.is_file():
         logger.info("VIDEO_HEADLINE_SERVE miss lookup=disk")
@@ -803,7 +908,27 @@ def generate_video():
                 return jsonify(response_body), 200
         else:
             job_id = str(uuid.uuid4())
-            video_allowance_id = ""
+            video_allowance_id = str(uuid.uuid4()) if tournament_enabled else ""
+
+        if not video_allowance_id and tournament_enabled:
+            video_allowance_id = str(uuid.uuid4())
+
+        config_err = _ace_security_config_or_fail()
+        if config_err is not None:
+            return config_err
+        if is_security_enabled():
+            if not tournament_enabled:
+                from engine.ace_payment_authorization import auth_reject
+
+                return auth_reject("ace_checkout_allowance_required")
+            purchased_video_count, _, sec_deny = _ace_security_guard_builder2_create(
+                client_video_count=payload.get("targetVideoCount"),
+                video_allowance_id=video_allowance_id,
+            )
+            if sec_deny is not None:
+                return sec_deny
+            if purchased_video_count is not None:
+                target_video_count = int(purchased_video_count)
 
         logger.info("VIDEO_TIMING_STAGE_START stage=request_received jobId=%s", job_id)
         extra_fields = None
@@ -895,6 +1020,13 @@ def video_status():
                     ownership_error,
                 )
                 return jsonify({"ok": False, "error": ownership_error, "jobId": job_id}), 403
+            config_err = _ace_security_config_or_fail()
+            if config_err is not None:
+                return config_err
+            if is_security_enabled():
+                sec_deny = _ace_security_guard_builder2_job(request, raw)
+                if sec_deny is not None:
+                    return sec_deny
     except Exception as e:
         logger.debug("BUILDER2_VIDEO_STATUS_OWNERSHIP_SKIP jobId=%s err=%s", job_id, e)
     logger.info("VIDEO_JOB_POLL jobId=%s status=%s", job_id, status)
@@ -976,6 +1108,13 @@ def builder2_job_cancel(job_id: str):
             ok, reason = verify_owner_context(raw, request)
             if not ok:
                 return jsonify({"ok": False, "error": reason or "ownership_required", "jobId": jid}), 403
+        config_err = _ace_security_config_or_fail()
+        if config_err is not None:
+            return config_err
+        if raw and is_security_enabled():
+            sec_deny = _ace_security_guard_builder2_job(request, raw)
+            if sec_deny is not None:
+                return sec_deny
 
         reason = CANCEL_REASON_FRONTEND_REFRESH
         if request.is_json:
@@ -1007,6 +1146,9 @@ def generate_video_next():
     video_allowance_id = (payload.get("videoAllowanceId") or "").strip()
     if not video_allowance_id:
         return jsonify({"ok": False, "error": "missing_param", "message": "videoAllowanceId is required"}), 400
+    sec_deny = _ace_security_guard_builder2_allowance(request, video_allowance_id)
+    if sec_deny is not None:
+        return sec_deny
     base = (os.environ.get("ACE_PUBLIC_BASE_URL") or "").strip().rstrip("/") or (request.url_root or "").rstrip("/")
     try:
         from engine.builder2_video_allowance import request_generate_video_next
@@ -1045,6 +1187,17 @@ def builder2_resume():
         return jsonify({"ok": False, "error": "missing_param", "message": "jobId is required"}), 400
     try:
         from engine.builder2_resume_service import request_builder2_resume
+        from engine.video_jobs_redis import video_job_get_raw
+
+        config_err = _ace_security_config_or_fail()
+        if config_err is not None:
+            return config_err
+        if is_security_enabled():
+            raw = video_job_get_raw(job_id) or {}
+            if raw:
+                sec_deny = _ace_security_guard_builder2_job(request, raw)
+                if sec_deny is not None:
+                    return sec_deny
 
         result = request_builder2_resume(job_id, request=request)
         status_code = 200 if result.get("ok") else 403 if result.get("error") in {
@@ -2303,20 +2456,6 @@ def builder1_generate():
         )
     raw_ad_count = body.get("adCount")
     logger.info("BUILDER1_AD_COUNT_RAW value=%r", raw_ad_count)
-    try:
-        ad_count = normalize_ad_count(raw_ad_count)
-    except Builder1InputError:
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "invalid_ad_count",
-                    "message": "adCount must be an integer from 2 through 4",
-                }
-            ),
-            200,
-        )
-    logger.info("BUILDER1_AD_COUNT_NORMALIZED value=%s", ad_count)
 
     from engine.builder1_request_idempotency import (
         OPERATION_INITIAL_GENERATE,
@@ -2325,6 +2464,33 @@ def builder1_generate():
 
     job_id = str(uuid.uuid4())
     campaign_id = str(uuid.uuid4())
+
+    purchased_ad_count, bound_campaign_id, _checkout_id, peek_deny = _ace_security_peek_builder1_create(
+        client_ad_count=raw_ad_count,
+    )
+    if peek_deny is not None:
+        return peek_deny
+    if bound_campaign_id:
+        campaign_id = bound_campaign_id
+    if purchased_ad_count is not None:
+        ad_count = int(purchased_ad_count)
+        logger.info("BUILDER1_AD_COUNT_FROM_ENTITLEMENT value=%s", ad_count)
+    else:
+        try:
+            ad_count = normalize_ad_count(raw_ad_count)
+        except Builder1InputError:
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "error": "invalid_ad_count",
+                        "message": "adCount must be an integer from 2 through 4",
+                    }
+                ),
+                200,
+            )
+        logger.info("BUILDER1_AD_COUNT_NORMALIZED value=%s", ad_count)
+
     fingerprint = fingerprint_initial_generate(body, ad_count=ad_count)
     early, idem_key, idem_record, job_id, campaign_id = _builder1_idempotency_begin(
         operation=OPERATION_INITIAL_GENERATE,
@@ -2334,6 +2500,16 @@ def builder1_generate():
     )
     if early is not None:
         return early
+
+    purchased_ad_count, _checkout_id, sec_deny = _ace_security_guard_builder1_create(
+        client_ad_count=raw_ad_count,
+        campaign_id=campaign_id,
+        initial_create=True,
+    )
+    if sec_deny is not None:
+        return sec_deny
+    if purchased_ad_count is not None:
+        ad_count = int(purchased_ad_count)
 
     ownership_fields = _builder1_ownership_fields_for_create(body)
     from engine.builder1_job_planning_request import build_planning_request_snapshot
@@ -2440,6 +2616,9 @@ def builder1_resume_planning():
     if deny is not None:
         return deny
     assert job is not None
+    sec_deny = _ace_security_guard_builder1_job(request, job)
+    if sec_deny is not None:
+        return sec_deny
 
     from engine.builder1_planning_resume import (
         assess_builder1_planning_resume,
@@ -2516,6 +2695,9 @@ def builder1_retry_image():
     _, deny = _builder1_verify_campaign_access(campaign_id)
     if deny is not None:
         return deny
+    sec_deny = _ace_security_guard_builder1_campaign(request, campaign_id)
+    if sec_deny is not None:
+        return sec_deny
     try:
         assert_campaign_not_cancelled(campaign_id)
     except CampaignStoreError as e:
@@ -2640,6 +2822,9 @@ def builder1_repair_physical():
     _, deny = _builder1_verify_campaign_access(campaign_id)
     if deny is not None:
         return deny
+    sec_deny = _ace_security_guard_builder1_campaign(request, campaign_id)
+    if sec_deny is not None:
+        return sec_deny
     try:
         assert_campaign_not_cancelled(campaign_id)
     except CampaignStoreError as e:
@@ -2739,6 +2924,9 @@ def builder1_generate_next():
     _, deny = _builder1_verify_campaign_access(campaign_id)
     if deny is not None:
         return deny
+    sec_deny = _ace_security_guard_builder1_campaign(request, campaign_id)
+    if sec_deny is not None:
+        return sec_deny
 
     try:
         expected_next_index = int(body.get("expectedNextIndex"))
@@ -2949,6 +3137,10 @@ def builder1_job_cancel(job_id: str):
     job, deny = _builder1_verify_job_access(jid)
     if deny is not None:
         return deny
+    assert job is not None
+    sec_deny = _ace_security_guard_builder1_job(request, job)
+    if sec_deny is not None:
+        return sec_deny
     try:
         from engine.builder1_job_cancellation import CANCEL_REASON_FRONTEND_REFRESH, request_builder1_job_cancellation
 
@@ -2969,8 +3161,12 @@ def builder1_job_cancel(job_id: str):
 
 @app.route("/api/builder1-image-artifact/<token>", methods=["GET"])
 def builder1_image_artifact(token: str):
+    from engine.ace_payment_authorization import authorize_builder1_artifact_access
     from engine.builder1_image_artifact_store import get_builder1_image_artifact_path
 
+    sec_deny = authorize_builder1_artifact_access(request, token)
+    if sec_deny is not None:
+        return sec_deny
     path = get_builder1_image_artifact_path((token or "").strip())
     if path is None:
         return jsonify({"ok": False, "error": "not_found"}), 404
@@ -2987,6 +3183,9 @@ def builder1_status():
     if deny is not None:
         return deny
     assert job is not None
+    sec_deny = _ace_security_guard_builder1_job(request, job)
+    if sec_deny is not None:
+        return sec_deny
     status = (job.get("status") or "running").strip()
     logger.info("BUILDER1_JOB_STATUS jobId=%s status=%s", job_id, status)
     if status == "cancelled":
@@ -3082,6 +3281,17 @@ def builder2_download_zip():
 
     if job_id:
         from engine.builder2_video_allowance import resolve_zip_payload_from_job
+        from engine.video_jobs_redis import video_job_get_raw
+
+        config_err = _ace_security_config_or_fail()
+        if config_err is not None:
+            return config_err
+        if is_security_enabled():
+            raw = video_job_get_raw(job_id) or {}
+            if raw:
+                sec_deny = _ace_security_guard_builder2_job(request, raw)
+                if sec_deny is not None:
+                    return sec_deny
 
         resolved_url, resolved_text, zip_err = resolve_zip_payload_from_job(
             job_id,
@@ -3136,6 +3346,16 @@ def download_video_zip():
     if not video_url:
         logger.info("DOWNLOAD_VIDEO_ZIP_MISSING_VIDEO_URL")
         return jsonify({"ok": False, "error": "missing_video_url"}), 400
+
+    from engine.ace_payment_authorization import authorize_builder2_video_url_for_download
+
+    config_err = _ace_security_config_or_fail()
+    if config_err is not None:
+        return config_err
+    if is_security_enabled():
+        sec_deny = authorize_builder2_video_url_for_download(request, video_url)
+        if sec_deny is not None:
+            return sec_deny
 
     video_bytes = b""
     local_match = re.search(r"/api/video-headline/([a-f0-9]{32})(?:[/?#]|$)", video_url)
@@ -3301,6 +3521,9 @@ def builder1_download_zip():
         _, deny = _builder1_verify_campaign_access(campaign_id)
         if deny is not None:
             return deny
+        sec_deny = _ace_security_guard_builder1_campaign(request, campaign_id)
+        if sec_deny is not None:
+            return sec_deny
 
     try:
         zip_bytes, download_name = build_builder1_zip_from_request(body)

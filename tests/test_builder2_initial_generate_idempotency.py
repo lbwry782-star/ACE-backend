@@ -55,6 +55,7 @@ class Builder2IdempotencyTestCase(unittest.TestCase):
         clear_memory_idempotency_for_tests()
         os.environ["BUILDER2_TOURNAMENT_ENABLED"] = "true"
         os.environ["REDIS_URL"] = "redis://test"
+        os.environ["ACE_SECURITY_ENABLED"] = "false"
         from app import app
 
         self.app = app
@@ -68,6 +69,7 @@ class Builder2IdempotencyTestCase(unittest.TestCase):
         disable_memory_idempotency_store()
         clear_memory_allowance_store_for_tests()
         clear_memory_idempotency_for_tests()
+        os.environ.pop("ACE_SECURITY_ENABLED", None)
 
     def _post_generate(
         self,
