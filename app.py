@@ -3516,11 +3516,19 @@ def builder1_download_zip():
         return jsonify({"ok": False, "error": "invalid_input"}), 400
 
     scope = str(body.get("scope") or "campaign").strip().lower()
+    campaign_id = str(body.get("campaignId") or "").strip()
+
     if scope == "campaign_server":
-        campaign_id = str(body.get("campaignId") or "").strip()
         _, deny = _builder1_verify_campaign_access(campaign_id)
         if deny is not None:
             return deny
+
+    from engine.ace_payment_authorization import auth_reject
+    from engine.ace_security_config import is_security_enabled, is_security_explicitly_disabled
+
+    if not is_security_explicitly_disabled():
+        if is_security_enabled() and not campaign_id:
+            return auth_reject("ace_checkout_campaign_missing")
         sec_deny = _ace_security_guard_builder1_campaign(request, campaign_id)
         if sec_deny is not None:
             return sec_deny
