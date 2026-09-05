@@ -5,15 +5,20 @@ Run: python -m unittest tests.test_icount_diagnostic_harness -v
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
 import unittest
+from unittest.mock import patch
 
 from engine.icount_diagnostic_harness import (
     SYNTHETIC_MARKER_PREFIX,
     build_correlation_hints,
     build_observation_report,
+    log_icount_diagnostic_observation,
     sanitize_field_map,
     sanitize_headers,
+    sanitize_icount_secret_header_value,
     sanitize_scalar_value,
     validate_diagnostic_nonce,
 )
@@ -51,6 +56,70 @@ class TestSanitization(unittest.TestCase):
     def test_cookie_header_redacted(self) -> None:
         _, headers = sanitize_headers({"Cookie": "session=abc"})
         self.assertEqual(headers[0]["value"]["redacted"], True)
+
+    def test_icount_secret_header_logs_hash_metadata_only(self) -> None:
+        raw_secret = "simulator-shared-secret-value-32c"
+        expected_sha256 = hashlib.sha256(raw_secret.encode("utf-8")).hexdigest()
+        _, headers = sanitize_headers({"X-Icount-Secret": raw_secret})
+        entry = headers[0]
+        self.assertEqual(entry["name"], "X-Icount-Secret")
+        self.assertEqual(
+            entry["value"],
+            {
+                "type": "string",
+                "length": len(raw_secret),
+                "sha256": expected_sha256,
+            },
+        )
+        serialized = json.dumps(headers)
+        self.assertNotIn(raw_secret, serialized)
+        self.assertEqual(sanitize_icount_secret_header_value(raw_secret), entry["value"])
+
+    def test_icount_secret_header_case_insensitive_name(self) -> None:
+        raw_secret = "abc123"
+        _, headers = sanitize_headers({"X-ICOUNT-SECRET": raw_secret})
+        self.assertIn("sha256", headers[0]["value"])
+        self.assertNotIn(raw_secret, json.dumps(headers))
+
+    def test_icount_secret_header_missing_is_safe(self) -> None:
+        names, headers = sanitize_headers({"Content-Type": "application/x-www-form-urlencoded"})
+        self.assertNotIn("X-Icount-Secret", names)
+        self.assertEqual(headers, [{"name": "Content-Type"}])
+
+    def test_icount_secret_empty_header_value(self) -> None:
+        empty_sha256 = hashlib.sha256(b"").hexdigest()
+        _, headers = sanitize_headers({"X-Icount-Secret": ""})
+        self.assertEqual(
+            headers[0]["value"],
+            {"type": "string", "length": 0, "sha256": empty_sha256},
+        )
+
+    def test_icount_secret_not_applied_to_other_secret_headers(self) -> None:
+        _, headers = sanitize_headers({"X-Other-Secret": "should-not-hash"})
+        self.assertEqual(headers[0], {"name": "X-Other-Secret"})
+
+
+class TestIcountSecretLogging(unittest.TestCase):
+    def test_log_payload_never_contains_raw_icount_secret(self) -> None:
+        raw_secret = "ipn-simulator-secret-do-not-log"
+        report = build_observation_report(
+            channel="IPN",
+            diagnostic_nonce="testnonce01",
+            method="POST",
+            content_type="application/x-www-form-urlencoded",
+            query_fields={},
+            form_fields={"amount": "45"},
+            json_payload=None,
+            header_map={"X-Icount-Secret": raw_secret},
+        )
+        with self.assertLogs("engine.icount_diagnostic_harness", level="INFO") as captured:
+            log_icount_diagnostic_observation(report)
+        combined_log = "\n".join(record.getMessage() for record in captured.records)
+        self.assertNotIn(raw_secret, combined_log)
+        self.assertIn(
+            hashlib.sha256(raw_secret.encode("utf-8")).hexdigest(),
+            combined_log,
+        )
 
 
 class TestCorrelationHints(unittest.TestCase):

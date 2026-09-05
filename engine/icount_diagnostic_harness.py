@@ -72,6 +72,8 @@ _HEADER_VALUE_METADATA_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"digest", re.I),
 )
 
+_ICOUNT_SECRET_HEADER_CANONICAL = "x-icount-secret"
+
 # Correlation hint buckets — field NAME presence only (no undocumented semantics).
 _CORRELATION_BUCKETS: Dict[str, Tuple[re.Pattern[str], ...]] = {
     "transactionIdFieldNames": (
@@ -129,6 +131,20 @@ def validate_diagnostic_nonce(nonce: str) -> bool:
 
 def _sha256_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _is_icount_secret_header(name: str) -> bool:
+    return str(name or "").casefold() == _ICOUNT_SECRET_HEADER_CANONICAL
+
+
+def sanitize_icount_secret_header_value(value: Any) -> Dict[str, Any]:
+    """Return type/length/sha256 for X-Icount-Secret — never the raw value."""
+    raw = str(value or "")
+    return {
+        "type": "string",
+        "length": len(raw),
+        "sha256": _sha256_digest(raw),
+    }
 
 
 def _value_type_name(value: Any) -> str:
@@ -231,7 +247,9 @@ def sanitize_headers(headers: Mapping[str, str]) -> Tuple[List[str], List[Dict[s
     for name in names:
         entry: Dict[str, Any] = {"name": name}
         lower = name.casefold()
-        if lower in {"cookie", "set-cookie"}:
+        if _is_icount_secret_header(name):
+            entry["value"] = sanitize_icount_secret_header_value(headers.get(name))
+        elif lower in {"cookie", "set-cookie"}:
             entry["value"] = {"redacted": True, "reason": "cookie_header"}
         elif any(pattern.search(name) for pattern in _HEADER_VALUE_METADATA_PATTERNS):
             raw = str(headers.get(name) or "")
