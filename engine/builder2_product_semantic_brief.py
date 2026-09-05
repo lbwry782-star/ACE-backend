@@ -12,6 +12,7 @@ import re
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 BUILDER2_PRODUCT_SEMANTIC_BRIEF_VERSION = "builder2_product_semantic_brief_v1"
+BUILDER2_PRODUCT_SEMANTIC_BRIEF_V2 = "builder2_product_semantic_brief_v2"
 
 # Public-facing Creator fields that may assert factual product capabilities.
 CREATOR_CLAIM_BEARING_FIELDS: Tuple[str, ...] = (
@@ -200,10 +201,15 @@ def build_deterministic_product_semantic_brief(
     allowed_capabilities = list(audit.get("explicitCapabilitiesSupplied") or [])
     restricted = [key for key in DISPUTED_CAPABILITY_KEYS if key not in allowed_capabilities]
     licensed = _default_licensed_implications(blob=blob)
+    essential = list(explicit_facts)
     return {
-        "briefVersion": BUILDER2_PRODUCT_SEMANTIC_BRIEF_VERSION,
+        "briefVersion": BUILDER2_PRODUCT_SEMANTIC_BRIEF_V2,
         "sourceDescription": _clean(product_description),
         "explicitFacts": explicit_facts,
+        "essentialFacts": essential,
+        "supportingEvidence": [],
+        "mandatoryConstraints": [],
+        "discardedFacts": [],
         "licensedImplications": licensed,
         "restrictedCapabilities": restricted,
         "allowedCapabilities": allowed_capabilities,
@@ -268,16 +274,36 @@ def merge_product_semantic_brief(
         return deterministic
     merged = copy.deepcopy(deterministic)
     llm_facts = _normalize_fact_items(llm_brief.get("explicitFacts"))
+    llm_essential = _normalize_fact_items(llm_brief.get("essentialFacts"))
+    llm_supporting = _normalize_fact_items(llm_brief.get("supportingEvidence"))
+    llm_mandatory = _normalize_fact_items(llm_brief.get("mandatoryConstraints"))
+    llm_discarded = _normalize_fact_items(llm_brief.get("discardedFacts"))
     llm_implications = _normalize_implication_items(llm_brief.get("licensedImplications"))
-    if llm_facts:
+    if llm_essential:
+        merged["essentialFacts"] = llm_essential
+        merged["explicitFacts"] = llm_essential
+    elif llm_facts:
         merged["explicitFacts"] = llm_facts
+        merged["essentialFacts"] = llm_facts
+    if llm_supporting:
+        merged["supportingEvidence"] = llm_supporting
+    if llm_mandatory:
+        merged["mandatoryConstraints"] = llm_mandatory
+    if llm_discarded:
+        merged["discardedFacts"] = llm_discarded
     if llm_implications:
         by_id = {item["id"]: item for item in merged.get("licensedImplications") or []}
         for item in llm_implications:
             by_id[item["id"]] = item
         merged["licensedImplications"] = list(by_id.values())
     merged["sourceDescription"] = _clean(product_description) or merged["sourceDescription"]
-    merged["briefVersion"] = BUILDER2_PRODUCT_SEMANTIC_BRIEF_VERSION
+    from engine.builder2_fact_selection import normalize_fact_selection_on_brief
+
+    merged = normalize_fact_selection_on_brief(merged, product_description=product_description)
+    if merged.get("essentialFacts"):
+        merged["briefVersion"] = BUILDER2_PRODUCT_SEMANTIC_BRIEF_V2
+    else:
+        merged["briefVersion"] = BUILDER2_PRODUCT_SEMANTIC_BRIEF_VERSION
     return merged
 
 
@@ -291,7 +317,7 @@ def get_product_semantic_brief(
     block = strategy_foundation.get("strategyEvidenceGrounding")
     if isinstance(block, dict):
         brief = block.get("productSemanticBrief")
-        if isinstance(brief, dict) and brief.get("explicitFacts"):
+        if isinstance(brief, dict) and (brief.get("explicitFacts") or brief.get("essentialFacts")):
             return brief
     name = _clean(product_name) or _clean(strategy_foundation.get("productNameResolved"))
     description = _clean(product_description)
@@ -315,12 +341,12 @@ def validate_product_semantic_brief(
         raise ValueError("productSemanticBrief must be an object")
     if not _clean(brief.get("briefVersion")):
         raise ValueError("productSemanticBrief.briefVersion required")
-    facts = brief.get("explicitFacts")
+    facts = brief.get("essentialFacts") or brief.get("explicitFacts")
     if not isinstance(facts, list) or not facts:
-        raise ValueError("productSemanticBrief.explicitFacts must be a non-empty array")
+        raise ValueError("productSemanticBrief.essentialFacts must be a non-empty array")
     for fact in facts:
         if not isinstance(fact, dict) or not _clean(fact.get("text")):
-            raise ValueError("productSemanticBrief.explicitFacts entries require text")
+            raise ValueError("productSemanticBrief.essentialFacts entries require text")
     source = _clean(brief.get("sourceDescription"))
     if product_description and source and source != _clean(product_description):
         raise ValueError("productSemanticBrief.sourceDescription must match product input")
@@ -408,11 +434,12 @@ def find_grounding_violations(
     return violations
 
 
-def summarize_brief_for_prompt(brief: Dict[str, Any]) -> str:
-    import json
-
-    payload = {
-        "explicitFacts": brief.get("explicitFacts") or [],
+def summarize_brief_for_creative_prompt(brief: Dict[str, Any]) -> Dict[str, Any]:
+    """Creative-stage buckets only — excludes discardedFacts and sourceDescription."""
+    return {
+        "essentialFacts": brief.get("essentialFacts") or brief.get("explicitFacts") or [],
+        "supportingEvidence": brief.get("supportingEvidence") or [],
+        "mandatoryConstraints": brief.get("mandatoryConstraints") or [],
         "licensedImplications": [
             {"id": item.get("id"), "text": item.get("text")}
             for item in (brief.get("licensedImplications") or [])
@@ -421,7 +448,12 @@ def summarize_brief_for_prompt(brief: Dict[str, Any]) -> str:
         "restrictedCapabilities": brief.get("restrictedCapabilities") or [],
         "allowedCapabilities": brief.get("allowedCapabilities") or [],
     }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def summarize_brief_for_prompt(brief: Dict[str, Any]) -> str:
+    import json
+
+    return json.dumps(summarize_brief_for_creative_prompt(brief), ensure_ascii=False, indent=2)
 
 
 def uri_lev_regression_description() -> str:

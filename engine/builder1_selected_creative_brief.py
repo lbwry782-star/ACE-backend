@@ -15,11 +15,12 @@ from engine.builder1_staged_parsers import StageParseError, coerce_json_dict
 
 SELECTED_CREATIVE_BRIEF_MAX_ITEMS = 12
 SELECTED_CREATIVE_BRIEF_MAX_ITEM_CHARS = 500
-SELECTED_CREATIVE_BRIEF_LIST_KEYS = (
+SELECTED_CREATIVE_BRIEF_CREATIVE_LIST_KEYS = (
     "essentialFacts",
     "supportingEvidence",
     "mandatoryConstraints",
 )
+SELECTED_CREATIVE_BRIEF_LIST_KEYS = SELECTED_CREATIVE_BRIEF_CREATIVE_LIST_KEYS
 
 
 @dataclass(frozen=True)
@@ -27,8 +28,18 @@ class SelectedCreativeBrief:
     essential_facts: List[str] = field(default_factory=list)
     supporting_evidence: List[str] = field(default_factory=list)
     mandatory_constraints: List[str] = field(default_factory=list)
+    discarded_facts: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        return {
+            "essentialFacts": list(self.essential_facts),
+            "supportingEvidence": list(self.supporting_evidence),
+            "mandatoryConstraints": list(self.mandatory_constraints),
+            "discardedFacts": list(self.discarded_facts),
+        }
+
+    def to_creative_dict(self) -> Dict[str, Any]:
+        """Creative-stage buckets only — excludes discardedFacts."""
         return {
             "essentialFacts": list(self.essential_facts),
             "supportingEvidence": list(self.supporting_evidence),
@@ -41,6 +52,7 @@ class SelectedCreativeBrief:
             essential_facts=list(raw.get("essentialFacts") or []),
             supporting_evidence=list(raw.get("supportingEvidence") or []),
             mandatory_constraints=list(raw.get("mandatoryConstraints") or []),
+            discarded_facts=list(raw.get("discardedFacts") or []),
         )
 
 
@@ -62,11 +74,12 @@ def selected_creative_brief_json_schema() -> Dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": list(SELECTED_CREATIVE_BRIEF_LIST_KEYS),
+        "required": list(SELECTED_CREATIVE_BRIEF_CREATIVE_LIST_KEYS),
         "properties": {
             "essentialFacts": {**list_schema, "minItems": 1},
             "supportingEvidence": list_schema,
             "mandatoryConstraints": list_schema,
+            "discardedFacts": list_schema,
         },
     }
 
@@ -106,6 +119,8 @@ def parse_selected_creative_brief(
     raw_payload: object,
     *,
     required: bool = True,
+    product_description: str = "",
+    strict_negative_selection: bool = False,
 ) -> SelectedCreativeBrief:
     if raw_payload is None:
         if required:
@@ -133,11 +148,31 @@ def parse_selected_creative_brief(
         field_name="mandatoryConstraints",
         prefix=prefix,
     )
-    return SelectedCreativeBrief(
+    discarded_raw = obj.get("discardedFacts")
+    if discarded_raw is None:
+        discarded: List[str] = []
+    else:
+        discarded = _validate_brief_list(
+            discarded_raw,
+            field_name="discardedFacts",
+            prefix=prefix,
+        )
+    brief = SelectedCreativeBrief(
         essential_facts=essential,
         supporting_evidence=supporting,
         mandatory_constraints=mandatory,
+        discarded_facts=discarded,
     )
+    from engine.builder1_negative_selection import validate_negative_selection
+
+    selection_reasons = validate_negative_selection(
+        brief,
+        product_description=product_description,
+        strict=strict_negative_selection,
+    )
+    if selection_reasons:
+        raise StageParseError("strategy_slogan_stage", selection_reasons)
+    return brief
 
 
 def selected_creative_brief_from_planning_internals(
@@ -149,7 +184,7 @@ def selected_creative_brief_from_planning_internals(
     if not isinstance(raw, dict):
         return None
     try:
-        return parse_selected_creative_brief(raw, required=True)
+        return parse_selected_creative_brief(raw, required=True, strict_negative_selection=False)
     except StageParseError:
         return None
 
@@ -189,12 +224,14 @@ def format_product_identity_block(*, product_name_resolved: str, brief: Selected
 
 
 def format_graphic_creative_brief_block(brief: Optional[SelectedCreativeBrief]) -> str:
-    if brief is None or not brief.mandatory_constraints:
+    if brief is None:
         return ""
-    from engine.builder1_server_mandatory_constraints import format_effective_mandatory_constraints_block
+    from engine.builder1_post_selection_brief_isolation import (
+        format_post_selection_creative_input_block,
+    )
 
-    return format_effective_mandatory_constraints_block(brief.mandatory_constraints)
+    return format_post_selection_creative_input_block(brief)
 
 
 def format_brief_for_prompt_json(brief: SelectedCreativeBrief) -> str:
-    return json.dumps(brief.to_dict(), ensure_ascii=False, indent=2)
+    return json.dumps(brief.to_creative_dict(), ensure_ascii=False, indent=2)

@@ -4,7 +4,7 @@ Builder2 tournament prompt builders — isolated from legacy video_planning prom
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from engine.builder2_creator_core_contract import build_creator_required_keys_prompt_text
 from engine.builder2_methodology_contract import (
@@ -23,11 +23,19 @@ from engine.builder2_judge_core_contract import (
     build_judge_factual_grounding_prompt_text,
     build_judge_required_keys_prompt_text,
     resolve_creator_verbal_decision,
+    _build_judge_fusion_prompt_text,
 )
 from engine.builder2_prototypes import Builder2Prototype
 from engine.builder2_runway_config import resolve_builder2_video_duration_seconds
 from engine.builder2_strategy_identity import expected_strategy_foundation_id
 from engine.builder2_product_semantic_brief import format_product_description_data_block, summarize_brief_for_prompt
+from engine.builder2_post_strategy_isolation import (
+    format_post_strategy_product_input_block,
+    post_strategy_isolation_required,
+    strategy_json_for_post_strategy_prompt,
+)
+from engine.builder2_fact_selection import NEGATIVE_SELECTION_METHODOLOGY
+from engine.builder2_essential_fact_fusion import BUILDER2_ESSENTIAL_FACT_FUSION_METHODOLOGY
 from engine.builder2_tournament_contracts import (
     CANDIDATE_SCHEMA_VERSION,
     JUDGMENT_SCHEMA_VERSION,
@@ -36,6 +44,23 @@ from engine.builder2_tournament_contracts import (
     VALID_GROUNDING_TYPES,
     WINNER_PLAN_SCHEMA_VERSION,
 )
+
+
+def _product_input_block(
+    *,
+    strategy_foundation: Dict[str, Any],
+    product_description: str,
+    product_brief_mode: Optional[str] = None,
+    state: Optional[Dict[str, Any]] = None,
+) -> str:
+    from engine.builder2_product_brief_production_guard import build_product_input_block_for_prompt
+
+    return build_product_input_block_for_prompt(
+        strategy_foundation=strategy_foundation,
+        product_description=product_description,
+        product_brief_mode=product_brief_mode,
+        state=state,
+    )
 
 
 def _product_semantic_brief_prompt_block(strategy_foundation: Dict[str, Any]) -> str:
@@ -79,9 +104,12 @@ def build_strategy_prompt(
         "relativeAdvantageFactuallyGrounded}, "
         "strategyEvidenceGrounding{contractVersion,productMarketStatus,productInformationDensity,"
         "explicitProductFacts,safeStrategicInterpretations,categoryConventions,unsupportedAssumptions,"
-        "productSemanticBrief{briefVersion,sourceDescription,explicitFacts[{id,text}],"
-        "licensedImplications[{id,text,entailedFrom}],restrictedCapabilities,allowedCapabilities}}, "
+        "productSemanticBrief{briefVersion,sourceDescription,essentialFacts[{id,text}],"
+        "supportingEvidence[{id,text}],mandatoryConstraints[{id,text}],discardedFacts[{id,text}],"
+        "explicitFacts[{id,text}],licensedImplications[{id,text,entailedFrom}],"
+        "restrictedCapabilities,allowedCapabilities}}, "
         "mechanismScan{domainFacts,discoveredMechanism,creativeOpportunity,depthEvidence}.\n"
+        f"{NEGATIVE_SELECTION_METHODOLOGY}\n"
         f'language must be exactly "he" or "en".\n'
         f"groundingType must be exactly one of: {grounding_types}.\n"
         "groundingEvidence must be a non-empty JSON array of concise qualitative evidence strings; "
@@ -93,7 +121,10 @@ def build_strategy_prompt(
         "depthEvidence must explain why the discovered mechanism is deeper than a first association.\n"
         "Evidence grounding contract: distinguish explicit product facts, safe strategic interpretation, "
         "category convention, and unsupported product claims.\n"
-        "productSemanticBrief must capture explicit facts written in the description plus narrow licensed "
+        "productSemanticBrief must classify facts into essentialFacts, supportingEvidence, "
+        "mandatoryConstraints, and discardedFacts. essentialFacts are campaign-critical; discardedFacts are "
+        "true but strategically irrelevant and must never become downstream creative input.\n"
+        "productSemanticBrief must also capture explicit facts written in the description plus narrow licensed "
         "implications directly entailed by those facts (for example: user supplies product information and "
         "receives an advertisement implies the product transforms supplied information into an advertisement).\n"
         "licensedImplications must be directly entailed, narrow, non-speculative, and must not add feedback, "
@@ -149,6 +180,8 @@ def build_creator_prompt(
     candidate_id: str,
     attempt_number: int,
     runway_mode: str,
+    product_brief_mode: Optional[str] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     duration = resolve_builder2_video_duration_seconds()
     structure_types = prompt_enum_list(VALID_STRUCTURE_TYPES)
@@ -171,10 +204,15 @@ def build_creator_prompt(
         "Do not optimize for Runway simplicity before finding an interesting mechanism.\n"
         "Do not use arbitrary weirdness as interest. Freshness must come from a deep mechanism.\n"
         "Realism and silent clarity are mandatory constraints. Everyday is lowest priority, not the starting point.\n"
-        "Creators inherit the Strategy evidence ledger and productSemanticBrief. You MAY paraphrase explicit facts, "
-        "use licensed semantic implications, visualize the mechanism, and use metaphor for the supplied process. "
-        "You MUST NOT invent product capabilities, treat agency/category conventions as product facts, or add "
-        "optimization, feedback, learning, measurement, or revision unless grounded in the description or brief.\n"
+        "Creators inherit the Strategy evidence ledger and productSemanticBrief. You MAY paraphrase essential facts, "
+        "supporting evidence where relevant, licensed semantic implications, visualize the mechanism, and use "
+        "metaphor for the supplied process. "
+        "You MUST NOT invent product capabilities, treat agency/category conventions as product facts, use "
+        "discardedFacts, or add optimization, feedback, learning, measurement, or revision unless grounded "
+        "in the selected brief.\n"
+        f"{BUILDER2_ESSENTIAL_FACT_FUSION_METHODOLOGY}\n"
+        "When essentialFacts require fusion, complete creatorReport.essentialFactFusionEvidence with explicit "
+        "answers showing where product/category identity and relative advantage survive and fuse in the mechanism.\n"
         "Only public-facing candidate fields (mechanism, concept, slogan, seven-second structure, visual anchor) "
         "assert product capabilities. Internal creatorReport analysis is not a product promise.\n"
         "Sparse product information still permits rich visual metaphor; it does not permit inventing feedback, "
@@ -197,13 +235,13 @@ def build_creator_prompt(
         f"Video duration seconds: {duration}\n"
         f"Runway mode constraint: {runway_mode}\n"
         f"Product name: {product_name or '(empty)'}\n"
-        f"{format_product_description_data_block(product_description)}\n"
+        f"{_product_input_block(strategy_foundation=strategy_foundation, product_description=product_description, product_brief_mode=product_brief_mode, state=state)}"
         f"Language: {language}\n"
         f"{_product_semantic_brief_prompt_block(strategy_foundation)}"
         f"strategyFoundationId (return exactly): {strategy_id!r}\n"
         f"strategyFoundationDigest (reference only, do not recalculate): {strategy_digest!r}\n"
         "Fixed strategic foundation (unchanged for all candidates):\n"
-        f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n\n"
+        f"{strategy_json_for_post_strategy_prompt(strategy_foundation, product_brief_mode=product_brief_mode, state=state)}\n\n"
         f"Return one JSON object only with schemaVersion={CANDIDATE_SCHEMA_VERSION!r}, "
         f"methodologyVersion={METHODOLOGY_VERSION!r}. No Markdown fences. No prose.\n"
         f"{build_creator_required_keys_prompt_text(prototype_id=prototype.prototype_id)}\n"
@@ -299,6 +337,8 @@ def build_creator_repair_prompt(
     runway_mode: str,
     invalid_output: Dict[str, Any],
     validation_failures: List[str],
+    product_brief_mode: Optional[str] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     slogan_repair = any("sloganText.word_limit" in item for item in validation_failures)
     slogan_repair_block = ""
@@ -334,7 +374,7 @@ def build_creator_repair_prompt(
         f"Candidate ID: {candidate_id}\n"
         f"Assigned prototype ID: {prototype.prototype_id}\n\n"
         "Original Creator instructions:\n"
-        f"{build_creator_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate_id=candidate_id, attempt_number=attempt_number, runway_mode=runway_mode)}\n\n"
+        f"{build_creator_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate_id=candidate_id, attempt_number=attempt_number, runway_mode=runway_mode, product_brief_mode=product_brief_mode, state=state)}\n\n"
         "Invalid structured output to repair:\n"
         f"{json.dumps(invalid_output, ensure_ascii=False)}\n\n"
         "Exact validation failures to fix:\n"
@@ -421,6 +461,7 @@ def build_creator_retry_prompt(
     attempt_number: int,
     runway_mode: str,
     retry_rule: str,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     return (
         "You are the Builder2 Creator role generating ONE fresh isolated candidate idea.\n"
@@ -429,7 +470,7 @@ def build_creator_retry_prompt(
         f"Candidate ID: {candidate_id}\n"
         f"Assigned prototype ID: {prototype.prototype_id}\n"
         f"Methodology rule to satisfy: {retry_rule}\n\n"
-        f"{build_creator_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate_id=candidate_id, attempt_number=attempt_number, runway_mode=runway_mode)}"
+        f"{build_creator_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate_id=candidate_id, attempt_number=attempt_number, runway_mode=runway_mode, state=state)}"
     )
 
 
@@ -442,6 +483,8 @@ def build_judge_prompt(
     prototype: Builder2Prototype,
     candidate: Dict[str, Any],
     candidate_id: str,
+    product_brief_mode: Optional[str] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     interest_order = " → ".join(INTEREST_PRIORITY_ORDER)
     contract = candidate.get("prototypeMethodContract") or {}
@@ -463,11 +506,11 @@ def build_judge_prompt(
         f"Interest priority for qualitative assessment: {interest_order}.\n"
         f"Candidate ID: {candidate_id}\n"
         f"Product name: {product_name or '(empty)'}\n"
-        f"{format_product_description_data_block(product_description)}\n"
+        f"{_product_input_block(strategy_foundation=strategy_foundation, product_description=product_description, product_brief_mode=product_brief_mode, state=state)}"
         f"Language: {language}\n"
         f"{_product_semantic_brief_prompt_block(strategy_foundation)}"
         "Fixed strategic foundation:\n"
-        f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n"
+        f"{strategy_json_for_post_strategy_prompt(strategy_foundation, product_brief_mode=product_brief_mode, state=state)}\n"
         "Canonical prototype method contract (authoritative):\n"
         f"{json.dumps(contract, ensure_ascii=False)}\n"
         "Assigned prototype definition (instruction context only — not proof of application):\n"
@@ -492,6 +535,7 @@ def build_judge_prompt(
         "silentMovieAssessment, verbalLayerAssessment, headlineNecessityAssessment, advertisingCompletionAssessment, "
         "factualGroundingAssessment.\n"
         f"{build_judge_factual_grounding_prompt_text()}\n"
+        f"{_build_judge_fusion_prompt_text()}\n"
         "Independently test creative embodiment: reject literal graph/report/dashboard/interface execution unless "
         "meaningfully transformed; require metaphoricalEmbodimentAssessment and visualBridgeAssessment with "
         "dependsOnEarlierCopy=false. Do not require leaving the business domain. "
@@ -513,6 +557,8 @@ def build_judge_repair_prompt(
     candidate_id: str,
     invalid_output: Dict[str, Any],
     validation_failures: List[str],
+    product_brief_mode: Optional[str] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     return (
         "You are the Builder2 Judge repair role.\n"
@@ -523,7 +569,7 @@ def build_judge_repair_prompt(
         f"{build_judge_factual_grounding_prompt_text()}\n"
         f"Candidate ID: {candidate_id}\n\n"
         "Original Judge instructions:\n"
-        f"{build_judge_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate=candidate, candidate_id=candidate_id)}\n\n"
+        f"{build_judge_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate=candidate, candidate_id=candidate_id, product_brief_mode=product_brief_mode, state=state)}\n\n"
         "Invalid structured output to repair:\n"
         f"{json.dumps(invalid_output, ensure_ascii=False)}\n\n"
         "Exact validation failures to fix:\n"
@@ -543,13 +589,14 @@ def build_judge_retry_prompt(
     candidate: Dict[str, Any],
     candidate_id: str,
     retry_rule: str,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     return (
         "You are the Builder2 Judge role performing ONE clean retry for the same candidate.\n"
         "Do NOT reference any previous Judge response, score, ranking, or unseen candidate.\n"
         f"Candidate ID: {candidate_id}\n"
         f"Violated Judge rule to respect: {retry_rule}\n\n"
-        f"{build_judge_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate=candidate, candidate_id=candidate_id)}"
+        f"{build_judge_prompt(product_name=product_name, product_description=product_description, language=language, strategy_foundation=strategy_foundation, prototype=prototype, candidate=candidate, candidate_id=candidate_id, state=state)}"
     )
 
 
@@ -610,6 +657,8 @@ def build_winner_development_prompt(
     prototype: Builder2Prototype,
     runway_mode: str,
     preservation_snapshot: Dict[str, Any],
+    product_brief_mode: Optional[str] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     duration = resolve_builder2_video_duration_seconds()
     headline_forms = prompt_enum_list(VALID_HEADLINE_FORMS)
@@ -642,11 +691,11 @@ def build_winner_development_prompt(
         f"Video duration seconds: {duration}\n"
         f"Runway mode: {runway_mode}\n"
         f"Product name: {product_name or '(empty)'}\n"
-        f"{format_product_description_data_block(product_description)}\n"
+        f"{_product_input_block(strategy_foundation=strategy_foundation, product_description=product_description, product_brief_mode=product_brief_mode, state=state)}"
         f"Language: {language}\n"
         f"{_product_semantic_brief_prompt_block(strategy_foundation)}"
         "Fixed strategic foundation:\n"
-        f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n"
+        f"{strategy_json_for_post_strategy_prompt(strategy_foundation, product_brief_mode=product_brief_mode, state=state)}\n"
         "Winning candidate:\n"
         f"{json.dumps(winning_candidate, ensure_ascii=False)}\n"
         "Valid Judge judgment for this winning candidate only:\n"
@@ -708,7 +757,7 @@ def build_winner_headline_repair_prompt(
         f"Product name: {product_name or '(empty)'}\n"
         f"Language: {language}\n"
         "Fixed strategic foundation:\n"
-        f"{json.dumps(strategy_foundation, ensure_ascii=False)}\n"
+        f"{strategy_json_for_post_strategy_prompt(strategy_foundation)}\n"
         "Winning Creator candidate:\n"
         f"{json.dumps(winning_candidate, ensure_ascii=False)}\n"
         "Winning Judge judgment (headline necessity is authoritative):\n"

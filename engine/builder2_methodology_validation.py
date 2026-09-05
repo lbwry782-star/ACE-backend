@@ -624,6 +624,16 @@ def collect_creator_methodology_structural_errors(
             if msg not in errors:
                 errors.append(msg)
 
+        from engine.builder2_essential_fact_fusion import collect_creator_fusion_structural_errors
+
+        errors.extend(
+            collect_creator_fusion_structural_errors(
+                strategy_foundation=strategy_foundation,
+                candidate=candidate,
+                compatibility_mode=compatibility_mode,
+            )
+        )
+
     return list(dict.fromkeys(errors))
 
 
@@ -826,6 +836,17 @@ def collect_judge_methodology_structural_errors(
             compatibility_mode=compatibility_mode,
         )
     )
+
+    if strategy_foundation is not None:
+        from engine.builder2_essential_fact_fusion import collect_judge_fusion_structural_errors
+
+        errors.extend(
+            collect_judge_fusion_structural_errors(
+                strategy_foundation=strategy_foundation,
+                judgment=judgment,
+                compatibility_mode=compatibility_mode,
+            )
+        )
 
     return list(dict.fromkeys(errors))
 

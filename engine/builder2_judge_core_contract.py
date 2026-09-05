@@ -215,13 +215,26 @@ def build_judge_example_json(*, candidate_id: str = "cand-example") -> Dict[str,
             "prototypeFitScore": 12,
         },
         "factualGroundingAssessment": _default_factual_grounding_example(),
+        "essentialFactFusionAssessment": _default_fusion_assessment_example(),
     }
+
+
+def _default_fusion_assessment_example() -> Dict[str, Any]:
+    from engine.builder2_essential_fact_fusion import build_default_judge_essential_fact_fusion_assessment
+
+    return build_default_judge_essential_fact_fusion_assessment(fusion_required=False)
 
 
 def _default_factual_grounding_example() -> Dict[str, Any]:
     from engine.builder2_strategy_evidence_grounding_contract import build_default_judge_factual_grounding_assessment
 
     return build_default_judge_factual_grounding_assessment()
+
+
+def _build_judge_fusion_prompt_text() -> str:
+    from engine.builder2_essential_fact_fusion import build_judge_essential_fact_fusion_prompt_text
+
+    return build_judge_essential_fact_fusion_prompt_text()
 
 
 def build_judge_factual_grounding_prompt_text() -> str:
@@ -232,8 +245,9 @@ def build_judge_factual_grounding_prompt_text() -> str:
         "Every gate must be JSON boolean true or false — false is valid when the candidate is not factually grounded.\n"
         "notes must be a non-empty string explaining the factual-grounding assessment.\n"
         "Never omit factualGroundingAssessment merely because eligible=false.\n"
-        "Compare product claims against the original product description, productSemanticBrief explicitFacts, "
-        "and licensedImplications — not identical wording.\n"
+        "Compare product claims against the selected post-Strategy productSemanticBrief "
+        "(essentialFacts, supportingEvidence, mandatoryConstraints, licensedImplications) — not identical wording.\n"
+        "Do not treat raw productDescription as ordinary Judge reasoning input when post-Strategy isolation applies.\n"
         "Reject unsupported capabilities listed in restrictedCapabilities unless explicitly supplied.\n"
         "Internal creatorReport analysis and explicit negations are not public product claims."
     )
@@ -270,6 +284,7 @@ def build_judge_required_keys_prompt_text(*, creator_verbal_decision: str, candi
         "Reject ordinary product demonstrations, untransformed dashboards/graphs/reports, and executions whose "
         "meaning exists only in the report or slogan.\n"
         f"{build_judge_factual_grounding_prompt_text()}\n"
+        f"{_build_judge_fusion_prompt_text()}\n"
         "logoPolicyAssessment must include logoDetectedInPlan, logoDependentMeaning, advertisedLogoRequested, "
         "thirdPartyBrandingDetected, inventedLogoDetected, brandedObjectRiskAccepted, plainTextIdentificationOnly, "
         "logoFreeExecutionAccepted, logoPolicySatisfied (booleans), and rejectionReason (null when accepted). "

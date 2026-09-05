@@ -135,6 +135,7 @@ def _resolve_judgment_for_candidate(state: Dict[str, Any], candidate_id: str) ->
 def select_global_winner(state: Dict[str, Any]) -> str:
     from engine.builder2_metaphorical_embodiment_contract import judgment_rejects_literal_execution
     from engine.builder2_no_logo_contract import judgment_rejects_logo_policy
+    from engine.builder2_essential_fact_fusion import judgment_rejects_essential_fact_fusion
 
     def _literal_winner_blocked(candidate_id: str) -> bool:
         judgment = _resolve_judgment_for_candidate(state, candidate_id)
@@ -144,6 +145,10 @@ def select_global_winner(state: Dict[str, Any]) -> str:
         judgment = _resolve_judgment_for_candidate(state, candidate_id)
         return judgment_rejects_logo_policy(judgment) if isinstance(judgment, dict) else False
 
+    def _fusion_winner_blocked(candidate_id: str) -> bool:
+        judgment = _resolve_judgment_for_candidate(state, candidate_id)
+        return judgment_rejects_essential_fact_fusion(judgment) if isinstance(judgment, dict) else False
+
     eligible_ids = [
         cid
         for cid, cand in state["candidates"].items()
@@ -152,6 +157,7 @@ def select_global_winner(state: Dict[str, Any]) -> str:
         and _has_valid_judgment(cand)
         and not _literal_winner_blocked(cid)
         and not _logo_winner_blocked(cid)
+        and not _fusion_winner_blocked(cid)
     ]
     if eligible_ids:
         best_id = eligible_ids[0]
@@ -650,6 +656,9 @@ def _run_builder2_tournament_body(
     is_new_job = state is None
     if state:
         ensure_methodology_compatibility_decided(state, is_new_job=False)
+        from engine.builder2_product_brief_production_guard import ensure_product_brief_mode_decided
+
+        ensure_product_brief_mode_decided(state, is_new_job=False)
         next_step = _next_step_name(state)
         logger.info(
             "BUILDER2_TOURNAMENT_RESUMED jobId=%s tournamentId=%s lastCompletedStep=%s nextStep=%s roundIndex=%s",
@@ -669,6 +678,9 @@ def _run_builder2_tournament_body(
         )
         state["methodologyVersion"] = METHODOLOGY_VERSION
         state["methodologyCompatibilityMode"] = False
+        from engine.builder2_product_brief_production_guard import ensure_product_brief_mode_decided
+
+        ensure_product_brief_mode_decided(state, is_new_job=True)
         save_tournament_state(job_id, state)
         logger.info(
             "BUILDER2_TOURNAMENT_START jobId=%s tournamentId=%s prototypes=%s maxRounds=%s",

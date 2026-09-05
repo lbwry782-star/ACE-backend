@@ -32,8 +32,15 @@ Instead: build from an advantage already true or honestly stated from the suppli
 Selection test: "Would this advertisement remain truthful if the business made no operational change after receiving it?"
 """.strip()
 
+from engine.builder1_negative_selection import NEGATIVE_SELECTION_METHODOLOGY
+
 STRATEGY_STAGE_METHODOLOGY = "\n\n".join(
-    [STRATEGY_PROBLEM_PERCEPTION, STRATEGY_RELATIVE_ADVANTAGE, STRATEGY_TRUTH_AND_OPERATIONS]
+    [
+        STRATEGY_PROBLEM_PERCEPTION,
+        STRATEGY_RELATIVE_ADVANTAGE,
+        STRATEGY_TRUTH_AND_OPERATIONS,
+        NEGATIVE_SELECTION_METHODOLOGY,
+    ]
 )
 
 # --- Slogan stage ---
@@ -112,9 +119,28 @@ Instead: return to strategic problem, advantage, slogan action, conceptual gener
 Selection test: "Was this visual designed from the current brand's advantage, or adapted from an idea that would work for someone else?"
 """.strip()
 
+from engine.builder1_essential_fact_fusion import (
+    BUILDER1_ESSENTIAL_FACT_CREATIVE_SEARCH_ORDER,
+    BUILDER1_ESSENTIAL_FACT_CULTURAL_CONTEXT,
+    BUILDER1_ESSENTIAL_FACT_FUSION,
+    BUILDER1_ESSENTIAL_FACT_FUSION_TEST,
+)
+from engine.builder1_post_selection_brief_isolation import POST_SELECTION_BRIEF_ISOLATION
+
+ESSENTIAL_FACT_FUSION_REASON = f"""
+{BUILDER1_ESSENTIAL_FACT_FUSION}
+Selection test: "If the product name were removed from copy, would the visual mechanism still connect to the advertised product/category?"
+Failure prevented: relative advantage visualized alone while selected product/category identity disappears from the mechanism.
+Instead: fuse product/category identity with relative advantage into one integrated creative mechanism before searching for generic external analogies.
+""".strip()
+
 CONCEPTUAL_STAGE_METHODOLOGY = "\n\n".join(
     [
+        POST_SELECTION_BRIEF_ISOLATION,
         CONCEPTUAL_GENERATOR_LAYER,
+        ESSENTIAL_FACT_FUSION_REASON,
+        BUILDER1_ESSENTIAL_FACT_FUSION_TEST,
+        BUILDER1_ESSENTIAL_FACT_CREATIVE_SEARCH_ORDER,
         IDEA_BEFORE_OBJECT,
         CLARITY_BEFORE_CLEVERNESS,
         DISTINCTIVENESS_AND_OWNERSHIP,
@@ -164,6 +190,10 @@ Mark all examples as methodology-only; restart the physical search for every bra
 
 BRAND_PHYSICAL_STAGE_METHODOLOGY = "\n\n".join(
     [
+        POST_SELECTION_BRIEF_ISOLATION,
+        ESSENTIAL_FACT_FUSION_REASON,
+        BUILDER1_ESSENTIAL_FACT_CREATIVE_SEARCH_ORDER,
+        BUILDER1_ESSENTIAL_FACT_CULTURAL_CONTEXT,
         PRODUCT_SHOT_BIAS_REASON,
         TRANSFERRED_OBJECT_REASON,
         DO_NOT_SHOW_THING_ITSELF,
@@ -173,7 +203,9 @@ BRAND_PHYSICAL_STAGE_METHODOLOGY = "\n\n".join(
 
 # --- Graphic system stage ---
 
-GRAPHIC_GENERATOR_REASON = """
+GRAPHIC_GENERATOR_REASON = f"""
+{POST_SELECTION_BRIEF_ISOLATION}
+
 Define the graphic generator before producing individual ads.
 Why: a series is recognized by a stable visual language, not only by its idea.
 Failure prevented: ads with the same message but different palettes, typography, composition, image styles, camera treatments, realism levels, or layouts — several unrelated advertisements.
@@ -220,6 +252,8 @@ Selection test: "Is this line expressing the permanent brand promise, or helping
 
 SERIES_STAGE_METHODOLOGY = "\n\n".join(
     [
+        ESSENTIAL_FACT_FUSION_REASON,
+        BUILDER1_ESSENTIAL_FACT_CULTURAL_CONTEXT,
         SERIES_COHERENCE_REASON,
         VARIATION_NOT_REPETITION,
         HEADLINE_OPTIONAL_REASON,

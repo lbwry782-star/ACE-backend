@@ -44,6 +44,12 @@ from engine.builder1_selected_creative_brief import (
     format_product_identity_block,
     format_selected_creative_brief_block,
 )
+from engine.builder1_essential_fact_fusion import format_essential_fact_fusion_prompt_block
+from engine.builder1_post_selection_brief_isolation import (
+    POST_SELECTION_BRIEF_ISOLATION,
+    build_creative_stage_information_block,
+    format_post_selection_creative_input_block,
+)
 from engine.builder1_server_mandatory_constraints import (
     format_effective_mandatory_constraints_block,
     format_server_mandatory_constraints_block,
@@ -238,7 +244,7 @@ Rules:
 STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM = f"""
 You are a Builder1 strategy-and-slogan planner for a digital advertising agent.
 Return JSON only. Return exactly this object and no additional top-level keys:
-{{"strategy":{{"lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null,"selectionReason":"...","selectedCreativeBrief":{{"essentialFacts":["..."],"supportingEvidence":["..."],"mandatoryConstraints":["..."]}}}},"slogan":{{"brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"...","selectionReason":"..."}}}}
+{{"strategy":{{"lens":"economic","strategicProblem":"...","relativeAdvantage":"...","briefSupport":"...","advantageSource":"explicit_brief","claimRisk":"low","campaignExecutableNow":true,"requiresClientConsultation":false,"clientActionLevel":"none","implementationCostLevel":"none","simpleStrategicAction":null,"selectionReason":"...","selectedCreativeBrief":{{"essentialFacts":["..."],"supportingEvidence":["..."],"mandatoryConstraints":["..."],"discardedFacts":["..."]}}}},"slogan":{{"brandSlogan":"...","derivationFromAdvantage":"...","impliedAction":"...","whyOwnable":"...","whyNaturalInLanguage":"...","competitorTransferRisk":"low","campaignGenerativePower":"...","selectionReason":"..."}}}}
 {STRATEGY_STAGE_METHODOLOGY}
 {SLOGAN_STAGE_METHODOLOGY}
 {NO_LOGO_REASON}
@@ -251,8 +257,10 @@ Include a fact in selectedCreativeBrief only if needed to understand, express, s
 strategy and relative advantage. Do NOT summarize the product, list main benefits, or include facts merely because they
 are true, positive, mentioned by the user, or could support a different campaign idea.
 essentialFacts: facts this campaign actually needs — not a product overview.
-supportingEvidence: facts that substantiate the chosen relativeAdvantage when relevant.
+Downstream stages must preserve essentialFacts in the creative mechanism; when product/category identity and relative advantage are both essential, fuse them — do not let category identity disappear while only the advantage is visualized.
+supportingEvidence: facts that substantiate the chosen relativeAdvantage when relevant — not automatic creative material.
 mandatoryConstraints: binding user instructions or factual limits creative must obey even if not ad message.
+discardedFacts: true facts explicitly excluded from THIS campaign because they do not serve the chosen strategy, required product/category identity, or mandatory constraints. Audit/diagnostic only — never creative input.
 Build one final campaign strategy and one final brand slogan in a single response.
 1. Identify the strongest real strategic or perceptual problem grounded in the full raw information.
 2. Derive one relative advantage directly from that problem.
@@ -271,7 +279,7 @@ STAGE_STRATEGY_SLOGAN_REPAIR_SYSTEM = f"""
 You are a Builder1 strategy-and-slogan repair assistant.
 Return JSON only with exactly two top-level keys: strategy and slogan.
 Each section must contain one final completed strategy and one final completed slogan only.
-The strategy object must include selectedCreativeBrief with essentialFacts, supportingEvidence, and mandatoryConstraints.
+The strategy object must include selectedCreativeBrief with essentialFacts, supportingEvidence, mandatoryConstraints, and discardedFacts when raw information contains strategically irrelevant true facts.
 Do not return candidate arrays, evaluations, selectedCandidateId, or alternatives.
 {STRATEGY_STAGE_METHODOLOGY}
 {SLOGAN_STAGE_METHODOLOGY}
@@ -379,6 +387,7 @@ Rules:
 - Exactly 6 candidates with ids C01 through C06.
 - Derive every candidate from the fixed brand slogan and its implied action — not from product shape, packaging, conventional product shots, or literal slogan nouns.
 - Reject candidates that merely illustrate the slogan wording instead of physically proving the perception.
+- When selectedCreativeBrief contains both product/category identity and relative-advantage essential facts, reject candidates that express the advantage without preserving product/category application (concept_essential_fact_fusion_missing).
 - generator must define a repeatable action, not a mood, object, or abstract noun.
 - categoryRelevant means relevant to the fixed relative advantage — not category literalness.
 - Mark eligible=false with rejectionCodes when the idea collapses without the product, starts from product-shot logic, lacks a transferred-object path, or is generically transferable — unless productEvidenceRequired=true with a convincing productEvidenceReason.
@@ -716,6 +725,8 @@ def build_strategy_slogan_stage_user_prompt(
         "Server mandatory user constraints are binding and must not be violated by the chosen strategy.\n"
         "While choosing strategicProblem and relativeAdvantage, decide which facts matter for this campaign.\n"
         "After strategy and relative advantage are resolved, commit selectedCreativeBrief with only campaign-relevant facts.\n"
+        "Classify every material fact: essentialFacts, supportingEvidence, mandatoryConstraints, or discardedFacts.\n"
+        "Place strategically irrelevant true facts in discardedFacts — do not leave them implicit or dump them into essentialFacts.\n"
         "You may add additional execution constraints in selectedCreativeBrief.mandatoryConstraints, "
         "but you must not omit or contradict server mandatory user constraints.\n"
         "Build one final campaign strategy and one final brand slogan.\n"
@@ -882,12 +893,23 @@ def build_conceptual_scan_user_prompt(
     selected_creative_brief: Optional[SelectedCreativeBrief] = None,
 ) -> str:
     if selected_creative_brief is not None:
-        information_block = format_selected_creative_brief_block(selected_creative_brief)
+        information_block = format_post_selection_creative_input_block(selected_creative_brief)
+        fusion_block = format_essential_fact_fusion_prompt_block(
+            selected_creative_brief,
+            relative_advantage=relative_advantage,
+        )
     else:
-        information_block = f"Brief: {product_description}\n"
+        information_block = build_creative_stage_information_block(
+            selected_creative_brief=None,
+            product_description=product_description,
+            legacy_label="Brief",
+        )
+        fusion_block = ""
+    fusion_section = f"\n{fusion_block}\n" if fusion_block else ""
     return (
         f"Product name (fixed): {product_name_resolved}\n"
         f"{information_block}\n"
+        f"{fusion_section}"
         f"Selected strategic problem: {strategic_problem}\n"
         f"Selected relative advantage: {relative_advantage}\n"
         f"Fixed brand slogan: {brand_slogan}\n"
@@ -895,10 +917,11 @@ def build_conceptual_scan_user_prompt(
         f"Implied slogan action: {implied_action}\n"
         f"Exploration seed: {exploration_seed}\n"
         "Every conceptual candidate must derive from the slogan action and the perception to create. "
-        "Apply the removal test and expressive-object decision. "
+        "Apply the removal test, expressive-object decision, and Essential Fact Fusion Test when essential facts require it. "
         "Run the slogan-literalness scan. Do not begin from product shape, packaging, conventional product shots, or literal slogan nouns.\n"
         "Use only the selected creative brief and fixed strategy — do not introduce alternate product benefits.\n"
-        "Answer: what external object physically proves the perception more clearly than showing the product or copying a slogan noun?\n"
+        "When product/category identity and relative advantage are both essential, search for fusion inside the product/category before external analogy.\n"
+        "Answer: what mechanism physically proves the perception while preserving selected essential facts?\n"
         "Return exactly 6 conceptual-generator candidates C01-C06 as objects."
     )
 
@@ -984,9 +1007,13 @@ def build_conceptual_evaluation_repair_user_prompt(
         if getattr(candidate, "id", "") in invalid_candidate_ids
     ]
     if selected_creative_brief is not None:
-        information_block = format_selected_creative_brief_block(selected_creative_brief)
+        information_block = format_post_selection_creative_input_block(selected_creative_brief)
     else:
-        information_block = f"Product description:\n{product_description.strip()}\n"
+        information_block = build_creative_stage_information_block(
+            selected_creative_brief=None,
+            product_description=product_description,
+            legacy_label="Product description",
+        )
     return (
         "Repair ONLY the listed evaluation objects.\n"
         "Return exactly:\n"
@@ -1076,15 +1103,26 @@ def build_brand_physical_user_prompt(
     if selected_creative_brief is not None:
         factual_block = (
             f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
-            f"{format_selected_creative_brief_block(selected_creative_brief)}\n"
+            f"{format_post_selection_creative_input_block(selected_creative_brief)}\n"
+        )
+        fusion_block = format_essential_fact_fusion_prompt_block(
+            selected_creative_brief,
+            relative_advantage=relative_advantage,
         )
     else:
         factual_block = (
             f"Fixed productNameResolved (echo exactly): {product_name_resolved}\n"
-            f"Description: {product_description}\n"
+            f"{build_creative_stage_information_block(
+                selected_creative_brief=None,
+                product_description=product_description,
+                legacy_label='Description',
+            )}"
         )
+        fusion_block = ""
+    fusion_section = f"\n{fusion_block}\n" if fusion_block else ""
     return (
         f"{factual_block}"
+        f"{fusion_section}"
         f"Language context: {detected_language}\n"
         f"Format context: {format_value}\n"
         f"Fixed strategic problem: {strategic_problem}\n"
@@ -1222,7 +1260,11 @@ def build_graphic_system_user_prompt(
         brief_block = format_graphic_creative_brief_block(selected_creative_brief)
         brief_section = f"{brief_block}\n" if brief_block else ""
     else:
-        brief_section = f"Brief: {product_description}\n"
+        brief_section = build_creative_stage_information_block(
+            selected_creative_brief=None,
+            product_description=product_description,
+            legacy_label="Brief",
+        )
     return (
         f"{brief_section}"
         f"Language: {detected_language}\n"

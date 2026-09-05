@@ -174,6 +174,8 @@ def new_tournament_state(
         "initialActivePrototypeIds": list(active_prototype_ids),
         "methodologyVersion": None,
         "methodologyCompatibilityMode": False,
+        "productBriefMode": "v2_selected",
+        "productBriefModeDecided": False,
         "processFailureTags": [],
         "completionReason": None,
         "metrics": None,

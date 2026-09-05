@@ -133,6 +133,8 @@ def parse_strategy_final_section(
     selected_brief = parse_selected_creative_brief(
         brief_raw,
         required=require_selected_creative_brief,
+        product_description=product_description,
+        strict_negative_selection=True,
     )
 
     item = copy.deepcopy(obj)

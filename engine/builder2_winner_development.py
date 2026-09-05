@@ -137,6 +137,7 @@ def develop_builder2_winning_candidate(
         prototype=prototype,
         runway_mode=runway_mode,
         preservation_snapshot=preservation_snapshot,
+        state=state,
     )
 
     timer = MetricsTimer()

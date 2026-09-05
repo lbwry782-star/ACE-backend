@@ -19,12 +19,18 @@ from engine.builder1_literal_embodiment import (
     LITERAL_EMBODIMENT_REJECTION_CODES,
     scan_literal_embodiment_bias,
 )
+from engine.builder1_essential_fact_fusion import (
+    ESSENTIAL_FACT_FUSION_REJECTION_CODES,
+    essential_fact_fusion_repair_stage,
+    scan_essential_fact_fusion,
+)
 
 METHODOLOGY_REJECTION_CODES = frozenset(
     SLOGAN_REJECTION_CODES
     | LITERAL_EMBODIMENT_REJECTION_CODES
     | ADVERTISING_COMPREHENSION_REJECTION_CODES
     | CATEGORY_INTEGRITY_VIOLATION_CODES
+    | ESSENTIAL_FACT_FUSION_REJECTION_CODES
     | {
         "conceptual_generator_not_derived_from_slogan",
         "physical_generator_not_derived_from_concept",
@@ -130,10 +136,13 @@ def methodology_repair_stage(codes: List[str]) -> Optional[str]:
             "conceptual_generator_not_derived_from_slogan",
             "campaign_transferable_to_competitor",
             "category_relevance_patched",
+            "relative_advantage_without_product_application",
         )
     ):
         if "campaign_transferable_to_competitor" in unique or "category_relevance_patched" in unique:
             return "strategy_scan"
+        if "relative_advantage_without_product_application" in unique:
+            return essential_fact_fusion_repair_stage(unique) or "conceptual_scan"
         return "conceptual_scan"
     if any(
         code in codes
@@ -189,6 +198,7 @@ def earliest_methodology_repair_stage(codes: List[str]) -> Optional[str]:
                     "conceptual_generator_not_derived_from_slogan",
                     "campaign_transferable_to_competitor",
                     "category_relevance_patched",
+                    "relative_advantage_without_product_application",
                 }
             ),
         ),
@@ -457,6 +467,7 @@ def _deterministic_methodology_checks_without_semantic_concept_derivation(
             reasons.append("no_mechanism_reuse_inside_campaign")
 
     reasons.extend(scan_literal_embodiment_bias(plan_dict, integrity_evidence))
+    reasons.extend(scan_essential_fact_fusion(plan_dict, integrity_evidence=integrity_evidence))
     reasons.extend(scan_advertising_comprehension(plan_dict, integrity_evidence))
     reasons.extend(scan_graphic_device_necessity(plan_dict))
     if _plan_ads_include_object_design_fields(plan_dict):

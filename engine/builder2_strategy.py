@@ -465,6 +465,15 @@ def generate_strategy_foundation(
                 foundation.get("strategyEvidenceGrounding") or {}
             ).get("contractVersion") or "builder2_strategy_evidence_grounding_v1"
             state["methodologyCompatibilityMode"] = False
+            from engine.builder2_product_brief_production_guard import (
+                PRODUCT_BRIEF_MODE_V2_SELECTED,
+                log_product_brief_mode,
+            )
+
+            state["productBriefMode"] = PRODUCT_BRIEF_MODE_V2_SELECTED
+            state["productBriefModeDecided"] = True
+            state.pop("productBriefModeReason", None)
+            log_product_brief_mode(state, mode=PRODUCT_BRIEF_MODE_V2_SELECTED)
             _write_strategy_diagnostics(
                 state,
                 parse_status="ok",

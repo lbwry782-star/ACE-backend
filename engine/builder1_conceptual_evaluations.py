@@ -21,6 +21,7 @@ CONCEPTUAL_REJECTION_CODES = frozenset(
         "concept_random_object_first",
         "concept_rewrites_slogan",
         "concept_requires_operational_change",
+        "concept_essential_fact_fusion_missing",
     }
     | CONCEPTUAL_PRODUCT_SHOT_REJECTION_CODES
 )

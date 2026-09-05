@@ -110,6 +110,36 @@ def methodology_judge_factual_grounding_extras(*, notes: str = "") -> Dict[str, 
     return {"factualGroundingAssessment": build_default_judge_factual_grounding_assessment(notes=notes)}
 
 
+def methodology_creator_fusion_extras(
+    *,
+    product_category_fact: str = "Product category identity fact",
+    relative_advantage_fact: str = "Relative advantage identity fact",
+    fusion_explanation: str = "Product/category and advantage fuse in one integrated visual mechanism.",
+) -> Dict[str, Any]:
+    from engine.builder2_essential_fact_fusion import build_default_creator_essential_fact_fusion_evidence
+
+    return {
+        "creatorReport": {
+            "essentialFactFusionEvidence": build_default_creator_essential_fact_fusion_evidence(
+                product_category_fact=product_category_fact,
+                relative_advantage_fact=relative_advantage_fact,
+                fusion_explanation=fusion_explanation,
+            ),
+        }
+    }
+
+
+def methodology_judge_fusion_extras(*, fusion_required: bool = False, notes: str = "") -> Dict[str, Any]:
+    from engine.builder2_essential_fact_fusion import build_default_judge_essential_fact_fusion_assessment
+
+    return {
+        "essentialFactFusionAssessment": build_default_judge_essential_fact_fusion_assessment(
+            fusion_required=fusion_required,
+            notes=notes or "Essential facts are preserved and integrated in the visual mechanism.",
+        )
+    }
+
+
 def methodology_strategy_identity_for(candidate_strategy: Dict[str, Any]) -> Dict[str, str]:
     return {
         "strategyFoundationId": str(candidate_strategy.get("strategyFoundationId") or ""),

@@ -183,6 +183,14 @@ FIELD_OWNERSHIP: Dict[str, str] = {
     "creatorReport.visualParallelType": CREATOR_OWNERSHIP_CREATOR_CORE,
     "creatorReport.whyParallelExpressesAdvantage": CREATOR_OWNERSHIP_CREATOR_CORE,
     "creatorReport.whyRunwayShouldUnderstand": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence.productCategoryEssentialFact": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence.relativeAdvantageEssentialFact": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence.productCategoryInVisualMechanism": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence.relativeAdvantageInVisualMechanism": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence.fusionOrCausalLinkExplanation": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence.meaningfulConnectionWithoutProductNameCopy": CREATOR_OWNERSHIP_CREATOR_CORE,
+    "creatorReport.essentialFactFusionEvidence.usedFactOutsideSelectedBrief": CREATOR_OWNERSHIP_CREATOR_CORE,
     "creatorReport.silentVerification": CREATOR_OWNERSHIP_CREATOR_CORE,
     "creatorReport.puritySelfCheck": CREATOR_OWNERSHIP_OPTIONAL_DIAGNOSTIC,
     "silentVerification": CREATOR_OWNERSHIP_REMOVE_DUPLICATE,
@@ -368,7 +376,11 @@ def build_creator_required_keys_prompt_text(*, prototype_id: str) -> str:
         "understandableWithoutCreatorReport,dualMeaningUsed,physicalMeaningActivatedByVisual,"
         "strategicMeaningActivatedBySlogan,meaningsConverge}, "
         "creatorReport{problemPerception,relativeAdvantage,mechanismScanSummary,goldPrototypeUsed,visualParallelType,"
-        "whyParallelExpressesAdvantage,whyRunwayShouldUnderstand,silentVerification,puritySelfCheck}.\n"
+        "whyParallelExpressesAdvantage,whyRunwayShouldUnderstand,silentVerification,puritySelfCheck,"
+        "essentialFactFusionEvidence{productCategoryEssentialFact,relativeAdvantageEssentialFact,"
+        "productCategoryInVisualMechanism,relativeAdvantageInVisualMechanism,fusionOrCausalLinkExplanation,"
+        "meaningfulConnectionWithoutProductNameCopy,usedFactOutsideSelectedBrief}}.\n"
+        "essentialFactFusionEvidence is required when essentialFacts require product/category + advantage fusion.\n"
         f"Prototype application object {app_field} must use these exact child field names: {child_list}.\n"
         f"Example: {app_example}\n"
         "For structureType=variation_montage also require visualFamilyId, visualFamilyDefinition, recurringMotif, "

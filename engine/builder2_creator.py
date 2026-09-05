@@ -817,6 +817,7 @@ def generate_creator_candidate(
         candidate_id=candidate_id,
         attempt_number=attempt_number,
         runway_mode=runway_mode,
+        state=state,
     )
 
     logger.info(
@@ -925,6 +926,7 @@ def generate_creator_candidate(
                 runway_mode=runway_mode,
                 invalid_output=last_parsed,
                 validation_failures=collected_structural_failures or [str(last_exc.args[0])],
+                state=state,
             )
             call_type = "repair"
         elif phase == "retry":
@@ -949,6 +951,7 @@ def generate_creator_candidate(
                 attempt_number=attempt_number,
                 runway_mode=runway_mode,
                 retry_rule=retry_rule or _failure_field(last_exc) or str(last_exc.args[0]),
+                state=state,
             )
             call_type = "retry"
         else:

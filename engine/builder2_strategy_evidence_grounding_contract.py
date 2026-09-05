@@ -641,6 +641,19 @@ def validate_strategy_evidence_grounding(
             validate_product_semantic_brief(brief, product_description=product_description)
         except ValueError as exc:
             _raise("builder2_strategy_validation_failed", field=f"strategyEvidenceGrounding.productSemanticBrief.{exc}")
+        from engine.builder2_fact_selection import validate_fact_selection_brief
+
+        for reason in validate_fact_selection_brief(
+            brief,
+            product_description=product_description,
+            strict=False,
+        ):
+            _raise("builder2_strategy_validation_failed", field=f"strategyEvidenceGrounding.{reason}")
+        from engine.builder2_product_brief_production_guard import (
+            validate_v2_product_brief_taxonomy_for_new_production,
+        )
+
+        validate_v2_product_brief_taxonomy_for_new_production(brief, compatibility_mode=compatibility_mode)
 
 
 def _get_nested_text(candidate: Dict[str, Any], field_path: str) -> str:

@@ -298,6 +298,9 @@ def validate_judge_response(
     from engine.builder2_no_logo_contract import apply_logo_eligibility_rules
 
     out = apply_logo_eligibility_rules(out)
+    from engine.builder2_essential_fact_fusion import apply_fusion_eligibility_rules
+
+    out = apply_fusion_eligibility_rules(out)
     return out, total, scores
 
 
@@ -648,6 +651,7 @@ def judge_candidate(
         prototype=prototype,
         candidate=candidate,
         candidate_id=candidate_id,
+        state=state,
     )
 
     logger.info(
@@ -692,6 +696,7 @@ def judge_candidate(
                 candidate_id=candidate_id,
                 invalid_output=last_parsed,
                 validation_failures=collected_structural_failures or [str(last_exc.args[0])],
+                state=state,
             )
             call_type = "repair"
         elif phase == "retry":
@@ -715,6 +720,7 @@ def judge_candidate(
                 candidate=candidate,
                 candidate_id=candidate_id,
                 retry_rule=retry_rule or _failure_rule(last_exc) or str(last_exc.args[0]),
+                state=state,
             )
             call_type = "retry"
         else:
@@ -1098,6 +1104,7 @@ def judge_candidate_structural_repair(
         candidate_id=candidate_id,
         invalid_output=source_parsed,
         validation_failures=failures,
+        state=state,
     )
     timer = MetricsTimer()
     response_text = _invoke_judge_model(
