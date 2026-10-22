@@ -112,8 +112,10 @@ from engine.builder1_zip import build_builder1_zip_bytes, build_builder1_zip_fro
 app = Flask(__name__)
 
 from engine.ace_payment_routes import ace_payment_bp
+from engine.ace_local_dev_routes import ace_local_dev_bp
 
 app.register_blueprint(ace_payment_bp)
+app.register_blueprint(ace_local_dev_bp)
 
 # Configure logging early (handlers use logger at request time)
 logging.basicConfig(level=logging.INFO)
