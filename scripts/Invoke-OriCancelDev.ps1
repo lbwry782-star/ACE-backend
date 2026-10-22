@@ -72,8 +72,31 @@ if (-not $Execute) {
     if (@($result.plan.blockers).Count -gt 0) {
         Write-CancelWarn ('Blockers: ' + ($result.plan.blockers -join ', '))
     }
+    if ($result.plan.cancelCycle -and [string]$result.plan.cancelCycle.status -eq 'CANCELLED') {
+        Write-CancelWarn ('Cancel cycle already closed at ' + $result.plan.cancelCycle.cancelledAt)
+    }
     if (@($result.plan.infraAdvancementPaths.backend).Count -gt 0) {
         Write-CancelInfo ('Infra advancement paths (backend, preserved): ' + ($result.plan.infraAdvancementPaths.backend -join ', '))
+    }
+    if (@($result.plan.infraAdvancementPaths.frontend).Count -gt 0) {
+        Write-CancelInfo ('Infra advancement paths (frontend, preserved): ' + ($result.plan.infraAdvancementPaths.frontend -join ', '))
+    }
+    Write-CancelInfo 'Commit graph (backend):'
+    Write-Host "  baseline product HEAD $($result.plan.commitGraph.backend.BaselineProductHead)"
+    Write-Host "  current HEAD $($result.plan.commitGraph.backend.CurrentHead) ($($result.plan.commitGraph.backend.CurrentBranch))"
+    Write-Host "  infra target $($result.plan.commitGraph.backend.InfraTarget)"
+    Write-CancelInfo 'Commits that would leave the active branch (product session):'
+    foreach ($c in $result.plan.commitsToCancel.backend) {
+        Write-Host "  BACKEND $($c.shortSha) [$($c.classification)] $($c.subject) branches=$($c.branches -join ',') wipRef=$($c.preservedInWipRef) backup=$($c.preservedInBackup)"
+    }
+    foreach ($c in $result.plan.commitsToCancel.frontend) {
+        Write-Host "  FRONTEND $($c.shortSha) [$($c.classification)] $($c.subject) branches=$($c.branches -join ',') wipRef=$($c.preservedInWipRef) backup=$($c.preservedInBackup)"
+    }
+    if (@($result.plan.commitGraph.backend.PreBaselineCommits).Count -gt 0) {
+        Write-CancelWarn 'Pre-baseline commits (require explicit cycle scope to cancel):'
+        foreach ($c in $result.plan.commitGraph.backend.PreBaselineCommits) {
+            Write-Host "  BACKEND $($c.shortSha) $($c.subject) explicit=$($c.explicitlyIncluded)"
+        }
     }
     Write-CancelInfo 'Changes that would be canceled (git paths):'
     foreach ($p in $result.plan.git.backend.PathsToRevert) { Write-Host "  BACKEND $p" }

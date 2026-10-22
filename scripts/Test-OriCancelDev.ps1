@@ -134,7 +134,12 @@ try {
         SessionsRoot = $sessionsRoot
     }
 
-    # Baseline at infra-old on backend, dirty wip file
+    # Baseline at infra-old on backend, dirty wip file (registry infra matches snapshot moment)
+    $regObjBaseline = Get-Content -LiteralPath $regPath -Raw | ConvertFrom-Json
+    $regObjBaseline.localDevInfra.backend.commitSha = $bShas.InfraOld
+    ($regObjBaseline | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $regPath -Encoding UTF8
+    Set-Content -LiteralPath "$regPath.sha256" -Value "$(Get-FileSha256Hex $regPath)  production-registry.json" -Encoding ASCII
+
     git -C $backendRoot checkout -q ori/local-dev-infrastructure
     git -C $backendRoot reset --hard $bShas.InfraOld
     Set-Content -LiteralPath (Join-Path $backendRoot 'wip-edit.txt') -Value 'wip' -Encoding UTF8
@@ -167,12 +172,19 @@ try {
     Set-Content -LiteralPath (Join-Path $backendRoot '.env.local.example') -Value "ACE_LOCAL_DEV_ENABLED=true`nPORT=5000`nACE_PUBLIC_BASE_URL=http://127.0.0.1:5000" -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $backendRoot 'wip-edit.txt') -Value 'wip-active' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $backendRoot '.env.local') -Value "ACE_LOCAL_DEV_ENABLED=true`nPORT=5000`nACE_PUBLIC_BASE_URL=http://127.0.0.1:5000`nSESSION_TEMP=active" -Encoding UTF8
+    $backendHeadBeforePreview = git -C $backendRoot rev-parse HEAD
+    Set-Content -LiteralPath (Join-Path $backendRoot 'wip-only-commit.txt') 'wip-only' -Encoding UTF8
+    git -C $backendRoot add wip-only-commit.txt
+    git -C $backendRoot commit -q -m 'wip-only-post-baseline'
 
     $preview = Invoke-OriCancelDevPreview -Layout $layout -SessionId $sid -SessionsRoot $sessionsRoot
     Assert-True ($preview.mode -eq 'PREVIEW') 'preview_mode'
     Assert-True ($preview.plan.infraTargets.backendCommit -eq $newInfraHead) 'infra_target_from_registry_not_baseline'
-    $backendHeadBefore = git -C $backendRoot rev-parse HEAD
-    Assert-True ($backendHeadBefore -eq $bShas.Latest) 'preview_did_not_change_backend_head'
+    Assert-True ($preview.plan.baselineInfraHead.backend -eq $bShas.InfraOld) 'baseline_infra_from_registry_snapshot'
+    Assert-True (@($preview.plan.infraAdvancementPaths.backend).Count -gt 0) 'infra_advancement_paths_nonempty'
+    Assert-True ($preview.plan.cancelCycle.status -eq 'OPEN') 'cycle_open_before_execute'
+    Assert-True (@($preview.plan.commitsToCancel.backend).Count -gt 0) 'preview_lists_wip_commits_to_cancel'
+    Assert-True ($backendHeadBeforePreview -eq $bShas.Latest) 'preview_did_not_change_backend_head'
 
     # Full backup covers git states + manual restore (before destructive execute)
     Set-Content (Join-Path $backendRoot 'staged.txt') 's' -Encoding UTF8
@@ -244,9 +256,17 @@ try {
     $ErrorActionPreference = $prevEap2
     Assert-True $wipRefOk 'wip_branch_retained'
 
-    # Preview again after execute (no mutations)
+    # Preview again after execute — cycle closed, re-execute blocked
     $preview2 = Invoke-OriCancelDevPreview -Layout $layout -SessionId $sid -SessionsRoot $sessionsRoot
     Assert-True ($preview2.mode -eq 'PREVIEW') 'preview_after_execute_no_mutation'
+    Assert-True ($preview2.plan.cancelCycle.status -eq 'CANCELLED') 'cycle_cancelled_after_execute'
+    Assert-True (-not $preview2.plan.canExecute) 'repeat_execute_blocked'
+    Assert-True (@($preview2.plan.blockers) -contains 'CYCLE_ALREADY_CANCELLED') 'cycle_blocker_present'
+    try {
+        Invoke-OriCancelDevExecute -Layout $layout -SessionId $sid -SessionsRoot $sessionsRoot | Out-Null
+        Assert-True $false 'repeat_execute_should_throw'
+    }
+    catch { Assert-True $true 'repeat_execute_should_throw' }
 
     # Unrelated git work blocks execute
     $sid2 = 'ori-test-cancel-002'
@@ -337,6 +357,53 @@ try {
     catch {
         Assert-True $true 'execute_without_confirm_blocked'
     }
+
+    # Pre-baseline commit on WIP blocks until explicitly included in cycle scope
+    $sidPre = 'ori-test-cancel-prebaseline'
+    git -C $backendRoot checkout -q ori/builder1-wip
+    git -C $backendRoot reset --hard $bShas.InfraOld
+    Set-Content (Join-Path $backendRoot 'legacy-wip.txt') 'legacy' -Encoding UTF8
+    git -C $backendRoot add legacy-wip.txt
+    git -C $backendRoot commit -q -m 'legacy-pre-baseline'
+    $legacySha = git -C $backendRoot rev-parse HEAD
+    Set-Content (Join-Path $backendRoot 'session-tip.txt') 'tip' -Encoding UTF8
+    git -C $backendRoot add session-tip.txt
+    git -C $backendRoot commit -q -m 'session-at-baseline'
+    $sessionTipSha = git -C $backendRoot rev-parse HEAD
+    Set-Content (Join-Path $backendRoot '.env.local.example') -Value "ACE_LOCAL_DEV_ENABLED=true`nPORT=5000`nACE_PUBLIC_BASE_URL=http://127.0.0.1:5000" -Encoding UTF8
+    New-Item -ItemType Directory -Path $scriptsDir -Force | Out-Null
+    Copy-Item (Join-Path $ScriptDir 'OriDevSessionBaselineLib.ps1') (Join-Path $scriptsDir 'OriDevSessionBaselineLib.ps1') -Force
+    & (Join-Path $ScriptDir 'New-OriDevSessionBaseline.ps1') -SessionId $sidPre `
+        -SessionsRoot $sessionsRoot -RegistryPath $regPath -BackendRoot $backendRoot -FrontendRoot $frontendRoot | Out-Null
+    Set-Content (Join-Path $backendRoot 'after-baseline.txt') 'after' -Encoding UTF8
+    git -C $backendRoot add after-baseline.txt
+    git -C $backendRoot commit -q -m 'after-baseline-commit'
+    $planPre = Build-OriCancelDevPlan -Layout $layout -SessionMeta (Get-OriSessionMeta -SessionRoot (Join-Path $sessionsRoot $sidPre)) `
+        -Registry (Get-Content $regPath -Raw | ConvertFrom-Json) -SessionRoot (Join-Path $sessionsRoot $sidPre)
+    Assert-True (-not $planPre.canExecute) 'pre_baseline_commit_blocks'
+    Assert-True (@($planPre.blockers | Where-Object { $_ -match 'PRE_BASELINE' }).Count -gt 0) 'pre_baseline_blocker_code'
+    Set-OriCancelDevCycleExplicitPreBaseline -SessionRoot (Join-Path $sessionsRoot $sidPre) `
+        -SessionMeta (Get-OriSessionMeta -SessionRoot (Join-Path $sessionsRoot $sidPre)) -BackendShas @($legacySha)
+    $planPreOk = Build-OriCancelDevPlan -Layout $layout -SessionMeta (Get-OriSessionMeta -SessionRoot (Join-Path $sessionsRoot $sidPre)) `
+        -Registry (Get-Content $regPath -Raw | ConvertFrom-Json) -SessionRoot (Join-Path $sessionsRoot $sidPre)
+    Assert-True ($planPreOk.canExecute) 'pre_baseline_explicit_allows'
+    Assert-True (@($planPreOk.commitsToCancel.backend | Where-Object { $_.subject -eq 'after-baseline-commit' }).Count -eq 1) 'after_baseline_commit_listed'
+
+    # Missing baseline infra registry snapshot blocks (tampered session)
+    $sidBadInfra = 'ori-test-cancel-bad-infra'
+    Invoke-OriGit -RepoRoot $backendRoot -GitArgs @('clean', '-fd') | Out-Null
+    git -C $backendRoot checkout -q ori/local-dev-infrastructure
+    git -C $backendRoot reset --hard $newInfraHead
+    & (Join-Path $ScriptDir 'New-OriDevSessionBaseline.ps1') -SessionId $sidBadInfra `
+        -SessionsRoot $sessionsRoot -RegistryPath $regPath -BackendRoot $backendRoot -FrontendRoot $frontendRoot | Out-Null
+    $badMetaPath = Join-Path (Join-Path $sessionsRoot $sidBadInfra) 'session.json'
+    $badMeta = Get-Content $badMetaPath -Raw | ConvertFrom-Json
+    $badMeta.localDevInfra.backendShaRegistry = '0000000000000000000000000000000000000000'
+    ($badMeta | ConvertTo-Json -Depth 12) | Set-Content $badMetaPath -Encoding UTF8
+    Remove-Item (Join-Path (Join-Path $sessionsRoot $sidBadInfra) 'cancel-dev-cycle.state.json') -Force -ErrorAction SilentlyContinue
+    $planBadInfra = Build-OriCancelDevPlan -Layout $layout -SessionMeta $badMeta -Registry (Get-Content $regPath -Raw | ConvertFrom-Json) `
+        -SessionRoot (Join-Path $sessionsRoot $sidBadInfra)
+    Assert-True (-not $planBadInfra.canExecute) 'missing_historical_infra_sha_blocks'
 
     # Session not READY
     $failSession = Join-Path $sessionsRoot 'ori-test-not-ready'

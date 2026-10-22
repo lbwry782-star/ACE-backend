@@ -130,8 +130,8 @@ function Get-OriSessionMeta {
 function Get-OriBaselineInfraHead {
     param($SessionMeta)
     $infra = $SessionMeta.localDevInfra
-    if ($infra.PSObject.Properties['backendHeadAtSnapshot']) {
-        return [string]$infra.backendHeadAtSnapshot
+    if ($infra.PSObject.Properties['backendShaRegistry']) {
+        return [string]$infra.backendShaRegistry
     }
     if ($infra.PSObject.Properties['backendSha']) {
         return [string]$infra.backendSha
@@ -142,13 +142,312 @@ function Get-OriBaselineInfraHead {
 function Get-OriBaselineFrontendHead {
     param($SessionMeta)
     $infra = $SessionMeta.localDevInfra
-    if ($infra.PSObject.Properties['frontendHeadAtSnapshot']) {
-        return [string]$infra.frontendHeadAtSnapshot
+    if ($infra.PSObject.Properties['frontendShaRegistry']) {
+        return [string]$infra.frontendShaRegistry
     }
     if ($infra.PSObject.Properties['frontendSha']) {
         return [string]$infra.frontendSha
     }
     return ''
+}
+
+function ConvertTo-StringArray {
+    param($Value)
+    if ($null -eq $Value) { return @() }
+    if ($Value -is [System.Array]) {
+        return @($Value | ForEach-Object { [string]$_ })
+    }
+    return @([string]$Value)
+}
+
+function Get-OriCancelDevCycleStatePath {
+    param([Parameter(Mandatory = $true)][string]$SessionRoot)
+    return Join-Path $SessionRoot 'cancel-dev-cycle.state.json'
+}
+
+function Get-OriCancelDevCycleState {
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionRoot,
+        [Parameter(Mandatory = $true)]$SessionMeta
+    )
+    $path = Get-OriCancelDevCycleStatePath -SessionRoot $SessionRoot
+    if (Test-Path -LiteralPath $path) {
+        return Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    }
+    $state = [ordered]@{
+        schemaVersion = 1
+        status        = 'OPEN'
+        openedAt      = (Get-Date).ToString('o')
+        cancelledAt   = $null
+        lastSuccessfulBackupRoot = $null
+        anchors       = [ordered]@{
+            backendProductHeadAtBaseline  = [string]$SessionMeta.git.backend.Head
+            frontendProductHeadAtBaseline = [string]$SessionMeta.git.frontend.Head
+            backendInfraRegistryAtBaseline  = Get-OriBaselineInfraHead -SessionMeta $SessionMeta
+            frontendInfraRegistryAtBaseline = Get-OriBaselineFrontendHead -SessionMeta $SessionMeta
+        }
+        explicitPreBaselineCommitShas = [ordered]@{
+            backend  = @()
+            frontend = @()
+        }
+    }
+    ($state | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath $path -Encoding UTF8
+    return ($state | ConvertTo-Json -Depth 6 | ConvertFrom-Json)
+}
+
+function Set-OriCancelDevCycleExplicitPreBaseline {
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionRoot,
+        [Parameter(Mandatory = $true)]$SessionMeta,
+        [string[]]$BackendShas = @(),
+        [string[]]$FrontendShas = @()
+    )
+    $state = Get-OriCancelDevCycleState -SessionRoot $SessionRoot -SessionMeta $SessionMeta
+    $state.explicitPreBaselineCommitShas.backend = @($BackendShas)
+    $state.explicitPreBaselineCommitShas.frontend = @($FrontendShas)
+    ($state | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Get-OriCancelDevCycleStatePath -SessionRoot $SessionRoot) -Encoding UTF8
+}
+
+function Set-OriCancelDevCycleCancelled {
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionRoot,
+        [Parameter(Mandatory = $true)]$SessionMeta,
+        [Parameter(Mandatory = $true)][string]$BackupRoot
+    )
+    $state = Get-OriCancelDevCycleState -SessionRoot $SessionRoot -SessionMeta $SessionMeta
+    $state.status = 'CANCELLED'
+    $state.cancelledAt = (Get-Date).ToString('o')
+    $state.lastSuccessfulBackupRoot = $BackupRoot
+    ($state | ConvertTo-Json -Depth 6) | Set-Content -LiteralPath (Get-OriCancelDevCycleStatePath -SessionRoot $SessionRoot) -Encoding UTF8
+}
+
+function Invoke-OriGitLines {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string[]]$GitArgs
+    )
+    Push-Location -LiteralPath $RepoRoot
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        $out = & git @GitArgs 2>$null
+        return @{ Code = $LASTEXITCODE; Lines = @($out | ForEach-Object { "$_" }) }
+    }
+    finally {
+        $ErrorActionPreference = $prevEap
+        Pop-Location
+    }
+}
+
+function Test-GitCommitExistsInRepo {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$Sha
+    )
+    if ([string]::IsNullOrWhiteSpace($Sha)) { return $false }
+    return (Invoke-OriGit -RepoRoot $RepoRoot -GitArgs @('rev-parse', '--verify', "${Sha}^{commit}")) -eq 0
+}
+
+function Test-GitIsAncestor {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$Ancestor,
+        [Parameter(Mandatory = $true)][string]$Descendant
+    )
+    return (Invoke-OriGit -RepoRoot $RepoRoot -GitArgs @('merge-base', '--is-ancestor', $Ancestor, $Descendant)) -eq 0
+}
+
+function Get-GitRevList {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string[]]$Revisions,
+        [switch]$Reverse
+    )
+    $args = @('rev-list')
+    if ($Reverse) { $args += '--reverse' }
+    $args += $Revisions
+    $r = Invoke-OriGitLines -RepoRoot $RepoRoot -GitArgs $args
+    if ($r.Code -ne 0) { return @() }
+    return @($r.Lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Get-GitCommitSummary {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$Sha
+    )
+    $r = Invoke-OriGitLines -RepoRoot $RepoRoot -GitArgs @('show', '-s', '--format=%H|%h|%s', $Sha)
+    if ($r.Code -ne 0 -or $r.Lines.Count -eq 0) { return $null }
+    $parts = $r.Lines[0].Split('|', 3)
+    if ($parts.Count -lt 3) { return $null }
+    return @{ FullSha = $parts[0]; ShortSha = $parts[1]; Subject = $parts[2] }
+}
+
+function Get-GitBranchesContaining {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$Sha
+    )
+    $r = Invoke-OriGitLines -RepoRoot $RepoRoot -GitArgs @('branch', '-a', '--contains', $Sha)
+    if ($r.Code -ne 0) { return @() }
+    return @($r.Lines | ForEach-Object { $_.Trim().TrimStart('*').Trim() } | Where-Object { $_ })
+}
+
+function Get-OriCancelDevCommitGraphForRepo {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$BaselineProductHead,
+        [Parameter(Mandatory = $true)][string]$BaselineInfraRegistrySha,
+        [Parameter(Mandatory = $true)][string]$InfraTargetSha,
+        [Parameter(Mandatory = $true)][string]$InfraBranch,
+        [Parameter(Mandatory = $true)][string]$WipBranch,
+        [string[]]$ExplicitPreBaselineShas = @()
+    )
+    $errors = @()
+    $blockers = @()
+
+    if ([string]::IsNullOrWhiteSpace($BaselineInfraRegistrySha)) {
+        $errors += "${Label}_BASELINE_INFRA_REGISTRY_SHA_MISSING"
+    }
+    elseif (-not (Test-GitCommitExistsInRepo -RepoRoot $RepoRoot -Sha $BaselineInfraRegistrySha)) {
+        $errors += "${Label}_BASELINE_INFRA_REGISTRY_SHA_MISSING:$BaselineInfraRegistrySha"
+    }
+    if (-not (Test-GitCommitExistsInRepo -RepoRoot $RepoRoot -Sha $InfraTargetSha)) {
+        $errors += "${Label}_INFRA_TARGET_SHA_MISSING:$InfraTargetSha"
+    }
+    if (-not (Test-GitCommitExistsInRepo -RepoRoot $RepoRoot -Sha $BaselineProductHead)) {
+        $errors += "${Label}_BASELINE_PRODUCT_HEAD_MISSING:$BaselineProductHead"
+    }
+
+    $state = Get-GitRepoState -RepoRoot $RepoRoot
+    $currentHead = [string]$state.Head
+    $currentBranch = [string]$state.Branch
+
+    if ($errors.Count -gt 0) {
+        return @{
+            Ok = $false
+            Errors = $errors
+            Blockers = @("${Label}_COMMIT_GRAPH_INCOMPLETE")
+            BaselineProductHead = $BaselineProductHead
+            CurrentHead = $currentHead
+            CurrentBranch = $currentBranch
+            InfraTarget = $InfraTargetSha
+            SessionWipCommits = @()
+            InfraCommits = @()
+            PreBaselineCommits = @()
+            CommitsToCancel = @()
+        }
+    }
+
+    if (-not (Test-GitIsAncestor -RepoRoot $RepoRoot -Ancestor $BaselineInfraRegistrySha -Descendant $InfraTargetSha)) {
+        $blockers += "${Label}_INFRA_ADVANCEMENT_NOT_ANCESTRAL"
+    }
+
+    $infraCommitShas = @()
+    if ($BaselineInfraRegistrySha -ne $InfraTargetSha) {
+        $infraCommitShas = Get-GitRevList -RepoRoot $RepoRoot -Revisions @("$BaselineInfraRegistrySha..$InfraTargetSha") -Reverse
+    }
+
+    $lostFromActive = Get-GitRevList -RepoRoot $RepoRoot -Revisions @($currentHead, '--not', $InfraTargetSha) -Reverse
+
+    $sessionAfterBaseline = @()
+    if ($BaselineProductHead -ne $currentHead) {
+        $sessionAfterBaseline = Get-GitRevList -RepoRoot $RepoRoot -Revisions @("$BaselineProductHead..$currentHead") -Reverse
+    }
+
+    $preBaseline = Get-GitRevList -RepoRoot $RepoRoot -Revisions @($BaselineProductHead, '--not', $InfraTargetSha) -Reverse
+    $preBaseline = @($preBaseline | Where-Object { $_ -ne $BaselineProductHead })
+
+    $explicitSet = @{}
+    foreach ($s in $ExplicitPreBaselineShas) { if ($s) { $explicitSet[$s] = $true } }
+
+    $sessionSet = @{}
+    foreach ($s in $sessionAfterBaseline) { $sessionSet[$s] = $true }
+
+    foreach ($sha in $lostFromActive) {
+        if ($infraCommitShas -contains $sha) { continue }
+        if ($sessionSet.ContainsKey($sha)) { continue }
+        if ($sha -eq $BaselineProductHead) { continue }
+        if ($BaselineProductHead -eq $currentHead) {
+            if (Test-GitIsAncestor -RepoRoot $RepoRoot -Ancestor $sha -Descendant $BaselineProductHead) { continue }
+        }
+        if ($preBaseline -contains $sha) { continue }
+        $blockers += "${Label}_COMMIT_UNATTRIBUTABLE:$sha"
+    }
+
+    $preBaselineOut = @()
+    foreach ($sha in $preBaseline) {
+        if ($lostFromActive -notcontains $sha) { continue }
+        if ($BaselineProductHead -eq $currentHead) { continue }
+        $sum = Get-GitCommitSummary -RepoRoot $RepoRoot -Sha $sha
+        if (-not $sum) {
+            $blockers += "${Label}_COMMIT_UNATTRIBUTABLE:$sha"
+            continue
+        }
+        $preBaselineOut += [ordered]@{
+            fullSha            = $sum.FullSha
+            shortSha           = $sum.ShortSha
+            subject            = $sum.Subject
+            branches           = @(Get-GitBranchesContaining -RepoRoot $RepoRoot -Sha $sha)
+            classification     = 'preBaseline'
+            preservedInWipRef  = $true
+            preservedInBackup  = $true
+            explicitlyIncluded = [bool]$explicitSet.ContainsKey($sha)
+        }
+        if (-not $explicitSet.ContainsKey($sha)) {
+            $blockers += "${Label}_PRE_BASELINE_COMMIT_NOT_IN_SCOPE:$($sum.ShortSha)"
+        }
+    }
+
+    $commitsToCancel = @()
+    foreach ($sha in $sessionAfterBaseline) {
+        if ($lostFromActive -notcontains $sha) { continue }
+        $sum = Get-GitCommitSummary -RepoRoot $RepoRoot -Sha $sha
+        if (-not $sum) {
+            $blockers += "${Label}_COMMIT_UNATTRIBUTABLE:$sha"
+            continue
+        }
+        $commitsToCancel += [ordered]@{
+            fullSha           = $sum.FullSha
+            shortSha          = $sum.ShortSha
+            subject           = $sum.Subject
+            branches          = @(Get-GitBranchesContaining -RepoRoot $RepoRoot -Sha $sha)
+            classification    = 'sessionWip'
+            preservedInWipRef = $true
+            preservedInBackup = $true
+        }
+    }
+    $infraOut = @()
+    foreach ($sha in $infraCommitShas) {
+        $sum = Get-GitCommitSummary -RepoRoot $RepoRoot -Sha $sha
+        if (-not $sum) { continue }
+        $infraOut += [ordered]@{
+            fullSha           = $sum.FullSha
+            shortSha          = $sum.ShortSha
+            subject           = $sum.Subject
+            branches          = @(Get-GitBranchesContaining -RepoRoot $RepoRoot -Sha $sha)
+            classification    = 'infra'
+            preservedInWipRef = $true
+            preservedInBackup = $true
+        }
+    }
+
+    return @{
+        Ok                    = ($blockers.Count -eq 0 -and $errors.Count -eq 0)
+        Errors                = $errors
+        Blockers              = $blockers
+        BaselineProductHead   = $BaselineProductHead
+        CurrentHead           = $currentHead
+        CurrentBranch         = $currentBranch
+        InfraTarget           = $InfraTargetSha
+        InfraBranch           = $InfraBranch
+        WipBranch             = $WipBranch
+        SessionWipCommits     = $commitsToCancel
+        InfraCommits          = $infraOut
+        PreBaselineCommits    = $preBaselineOut
+        CommitsToCancel       = $commitsToCancel
+    }
 }
 
 function Invoke-OriGit {
@@ -756,10 +1055,27 @@ function Build-OriCancelDevPlan {
     $wipBranch = [string]$SessionMeta.productWip.builder1Branch
     $wipSha = [string]$SessionMeta.productWip.builder1Sha
 
-    $baselineBackendHead = Get-OriBaselineInfraHead -SessionMeta $SessionMeta
-    $baselineFrontendHead = Get-OriBaselineFrontendHead -SessionMeta $SessionMeta
-    $backendInfraPaths = Get-GitInfraAdvancementPaths -RepoRoot $backendRoot -FromSha $baselineBackendHead -ToSha $infraBackendSha
-    $frontendInfraPaths = Get-GitInfraAdvancementPaths -RepoRoot $frontendRoot -FromSha $baselineFrontendHead -ToSha $infraFrontendSha
+    $baselineBackendInfraSha = Get-OriBaselineInfraHead -SessionMeta $SessionMeta
+    $baselineFrontendInfraSha = Get-OriBaselineFrontendHead -SessionMeta $SessionMeta
+    $baselineBackendProductHead = [string]$SessionMeta.git.backend.Head
+    $baselineFrontendProductHead = [string]$SessionMeta.git.frontend.Head
+    $backendInfraPaths = Get-GitInfraAdvancementPaths -RepoRoot $backendRoot -FromSha $baselineBackendInfraSha -ToSha $infraBackendSha
+    $frontendInfraPaths = Get-GitInfraAdvancementPaths -RepoRoot $frontendRoot -FromSha $baselineFrontendInfraSha -ToSha $infraFrontendSha
+    $cycleState = Get-OriCancelDevCycleState -SessionRoot $SessionRoot -SessionMeta $SessionMeta
+    $explicitPreBackend = @()
+    $explicitPreFrontend = @()
+    if ($cycleState.explicitPreBaselineCommitShas) {
+        $explicitPreBackend = ConvertTo-StringArray -Value $cycleState.explicitPreBaselineCommitShas.backend
+        $explicitPreFrontend = ConvertTo-StringArray -Value $cycleState.explicitPreBaselineCommitShas.frontend
+    }
+    $commitGraphBackend = Get-OriCancelDevCommitGraphForRepo -RepoRoot $backendRoot -Label 'BACKEND' `
+        -BaselineProductHead $baselineBackendProductHead -BaselineInfraRegistrySha $baselineBackendInfraSha `
+        -InfraTargetSha $infraBackendSha -InfraBranch $infraBackendBranch -WipBranch $wipBranch `
+        -ExplicitPreBaselineShas $explicitPreBackend
+    $commitGraphFrontend = Get-OriCancelDevCommitGraphForRepo -RepoRoot $frontendRoot -Label 'FRONTEND' `
+        -BaselineProductHead $baselineFrontendProductHead -BaselineInfraRegistrySha $baselineFrontendInfraSha `
+        -InfraTargetSha $infraFrontendSha -InfraBranch $infraFrontendBranch -WipBranch $wipBranch `
+        -ExplicitPreBaselineShas $explicitPreFrontend
     $registryDrift = Get-OriInfraRegistryDrift -Layout $Layout -Registry $Registry
 
     $backendState = Get-GitRepoState -RepoRoot $backendRoot
@@ -788,6 +1104,26 @@ function Build-OriCancelDevPlan {
     if (@($registryDrift).Count -gt 0) {
         $blockers += @($registryDrift)
     }
+    if ([string]$cycleState.status -eq 'CANCELLED') {
+        $blockers += 'CYCLE_ALREADY_CANCELLED'
+    }
+    if (-not $commitGraphBackend.Ok) {
+        $blockers += @($commitGraphBackend.Blockers)
+        $blockers += @($commitGraphBackend.Errors)
+    }
+    else {
+        $blockers += @($commitGraphBackend.Blockers)
+    }
+    if (-not $commitGraphFrontend.Ok) {
+        $blockers += @($commitGraphFrontend.Blockers)
+        $blockers += @($commitGraphFrontend.Errors)
+    }
+    else {
+        $blockers += @($commitGraphFrontend.Blockers)
+    }
+    if ([string]::IsNullOrWhiteSpace($baselineBackendInfraSha) -or [string]::IsNullOrWhiteSpace($baselineFrontendInfraSha)) {
+        $blockers += 'BASELINE_INFRA_REGISTRY_SNAPSHOT_INCOMPLETE'
+    }
 
     return [ordered]@{
         sessionId              = [string]$SessionMeta.sessionId
@@ -805,8 +1141,31 @@ function Build-OriCancelDevPlan {
             note           = 'Targets from live registry; not baseline HEAD.'
         }
         baselineInfraHead      = @{
-            backend  = $baselineBackendHead
-            frontend = $baselineFrontendHead
+            backend  = $baselineBackendInfraSha
+            frontend = $baselineFrontendInfraSha
+            note     = 'From baseline registry snapshot (backendShaRegistry), not WIP HEAD at snapshot.'
+        }
+        baselineProductHead    = @{
+            backend  = $baselineBackendProductHead
+            frontend = $baselineFrontendProductHead
+        }
+        cancelCycle            = @{
+            status                 = [string]$cycleState.status
+            cancelledAt            = [string]$cycleState.cancelledAt
+            lastSuccessfulBackupRoot = [string]$cycleState.lastSuccessfulBackupRoot
+            anchors                = $cycleState.anchors
+        }
+        commitGraph            = @{
+            backend  = $commitGraphBackend
+            frontend = $commitGraphFrontend
+        }
+        commitsToCancel        = @{
+            backend  = @($commitGraphBackend.CommitsToCancel)
+            frontend = @($commitGraphFrontend.CommitsToCancel)
+        }
+        infraCommitsPreserved  = @{
+            backend  = @($commitGraphBackend.InfraCommits)
+            frontend = @($commitGraphFrontend.InfraCommits)
         }
         registryInfraDrift     = $registryDrift
         infraAdvancementPaths  = @{
@@ -847,6 +1206,7 @@ function Build-OriCancelDevPlan {
                 "Checkout $infraBackendBranch @ $infraBackendSha (backend) only if registry matches branch HEAD"
                 "Checkout $infraFrontendBranch @ $infraFrontendSha (frontend) only if registry matches branch HEAD"
                 'Revert working-tree paths captured in baseline snapshot (session-attributed only)'
+                'Active branch reset drops session WIP commits listed in commitsToCancel (WIP refs and bundle retained)'
             )
             env = @(
                 'Restore sessionOrCustom keys from baseline DPAPI'
@@ -1064,6 +1424,9 @@ function Invoke-OriCancelDevExecute {
             throw ($vErrors -join ',')
         }
         Add-OriCancelJournalStep -Journal $journal -Name 'final_verify' -Status 'SUCCESS'
+
+        Set-OriCancelDevCycleCancelled -SessionRoot $sessionRoot -SessionMeta $sessionMeta -BackupRoot $backupRoot
+        Add-OriCancelJournalStep -Journal $journal -Name 'close_cancel_cycle' -Status 'SUCCESS'
 
         $overallStatus = 'SUCCESS'
         $journal.status = 'SUCCESS'
