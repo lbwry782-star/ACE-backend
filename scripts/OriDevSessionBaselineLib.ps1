@@ -1,0 +1,374 @@
+# Ori local dev session baseline — shared helpers (no side effects on dot-source).
+Set-StrictMode -Version Latest
+
+function Write-BaselineInfo([string]$Message) { Write-Host $Message -ForegroundColor Cyan }
+function Write-BaselineOk([string]$Message) { Write-Host $Message -ForegroundColor Green }
+function Write-BaselineWarn([string]$Message) { Write-Host $Message -ForegroundColor Yellow }
+function Write-BaselineErr([string]$Message) { Write-Host $Message -ForegroundColor Red }
+
+function Get-FileSha256Hex([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Get-TextSha256Hex([string]$Text) {
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Text)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant())
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function New-OriSessionId {
+    $ts = Get-Date -Format 'yyyyMMdd-HHmmss'
+    $suffix = ([Guid]::NewGuid().ToString('N')).Substring(0, 8)
+    return "ori-$ts-$suffix"
+}
+
+function Test-ProductionRegistryIntegrity {
+    param(
+        [Parameter(Mandatory = $true)][string]$RegistryPath,
+        [Parameter(Mandatory = $true)][string]$Sha256SidecarPath
+    )
+    $errors = @()
+    if (-not (Test-Path -LiteralPath $RegistryPath)) {
+        return @{ Ok = $false; Errors = @('REGISTRY_MISSING'); Registry = $null }
+    }
+    if (-not (Test-Path -LiteralPath $Sha256SidecarPath)) {
+        return @{ Ok = $false; Errors = @('REGISTRY_SHA256_SIDECAR_MISSING'); Registry = $null }
+    }
+    $expectedLine = (Get-Content -LiteralPath $Sha256SidecarPath -Raw).Trim()
+    $expectedHash = ($expectedLine -split '\s+')[0].ToLowerInvariant()
+    $actualHash = Get-FileSha256Hex $RegistryPath
+    if ($expectedHash -ne $actualHash) {
+        $errors += 'REGISTRY_SHA256_MISMATCH'
+    }
+    try {
+        $registry = Get-Content -LiteralPath $RegistryPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        return @{ Ok = $false; Errors = @('REGISTRY_JSON_INVALID'); Registry = $null }
+    }
+    if ($registry.schemaVersion -ne 1) {
+        $errors += 'REGISTRY_SCHEMA_UNSUPPORTED'
+    }
+    if ($errors.Count -gt 0) {
+        return @{ Ok = $false; Errors = $errors; Registry = $registry }
+    }
+    return @{ Ok = $true; Errors = @(); Registry = $registry }
+}
+
+function Get-RegistryCommitShas {
+    param([Parameter(Mandatory = $true)]$Registry)
+    $list = @()
+    $prod = $Registry.production
+    if ($prod.backendWeb.deployedCommitSha) { $list += @{ Repo = 'backend'; Role = 'productionWeb'; Sha = [string]$prod.backendWeb.deployedCommitSha } }
+    if ($prod.backendWorker.deployedCommitSha) {
+        $sha = [string]$prod.backendWorker.deployedCommitSha
+        if (-not ($list | Where-Object { $_.Repo -eq 'backend' -and $_.Sha -eq $sha })) {
+            $list += @{ Repo = 'backend'; Role = 'productionWorker'; Sha = $sha }
+        }
+    }
+    if ($prod.frontend.deployedCommitSha) { $list += @{ Repo = 'frontend'; Role = 'production'; Sha = [string]$prod.frontend.deployedCommitSha } }
+    $infra = $Registry.localDevInfra
+    if ($infra.backend.commitSha) { $list += @{ Repo = 'backend'; Role = 'localDevInfra'; Sha = [string]$infra.backend.commitSha } }
+    if ($infra.frontend.commitSha) { $list += @{ Repo = 'frontend'; Role = 'localDevInfra'; Sha = [string]$infra.frontend.commitSha } }
+    if ($Registry.wip.builder1.commitSha) { $list += @{ Repo = 'backend'; Role = 'builder1Wip'; Sha = [string]$Registry.wip.builder1.commitSha } }
+    return $list
+}
+
+function Test-RegistryCommitsExist {
+    param(
+        [Parameter(Mandatory = $true)]$Registry,
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [Parameter(Mandatory = $true)][string]$FrontendRoot
+    )
+    $errors = @()
+    foreach ($entry in (Get-RegistryCommitShas -Registry $Registry)) {
+        $root = if ($entry.Repo -eq 'backend') { $BackendRoot } else { $FrontendRoot }
+        Push-Location -LiteralPath $root
+        try {
+            git rev-parse --verify "$($entry.Sha)^{commit}" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                $errors += "COMMIT_MISSING:$($entry.Role):$($entry.Sha)"
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    return @{ Ok = ($errors.Count -eq 0); Errors = $errors }
+}
+
+function Protect-ContentForCurrentUser {
+    param([Parameter(Mandatory = $true)][byte[]]$PlainBytes)
+    Add-Type -AssemblyName System.Security
+    return [System.Security.Cryptography.ProtectedData]::Protect(
+        $PlainBytes,
+        $null,
+        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+}
+
+function Unprotect-ContentForCurrentUser {
+    param([Parameter(Mandatory = $true)][byte[]]$ProtectedBytes)
+    Add-Type -AssemblyName System.Security
+    return [System.Security.Cryptography.ProtectedData]::Unprotect(
+        $ProtectedBytes,
+        $null,
+        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+}
+
+function Set-DirectoryCurrentUserAcl {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    icacls $Path /inheritance:r /grant:r "${user}:(OI)(CI)F" /Q 2>&1 | Out-Null
+    Get-ChildItem -LiteralPath $Path -File -ErrorAction SilentlyContinue | ForEach-Object {
+        icacls $_.FullName /inheritance:r /grant:r "${user}:F" /Q 2>&1 | Out-Null
+    }
+}
+
+function Parse-DotEnvKeys {
+    param([Parameter(Mandatory = $true)][string]$Content)
+    $keys = [ordered]@{}
+    foreach ($line in ($Content -split "`n")) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $eq = $t.IndexOf('=')
+        if ($eq -lt 1) { continue }
+        $name = $t.Substring(0, $eq).Trim()
+        $value = $t.Substring($eq + 1).Trim()
+        if ($value.StartsWith('"') -and $value.EndsWith('"') -and $value.Length -ge 2) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+        $keys[$name] = $value
+    }
+    return $keys
+}
+
+function Get-EnvKeyTemplateFromExample {
+    param([Parameter(Mandatory = $true)][string]$ExamplePath)
+    if (-not (Test-Path -LiteralPath $ExamplePath)) {
+        return @()
+    }
+    $content = Get-Content -LiteralPath $ExamplePath -Raw -Encoding UTF8
+    $parsed = Parse-DotEnvKeys -Content $content
+    return @($parsed.Keys)
+}
+
+function Build-EnvKeyManifest {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$KeyValues,
+        [AllowEmptyCollection()][string[]]$TemplateKeys = @(),
+        [Parameter(Mandatory = $true)][string]$LogicalName
+    )
+    $rows = @()
+    foreach ($name in ($KeyValues.Keys | Sort-Object)) {
+        $value = [string]$KeyValues[$name]
+        $classification = if ($TemplateKeys -contains $name) { 'infraTemplate' } else { 'sessionOrCustom' }
+        $rows += [PSCustomObject]@{
+            logicalName = $LogicalName
+            key         = $name
+            valueSha256 = (Get-TextSha256Hex $value)
+            classification = $classification
+        }
+    }
+    foreach ($name in ($TemplateKeys | Sort-Object)) {
+        if (-not $KeyValues.ContainsKey($name)) {
+            $rows += [PSCustomObject]@{
+                logicalName = $LogicalName
+                key         = $name
+                valueSha256 = ''
+                classification = 'infraTemplateMissingAtBaseline'
+            }
+        }
+    }
+    return $rows
+}
+
+function Parse-GitStatusLine {
+    param([string]$Line)
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
+    $xy = $Line.Substring(0, 2)
+    $pathPart = $Line.Substring(3).Trim()
+    if ($pathPart -match '^"(.+)"$') { $pathPart = $Matches[1] }
+    elseif ($pathPart -match ' -> ') { $pathPart = ($pathPart -split ' -> ', 2)[-1].Trim('"') }
+    $rel = $pathPart -replace '/', '\'
+    $changeType = switch -Regex ($xy) {
+        '^\?\?' { 'untracked' }
+        '^ D|^D ' { 'deleted' }
+        default { 'modified' }
+    }
+    [PSCustomObject]@{ XY = $xy; RelPath = $rel; ChangeType = $changeType }
+}
+
+function Export-GitWorkingTreeSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [Parameter(Mandatory = $true)][string]$SessionRoot
+    )
+    $out = Join-Path $SessionRoot $Label
+    $gitDir = Join-Path $out 'git'
+    $mirrorDir = Join-Path $out 'mirror'
+    $deletedDir = Join-Path $out 'deleted-from-HEAD'
+    New-Item -ItemType Directory -Path $gitDir, $mirrorDir, $deletedDir -Force | Out-Null
+
+    Push-Location -LiteralPath $RepoRoot
+    try {
+        $branch = (git rev-parse --abbrev-ref HEAD).Trim()
+        $head = (git rev-parse HEAD).Trim()
+        Set-Content -LiteralPath (Join-Path $gitDir 'branch.txt') -Value $branch -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $gitDir 'HEAD.txt') -Value $head -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $gitDir 'status-porcelain.txt') -Value (git status -u --porcelain=v1) -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $gitDir 'diff-HEAD.patch') -Value (git diff HEAD | Out-String) -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $gitDir 'diff-staged.patch') -Value (git diff --cached | Out-String) -Encoding UTF8
+
+        $entries = @()
+        foreach ($line in (git status -u --porcelain=v1)) {
+            $p = Parse-GitStatusLine -Line $line
+            if ($p) { $entries += $p }
+        }
+        foreach ($e in $entries) {
+            $full = Join-Path $RepoRoot $e.RelPath
+            if ($e.ChangeType -eq 'deleted') {
+                $destDeleted = Join-Path $deletedDir $e.RelPath
+                New-Item -ItemType Directory -Path (Split-Path -Parent $destDeleted) -Force | Out-Null
+                $blob = git show "HEAD:$($e.RelPath -replace '\\','/')"
+                Set-Content -LiteralPath $destDeleted -Value $blob -Encoding UTF8
+            }
+            elseif (Test-Path -LiteralPath $full -PathType Leaf) {
+                $destMirror = Join-Path $mirrorDir $e.RelPath
+                New-Item -ItemType Directory -Path (Split-Path -Parent $destMirror) -Force | Out-Null
+                Copy-Item -LiteralPath $full -Destination $destMirror -Force
+            }
+        }
+        return @{
+            Label   = $Label
+            Branch  = $branch
+            Head    = $head
+            Entries = $entries
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Export-EnvFileSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestDpapiPath,
+        [AllowEmptyCollection()][string[]]$TemplateKeys = @(),
+        [Parameter(Mandatory = $true)][string]$LogicalName
+    )
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
+        return @{
+            Present = $false
+            LogicalName = $LogicalName
+            SourcePath = $SourcePath
+            DestDpapiPath = $DestDpapiPath
+            KeyManifest = @()
+            SizeBytes = 0
+        }
+    }
+    $raw = [System.IO.File]::ReadAllText($SourcePath, [System.Text.Encoding]::UTF8)
+    $protected = Protect-ContentForCurrentUser -PlainBytes ([System.Text.Encoding]::UTF8.GetBytes($raw))
+    [System.IO.File]::WriteAllBytes($DestDpapiPath, $protected)
+    $keys = Parse-DotEnvKeys -Content $raw
+    $manifest = Build-EnvKeyManifest -KeyValues $keys -TemplateKeys $TemplateKeys -LogicalName $LogicalName
+    return @{
+        Present = $true
+        LogicalName = $LogicalName
+        SourcePath = $SourcePath
+        DestDpapiPath = $DestDpapiPath
+        PlainSha256 = (Get-TextSha256Hex $raw)
+        KeyManifest = $manifest
+        SizeBytes = (Get-Item -LiteralPath $SourcePath).Length
+    }
+}
+
+function Test-SessionSnapshotIntegrity {
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionRoot,
+        [Parameter(Mandatory = $true)]$SessionMeta
+    )
+    $errors = @()
+    $sessionFile = Join-Path $SessionRoot 'session.json'
+    if (-not (Test-Path -LiteralPath $sessionFile)) {
+        $errors += 'SESSION_JSON_MISSING'
+        return @{ Ok = $false; Errors = $errors }
+    }
+    foreach ($block in @('BACKEND', 'FRONTEND')) {
+        $headFile = Join-Path $SessionRoot "$block\git\HEAD.txt"
+        if (-not (Test-Path -LiteralPath $headFile)) { $errors += "MISSING_${block}_HEAD" }
+    }
+    $manifestPath = Join-Path $SessionRoot 'MANIFEST.csv'
+    if (-not (Test-Path -LiteralPath $manifestPath)) { $errors += 'MANIFEST_MISSING' }
+
+    foreach ($envItem in $SessionMeta.envSnapshots) {
+        if (-not $envItem.Present) { continue }
+        if (-not (Test-Path -LiteralPath $envItem.DestDpapiPath)) {
+            $errors += "ENV_DPAPI_MISSING:$($envItem.LogicalName)"
+            continue
+        }
+        try {
+            $bytes = [System.IO.File]::ReadAllBytes($envItem.DestDpapiPath)
+            $plain = [System.Text.Encoding]::UTF8.GetString((Unprotect-ContentForCurrentUser -ProtectedBytes $bytes))
+            $round = Get-TextSha256Hex $plain
+            if ($round -ne $envItem.PlainSha256) {
+                $errors += "ENV_DPAPI_ROUNDTRIP_FAIL:$($envItem.LogicalName)"
+            }
+        }
+        catch {
+            $errors += "ENV_DPAPI_UNPROTECT_FAIL:$($envItem.LogicalName)"
+        }
+    }
+
+    foreach ($block in @(
+        @{ Label = 'BACKEND'; RootKey = 'backend' }
+        @{ Label = 'FRONTEND'; RootKey = 'frontend' }
+    )) {
+        $snap = $SessionMeta.git.$($block.RootKey)
+        if (-not $snap) { continue }
+        foreach ($e in $snap.Entries) {
+            $repoRoot = if ($block.Label -eq 'BACKEND') { $SessionMeta.paths.backendRoot } else { $SessionMeta.paths.frontendRoot }
+            $full = Join-Path $repoRoot $e.RelPath
+            if ($e.ChangeType -eq 'deleted') {
+                $bkp = Join-Path $SessionRoot "$($block.Label)\deleted-from-HEAD\$($e.RelPath)"
+                if (-not (Test-Path -LiteralPath $bkp)) { $errors += "MISSING_DELETED:$($block.Label):$($e.RelPath)" }
+            }
+            else {
+                if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { continue }
+                $bkp = Join-Path $SessionRoot "$($block.Label)\mirror\$($e.RelPath)"
+                if (-not (Test-Path -LiteralPath $bkp)) { $errors += "MISSING_MIRROR:$($block.Label):$($e.RelPath)" }
+                elseif ((Get-FileSha256Hex $full) -ne (Get-FileSha256Hex $bkp)) {
+                    $errors += "HASH_MISMATCH:$($block.Label):$($e.RelPath)"
+                }
+            }
+        }
+    }
+    return @{ Ok = ($errors.Count -eq 0); Errors = $errors }
+}
+
+function Write-SessionManifest {
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionRoot,
+        [Parameter(Mandatory = $true)][array]$Rows
+    )
+    $path = Join-Path $SessionRoot 'MANIFEST.csv'
+    $Rows | Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8
+}
+
+function Save-SessionState {
+    param(
+        [Parameter(Mandatory = $true)][string]$SessionRoot,
+        [Parameter(Mandatory = $true)][hashtable]$State
+    )
+    ($State | ConvertTo-Json -Depth 12) | Set-Content -LiteralPath (Join-Path $SessionRoot 'session.json') -Encoding UTF8
+}
