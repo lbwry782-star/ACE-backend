@@ -53,8 +53,10 @@ class Builder2IdempotencyTestCase(unittest.TestCase):
         enable_memory_idempotency_store()
         clear_memory_allowance_store_for_tests()
         clear_memory_idempotency_for_tests()
+        from engine.ace_local_dev_config import enable_local_dev_security_bypass_for_tests
+
         os.environ["BUILDER2_TOURNAMENT_ENABLED"] = "true"
-        os.environ["REDIS_URL"] = "redis://test"
+        enable_local_dev_security_bypass_for_tests()
         os.environ["ACE_SECURITY_ENABLED"] = "false"
         from app import app
 
@@ -70,6 +72,9 @@ class Builder2IdempotencyTestCase(unittest.TestCase):
         clear_memory_allowance_store_for_tests()
         clear_memory_idempotency_for_tests()
         os.environ.pop("ACE_SECURITY_ENABLED", None)
+        from engine.ace_local_dev_config import reset_local_dev_config_for_tests
+
+        reset_local_dev_config_for_tests()
 
     def _post_generate(
         self,

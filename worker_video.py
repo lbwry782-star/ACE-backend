@@ -123,6 +123,15 @@ def main() -> None:
         logger.error("REDIS_URL is required for worker_video")
         sys.exit(1)
 
+    from engine.ace_local_dev_config import assert_local_dev_startup_safe, confirm_local_dev_loopback_bind
+
+    confirm_local_dev_loopback_bind("127.0.0.1")
+    try:
+        assert_local_dev_startup_safe()
+    except RuntimeError as exc:
+        logger.error("ACE_LOCAL_DEV startup blocked: %s", exc)
+        sys.exit(1)
+
     # Import after env check so engine can read other env vars
     from engine.builder2_tournament_recovery import (
         acquire_job_lease,

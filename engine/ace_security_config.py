@@ -47,7 +47,11 @@ def is_security_enabled() -> bool:
 
 
 def is_security_explicitly_disabled() -> bool:
-    return resolve_security_config_state() == SECURITY_STATE_DISABLED
+    if resolve_security_config_state() != SECURITY_STATE_DISABLED:
+        return False
+    from engine.ace_local_dev_config import is_local_dev_security_bypass_allowed
+
+    return is_local_dev_security_bypass_allowed()
 
 
 def is_security_config_invalid() -> bool:
@@ -68,6 +72,17 @@ def assert_protected_route_security_config(*, include_ok: bool = True) -> Option
     if is_security_config_invalid():
         logger.warning("ACE_SECURITY_CONFIG reason=ace_security_config_invalid")
         return security_config_error_response(include_ok=include_ok)
+    if resolve_security_config_state() == SECURITY_STATE_DISABLED:
+        from engine.ace_local_dev_config import is_local_dev_security_bypass_allowed
+
+        if not is_local_dev_security_bypass_allowed():
+            logger.warning("ACE_SECURITY_CONFIG reason=ace_security_disabled_not_allowed")
+            payload = {"error": "ace_security_disabled_not_allowed"}
+            if include_ok:
+                payload = {"ok": False, "error": "ace_security_disabled_not_allowed"}
+            response = jsonify(payload)
+            response.headers["Cache-Control"] = "no-store"
+            return response, 503
     return None
 
 
@@ -76,8 +91,9 @@ def security_config_payload() -> dict:
 
 
 def security_config_response() -> Tuple[Response, int]:
-    if is_security_config_invalid():
-        return security_config_error_response(include_ok=False)
+    config_err = assert_protected_route_security_config(include_ok=False)
+    if config_err is not None:
+        return config_err
     response = jsonify(security_config_payload())
     response.headers["Cache-Control"] = "no-store"
     return response, 200
@@ -110,6 +126,12 @@ def log_security_config_on_startup() -> None:
     if state == SECURITY_STATE_INVALID:
         logger.warning("ACE_SECURITY_CONFIG state=invalid fail_closed=true")
     elif state == SECURITY_STATE_DISABLED:
-        logger.info("ACE_SECURITY_CONFIG securityEnabled=false security_checks_bypassed=true")
+        if is_security_explicitly_disabled():
+            logger.info("ACE_SECURITY_CONFIG securityEnabled=false security_checks_bypassed=true local_dev=true")
+        else:
+            logger.warning(
+                "ACE_SECURITY_CONFIG state=disabled_not_allowed fail_closed=true "
+                "(requires ACE_LOCAL_DEV_ENABLED + loopback bind)"
+            )
     else:
         logger.info("ACE_SECURITY_CONFIG securityEnabled=true")

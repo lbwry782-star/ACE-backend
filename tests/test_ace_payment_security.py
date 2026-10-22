@@ -43,6 +43,10 @@ from engine.ace_payment_tokens import (
     sha256_hex,
     verify_browser_token,
 )
+from engine.ace_local_dev_config import (
+    enable_local_dev_security_bypass_for_tests,
+    reset_local_dev_config_for_tests,
+)
 from engine.ace_security_config import (
     SECURITY_STATE_DISABLED,
     SECURITY_STATE_ENABLED,
@@ -65,6 +69,7 @@ def _checkout_headers(checkout_id: str, browser_token: str) -> Dict[str, str]:
 class AceSecurityConfigTests(unittest.TestCase):
     def tearDown(self) -> None:
         os.environ.pop("ACE_SECURITY_ENABLED", None)
+        reset_local_dev_config_for_tests()
 
     def test_explicit_true_enables(self) -> None:
         for val in ("true", "TRUE", "  true  ", "1", "yes", "on"):
@@ -74,13 +79,19 @@ class AceSecurityConfigTests(unittest.TestCase):
             self.assertFalse(is_security_explicitly_disabled())
             self.assertFalse(is_security_config_invalid())
 
-    def test_explicit_false_disables(self) -> None:
+    def test_explicit_false_parses_disabled_env(self) -> None:
         for val in ("false", "FALSE", "  false  ", "0", "no", "off"):
             os.environ["ACE_SECURITY_ENABLED"] = val
             self.assertEqual(resolve_security_config_state(), SECURITY_STATE_DISABLED)
             self.assertFalse(is_security_enabled())
-            self.assertTrue(is_security_explicitly_disabled())
+            self.assertFalse(is_security_explicitly_disabled())
             self.assertFalse(is_security_config_invalid())
+
+    def test_explicit_false_bypass_only_with_local_dev(self) -> None:
+        enable_local_dev_security_bypass_for_tests()
+        os.environ["ACE_SECURITY_ENABLED"] = "false"
+        self.assertTrue(is_security_explicitly_disabled())
+        self.assertEqual(security_config_payload(), {"securityEnabled": False})
 
     def test_missing_empty_typo_fail_closed(self) -> None:
         for val in ("", "  ", "treu", "maybe", "TRUEE", "enabled"):
@@ -335,6 +346,7 @@ class AcePaymentRouteTests(unittest.TestCase):
         os.environ.pop("ACE_SECURITY_ENABLED", None)
         os.environ.pop("REDIS_URL", None)
         os.environ.pop("ACE_ICOUNT_IPN_SECRET_SHA256", None)
+        reset_local_dev_config_for_tests()
 
     @patch("engine.video_jobs_redis.get_redis")
     def test_security_config_invalid_returns_503(self, mock_get_redis: MagicMock) -> None:
@@ -349,6 +361,7 @@ class AcePaymentRouteTests(unittest.TestCase):
     @patch("engine.video_jobs_redis.get_redis")
     def test_security_config_explicit_false_returns_200(self, mock_get_redis: MagicMock) -> None:
         mock_get_redis.return_value.ping.return_value = True
+        enable_local_dev_security_bypass_for_tests()
         os.environ["ACE_SECURITY_ENABLED"] = "false"
         resp = self.client.get("/api/security/config")
         self.assertEqual(resp.status_code, 200)
@@ -357,6 +370,7 @@ class AcePaymentRouteTests(unittest.TestCase):
     @patch("engine.video_jobs_redis.get_redis")
     def test_checkout_disabled_when_security_off(self, mock_get_redis: MagicMock) -> None:
         mock_get_redis.return_value.ping.return_value = True
+        enable_local_dev_security_bypass_for_tests()
         os.environ["ACE_SECURITY_ENABLED"] = "false"
         resp = self.client.post("/api/payments/checkout", json={"offerCode": "b1-2"})
         self.assertEqual(resp.status_code, 503)
@@ -398,6 +412,7 @@ class AcePaymentRouteTests(unittest.TestCase):
     @patch("engine.video_jobs_redis.get_redis")
     def test_ipn_endpoint_disabled_when_security_off(self, mock_get_redis: MagicMock) -> None:
         mock_get_redis.return_value.ping.return_value = True
+        enable_local_dev_security_bypass_for_tests()
         os.environ["ACE_SECURITY_ENABLED"] = "false"
         resp = self.client.post("/api/payments/icount/ipn", data={"sum": "45"})
         self.assertEqual(resp.status_code, 503)
@@ -710,6 +725,7 @@ class AceDownloadVideoZipTests(unittest.TestCase):
         os.environ.pop("ACE_SECURITY_ENABLED", None)
         os.environ.pop("REDIS_URL", None)
         os.environ.pop("ACE_ICOUNT_IPN_SECRET_SHA256", None)
+        reset_local_dev_config_for_tests()
 
     @patch("engine.video_jobs_redis.get_redis")
     @patch("requests.get")
@@ -733,6 +749,7 @@ class AceDownloadVideoZipTests(unittest.TestCase):
         mock_get_redis: MagicMock,
     ) -> None:
         mock_get_redis.return_value.ping.return_value = True
+        enable_local_dev_security_bypass_for_tests()
         os.environ["ACE_SECURITY_ENABLED"] = "false"
         mock_response = MagicMock()
         mock_response.status_code = 200

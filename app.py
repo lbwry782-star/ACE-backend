@@ -528,8 +528,10 @@ def add_cors_headers(response):
     return response
 
 
+from engine.ace_local_dev_config import log_local_dev_config_on_startup
 from engine.ace_security_config import log_security_config_on_startup
 
+log_local_dev_config_on_startup()
 log_security_config_on_startup()
 
 
@@ -3606,6 +3608,19 @@ _log_video_headline_upload_routes_registered()
 
 
 if __name__ == "__main__":
+    from engine.ace_local_dev_config import (
+        assert_local_dev_startup_safe,
+        confirm_local_dev_loopback_bind,
+        log_local_dev_config_on_startup,
+        resolve_local_dev_bind_host,
+    )
+
     port = int(os.environ.get("PORT", 5000))
+    bind_host = resolve_local_dev_bind_host()
+    confirm_local_dev_loopback_bind(bind_host)
+    assert_local_dev_startup_safe()
+    log_local_dev_config_on_startup()
+    log_security_config_on_startup()
+    logger.info("ACE_BIND host=%s port=%s", bind_host, port)
     logger.info("HEALTH_READY /health returns 200 immediately")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host=bind_host, port=port, debug=False)

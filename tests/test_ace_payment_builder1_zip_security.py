@@ -240,19 +240,23 @@ class Builder1ZipSecurityOnTests(unittest.TestCase):
 
 class Builder1ZipSecurityOffTests(unittest.TestCase):
     def setUp(self) -> None:
+        from engine.ace_local_dev_config import enable_local_dev_security_bypass_for_tests
+
         configure_checkout_memory_store(True)
         clear_memory_checkout_store_for_tests()
-        os.environ["REDIS_URL"] = "redis://test"
+        enable_local_dev_security_bypass_for_tests()
         os.environ["ACE_SECURITY_ENABLED"] = "false"
         from app import app
 
         self.client = app.test_client()
 
     def tearDown(self) -> None:
+        from engine.ace_local_dev_config import reset_local_dev_config_for_tests
+
         configure_checkout_memory_store(False)
         clear_memory_checkout_store_for_tests()
         os.environ.pop("ACE_SECURITY_ENABLED", None)
-        os.environ.pop("REDIS_URL", None)
+        reset_local_dev_config_for_tests()
 
     def test_legacy_single_ad_without_checkout(self) -> None:
         payload = {

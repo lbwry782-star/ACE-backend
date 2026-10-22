@@ -152,12 +152,15 @@ def peek_builder_checkout_entitlement(
     """
     Read checkout entitlement without binding. Returns (quantity, bound_resource_id, checkout_id, error).
     """
-    if is_security_explicitly_disabled() or not is_security_enabled():
+    if is_security_explicitly_disabled():
         return None, None, None, None
 
     config_err = assert_protected_route_security_config()
     if config_err is not None:
         return None, None, None, config_err
+
+    if not is_security_enabled():
+        return None, None, None, None
 
     redis_err = require_security_redis_or_fail()
     if redis_err is not None:

@@ -40,6 +40,9 @@ def get_redis():
     url = redis_url()
     if not url:
         raise RuntimeError("REDIS_URL is not set")
+    from engine.ace_local_dev_config import assert_local_dev_redis_url_allowed
+
+    assert_local_dev_redis_url_allowed(url)
     import redis as redis_lib
 
     # Avoid indefinite hangs if Redis is unreachable (worker would stop after VIDEO_JOB_STARTED).
