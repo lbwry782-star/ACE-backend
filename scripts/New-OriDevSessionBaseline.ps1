@@ -5,34 +5,20 @@
 
 .DESCRIPTION
   Snapshot only — does not cancel dev, deploy, or modify source repos/ENV files.
-  Session data is stored under D:\אס2\ACE\_backups\sessions\<session-id>\
+  Paths are resolved from the ACE project layout (sibling _registry, _backups, ACE-Frontend).
 
-.PARAMETER SessionId
-  Optional fixed id (tests). Default: auto-generated. Existing folder => FAILED, no overwrite.
-
-.PARAMETER SessionsRoot
-  Root directory for session folders.
-
-.PARAMETER RegistryPath
-  Path to production-registry.json
-
-.PARAMETER BackendRoot
-  ACE-Backend repository root.
-
-.PARAMETER FrontendRoot
-  ACE-Frontend repository root.
-
-.PARAMETER FailAfterGitBackend
-  Test hook: simulate failure after backend git snapshot.
+.PARAMETER ValidateOnly
+  Resolve paths and verify registry/commits only; do not create a session folder.
 #>
 [CmdletBinding()]
 param(
     [string]$SessionId = '',
-    [string]$SessionsRoot = 'D:\אס2\ACE\_backups\sessions',
-    [string]$RegistryPath = 'D:\אס2\ACE\_registry\production-registry.json',
+    [string]$SessionsRoot = '',
+    [string]$RegistryPath = '',
     [string]$BackendRoot = '',
     [string]$FrontendRoot = '',
-    [switch]$FailAfterGitBackend
+    [switch]$FailAfterGitBackend,
+    [switch]$ValidateOnly
 )
 
 Set-StrictMode -Version Latest
@@ -41,23 +27,36 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir 'OriDevSessionBaselineLib.ps1')
 
-if ([string]::IsNullOrWhiteSpace($SessionsRoot) -or $SessionsRoot -match '\.\.') {
-    $SessionsRoot = 'D:\אס2\ACE\_backups\sessions'
-}
-$SessionsRoot = [System.IO.Path]::GetFullPath($SessionsRoot)
-$RegistryPath = [System.IO.Path]::GetFullPath($RegistryPath)
+$layout = Resolve-OriProjectLayout `
+    -ScriptsDirectory $ScriptDir `
+    -BackendRoot $BackendRoot `
+    -FrontendRoot $FrontendRoot `
+    -RegistryPath $RegistryPath `
+    -SessionsRoot $SessionsRoot
+
+$BackendRoot = $layout.BackendRoot
+$FrontendRoot = $layout.FrontendRoot
+$RegistryPath = $layout.RegistryPath
+$SessionsRoot = $layout.SessionsRoot
 $Sha256Sidecar = "$RegistryPath.sha256"
 
-if ([string]::IsNullOrWhiteSpace($BackendRoot)) {
-    $BackendRoot = (Resolve-Path (Join-Path $ScriptDir '..')).Path
-}
-if ([string]::IsNullOrWhiteSpace($FrontendRoot)) {
-    $candidate = Join-Path (Split-Path -Parent $BackendRoot) 'ACE-Frontend'
-    if (Test-Path -LiteralPath $candidate) {
-        $FrontendRoot = (Resolve-Path -LiteralPath $candidate).Path
+if ($ValidateOnly) {
+    $regCheck = Test-ProductionRegistryIntegrity -RegistryPath $RegistryPath -Sha256SidecarPath $Sha256Sidecar
+    if (-not $regCheck.Ok) {
+        throw ($regCheck.Errors -join ',')
     }
-    else {
-        throw 'FrontendRoot not found. Pass -FrontendRoot explicitly.'
+    $commitCheck = Test-RegistryCommitsExist -Registry $regCheck.Registry -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot
+    if (-not $commitCheck.Ok) {
+        throw ($commitCheck.Errors -join ',')
+    }
+    Write-BaselineOk 'ValidateOnly: layout, registry, and commits OK.'
+    return [ordered]@{
+        status        = 'VALIDATE_OK'
+        aceRoot       = $layout.AceRoot
+        backendRoot   = $BackendRoot
+        frontendRoot  = $FrontendRoot
+        registryPath  = $RegistryPath
+        sessionsRoot  = $SessionsRoot
     }
 }
 
@@ -65,7 +64,6 @@ if ([string]::IsNullOrWhiteSpace($SessionId)) {
     $SessionId = New-OriSessionId
 }
 $SessionRoot = Join-Path $SessionsRoot $SessionId
-$verifyErrors = @()
 $sessionDirOwned = $false
 $sessionState = @{
     sessionId   = $SessionId
@@ -88,6 +86,7 @@ $sessionState = @{
         registryPath  = $RegistryPath
         backendRoot   = $BackendRoot
         frontendRoot  = $FrontendRoot
+        aceRoot       = $layout.AceRoot
     }
 }
 
@@ -159,10 +158,12 @@ try {
         workflowRunId    = [string]$registry.production.frontend.workflowRunId
     }
     $sessionState.localDevInfra = @{
-        backendSha  = [string]$registry.localDevInfra.backend.commitSha
-        frontendSha = [string]$registry.localDevInfra.frontend.commitSha
-        backendBranchExpected = [string]$registry.localDevInfra.backend.branch
-        frontendBranchExpected = [string]$registry.localDevInfra.frontend.branch
+        backendShaRegistry       = [string]$registry.localDevInfra.backend.commitSha
+        frontendShaRegistry      = [string]$registry.localDevInfra.frontend.commitSha
+        backendHeadAtSnapshot    = $backendSnap.Head
+        frontendHeadAtSnapshot   = $frontendSnap.Head
+        backendBranchExpected    = [string]$registry.localDevInfra.backend.branch
+        frontendBranchExpected   = [string]$registry.localDevInfra.frontend.branch
     }
     $sessionState.productWip = @{
         builder1Branch = [string]$registry.wip.builder1.branch

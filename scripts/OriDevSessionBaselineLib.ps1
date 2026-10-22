@@ -372,3 +372,139 @@ function Save-SessionState {
     )
     ($State | ConvertTo-Json -Depth 12) | Set-Content -LiteralPath (Join-Path $SessionRoot 'session.json') -Encoding UTF8
 }
+
+function Resolve-OriLiteralPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+    if (Test-Path -LiteralPath $Path) {
+        return (Resolve-Path -LiteralPath $Path).ProviderPath
+    }
+    return $Path
+}
+
+function Resolve-OriProjectLayout {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptsDirectory,
+        [string]$BackendRoot = '',
+        [string]$FrontendRoot = '',
+        [string]$RegistryPath = '',
+        [string]$SessionsRoot = ''
+    )
+    $backendCandidate = if ([string]::IsNullOrWhiteSpace($BackendRoot)) {
+        Split-Path -Parent $ScriptsDirectory
+    }
+    else {
+        $BackendRoot
+    }
+    $backendCandidate = Resolve-OriLiteralPath $backendCandidate
+    if (-not (Test-Path -LiteralPath (Join-Path $backendCandidate 'app.py'))) {
+        throw 'ACE_BACKEND_LAYOUT_NOT_FOUND'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $backendCandidate 'worker_video.py'))) {
+        throw 'ACE_BACKEND_LAYOUT_NOT_FOUND'
+    }
+
+    $aceRoot = Split-Path -Parent $backendCandidate
+    $registryCandidate = if ([string]::IsNullOrWhiteSpace($RegistryPath)) {
+        Join-Path $aceRoot '_registry\production-registry.json'
+    }
+    else {
+        $RegistryPath
+    }
+    $sessionsCandidate = if ([string]::IsNullOrWhiteSpace($SessionsRoot)) {
+        Join-Path $aceRoot '_backups\sessions'
+    }
+    else {
+        $SessionsRoot
+    }
+    $frontendCandidate = if ([string]::IsNullOrWhiteSpace($FrontendRoot)) {
+        Join-Path $aceRoot 'ACE-Frontend'
+    }
+    else {
+        $FrontendRoot
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $frontendCandidate 'package.json'))) {
+        throw 'ACE_FRONTEND_LAYOUT_NOT_FOUND'
+    }
+    $frontendCandidate = Resolve-OriLiteralPath $frontendCandidate
+
+    return @{
+        AceRoot       = $aceRoot
+        BackendRoot   = $backendCandidate
+        FrontendRoot  = $frontendCandidate
+        RegistryPath  = $registryCandidate
+        SessionsRoot  = $sessionsCandidate
+    }
+}
+
+function Write-ProductionRegistrySha256Sidecar {
+    param([Parameter(Mandatory = $true)][string]$RegistryPath)
+    $hash = Get-FileSha256Hex $RegistryPath
+    $sidecar = "$RegistryPath.sha256"
+    [System.IO.File]::WriteAllText($sidecar, "$hash  production-registry.json", [System.Text.UTF8Encoding]::new($false))
+    return $hash
+}
+
+function Update-OriProductionRegistryBackendInfraCommit {
+    param(
+        [Parameter(Mandatory = $true)][string]$RegistryPath,
+        [Parameter(Mandatory = $true)][string]$NewCommitSha,
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [string]$BackupRoot = ''
+    )
+    $regCheck = Test-ProductionRegistryIntegrity -RegistryPath $RegistryPath -Sha256SidecarPath "$RegistryPath.sha256"
+    if (-not $regCheck.Ok) {
+        throw ($regCheck.Errors -join ',')
+    }
+    $registry = $regCheck.Registry
+    $oldSha = [string]$registry.localDevInfra.backend.commitSha
+    if ($oldSha -eq $NewCommitSha) {
+        return @{ Updated = $false; OldSha = $oldSha; NewSha = $NewCommitSha; RegistryHash = (Get-FileSha256Hex $RegistryPath) }
+    }
+
+    Push-Location -LiteralPath $BackendRoot
+    try {
+        git rev-parse --verify "$NewCommitSha^{commit}" 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'NEW_INFRA_COMMIT_NOT_FOUND'
+        }
+        git merge-base --is-ancestor $oldSha $NewCommitSha 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            throw 'NEW_INFRA_COMMIT_NOT_DESCENDANT_OF_REGISTRY'
+        }
+    }
+    finally {
+        Pop-Location
+    }
+
+    if ([string]::IsNullOrWhiteSpace($BackupRoot)) {
+        $aceRoot = Split-Path -Parent (Split-Path -Parent $RegistryPath)
+        $BackupRoot = Join-Path $aceRoot '_backups\registry-updates'
+    }
+    New-Item -ItemType Directory -Path $BackupRoot -Force | Out-Null
+    $ts = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+    Copy-Item -LiteralPath $RegistryPath -Destination (Join-Path $BackupRoot "production-registry.before-$ts.json") -Force
+    Copy-Item -LiteralPath "$RegistryPath.sha256" -Destination (Join-Path $BackupRoot "production-registry.before-$ts.json.sha256") -Force
+
+    $registry.localDevInfra.backend.commitSha = $NewCommitSha
+    $nowIso = (Get-Date).ToString('o')
+    $registry | Add-Member -NotePropertyName 'localDevInfraBackendUpdatedAt' -NotePropertyValue $nowIso -Force
+    $registry | Add-Member -NotePropertyName 'lastVerifiedAt' -NotePropertyValue $nowIso -Force
+
+    $tmp = "$RegistryPath.tmp"
+    $json = $registry | ConvertTo-Json -Depth 12
+    [System.IO.File]::WriteAllText($tmp, $json, [System.Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tmp -Destination $RegistryPath -Force
+
+    $newHash = Write-ProductionRegistrySha256Sidecar -RegistryPath $RegistryPath
+    Copy-Item -LiteralPath $RegistryPath -Destination (Join-Path $BackupRoot "production-registry.after-$ts.json") -Force
+    Copy-Item -LiteralPath "$RegistryPath.sha256" -Destination (Join-Path $BackupRoot "production-registry.after-$ts.json.sha256") -Force
+
+    $verify = Test-ProductionRegistryIntegrity -RegistryPath $RegistryPath -Sha256SidecarPath "$RegistryPath.sha256"
+    if (-not $verify.Ok) {
+        throw 'REGISTRY_POST_UPDATE_VERIFY_FAILED'
+    }
+    return @{ Updated = $true; OldSha = $oldSha; NewSha = $NewCommitSha; RegistryHash = $newHash; BackupRoot = $BackupRoot }
+}

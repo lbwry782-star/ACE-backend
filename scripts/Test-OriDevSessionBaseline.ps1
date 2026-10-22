@@ -88,6 +88,13 @@ function New-TwoCommitRepo {
 
 Write-Host 'Test-OriDevSessionBaseline...' -ForegroundColor Cyan
 
+$realBaselineSessionJson = Join-Path (Resolve-OriProjectLayout -ScriptsDirectory $ScriptDir).SessionsRoot `
+    'ori-20261023-010342-2d952e88\session.json'
+$baselineHashBefore = $null
+if (Test-Path -LiteralPath $realBaselineSessionJson) {
+    $baselineHashBefore = Get-FileSha256Hex $realBaselineSessionJson
+}
+
 $tempRoot = Join-Path $env:TEMP ("ori-baseline-test-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 
@@ -100,6 +107,11 @@ try {
 
     $bShas = New-ThreeCommitRepo -Path $backendRoot
     Push-Location $backendRoot
+    Set-Content -LiteralPath 'app.py' -Value '# test marker' -Encoding UTF8
+    Set-Content -LiteralPath 'worker_video.py' -Value '# test marker' -Encoding UTF8
+    git add app.py worker_video.py
+    git commit -q -m 'ace-layout-markers'
+    $bShas.Wip = git rev-parse HEAD
     Set-Content -LiteralPath '.env.local.example' -Value "ACE_LOCAL_DEV_ENABLED=true`nPORT=5000" -Encoding UTF8
     Set-Content -LiteralPath '.env.local' -Value "ACE_LOCAL_DEV_ENABLED=true`nOPENAI_API_KEY=sk-test-secret-value`nSESSION_FLAG=temp" -Encoding UTF8
     Set-Content -LiteralPath 'dirty.txt' -Value 'original' -Encoding UTF8
@@ -111,7 +123,14 @@ try {
 
     $fShas = New-TwoCommitRepo -Path $frontendRoot
     Push-Location $frontendRoot
+    Set-Content -LiteralPath 'package.json' -Value '{"name":"ace-frontend-test"}' -Encoding UTF8
+    git add package.json
+    git commit -q -m 'ace-layout-marker'
+    $fShas.Infra = git rev-parse HEAD
     Set-Content -LiteralPath '.env.development.local' -Value 'VITE_BACKEND_URL=http://127.0.0.1:5000' -Encoding UTF8
+    Pop-Location
+    Push-Location $backendRoot
+    $bShas.Wip = git rev-parse HEAD
     Pop-Location
 
     $regPath = New-TestRegistry -Dir $registryDir `
@@ -198,6 +217,38 @@ try {
     $okReg = Test-ProductionRegistryIntegrity -RegistryPath $regPath -Sha256SidecarPath "$regPath.sha256"
     Assert-True $okReg.Ok 'registry_integrity_helper'
 
+    # Layout resolution without explicit paths (from this repo scripts dir)
+    $layoutNoParams = Resolve-OriProjectLayout -ScriptsDirectory $ScriptDir
+    Assert-True (Test-Path -LiteralPath $layoutNoParams.RegistryPath) 'real_layout_registry_resolves'
+    $validateReal = & (Join-Path $ScriptDir 'New-OriDevSessionBaseline.ps1') -ValidateOnly
+    Assert-True ($validateReal.status -eq 'VALIDATE_OK') 'real_validate_only_no_path_params'
+
+    # Registry infra commit bump (temp copy only)
+    $regBumpDir = Join-Path $tempRoot 'reg-bump'
+    New-Item -ItemType Directory -Path $regBumpDir -Force | Out-Null
+    $regBumpPath = Join-Path $regBumpDir 'production-registry.json'
+    Copy-Item -LiteralPath $regPath -Destination $regBumpPath -Force
+    Copy-Item -LiteralPath "$regPath.sha256" -Destination "$regBumpPath.sha256" -Force
+    $prodBefore = (Get-Content -LiteralPath $regBumpPath -Raw | ConvertFrom-Json).production.backendWeb.deployedCommitSha
+    $regBackupDir = Join-Path $tempRoot 'reg-bump-backups'
+    $bump = Update-OriProductionRegistryBackendInfraCommit `
+        -RegistryPath $regBumpPath -NewCommitSha $bShas.Wip -BackendRoot $backendRoot -BackupRoot $regBackupDir
+    Assert-True $bump.Updated 'registry_infra_bump_updated'
+    $regAfter = Get-Content -LiteralPath $regBumpPath -Raw | ConvertFrom-Json
+    Assert-True ($regAfter.localDevInfra.backend.commitSha -eq $bShas.Wip) 'registry_infra_sha_bumped'
+    Assert-True ($regAfter.production.backendWeb.deployedCommitSha -eq $prodBefore) 'registry_production_sha_unchanged'
+    $bumpAgain = Update-OriProductionRegistryBackendInfraCommit `
+        -RegistryPath $regBumpPath -NewCommitSha $bShas.Wip -BackendRoot $backendRoot -BackupRoot $regBackupDir
+    Assert-True (-not $bumpAgain.Updated) 'registry_infra_idempotent'
+    try {
+        Update-OriProductionRegistryBackendInfraCommit `
+            -RegistryPath $regBumpPath -NewCommitSha $bShas.Prod -BackendRoot $backendRoot -BackupRoot $regBackupDir | Out-Null
+        Assert-True $false 'registry_non_descendant_should_fail'
+    }
+    catch {
+        Assert-True $true 'registry_non_descendant_should_fail'
+    }
+
     # Deleted file test (separate mini repo)
     $delRoot = Join-Path $tempRoot 'ACE-Backend-Del'
     New-Item -ItemType Directory -Path $delRoot -Force | Out-Null
@@ -206,8 +257,10 @@ try {
     git config user.email 't@t.local'
     git config user.name 'T'
     git branch -M main
+    Set-Content -LiteralPath 'app.py' -Value '# t' -Encoding UTF8
+    Set-Content -LiteralPath 'worker_video.py' -Value '# t' -Encoding UTF8
     Set-Content removed.txt 'x' -Encoding UTF8
-    git add removed.txt
+    git add app.py worker_video.py removed.txt
     git commit -q -m 'one'
     $onlySha = git rev-parse HEAD
     Remove-Item -LiteralPath 'removed.txt' -Force
@@ -222,6 +275,55 @@ try {
         -SessionId $sidDel -SessionsRoot $sessionsRoot -RegistryPath $regDel `
         -BackendRoot $delRoot -FrontendRoot $frontendRoot | Out-Null
     Assert-True (Test-Path (Join-Path $sessionsRoot "$sidDel\BACKEND\deleted-from-HEAD\removed.txt")) 'deleted_file_snapshot'
+
+    # Hebrew ACE root layout + invocation without explicit registry/sessions paths
+    $heRoot = Join-Path $tempRoot 'אורי-ACE'
+    $heBackend = Join-Path $heRoot 'ACE-Backend'
+    $heFrontend = Join-Path $heRoot 'ACE-Frontend'
+    Copy-Item -LiteralPath $backendRoot -Destination $heBackend -Recurse -Force
+    Copy-Item -LiteralPath $frontendRoot -Destination $heFrontend -Recurse -Force
+    $heRegistryDir = Join-Path $heRoot '_registry'
+    $heSessions = Join-Path $heRoot '_backups\sessions'
+    New-Item -ItemType Directory -Path $heRegistryDir, $heSessions -Force | Out-Null
+    Copy-Item -LiteralPath $regPath -Destination (Join-Path $heRegistryDir 'production-registry.json') -Force
+    Copy-Item -LiteralPath "$regPath.sha256" -Destination (Join-Path $heRegistryDir 'production-registry.json.sha256') -Force
+    $heScripts = Join-Path $heBackend 'scripts'
+    New-Item -ItemType Directory -Path $heScripts -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $ScriptDir 'OriDevSessionBaselineLib.ps1') -Destination (Join-Path $heScripts 'OriDevSessionBaselineLib.ps1') -Force
+    Copy-Item -LiteralPath (Join-Path $ScriptDir 'New-OriDevSessionBaseline.ps1') -Destination (Join-Path $heScripts 'New-OriDevSessionBaseline.ps1') -Force
+    $heLayout = Resolve-OriProjectLayout -ScriptsDirectory $heScripts
+    Assert-True (Test-Path -LiteralPath $heLayout.RegistryPath) 'hebrew_layout_registry'
+    $heValidate = & (Join-Path $heBackend 'scripts\New-OriDevSessionBaseline.ps1') -ValidateOnly
+    Assert-True ($heValidate.status -eq 'VALIDATE_OK') 'hebrew_validate_only_no_params'
+    $sidHe = 'ori-test-hebrew-no-params-010'
+    & (Join-Path $heBackend 'scripts\New-OriDevSessionBaseline.ps1') -SessionId $sidHe | Out-Null
+    $metaHe = Get-Content -LiteralPath (Join-Path (Join-Path $heSessions $sidHe) 'session.json') -Raw | ConvertFrom-Json
+    Assert-True ($metaHe.status -eq 'READY') 'hebrew_no_explicit_paths_session'
+
+    # Registry with older infra SHA (e41f418) should still validate if commits exist in backend
+    $oldInfraRegDir = Join-Path $tempRoot 'reg-old-infra'
+    New-Item -ItemType Directory -Path $oldInfraRegDir -Force | Out-Null
+    $oldInfraReg = New-TestRegistry -Dir $oldInfraRegDir `
+        -BackendProdSha $bShas.Prod -FrontendProdSha $fShas.Prod `
+        -BackendInfraSha 'e41f41834392858f7b5ab20c8acfc5ee162b7957' -FrontendInfraSha $fShas.Infra -WipSha $bShas.Wip
+    # only works if e41f418 exists in backendRoot - skip if not
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    git -C $backendRoot rev-parse --verify 'e41f41834392858f7b5ab20c8acfc5ee162b7957^{commit}' 2>$null | Out-Null
+    $hasRealOldInfra = ($LASTEXITCODE -eq 0)
+    $ErrorActionPreference = $prevEap
+    if ($hasRealOldInfra) {
+        $sidOld = 'ori-test-old-infra-reg-009'
+        & (Join-Path $ScriptDir 'New-OriDevSessionBaseline.ps1') `
+            -SessionId $sidOld -SessionsRoot $sessionsRoot -RegistryPath $oldInfraReg `
+            -BackendRoot $backendRoot -FrontendRoot $frontendRoot | Out-Null
+        $metaOld = Get-Content -LiteralPath (Join-Path (Join-Path $sessionsRoot $sidOld) 'session.json') -Raw | ConvertFrom-Json
+        Assert-True ($metaOld.status -eq 'READY') 'registry_old_infra_sha_still_valid'
+    }
+
+    if ($baselineHashBefore) {
+        Assert-True ((Get-FileSha256Hex $realBaselineSessionJson) -eq $baselineHashBefore) 'existing_real_baseline_unchanged'
+    }
 
     Write-Host "Done. Failure count: $($failures.Count)" -ForegroundColor $(if ($failures.Count -eq 0) { 'Green' } else { 'Red' })
     if ($failures.Count -gt 0) { exit 1 }
