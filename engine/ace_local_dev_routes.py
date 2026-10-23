@@ -44,6 +44,11 @@ from engine.ace_local_dev_publish_uri_candidate_dry_run import (
     PublishCandidateDryRunRejected,
     execute_publish_uri_candidate_dry_run,
 )
+from engine.ace_local_dev_publish_candidate_register import (
+    PublishCandidateRegisterRejected,
+    discover_registered_publish_candidate,
+    register_publish_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -368,6 +373,64 @@ def local_dev_publish_uri_candidate_dry_run():
                 "ok": False,
                 "dryRun": True,
                 "error": "ace_publish_uri_candidate_dry_run_failed",
+                "message": str(exc)[:500],
+            },
+            503,
+        )
+
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/registered", methods=["GET"])
+def local_dev_publish_uri_candidate_registered():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    payload = discover_registered_publish_candidate()
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/register", methods=["POST"])
+def local_dev_publish_uri_candidate_register():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    body, body_err = parse_strict_json_object(
+        request,
+        allowed_keys={"candidateBackendSha", "confirmRegister"},
+    )
+    if body_err:
+        return _no_store_json({"ok": False, "error": body_err}, 400)
+
+    try:
+        payload = register_publish_candidate(
+            candidate_backend_sha=str(body.get("candidateBackendSha") or ""),
+            confirm_register=str(body.get("confirmRegister") or ""),
+        )
+    except PublishCandidateRegisterRejected as exc:
+        status = 400
+        body_out: dict = {
+            "ok": False,
+            "error": exc.code,
+            "message": exc.message,
+        }
+        if exc.blockers:
+            body_out["blockers"] = exc.blockers
+        return _no_store_json(body_out, status)
+    except RuntimeError as exc:
+        logger.warning("LOCAL_DEV_PUBLISH_CANDIDATE_REGISTER_FAILED err=%s", exc)
+        return _no_store_json(
+            {
+                "ok": False,
+                "error": "ace_publish_candidate_register_failed",
                 "message": str(exc)[:500],
             },
             503,
