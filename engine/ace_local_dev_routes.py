@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 
-from flask import Blueprint, Response, jsonify
+from flask import Blueprint, jsonify
 
 from engine.ace_local_dev_access import (
     assert_local_dev_loopback_api_access,
@@ -18,10 +18,34 @@ from engine.ace_local_dev_cancel_preview import (
     resolve_configured_dev_session_id,
     run_cancel_dev_preview_powershell,
 )
+from engine.ace_local_dev_cycle_store import (
+    active_cycle_pointer_path,
+    resolve_active_dev_cycle,
+    resolve_active_dev_session_id_for_api,
+)
 
 logger = logging.getLogger(__name__)
 
 ace_local_dev_bp = Blueprint("ace_local_dev", __name__)
+
+
+def _no_store_json(payload, status: int = 200):
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response, status
+
+
+@ace_local_dev_bp.route("/api/local-dev/dev-cycle/status", methods=["GET"])
+def local_dev_dev_cycle_status():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    resolution = resolve_active_dev_cycle()
+    return _no_store_json(resolution.to_status_payload(), 200)
 
 
 @ace_local_dev_bp.route("/api/local-dev/cancel-development/preview", methods=["GET"])
@@ -33,24 +57,37 @@ def local_dev_cancel_development_preview():
     if bad_query is not None:
         return bad_query
 
-    try:
-        session_id = resolve_configured_dev_session_id()
-    except ValueError:
-        payload = preview_error_response(
-            error="ace_ori_dev_session_id_invalid",
-            message="ACE_ORI_DEV_SESSION_ID must match ori-YYYYMMDD-HHMMSS-xxxxxxxx",
-        )
-        response = jsonify(payload)
-        response.headers["Cache-Control"] = "no-store"
-        return response, 400
+    if not active_cycle_pointer_path().is_file():
+        try:
+            resolve_configured_dev_session_id()
+        except ValueError:
+            payload = preview_error_response(
+                error="ace_ori_dev_session_id_invalid",
+                message="ACE_ORI_DEV_SESSION_ID must match ori-YYYYMMDD-HHMMSS-xxxxxxxx",
+            )
+            return _no_store_json(payload, 400)
 
-    if not session_id:
-        payload = no_active_cycle_response(
-            reason="No active dev cancel cycle configured (ACE_ORI_DEV_SESSION_ID unset).",
+    resolution = resolve_active_dev_session_id_for_api()
+    if resolution.cycle_status == "INVALID":
+        payload = preview_error_response(
+            error="ace_active_dev_cycle_invalid",
+            message="Active dev cycle pointer is missing or invalid; fix before preview.",
+            blockers=list(resolution.blockers) + list(resolution.pointer_errors),
         )
-        response = jsonify(payload)
-        response.headers["Cache-Control"] = "no-store"
-        return response, 200
+        return _no_store_json(payload, 200)
+
+    session_id = resolution.session_id
+    if not session_id or resolution.cycle_status == "NONE":
+        payload = no_active_cycle_response(
+            reason="No active dev cycle (set active-dev-cycle.json or ACE_ORI_DEV_SESSION_ID).",
+        )
+        return _no_store_json(payload, 200)
+
+    if resolution.cycle_status == "CANCELLED" or "CYCLE_ALREADY_CANCELLED" in resolution.blockers:
+        payload = no_active_cycle_response(
+            reason="Dev cancel cycle is CANCELLED for the configured session.",
+        )
+        return _no_store_json(payload, 200)
 
     try:
         raw = run_cancel_dev_preview_powershell(session_id)
@@ -59,9 +96,7 @@ def local_dev_cancel_development_preview():
             error="ace_cancel_preview_script_missing",
             message="Cancel preview script not found in backend scripts directory.",
         )
-        response = jsonify(payload)
-        response.headers["Cache-Control"] = "no-store"
-        return response, 503
+        return _no_store_json(payload, 503)
     except RuntimeError as exc:
         msg = str(exc)
         logger.warning("LOCAL_DEV_CANCEL_PREVIEW_FAILED sessionId=%s err=%s", session_id, msg)
@@ -83,20 +118,14 @@ def local_dev_cancel_development_preview():
                 message=msg[:500],
             )
             status = 503
-        response = jsonify(payload)
-        response.headers["Cache-Control"] = "no-store"
-        return response, status
+        return _no_store_json(payload, status)
 
     if not raw.get("ok"):
         payload = preview_error_response(
             error="ace_cancel_preview_failed",
             message=str(raw.get("error") or "unknown"),
         )
-        response = jsonify(payload)
-        response.headers["Cache-Control"] = "no-store"
-        return response, 503
+        return _no_store_json(payload, 503)
 
     payload = build_public_preview_response(raw)
-    response = jsonify(payload)
-    response.headers["Cache-Control"] = "no-store"
-    return response, 200
+    return _no_store_json(payload, 200)

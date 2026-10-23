@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import app as app_module
@@ -75,15 +78,29 @@ def _sample_raw_plan() -> dict:
     }
 
 
+def _isolated_sessions_root() -> Path:
+    root = Path(tempfile.mkdtemp(prefix="ace-preview-sessions-"))
+    sid = "ori-20261023-010342-2d952e88"
+    folder = root / sid
+    folder.mkdir(parents=True)
+    (folder / "session.json").write_text(json.dumps({"status": "READY"}), encoding="utf-8")
+    (folder / "cancel-dev-cycle.state.json").write_text(json.dumps({"status": "OPEN"}), encoding="utf-8")
+    return root
+
+
 class LocalDevCancelPreviewApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = app_module.app.test_client()
         reset_local_dev_config_for_tests()
         os.environ.pop("ACE_ORI_DEV_SESSION_ID", None)
+        self._sessions_tmp = _isolated_sessions_root()
+        os.environ["ACE_SESSIONS_ROOT"] = str(self._sessions_tmp)
 
     def tearDown(self) -> None:
         reset_local_dev_config_for_tests()
         os.environ.pop("ACE_ORI_DEV_SESSION_ID", None)
+        os.environ.pop("ACE_SESSIONS_ROOT", None)
+        shutil.rmtree(self._sessions_tmp, ignore_errors=True)
 
     def test_blocked_when_local_dev_disabled(self) -> None:
         confirm_local_dev_loopback_bind("127.0.0.1")
