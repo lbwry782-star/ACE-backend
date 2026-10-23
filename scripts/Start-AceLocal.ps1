@@ -5,10 +5,14 @@
 
 .PARAMETER ValidateOnly
   Safety checks and status report only (no starts, no browser).
+
+.PARAMETER SkipLocalUndoShell
+  Do not launch the standalone LOCAL undo window after Vite is ready.
 #>
 [CmdletBinding()]
 param(
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    [switch]$SkipLocalUndoShell
 )
 
 Set-StrictMode -Version Latest
@@ -112,6 +116,40 @@ function Ensure-MemuraiRunning {
     }
     Write-Ok "Memurai: PONG"
     return $true
+}
+
+function Start-AceLocalUndoShellAsync {
+    param(
+        [Parameter(Mandatory = $true)][int]$VitePort,
+        [Parameter(Mandatory = $true)][string]$FrontendRoot
+    )
+    $undoScript = Join-Path $FrontendRoot 'scripts\Start-AceUndoLocal.ps1'
+    if (-not (Test-Path -LiteralPath $undoScript)) {
+        Write-Warn ('LOCAL shell: script not found ({0}). Dev stack continues.' -f $undoScript)
+        return
+    }
+    if (-not (Test-AceFrontendViteOnPort $VitePort)) {
+        Write-Warn ("LOCAL shell: ACE Vite not verified on port {0}. LOCAL was not started." -f $VitePort)
+        return
+    }
+    try {
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $psExe)) {
+            $psExe = 'powershell.exe'
+        }
+        $psArgs = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-WindowStyle', 'Hidden',
+            '-File', $undoScript,
+            '-VitePort', ([string]$VitePort)
+        )
+        Start-Process -FilePath $psExe -ArgumentList $psArgs -WorkingDirectory $FrontendRoot -ErrorAction Stop | Out-Null
+        Write-Ok ("LOCAL shell: launch requested (Vite port {0})." -f $VitePort)
+    }
+    catch {
+        Write-Warn ('LOCAL shell: launch failed ({0}). Dev stack continues.' -f $_.Exception.Message)
+    }
 }
 
 function Start-ComponentWindow([string]$Title, [string]$CmdPath, [string]$WorkingDirectory, [hashtable]$ExtraEnv) {
@@ -251,6 +289,10 @@ if (-not $backendOk) {
     Write-Err "Backend not verified. Not reporting success."
     Read-Host "Press Enter to close"
     exit 1
+}
+
+if (-not $SkipLocalUndoShell) {
+    Start-AceLocalUndoShellAsync -VitePort $frontendPort -FrontendRoot $FrontendRoot
 }
 
 $frontendUrl = "http://localhost:$frontendPort/"
