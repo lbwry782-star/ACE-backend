@@ -66,14 +66,10 @@ if ($existing.Count -gt 0) {
     exit 0
 }
 
-$python = Join-Path $RepoRoot ".venv312\Scripts\python.exe"
-if (-not (Test-Path -LiteralPath $python)) {
-    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $pythonCmd) {
-        Write-Err "Python not found. Install Python 3.8+ or create venv: python -m venv .venv312"
-        exit 1
-    }
-    $python = $pythonCmd.Source
+$python = Resolve-AceBackendPythonExe -BackendRoot $RepoRoot
+if (-not $python) {
+    Write-Err "Python not found. Install Python 3.8+ or create venv: python -m venv .venv312"
+    exit 1
 }
 
 $workerPy = Join-Path $RepoRoot "worker_video.py"

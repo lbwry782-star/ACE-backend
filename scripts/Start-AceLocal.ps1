@@ -145,7 +145,19 @@ if (-not $memuraiOk -and -not $ValidateOnly) {
     exit 1
 }
 
-$backendOk = (Test-BackendLocalDevIdentity -Port $BackendPort).Ok
+$backendPortState = Get-AceBackendLocalPortState -Port $BackendPort -BackendRoot $BackendRoot
+$backendOk = $false
+if ($backendPortState.Action -eq "AlreadyRunning") {
+    $backendOk = (Test-BackendLocalDevIdentity -Port $BackendPort).Ok
+}
+elseif ($backendPortState.Action -ne "Start") {
+    Write-Err ("Backend port/process state blocks stack start: {0} ({1})" -f $backendPortState.Action, $backendPortState.Reason)
+    Write-AceBackendLocalPortStateReport -State $backendPortState
+    if (-not $ValidateOnly) {
+        Read-Host "Press Enter to close"
+        exit 1
+    }
+}
 $backendProcs = @(Find-LocalAceBackendProcesses -BackendRoot $BackendRoot)
 $workerProcs = @(Find-LocalAceWorkerProcesses -BackendRoot $BackendRoot)
 $frontendPorts = @(Find-AceFrontendVitePorts -FromPort $FrontendPortMin -ToPort $FrontendPortMax)
@@ -157,6 +169,7 @@ if ($frontendPorts.Count -gt 1) {
 if ($ValidateOnly) {
     Write-Info "--- ValidateOnly: component status ---"
     Write-Host ("Memurai PONG: " + $(if ($memuraiOk) { "OK" } else { "FAILED" }))
+    Write-Host ("Backend port decision: " + $backendPortState.Action + " (" + $backendPortState.Reason + ")")
     Write-Host ("Backend ACE identity: " + $(if ($backendOk) { "OK" } else { "missing / not verified" }))
     Write-Host ("Backend app.py processes in repo path: " + $backendProcs.Count)
     Write-Host ("Worker worker_video.py: " + $(if ($workerProcs.Count -gt 0) { "running ($($workerProcs.Count))" } else { "not running" }))
@@ -176,6 +189,11 @@ $started = @()
 
 if ($backendOk) {
     Write-Ok ("Backend: already running (127.0.0.1:{0}, local dev verified)" -f $BackendPort)
+}
+elseif ($backendPortState.Action -ne "Start") {
+    Write-Err "Backend: not started (see port/process decision above)."
+    Read-Host "Press Enter to close"
+    exit 1
 }
 else {
     Write-Info "Backend: starting new window..."

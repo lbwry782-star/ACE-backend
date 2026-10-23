@@ -247,25 +247,285 @@ function Resolve-AceFrontendRoot([string]$BackendRoot) {
     return ""
 }
 
-function Find-LocalAceBackendProcesses([string]$BackendRoot) {
+function Get-AceNormalizedPath([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return ""
+    }
+    try {
+        return ([System.IO.Path]::GetFullPath($Path)).TrimEnd('\', '/').ToLowerInvariant()
+    }
+    catch {
+        return $Path.Trim().ToLowerInvariant()
+    }
+}
+
+function Test-Win32CommandLineIsAceBackendApp {
+    param(
+        [string]$CommandLine,
+        [Parameter(Mandatory = $true)][string]$BackendRoot
+    )
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) {
+        return $false
+    }
+    if ($CommandLine -notmatch "app\.py") {
+        return $false
+    }
+    $rootNorm = Get-AceNormalizedPath $BackendRoot
+    $appNorm = Get-AceNormalizedPath (Join-Path $BackendRoot "app.py")
+    $cmdNorm = $CommandLine.ToLowerInvariant()
+    if ($rootNorm -and $cmdNorm.Contains($rootNorm)) {
+        return $true
+    }
+    if ($appNorm -and $cmdNorm.Contains($appNorm)) {
+        return $true
+    }
+    return $false
+}
+
+function Test-Win32ProcessIsAceBackendApp {
+    param(
+        [Parameter(Mandatory = $true)]$Win32Process,
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [int]$ListenerPort = 0
+    )
+    $cmd = [string]$Win32Process.CommandLine
+    if (Test-Win32CommandLineIsAceBackendApp -CommandLine $cmd -BackendRoot $BackendRoot) {
+        return $true
+    }
+    if ($cmd -notmatch "app\.py") {
+        return $false
+    }
+    $exe = [string]$Win32Process.ExecutablePath
+    if (-not $exe) {
+        return $false
+    }
+    $exeNorm = Get-AceNormalizedPath $exe
+    $venvPyNorm = Get-AceNormalizedPath (Join-Path $BackendRoot ".venv312\Scripts\python.exe")
+    if ($venvPyNorm -and ($exeNorm -eq $venvPyNorm)) {
+        return $true
+    }
+    $rootNorm = Get-AceNormalizedPath $BackendRoot
+    if ($rootNorm -and $exeNorm.Contains($rootNorm)) {
+        return $true
+    }
+    if ($ListenerPort -gt 0 -and ($cmd -match "\sapp\.py(\s|$|"")")) {
+        $listeners = @(Get-AceLoopbackListenerProcessIds -Port $ListenerPort)
+        if ($listeners -contains [int]$Win32Process.ProcessId) {
+            $identity = Test-BackendLocalDevIdentity -Port $ListenerPort
+            if ($identity.Ok) {
+                return $true
+            }
+        }
+    }
+    return $false
+}
+
+function Find-LocalAceBackendProcesses {
+    param(
+        [string]$BackendRoot,
+        [int]$ListenerPort = 0
+    )
     $found = @()
     Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | ForEach-Object {
-        $cmd = $_.CommandLine
-        if (-not $cmd) {
-            return
-        }
-        if ($cmd -notmatch "app\.py") {
-            return
-        }
-        if ($BackendRoot -and ($cmd -notmatch [regex]::Escape($BackendRoot))) {
+        if (-not (Test-Win32ProcessIsAceBackendApp -Win32Process $_ -BackendRoot $BackendRoot -ListenerPort $ListenerPort)) {
             return
         }
         $found += [PSCustomObject]@{
             ProcId      = $_.ProcessId
-            CommandLine = $cmd
+            CommandLine = [string]$_.CommandLine
         }
     }
     return @($found)
+}
+
+function Test-TcpPortOpen([int]$Port) {
+    try {
+        $r = Test-NetConnection -ComputerName 127.0.0.1 -Port $Port -WarningAction SilentlyContinue
+        return [bool]$r.TcpTestSucceeded
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-AceLoopbackListenerProcessIds([int]$Port) {
+    $pids = @()
+    try {
+        Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+            $addr = ([string]$_.LocalAddress).Trim().ToLowerInvariant()
+            if ($addr -in @("127.0.0.1", "::1", "0.0.0.0")) {
+                if ($_.OwningProcess -gt 0) {
+                    $pids += [int]$_.OwningProcess
+                }
+            }
+        }
+    }
+    catch {
+        return @()
+    }
+    return @($pids | Sort-Object -Unique)
+}
+
+function Resolve-AceBackendPythonExe([Parameter(Mandatory = $true)][string]$BackendRoot) {
+    $venvPy = Join-Path $BackendRoot ".venv312\Scripts\python.exe"
+    if (Test-Path -LiteralPath $venvPy) {
+        return (Resolve-Path -LiteralPath $venvPy).Path
+    }
+    $pythonCmd = Get-Command python -ErrorAction SilentlyContinue
+    if ($pythonCmd) {
+        return [string]$pythonCmd.Source
+    }
+    return ""
+}
+
+function Assert-BackendLocalEnvSafety {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][int]$BackendPort
+    )
+    if ((Get-EnvString "ACE_SECURITY_ENABLED").ToLowerInvariant() -notin @("false", "0", "no", "off")) {
+        Write-Warn "ACE_SECURITY_ENABLED is not false; local dev expects security off."
+        Write-Warn "Set ACE_SECURITY_ENABLED=false in .env.local for Ori local mode."
+    }
+    $redisUrl = Get-EnvString "REDIS_URL"
+    if ($redisUrl) {
+        $redisHost = Get-RedisHostFromUrl $redisUrl
+        if ($redisHost -eq "__invalid__") {
+            Write-Err "REDIS_URL is not a valid URL. Use loopback only, e.g. redis://127.0.0.1:6379/0"
+            exit 1
+        }
+        if (-not (Test-LoopbackHost $redisHost)) {
+            Write-Err "REDIS_URL must point to local Redis (127.0.0.1 / localhost), not production."
+            exit 1
+        }
+    }
+    if (Test-ProductionPublicBaseUrl (Get-EnvString "ACE_PUBLIC_BASE_URL")) {
+        Write-Err "ACE_PUBLIC_BASE_URL looks like production (Render / public site)."
+        Write-Err "Remove it or set http://127.0.0.1:$BackendPort for local use."
+        exit 1
+    }
+}
+
+function Get-AceBackendLocalPortState {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [hashtable]$Simulate = $null
+    )
+    if ($Simulate) {
+        return [PSCustomObject]@{
+            Port                     = $Port
+            BackendRoot              = $BackendRoot
+            HealthOk                 = [bool]$Simulate.HealthOk
+            AceBackendProcessCount   = [int]$Simulate.AceBackendProcessCount
+            AceBackendProcesses      = @()
+            ListenerPids             = @($Simulate.ListenerPids)
+            AceListenerPids          = @($Simulate.AceListenerPids)
+            ForeignListenerPids      = @($Simulate.ForeignListenerPids)
+            UncertainListenerPids    = @($Simulate.UncertainListenerPids)
+            Action                   = [string]$Simulate.Action
+            Reason                   = [string]$Simulate.Reason
+        }
+    }
+
+    $listenerPids = @(Get-AceLoopbackListenerProcessIds -Port $Port)
+    $backendProcs = @(Find-LocalAceBackendProcesses -BackendRoot $BackendRoot -ListenerPort $Port)
+    $aceListeners = @()
+    $foreignListeners = @()
+    $uncertainListeners = @()
+
+    foreach ($procId in $listenerPids) {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction SilentlyContinue
+        if (-not $proc) {
+            $uncertainListeners += $procId
+            continue
+        }
+        if (Test-Win32ProcessIsAceBackendApp -Win32Process $proc -BackendRoot $BackendRoot -ListenerPort $Port) {
+            $aceListeners += $procId
+        }
+        elseif ([string]$proc.Name -match "python") {
+            $foreignListeners += $procId
+        }
+        else {
+            $foreignListeners += $procId
+        }
+    }
+
+    $healthOk = Test-BackendHealth -Port $Port
+    $action = "Start"
+    $reason = "port_available"
+
+    if ($backendProcs.Count -gt 1) {
+        $action = "BlockedDuplicate"
+        $reason = "multiple_ace_backend_app_py_processes"
+    }
+    elseif ($aceListeners.Count -gt 1) {
+        $action = "BlockedDuplicate"
+        $reason = "multiple_ace_backend_listeners"
+    }
+    elseif ($foreignListeners.Count -gt 0) {
+        $action = "BlockedForeign"
+        $reason = "foreign_process_on_port"
+    }
+    elseif ($uncertainListeners.Count -gt 0) {
+        $action = "BlockedUncertain"
+        $reason = "uncertain_listener_process"
+    }
+    elseif ($aceListeners.Count -eq 1) {
+        if ($healthOk) {
+            $action = "AlreadyRunning"
+            $reason = "ace_backend_listening_health_ok"
+        }
+        else {
+            $action = "BlockedUnhealthy"
+            $reason = "ace_backend_listening_health_failed"
+        }
+    }
+    elseif ($listenerPids.Count -gt 0) {
+        $action = "BlockedUncertain"
+        $reason = "listeners_unclassified"
+    }
+    elseif ($healthOk) {
+        $action = "BlockedUncertain"
+        $reason = "health_ok_without_ace_listener"
+    }
+    elseif ((Test-TcpPortOpen -Port $Port) -and ($listenerPids.Count -eq 0)) {
+        $action = "BlockedUncertain"
+        $reason = "port_in_use_listener_unknown"
+    }
+    elseif ($backendProcs.Count -eq 1) {
+        $action = "BlockedDuplicate"
+        $reason = "orphan_ace_backend_process_port_free"
+    }
+
+    return [PSCustomObject]@{
+        Port                   = $Port
+        BackendRoot            = $BackendRoot
+        HealthOk               = $healthOk
+        AceBackendProcessCount = $backendProcs.Count
+        AceBackendProcesses    = $backendProcs
+        ListenerPids           = $listenerPids
+        AceListenerPids        = $aceListeners
+        ForeignListenerPids    = $foreignListeners
+        UncertainListenerPids  = $uncertainListeners
+        Action                 = $action
+        Reason                 = $reason
+    }
+}
+
+function Write-AceBackendLocalPortStateReport {
+    param(
+        [Parameter(Mandatory = $true)]$State
+    )
+    Write-Info ("Port {0}: listeners={1} ace={2} foreign={3} uncertain={4}" -f `
+            $State.Port, `
+            ($State.ListenerPids -join ","), `
+            ($State.AceListenerPids -join ","), `
+            ($State.ForeignListenerPids -join ","), `
+            ($State.UncertainListenerPids -join ","))
+    Write-Info ("ACE Backend app.py processes in repo: {0}" -f $State.AceBackendProcessCount)
+    Write-Info ("Health /health: {0}" -f $(if ($State.HealthOk) { "OK" } else { "not OK" }))
+    Write-Info ("Decision: {0} ({1})" -f $State.Action, $State.Reason)
 }
 
 function Test-AceFrontendViteOnPort([int]$Port) {
