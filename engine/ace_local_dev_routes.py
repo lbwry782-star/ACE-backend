@@ -28,6 +28,12 @@ from engine.ace_local_dev_cycle_store import (
 from engine.ace_local_dev_request_body import parse_strict_json_object
 from engine.ace_local_dev_post_cancel_auto_start import try_resume_post_cancel_auto_start
 from engine.ace_local_dev_start_cycle import start_dev_cycle
+from engine.ace_local_dev_publish_uri_preview import (
+    build_public_publish_uri_preview_response,
+    publish_uri_no_active_cycle_response,
+    publish_uri_preview_error_response,
+    run_publish_uri_preview_powershell,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +140,79 @@ def local_dev_cancel_development_preview():
         return _no_store_json(payload, 503)
 
     payload = build_public_preview_response(raw)
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/preview", methods=["GET"])
+def local_dev_publish_uri_preview():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    resolution = resolve_active_dev_session_id_for_api()
+    if resolution.cycle_status == "INVALID":
+        payload = publish_uri_preview_error_response(
+            error="ace_active_dev_cycle_invalid",
+            message="Active dev cycle pointer is missing or invalid; fix before preview.",
+            blockers=list(resolution.blockers) + list(resolution.pointer_errors),
+        )
+        return _no_store_json(payload, 200)
+
+    session_id = resolution.session_id
+    if not session_id or resolution.cycle_status == "NONE":
+        payload = publish_uri_no_active_cycle_response(
+            reason="No active dev cycle (set active-dev-cycle.json or ACE_ORI_DEV_SESSION_ID).",
+        )
+        return _no_store_json(payload, 200)
+
+    if resolution.cycle_status == "CANCELLED" or "CYCLE_ALREADY_CANCELLED" in resolution.blockers:
+        payload = publish_uri_no_active_cycle_response(
+            reason="Dev cancel cycle is CANCELLED for the configured session.",
+        )
+        return _no_store_json(payload, 200)
+
+    try:
+        raw = run_publish_uri_preview_powershell(session_id)
+    except FileNotFoundError:
+        payload = publish_uri_preview_error_response(
+            error="ace_publish_uri_preview_script_missing",
+            message="Publish Uri preview script not found in backend scripts directory.",
+        )
+        return _no_store_json(payload, 503)
+    except RuntimeError as exc:
+        msg = str(exc)
+        logger.warning("LOCAL_DEV_PUBLISH_URI_PREVIEW_FAILED sessionId=%s err=%s", session_id, msg)
+        if "SESSION_JSON_MISSING" in msg or "SESSION_NOT_READY" in msg:
+            payload = publish_uri_no_active_cycle_response(
+                reason="Configured session is missing or not READY.",
+            )
+            status = 200
+        elif "REGISTRY" in msg.upper():
+            payload = publish_uri_preview_error_response(
+                error="ace_publish_uri_preview_blocked",
+                message="Preview blocked; see blockers.",
+                blockers=[msg],
+            )
+            status = 200
+        else:
+            payload = publish_uri_preview_error_response(
+                error="ace_publish_uri_preview_failed",
+                message=msg[:500],
+            )
+            status = 503
+        return _no_store_json(payload, status)
+
+    if not raw.get("ok"):
+        payload = publish_uri_preview_error_response(
+            error="ace_publish_uri_preview_failed",
+            message=str(raw.get("error") or "unknown"),
+        )
+        return _no_store_json(payload, 503)
+
+    payload = build_public_publish_uri_preview_response(raw)
     return _no_store_json(payload, 200)
 
 
