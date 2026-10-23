@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from engine.ace_local_dev_preview_fingerprint import compute_preview_fingerprint
+
 logger = logging.getLogger(__name__)
 
 _SESSION_ID_PATTERN = re.compile(r"^ori-\d{8}-\d{6}-[0-9a-f]{8}$", re.IGNORECASE)
@@ -54,6 +56,7 @@ def run_cancel_dev_preview_powershell(session_id: str) -> Dict[str, Any]:
         text=True,
         timeout=120,
         check=False,
+        env=os.environ.copy(),
     )
     if completed.returncode != 0:
         err = (completed.stderr or completed.stdout or "").strip()
@@ -168,16 +171,19 @@ def build_public_preview_response(raw: Dict[str, Any]) -> Dict[str, Any]:
             "canApply": bool(side_env.get("CanApply", True)),
         }
 
+    preview_fp = compute_preview_fingerprint(raw)
+
     return {
         "ok": True,
         "previewMode": "READ_ONLY",
-        "executeEndpointAvailable": False,
+        "previewFingerprint": preview_fp,
+        "executeEndpointAvailable": True,
         "activeCycle": {
             "sessionId": session_id,
             "status": cycle_status,
             "hasWorkToCancel": has_work,
             "canExecuteInEngine": can_execute,
-            "executeAvailableInApi": False,
+            "executeAvailableInApi": True,
         },
         "blockers": blockers,
         "registryInfraDrift": list(plan.get("registryInfraDrift") or []),

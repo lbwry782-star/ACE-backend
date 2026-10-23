@@ -15,7 +15,12 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $ScriptDir 'OriDevSessionBaselineLib.ps1')
 . (Join-Path $ScriptDir 'OriDevCancelDevLib.ps1')
 
-$layout = Resolve-OriProjectLayout -ScriptsDirectory $ScriptDir
+$layoutParams = @{ ScriptsDirectory = $ScriptDir }
+if ($env:ACE_ORI_PS_BACKEND_ROOT) { $layoutParams.BackendRoot = $env:ACE_ORI_PS_BACKEND_ROOT }
+if ($env:ACE_ORI_PS_FRONTEND_ROOT) { $layoutParams.FrontendRoot = $env:ACE_ORI_PS_FRONTEND_ROOT }
+if ($env:ACE_ORI_PS_REGISTRY_PATH) { $layoutParams.RegistryPath = $env:ACE_ORI_PS_REGISTRY_PATH }
+if ($env:ACE_ORI_PS_SESSIONS_ROOT) { $layoutParams.SessionsRoot = $env:ACE_ORI_PS_SESSIONS_ROOT }
+$layout = Resolve-OriProjectLayout @layoutParams
 $result = Invoke-OriCancelDevPreview -Layout $layout -SessionId $SessionId -SessionsRoot $layout.SessionsRoot
 $payload = [ordered]@{
     ok          = $true

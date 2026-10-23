@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 
 from engine.ace_local_dev_access import (
     assert_local_dev_loopback_api_access,
@@ -18,11 +18,14 @@ from engine.ace_local_dev_cancel_preview import (
     resolve_configured_dev_session_id,
     run_cancel_dev_preview_powershell,
 )
+from engine.ace_local_dev_cancel_execute import execute_cancel_development
 from engine.ace_local_dev_cycle_store import (
     active_cycle_pointer_path,
     resolve_active_dev_cycle,
     resolve_active_dev_session_id_for_api,
 )
+from engine.ace_local_dev_request_body import parse_strict_json_object
+from engine.ace_local_dev_start_cycle import start_dev_cycle
 
 logger = logging.getLogger(__name__)
 
@@ -128,4 +131,81 @@ def local_dev_cancel_development_preview():
         return _no_store_json(payload, 503)
 
     payload = build_public_preview_response(raw)
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/dev-cycle/start", methods=["POST"])
+def local_dev_dev_cycle_start():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    body, body_err = parse_strict_json_object(request, allowed_keys={"confirmStart"})
+    if body_err:
+        return _no_store_json({"ok": False, "error": body_err}, 400)
+
+    try:
+        payload = start_dev_cycle(confirm_start=str(body.get("confirmStart") or ""))
+    except ValueError as exc:
+        code = str(exc)
+        status = 409 if "open_exists" in code else 400
+        return _no_store_json({"ok": False, "error": code, "message": code}, status)
+    except RuntimeError as exc:
+        logger.exception("LOCAL_DEV_START_CYCLE_FAILED")
+        return _no_store_json(
+            {"ok": False, "error": "ace_dev_cycle_start_failed", "message": str(exc)[:500]},
+            503,
+        )
+
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/cancel-development/execute", methods=["POST"])
+def local_dev_cancel_development_execute():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    body, body_err = parse_strict_json_object(
+        request,
+        allowed_keys={"confirmExecute", "previewFingerprint"},
+    )
+    if body_err:
+        return _no_store_json({"ok": False, "error": body_err}, 400)
+
+    try:
+        payload = execute_cancel_development(
+            confirm_execute=str(body.get("confirmExecute") or ""),
+            preview_fingerprint=str(body.get("previewFingerprint") or ""),
+        )
+    except ValueError as exc:
+        code = str(exc)
+        if code.startswith("ace_cancel_execute_blockers:"):
+            blockers = code.split(":", 1)[1].split(",") if ":" in code else []
+            return _no_store_json(
+                {
+                    "ok": False,
+                    "error": "ace_cancel_execute_blocked",
+                    "message": "Execute blocked; refresh preview.",
+                    "blockers": blockers,
+                },
+                409,
+            )
+        status = 409 if "in_progress" in code or "stale" in code or "cancelled" in code else 400
+        return _no_store_json({"ok": False, "error": code, "message": code}, status)
+    except RuntimeError as exc:
+        logger.exception("LOCAL_DEV_CANCEL_EXECUTE_RUNTIME")
+        return _no_store_json(
+            {"ok": False, "error": "ace_cancel_execute_failed", "message": str(exc)[:500]},
+            503,
+        )
+
+    if not payload.get("ok"):
+        return _no_store_json(payload, 503)
     return _no_store_json(payload, 200)

@@ -144,7 +144,7 @@ class LocalDevCancelPreviewApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.get_json()
         self.assertTrue(body.get("ok"))
-        self.assertFalse(body.get("executeEndpointAvailable"))
+        self.assertTrue(body.get("executeEndpointAvailable"))
         self.assertEqual(len(body["commitsToCancel"]["backend"]), 1)
         self.assertIn("product-temp.txt", body["pathsToRevert"]["backend"])
         self.assertEqual(len(body["preBaselineWarnings"]), 1)
