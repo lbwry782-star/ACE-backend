@@ -39,8 +39,16 @@ def _run_ps1(script_name: str, args: List[str], *, timeout: int = 600) -> Dict[s
     if not stdout:
         raise RuntimeError(stderr or "ace_local_dev_powershell_empty_stdout")
 
+    json_text = stdout
+    if not json_text.startswith("{"):
+        for line in reversed(stdout.splitlines()):
+            stripped = line.strip()
+            if stripped.startswith("{"):
+                json_text = stripped
+                break
+
     try:
-        data = json.loads(stdout)
+        data = json.loads(json_text)
     except json.JSONDecodeError as exc:
         tail = (stdout + "\n" + stderr)[:800]
         raise RuntimeError(f"ace_local_dev_powershell_invalid_json:{tail}") from exc

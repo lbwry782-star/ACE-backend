@@ -51,17 +51,17 @@ if (-not (Test-Path -LiteralPath $baselineScript)) {
     throw 'BASELINE_SCRIPT_MISSING'
 }
 
-$baselineArgs = @()
+$baselineParams = @{}
 if (-not [string]::IsNullOrWhiteSpace($SessionId)) {
-    $baselineArgs += @('-SessionId', $SessionId.Trim())
+    $baselineParams['SessionId'] = $SessionId.Trim()
 }
-if ($env:ACE_ORI_PS_SESSIONS_ROOT) { $baselineArgs += @('-SessionsRoot', $env:ACE_ORI_PS_SESSIONS_ROOT) }
-if ($env:ACE_ORI_PS_REGISTRY_PATH) { $baselineArgs += @('-RegistryPath', $env:ACE_ORI_PS_REGISTRY_PATH) }
-if ($env:ACE_ORI_PS_BACKEND_ROOT) { $baselineArgs += @('-BackendRoot', $env:ACE_ORI_PS_BACKEND_ROOT) }
-if ($env:ACE_ORI_PS_FRONTEND_ROOT) { $baselineArgs += @('-FrontendRoot', $env:ACE_ORI_PS_FRONTEND_ROOT) }
+if ($env:ACE_ORI_PS_SESSIONS_ROOT) { $baselineParams['SessionsRoot'] = $env:ACE_ORI_PS_SESSIONS_ROOT }
+if ($env:ACE_ORI_PS_REGISTRY_PATH) { $baselineParams['RegistryPath'] = $env:ACE_ORI_PS_REGISTRY_PATH }
+if ($env:ACE_ORI_PS_BACKEND_ROOT) { $baselineParams['BackendRoot'] = $env:ACE_ORI_PS_BACKEND_ROOT }
+if ($env:ACE_ORI_PS_FRONTEND_ROOT) { $baselineParams['FrontendRoot'] = $env:ACE_ORI_PS_FRONTEND_ROOT }
 
 try {
-    $summary = & $baselineScript @baselineArgs
+    $summary = & $baselineScript @baselineParams
 }
 catch {
     throw
