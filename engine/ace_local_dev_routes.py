@@ -18,7 +18,8 @@ from engine.ace_local_dev_cancel_preview import (
     resolve_configured_dev_session_id,
     run_cancel_dev_preview_powershell,
 )
-from engine.ace_local_dev_cancel_execute import execute_cancel_development
+from engine.ace_local_dev_cancel_execute import CancelExecuteRejected, execute_cancel_development
+from engine.ace_local_dev_cancel_progress import load_public_progress
 from engine.ace_local_dev_cycle_store import (
     active_cycle_pointer_path,
     resolve_active_dev_cycle,
@@ -165,6 +166,28 @@ def local_dev_dev_cycle_start():
     return _no_store_json(payload, 200)
 
 
+@ace_local_dev_bp.route("/api/local-dev/cancel-development/progress", methods=["GET"])
+def local_dev_cancel_development_progress():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params(frozenset({"operationId", "sessionId"}))
+    if bad_query is not None:
+        return bad_query
+
+    operation_id = (request.args.get("operationId") or "").strip()
+    if not operation_id:
+        return _no_store_json(
+            {"ok": False, "error": "ace_cancel_progress_operation_id_required"},
+            400,
+        )
+    session_hint = (request.args.get("sessionId") or "").strip() or None
+    payload = load_public_progress(operation_id, session_id_hint=session_hint)
+    if payload is None:
+        return _no_store_json({"ok": False, "error": "ace_cancel_progress_not_found"}, 404)
+    return _no_store_json(payload, 200)
+
+
 @ace_local_dev_bp.route("/api/local-dev/cancel-development/execute", methods=["POST"])
 def local_dev_cancel_development_execute():
     denied = assert_local_dev_loopback_api_access()
@@ -176,41 +199,63 @@ def local_dev_cancel_development_execute():
 
     body, body_err = parse_strict_json_object(
         request,
-        allowed_keys={"confirmExecute", "previewFingerprint"},
+        allowed_keys={"confirmExecute", "previewFingerprint", "operationId"},
     )
     if body_err:
         return _no_store_json({"ok": False, "error": body_err}, 400)
+
+    def _with_operation(payload: dict, operation_id: str | None) -> dict:
+        if operation_id:
+            payload = dict(payload)
+            payload["operationId"] = operation_id
+        return payload
 
     try:
         payload = execute_cancel_development(
             confirm_execute=str(body.get("confirmExecute") or ""),
             preview_fingerprint=str(body.get("previewFingerprint") or ""),
+            operation_id=str(body.get("operationId") or "") or None,
         )
-    except ValueError as exc:
+    except CancelExecuteRejected as exc:
         code = str(exc)
+        op = exc.operation_id
         if code.startswith("ace_cancel_execute_blockers:"):
             blockers = code.split(":", 1)[1].split(",") if ":" in code else []
             return _no_store_json(
-                {
-                    "ok": False,
-                    "error": "ace_cancel_execute_blocked",
-                    "message": "Execute blocked; refresh preview.",
-                    "blockers": blockers,
-                },
+                _with_operation(
+                    {
+                        "ok": False,
+                        "error": "ace_cancel_execute_blocked",
+                        "message": "Execute blocked; refresh preview.",
+                        "blockers": blockers,
+                    },
+                    op,
+                ),
                 409,
             )
         if code == "ace_cancel_execute_not_allowed":
             return _no_store_json(
-                {
-                    "ok": False,
-                    "error": code,
-                    "message": (
-                        "Real cancel Execute is blocked. Use isolated TEMP tests or set "
-                        "ACE_LOCAL_DEV_ALLOW_REAL_EXECUTE after explicit approval."
-                    ),
-                },
+                _with_operation(
+                    {
+                        "ok": False,
+                        "error": code,
+                        "message": (
+                            "Real cancel Execute is blocked. Use isolated TEMP tests or set "
+                            "ACE_LOCAL_DEV_ALLOW_REAL_EXECUTE after explicit approval."
+                        ),
+                    },
+                    op,
+                ),
                 403,
             )
+        status = 409 if "in_progress" in code or "stale" in code or "cancelled" in code else 400
+        if code == "ace_cancel_progress_operation_id_already_used":
+            status = 409
+        return _no_store_json(_with_operation({"ok": False, "error": code, "message": code}, op), status)
+    except ValueError as exc:
+        code = str(exc)
+        if code == "ace_cancel_progress_operation_id_invalid":
+            return _no_store_json({"ok": False, "error": code, "message": code}, 400)
         status = 409 if "in_progress" in code or "stale" in code or "cancelled" in code else 400
         return _no_store_json({"ok": False, "error": code, "message": code}, status)
     except FileNotFoundError as exc:

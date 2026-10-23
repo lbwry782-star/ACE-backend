@@ -45,6 +45,172 @@ function Save-OriCancelJournal {
     ($Journal | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Set-OriCancelExecuteProgressBinding {
+    param(
+        [string]$ProgressPath = '',
+        [string]$ProgressOperationId = ''
+    )
+    if ([string]::IsNullOrWhiteSpace($ProgressPath) -or [string]::IsNullOrWhiteSpace($ProgressOperationId)) {
+        $script:OriCancelExecuteProgressBinding = $null
+        return
+    }
+    $script:OriCancelExecuteProgressBinding = @{
+        Path        = $ProgressPath.Trim()
+        OperationId = $ProgressOperationId.Trim().ToLowerInvariant()
+    }
+}
+
+function Get-OriCancelExecuteProgressContext {
+    $path = [string]$env:ACE_CANCEL_EXECUTE_PROGRESS_PATH
+    $op = [string]$env:ACE_CANCEL_EXECUTE_OPERATION_ID
+    if (($path.Trim().Length -eq 0 -or $op.Trim().Length -eq 0) -and $script:OriCancelExecuteProgressBinding) {
+        $path = [string]$script:OriCancelExecuteProgressBinding.Path
+        $op = [string]$script:OriCancelExecuteProgressBinding.OperationId
+    }
+    if ([string]::IsNullOrWhiteSpace($path) -or [string]::IsNullOrWhiteSpace($op)) {
+        return $null
+    }
+    return @{
+        Path        = $path.Trim()
+        OperationId = $op.Trim().ToLowerInvariant()
+    }
+}
+
+function Protect-OriCancelProgressErrorMessage {
+    param([string]$Message)
+    $text = [string]$Message
+    if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+    $text = $text -replace '[A-Za-z]:\\[^\s,;]+', '[path]'
+    $text = $text -replace '\\\\[^\s,;]+', '[path]'
+    $text = $text -replace '/[^\s,;]+', '[path]'
+    $text = $text -replace '\s+', ' '
+    if ($text.Length -gt 240) { $text = $text.Substring(0, 237) + '...' }
+    return $text.Trim()
+}
+
+function Read-OriCancelExecuteProgressDocument {
+    param(
+        [Parameter(Mandatory = $true)][string]$ProgressPath,
+        [Parameter(Mandatory = $true)][string]$OperationId
+    )
+    if (-not (Test-Path -LiteralPath $ProgressPath)) {
+        throw 'PROGRESS_FILE_MISSING'
+    }
+    $raw = Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8
+    $doc = $raw | ConvertFrom-Json
+    $docOp = [string]$doc.operationId
+    if ($docOp.ToLowerInvariant() -ne $OperationId.ToLowerInvariant()) {
+        throw 'PROGRESS_OPERATION_MISMATCH'
+    }
+    return $doc
+}
+
+function Save-OriCancelExecuteProgressDocument {
+    param(
+        [Parameter(Mandatory = $true)]$Document,
+        [Parameter(Mandatory = $true)][string]$ProgressPath
+    )
+    $dir = Split-Path -Parent $ProgressPath
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $Document.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    $tmp = "$ProgressPath.tmp.$([guid]::NewGuid().ToString('n'))"
+    $json = ($Document | ConvertTo-Json -Depth 12)
+    [System.IO.File]::WriteAllText($tmp, $json, [System.Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $tmp -Destination $ProgressPath -Force
+}
+
+function Start-OriCancelExecuteProgressStep {
+    param(
+        [Parameter(Mandatory = $true)][string]$StepId
+    )
+    $ctx = Get-OriCancelExecuteProgressContext
+    if (-not $ctx) { return }
+    $doc = Read-OriCancelExecuteProgressDocument -ProgressPath $ctx.Path -OperationId $ctx.OperationId
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    $doc.currentStep = [ordered]@{
+        id        = $StepId
+        status    = 'IN_PROGRESS'
+        startedAt = $now
+    }
+    Save-OriCancelExecuteProgressDocument -Document $doc -ProgressPath $ctx.Path
+}
+
+function Complete-OriCancelExecuteProgressStep {
+    param(
+        [Parameter(Mandatory = $true)][string]$StepId,
+        [string]$Status = 'SUCCESS'
+    )
+    $ctx = Get-OriCancelExecuteProgressContext
+    if (-not $ctx) { return }
+    $doc = Read-OriCancelExecuteProgressDocument -ProgressPath $ctx.Path -OperationId $ctx.OperationId
+    $now = (Get-Date).ToUniversalTime().ToString('o')
+    $started = $now
+    if ($doc.currentStep -and [string]$doc.currentStep.id -eq $StepId) {
+        $started = [string]$doc.currentStep.startedAt
+    }
+    $steps = @()
+    if ($doc.completedSteps) { $steps = @($doc.completedSteps) }
+    $steps += [ordered]@{
+        id         = $StepId
+        status     = $Status
+        startedAt  = $started
+        finishedAt = $now
+    }
+    $doc.completedSteps = $steps
+    $doc.currentStep = $null
+    Save-OriCancelExecuteProgressDocument -Document $doc -ProgressPath $ctx.Path
+}
+
+function Fail-OriCancelExecuteProgressStep {
+    param(
+        [Parameter(Mandatory = $true)][string]$StepId,
+        [string]$ErrorMessage = ''
+    )
+    Complete-OriCancelExecuteProgressStep -StepId $StepId -Status 'FAILED'
+    $ctx = Get-OriCancelExecuteProgressContext
+    if (-not $ctx) { return }
+    $doc = Read-OriCancelExecuteProgressDocument -ProgressPath $ctx.Path -OperationId $ctx.OperationId
+    $doc.operationStatus = 'FAILED'
+    if (-not $doc.cancelStatus) { $doc | Add-Member -NotePropertyName 'cancelStatus' -NotePropertyValue 'FAILED' -Force }
+    else { $doc.cancelStatus = 'FAILED' }
+    $doc.error = Protect-OriCancelProgressErrorMessage -Message $ErrorMessage
+    Save-OriCancelExecuteProgressDocument -Document $doc -ProgressPath $ctx.Path
+}
+
+function Set-OriCancelExecuteProgressOperationStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$OperationStatus,
+        [string]$ErrorMessage = ''
+    )
+    $ctx = Get-OriCancelExecuteProgressContext
+    if (-not $ctx) { return }
+    $doc = Read-OriCancelExecuteProgressDocument -ProgressPath $ctx.Path -OperationId $ctx.OperationId
+    $doc.operationStatus = $OperationStatus
+    $doc.currentStep = $null
+    if (-not [string]::IsNullOrWhiteSpace($ErrorMessage)) {
+        $doc.error = Protect-OriCancelProgressErrorMessage -Message $ErrorMessage
+    }
+    Save-OriCancelExecuteProgressDocument -Document $doc -ProgressPath $ctx.Path
+}
+
+function Set-OriCancelExecuteProgressCancelStatus {
+    param(
+        [Parameter(Mandatory = $true)][string]$CancelStatus,
+        [string]$ErrorMessage = ''
+    )
+    $ctx = Get-OriCancelExecuteProgressContext
+    if (-not $ctx) { return }
+    $doc = Read-OriCancelExecuteProgressDocument -ProgressPath $ctx.Path -OperationId $ctx.OperationId
+    if (-not $doc.cancelStatus) { $doc | Add-Member -NotePropertyName 'cancelStatus' -NotePropertyValue $CancelStatus -Force }
+    else { $doc.cancelStatus = $CancelStatus }
+    if (-not [string]::IsNullOrWhiteSpace($ErrorMessage)) {
+        $doc.error = Protect-OriCancelProgressErrorMessage -Message $ErrorMessage
+    }
+    Save-OriCancelExecuteProgressDocument -Document $doc -ProgressPath $ctx.Path
+}
+
 function Get-OriCancelLockPath {
     param([Parameter(Mandatory = $true)][string]$SessionsRoot)
     return Join-Path $SessionsRoot '.ori-cancel-dev.lock'
@@ -1302,16 +1468,26 @@ function Invoke-OriCancelDevExecute {
         [switch]$SimulateFailAfterBackend,
         [switch]$SimulateEnvWriteFail,
         [switch]$SimulateBackupVerifyFail,
-        [string]$SessionsRoot = ''
+        [string]$SessionsRoot = '',
+        [string]$ProgressPath = '',
+        [string]$ProgressOperationId = ''
     )
     if ([string]::IsNullOrWhiteSpace($SessionsRoot)) {
         $SessionsRoot = $Layout.SessionsRoot
     }
+    if (-not [string]::IsNullOrWhiteSpace($ProgressPath)) {
+        $env:ACE_CANCEL_EXECUTE_PROGRESS_PATH = $ProgressPath.Trim()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ProgressOperationId)) {
+        $env:ACE_CANCEL_EXECUTE_OPERATION_ID = $ProgressOperationId.Trim().ToLowerInvariant()
+    }
+    Set-OriCancelExecuteProgressBinding -ProgressPath $ProgressPath -ProgressOperationId $ProgressOperationId
     $sessionRoot = Join-Path $SessionsRoot $SessionId
     $lockPath = $null
     $journal = New-OriCancelJournal -SessionId $SessionId -Mode 'EXECUTE'
     $backupRoot = $null
     $overallStatus = 'FAILED'
+    $progressStep = $null
 
     try {
         $lockPath = Enter-OriCancelDevLock -SessionsRoot $SessionsRoot
@@ -1327,6 +1503,9 @@ function Invoke-OriCancelDevExecute {
         if ($plan.registryInfraDrift -and $plan.registryInfraDrift.Count -gt 0) {
             throw ('REGISTRY_INFRA_DRIFT:' + ($plan.registryInfraDrift -join ','))
         }
+
+        $progressStep = 'backup_creation'
+        Start-OriCancelExecuteProgressStep -StepId $progressStep
 
         $ts = Get-Date -Format 'yyyy-MM-dd_HHmmss'
         $backupRoot = Join-Path $Layout.AceRoot "_backups\cancel-dev-backups\$SessionId-$ts"
@@ -1354,6 +1533,11 @@ function Invoke-OriCancelDevExecute {
         }
         Write-OriCancelDevRecoveryGuide -BackupRoot $backupRoot -Status 'BACKUP_VERIFIED' -FailureDetail ''
         Add-OriCancelJournalStep -Journal $journal -Name 'pre_cancel_backup_verified' -Status 'SUCCESS' -Detail $backupRoot
+        Complete-OriCancelExecuteProgressStep -StepId 'backup_creation'
+        $progressStep = $null
+
+        $progressStep = 'backend_restore'
+        Start-OriCancelExecuteProgressStep -StepId $progressStep
 
         $sessionMeta = Get-OriSessionMeta -SessionRoot $sessionRoot
         $backendRoot = $Layout.BackendRoot
@@ -1367,10 +1551,15 @@ function Invoke-OriCancelDevExecute {
             throw 'BACKEND_RESET_INFRA_FAILED'
         }
         Add-OriCancelJournalStep -Journal $journal -Name 'backend_git_restore' -Status 'SUCCESS'
+        Complete-OriCancelExecuteProgressStep -StepId 'backend_restore'
+        $progressStep = $null
 
         if ($SimulateFailAfterBackend) {
             throw 'SIMULATED_FAIL_AFTER_BACKEND'
         }
+
+        $progressStep = 'frontend_restore'
+        Start-OriCancelExecuteProgressStep -StepId $progressStep
 
         Invoke-OriGitRevertBaselinePaths -RepoRoot $frontendRoot -SessionRoot $sessionRoot -Label 'FRONTEND' -PathsToRevert $plan.git.frontend.PathsToRevert
         if ((Invoke-OriGit -RepoRoot $frontendRoot -GitArgs @('checkout', '-f', $plan.infraTargets.frontendBranch)) -ne 0) {
@@ -1380,11 +1569,16 @@ function Invoke-OriCancelDevExecute {
             throw 'FRONTEND_RESET_INFRA_FAILED'
         }
         Add-OriCancelJournalStep -Journal $journal -Name 'frontend_git_restore' -Status 'SUCCESS'
+        Complete-OriCancelExecuteProgressStep -StepId 'frontend_restore'
+        $progressStep = $null
 
         $backendEnvSnap = $sessionMeta.envSnapshots | Where-Object { $_.LogicalName -eq 'backend.env.local' } | Select-Object -First 1
         $frontendEnvSnap = $sessionMeta.envSnapshots | Where-Object { $_.LogicalName -eq 'frontend.env.development.local' } | Select-Object -First 1
         $backendEnvPath = Join-Path $backendRoot '.env.local'
         $frontendEnvPath = Join-Path $frontendRoot '.env.development.local'
+
+        $progressStep = 'env_restore'
+        Start-OriCancelExecuteProgressStep -StepId $progressStep
 
         if ($SimulateEnvWriteFail) {
             throw 'SIMULATED_ENV_WRITE_FAIL'
@@ -1407,6 +1601,11 @@ function Invoke-OriCancelDevExecute {
             Move-Item -LiteralPath $tmp -Destination $envTargetPath -Force
         }
         Add-OriCancelJournalStep -Journal $journal -Name 'env_restore' -Status 'SUCCESS'
+        Complete-OriCancelExecuteProgressStep -StepId 'env_restore'
+        $progressStep = $null
+
+        $progressStep = 'final_verify'
+        Start-OriCancelExecuteProgressStep -StepId $progressStep
 
         $verifyBackend = Get-GitRepoState -RepoRoot $backendRoot
         $verifyFrontend = Get-GitRepoState -RepoRoot $frontendRoot
@@ -1429,15 +1628,29 @@ function Invoke-OriCancelDevExecute {
             throw ($vErrors -join ',')
         }
         Add-OriCancelJournalStep -Journal $journal -Name 'final_verify' -Status 'SUCCESS'
+        Complete-OriCancelExecuteProgressStep -StepId 'final_verify'
+        $progressStep = $null
+
+        $progressStep = 'close_cancel_cycle'
+        Start-OriCancelExecuteProgressStep -StepId $progressStep
 
         Set-OriCancelDevCycleCancelled -SessionRoot $sessionRoot -SessionMeta $sessionMeta -BackupRoot $backupRoot
         Add-OriCancelJournalStep -Journal $journal -Name 'close_cancel_cycle' -Status 'SUCCESS'
+        Complete-OriCancelExecuteProgressStep -StepId 'close_cancel_cycle'
+        $progressStep = $null
 
         $overallStatus = 'SUCCESS'
         $journal.status = 'SUCCESS'
+        Set-OriCancelExecuteProgressCancelStatus -CancelStatus 'COMPLETED'
     }
     catch {
         $msg = $_.Exception.Message
+        if ($progressStep) {
+            Fail-OriCancelExecuteProgressStep -StepId $progressStep -ErrorMessage $msg
+        }
+        else {
+            Set-OriCancelExecuteProgressOperationStatus -OperationStatus 'FAILED' -ErrorMessage $msg
+        }
         Add-OriCancelJournalStep -Journal $journal -Name 'failure' -Status 'FAILED' -Detail $msg
         if ($journal.steps | Where-Object { $_.status -eq 'SUCCESS' -and $_.name -match 'backend|frontend|env' }) {
             $journal.status = 'PARTIAL'
@@ -1446,6 +1659,10 @@ function Invoke-OriCancelDevExecute {
         else {
             $journal.status = 'FAILED'
             $overallStatus = 'FAILED'
+        }
+        if ($overallStatus -eq 'PARTIAL') {
+            Set-OriCancelExecuteProgressCancelStatus -CancelStatus 'PARTIAL' -ErrorMessage $msg
+            Set-OriCancelExecuteProgressOperationStatus -OperationStatus 'FAILED' -ErrorMessage $msg
         }
         if ($backupRoot -and (Test-Path -LiteralPath $backupRoot)) {
             Write-OriCancelDevRecoveryGuide -BackupRoot $backupRoot -Status $overallStatus -FailureDetail $msg

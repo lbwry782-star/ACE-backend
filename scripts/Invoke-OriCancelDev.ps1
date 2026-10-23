@@ -36,7 +36,9 @@ param(
     [string]$ConfirmExecute = '',
     [switch]$AllowRealExecute,
     [switch]$RestartServices,
-    [string]$ConfirmRestart = ''
+    [string]$ConfirmRestart = '',
+    [string]$ProgressPath = '',
+    [string]$ProgressOperationId = ''
 )
 
 Set-StrictMode -Version Latest
@@ -124,7 +126,8 @@ if ($realAce -and -not $AllowRealExecute) {
 }
 
 try {
-    $execResult = Invoke-OriCancelDevExecute -Layout $layout -SessionId $SessionId -SessionsRoot $SessionsRoot
+    $execResult = Invoke-OriCancelDevExecute -Layout $layout -SessionId $SessionId -SessionsRoot $SessionsRoot `
+        -ProgressPath $ProgressPath -ProgressOperationId $ProgressOperationId
     Write-CancelOk "Execute finished: $($execResult.status)"
     Write-CancelInfo "Backup: $($execResult.backupRoot)"
     Write-CancelInfo "Journal: $($execResult.journalPath)"

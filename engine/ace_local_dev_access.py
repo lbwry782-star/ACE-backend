@@ -38,7 +38,15 @@ def assert_local_dev_loopback_api_access() -> Optional[Tuple[Response, int]]:
     return None
 
 
-def reject_unexpected_query_params() -> Optional[Tuple[Response, int]]:
+def reject_unexpected_query_params(
+    allowed: Optional[frozenset[str]] = None,
+) -> Optional[Tuple[Response, int]]:
+    allowed_set = allowed or frozenset()
+    if allowed_set:
+        extra = set(request.args.keys()) - set(allowed_set)
+        if extra:
+            return _deny("ace_local_dev_unexpected_query_parameters", 400)
+        return None
     if request.args:
         return _deny("ace_local_dev_unexpected_query_parameters", 400)
     return None

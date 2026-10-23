@@ -22,6 +22,7 @@ from engine.ace_local_dev_cycle_store import (
     ACTIVE_CYCLE_FILENAME,
     resolve_active_dev_cycle,
 )
+from engine.ace_local_dev_cancel_progress import load_public_progress
 from engine.ace_local_dev_execute_guard import end_local_dev_execute, try_begin_local_dev_execute
 
 
@@ -207,12 +208,37 @@ class LocalDevApiE2ETemp(unittest.TestCase):
         targets = plan.get("infraTargets") or {}
         self.assertEqual(str(targets.get("backendCommit") or ""), infra_head)
 
+        import uuid
+
+        client_op = uuid.uuid4().hex
         exec_resp = self.client.post(
             "/api/local-dev/cancel-development/execute",
-            json={"confirmExecute": "CANCEL", "previewFingerprint": fp},
+            json={
+                "confirmExecute": "CANCEL",
+                "previewFingerprint": fp,
+                "operationId": client_op,
+            },
         )
         self.assertEqual(exec_resp.status_code, 200, exec_resp.get_data(as_text=True))
         self.assertTrue(exec_resp.get_json().get("ok"))
+        self.assertEqual(exec_resp.get_json().get("operationId"), client_op)
+        prog = load_public_progress(client_op, session_id_hint=sid)
+        self.assertIsNotNone(prog)
+        assert prog is not None
+        self.assertEqual(prog.get("cancelStatus"), "COMPLETED")
+        self.assertEqual(prog.get("operationStatus"), "COMPLETED")
+        step_ids = {s.get("id") for s in prog.get("completedSteps") or []}
+        for expected in (
+            "pre_checks",
+            "backup_creation",
+            "backend_restore",
+            "frontend_restore",
+            "env_restore",
+            "final_verify",
+            "close_cancel_cycle",
+            "post_cancel_auto_start",
+        ):
+            self.assertIn(expected, step_ids, msg=f"missing progress step {expected}")
 
         self.assertFalse((backend / "api-e2e-wip.txt").exists())
         self.assertIn("SESSION_TEMP=pre-start", (backend / ".env.local").read_text(encoding="utf-8"))

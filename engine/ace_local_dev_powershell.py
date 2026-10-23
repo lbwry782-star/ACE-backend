@@ -12,7 +12,13 @@ def _scripts_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "scripts"
 
 
-def _run_ps1(script_name: str, args: List[str], *, timeout: int = 600) -> Dict[str, Any]:
+def _run_ps1(
+    script_name: str,
+    args: List[str],
+    *,
+    timeout: int = 600,
+    env_overlay: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     script = _scripts_dir() / script_name
     if not script.is_file():
         raise FileNotFoundError(f"ace_local_dev_script_missing:{script_name}")
@@ -26,13 +32,16 @@ def _run_ps1(script_name: str, args: List[str], *, timeout: int = 600) -> Dict[s
         str(script),
         *args,
     ]
+    env = os.environ.copy()
+    if env_overlay:
+        env.update(env_overlay)
     completed = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
-        env=os.environ.copy(),
+        env=env,
     )
     stdout = (completed.stdout or "").strip()
     stderr = (completed.stderr or "").strip()
@@ -76,8 +85,24 @@ def run_cancel_execute_json(
     session_id: str,
     *,
     allow_real_execute: bool = False,
+    progress_path: Optional[str] = None,
+    operation_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     args = ["-SessionId", session_id, "-ConfirmExecute", "CANCEL"]
     if allow_real_execute:
         args.append("-AllowRealExecute")
-    return _run_ps1("Export-OriCancelDevExecuteJson.ps1", args, timeout=900)
+    if progress_path:
+        args.extend(["-ProgressPath", progress_path])
+    if operation_id:
+        args.extend(["-ProgressOperationId", operation_id])
+    env_overlay: Dict[str, str] = {}
+    if progress_path:
+        env_overlay["ACE_CANCEL_EXECUTE_PROGRESS_PATH"] = progress_path
+    if operation_id:
+        env_overlay["ACE_CANCEL_EXECUTE_OPERATION_ID"] = operation_id
+    return _run_ps1(
+        "Export-OriCancelDevExecuteJson.ps1",
+        args,
+        timeout=900,
+        env_overlay=env_overlay or None,
+    )

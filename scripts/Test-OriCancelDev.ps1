@@ -240,6 +240,41 @@ try {
         Assert-True (($latest.Count -gt 0) -and (Test-Path -LiteralPath (Join-Path $latest[0].FullName 'RECOVERY.md'))) 'partial_recovery_guide'
     }
 
+    # Progress: env_restore failure recorded on disk (TEMP)
+    $sidEnvProg = 'ori-test-progress-env-fail'
+    & (Join-Path $ScriptDir 'New-OriDevSessionBaseline.ps1') -SessionId $sidEnvProg `
+        -SessionsRoot $sessionsRoot -RegistryPath $regPath -BackendRoot $backendRoot -FrontendRoot $frontendRoot | Out-Null
+    Set-Content (Join-Path $backendRoot 'wip-edit.txt') 'wip-env-prog' -Encoding UTF8
+    $opProg = [guid]::NewGuid().ToString('n')
+    $sessProgRoot = Join-Path $sessionsRoot $sidEnvProg
+    $progPath = Join-Path $sessProgRoot "cancel-execute-progress-$opProg.json"
+    $progInit = [ordered]@{
+        schemaVersion       = 1
+        operationId         = $opProg
+        sessionId           = $sidEnvProg
+        operationStatus     = 'IN_PROGRESS'
+        cancelStatus        = 'IN_PROGRESS'
+        phase               = 'CANCEL_EXECUTE'
+        currentStep         = $null
+        completedSteps      = @()
+        postCancelAutoStart = @{ phase = 'PENDING'; newSessionId = $null; lastError = $null }
+        startedAt           = (Get-Date).ToUniversalTime().ToString('o')
+        updatedAt           = (Get-Date).ToUniversalTime().ToString('o')
+        error               = $null
+    }
+    $progJson = ($progInit | ConvertTo-Json -Depth 8)
+    [System.IO.File]::WriteAllText($progPath, $progJson, [System.Text.UTF8Encoding]::new($false))
+    try {
+        Invoke-OriCancelDevExecute -Layout $layout -SessionId $sidEnvProg -SessionsRoot $sessionsRoot `
+            -SimulateEnvWriteFail -ProgressPath $progPath -ProgressOperationId $opProg | Out-Null
+        Assert-True $false 'progress_env_fail_should_throw'
+    }
+    catch {
+        Assert-True $true 'progress_env_fail_should_throw'
+        $progDoc = Get-Content -LiteralPath $progPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True ([string]$progDoc.operationStatus -eq 'FAILED') 'progress_operation_failed'
+    }
+
     # Successful execute
     $exec = Invoke-OriCancelDevExecute -Layout $layout -SessionId $sid -SessionsRoot $sessionsRoot
     Assert-True ($exec.status -eq 'SUCCESS') 'execute_success'

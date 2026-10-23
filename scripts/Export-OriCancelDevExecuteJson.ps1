@@ -7,7 +7,9 @@
 param(
     [Parameter(Mandatory = $true)][string]$SessionId,
     [string]$ConfirmExecute = 'CANCEL',
-    [switch]$AllowRealExecute
+    [switch]$AllowRealExecute,
+    [string]$ProgressPath = '',
+    [string]$ProgressOperationId = ''
 )
 
 Set-StrictMode -Version Latest
@@ -29,6 +31,13 @@ if (-not (Test-Path -LiteralPath $invokeScript)) {
 }
 
 try {
+    if ([string]::IsNullOrWhiteSpace($ProgressPath)) {
+        $ProgressPath = [string]$env:ACE_CANCEL_EXECUTE_PROGRESS_PATH
+    }
+    if ([string]::IsNullOrWhiteSpace($ProgressOperationId)) {
+        $ProgressOperationId = [string]$env:ACE_CANCEL_EXECUTE_OPERATION_ID
+    }
+
     $execResult = & $invokeScript `
         -SessionId $SessionId.Trim() `
         -SessionsRoot $layout.SessionsRoot `
@@ -37,7 +46,9 @@ try {
         -FrontendRoot $layout.FrontendRoot `
         -Execute `
         -ConfirmExecute $ConfirmExecute `
-        -AllowRealExecute:$AllowRealExecute.IsPresent
+        -AllowRealExecute:$AllowRealExecute.IsPresent `
+        -ProgressPath $ProgressPath `
+        -ProgressOperationId $ProgressOperationId
 
     $payload = [ordered]@{
         ok     = $true
