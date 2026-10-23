@@ -19,7 +19,7 @@ from engine.ace_local_dev_cancel_preview import (
     run_cancel_dev_preview_powershell,
 )
 from engine.ace_local_dev_cancel_execute import CancelExecuteRejected, execute_cancel_development
-from engine.ace_local_dev_cancel_progress import load_public_progress
+from engine.ace_local_dev_cancel_progress import load_public_progress, validate_operation_id
 from engine.ace_local_dev_cycle_store import (
     active_cycle_pointer_path,
     resolve_active_dev_cycle,
@@ -258,6 +258,20 @@ def local_dev_cancel_development_progress():
     if not operation_id:
         return _no_store_json(
             {"ok": False, "error": "ace_cancel_progress_operation_id_required"},
+            400,
+        )
+    try:
+        validate_operation_id(operation_id)
+    except ValueError:
+        return _no_store_json(
+            {
+                "ok": False,
+                "error": "ace_cancel_progress_operation_id_invalid",
+                "message": (
+                    "operationId must be exactly 32 lowercase hexadecimal characters "
+                    "(UUID without hyphens)."
+                ),
+            },
             400,
         )
     session_hint = (request.args.get("sessionId") or "").strip() or None

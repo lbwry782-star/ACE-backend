@@ -34,6 +34,7 @@ from engine.ace_local_dev_cancel_progress import (
     public_progress_payload,
     resolve_operation_id,
     sanitize_progress_error,
+    validate_operation_id,
 )
 from engine.ace_local_dev_config import (
     confirm_local_dev_loopback_bind,
@@ -228,6 +229,73 @@ class CancelProgressApiTests(unittest.TestCase):
         op = new_operation_id()
         resp = self.client.get(f"/api/local-dev/cancel-development/progress?operationId={op}")
         self.assertEqual(resp.status_code, 404)
+
+    def test_progress_invalid_uuid_with_hyphens_returns_400(self) -> None:
+        dashed = str(uuid.uuid4())
+        resp = self.client.get(f"/api/local-dev/cancel-development/progress?operationId={dashed}")
+        self.assertEqual(resp.status_code, 400)
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "ace_cancel_progress_operation_id_invalid")
+
+    def test_progress_invalid_malformed_returns_400(self) -> None:
+        for bad in ("abc", "g" * 32, "Z" * 32, "not-a-valid-id!!!"):
+            resp = self.client.get(f"/api/local-dev/cancel-development/progress?operationId={bad}")
+            self.assertEqual(resp.status_code, 400, bad)
+            self.assertEqual(resp.get_json().get("error"), "ace_cancel_progress_operation_id_invalid")
+
+    def test_progress_path_traversal_rejected(self) -> None:
+        traversal = "../" * 4 + "a" * 32
+        with self.assertRaises(ValueError):
+            validate_operation_id(traversal)
+        resp = self.client.get(
+            f"/api/local-dev/cancel-development/progress?operationId={traversal.replace('/', '%2F')}"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.get_json().get("error"), "ace_cancel_progress_operation_id_invalid")
+
+    def test_progress_completed_operation_returns_200(self) -> None:
+        op = new_operation_id()
+        writer = CancelExecuteProgressWriter(
+            session_id=self.session_id,
+            operation_id=op,
+            sessions_root=self.sessions_root,
+        )
+        writer.finish(operation_status=STATUS_COMPLETED, cancel_status=STATUS_COMPLETED)
+
+        resp = self.client.get(
+            f"/api/local-dev/cancel-development/progress?operationId={op}&sessionId={self.session_id}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        body = resp.get_json()
+        self.assertEqual(body.get("cancelStatus"), STATUS_COMPLETED)
+        self.assertEqual(body.get("operationStatus"), STATUS_COMPLETED)
+
+    @patch("engine.ace_local_dev_routes.run_cancel_dev_preview_powershell")
+    @patch("engine.ace_local_dev_routes.run_publish_uri_preview_powershell")
+    def test_previews_still_200_after_progress_validation_fix(
+        self, mock_publish, mock_cancel
+    ) -> None:
+        sid = self.session_id
+        _session_fixture(self.sessions_root, sid)
+        write_active_dev_cycle_pointer(session_id=sid, sessions_root=self.sessions_root)
+        mock_cancel.return_value = _sample_preview_raw(sid)
+        mock_publish.return_value = {
+            "ok": True,
+            "plan": {
+                "sessionId": sid,
+                "production": {},
+                "proposedChanges": {"backend": {}, "frontend": {}},
+                "workerImpact": {},
+                "commits": {"productCandidate": {"backend": [], "frontend": []}, "excludedLocal": {}},
+                "readiness": {},
+                "cancelCycle": {"status": "OPEN"},
+                "blockers": [],
+            },
+        }
+        cancel_resp = self.client.get("/api/local-dev/cancel-development/preview")
+        publish_resp = self.client.get("/api/local-dev/publish-uri/preview")
+        self.assertEqual(cancel_resp.status_code, 200)
+        self.assertEqual(publish_resp.status_code, 200)
 
     def test_parallel_progress_reads(self) -> None:
         op = new_operation_id()
