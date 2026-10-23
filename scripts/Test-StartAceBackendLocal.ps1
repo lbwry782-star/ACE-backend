@@ -67,16 +67,58 @@ $simForeign = Get-AceBackendLocalPortState -Port 5000 -BackendRoot $BackendRoot 
 Assert-Test "simulate_foreign" ($simForeign.Action -eq "BlockedForeign")
 
 $simDup = Get-AceBackendLocalPortState -Port 5000 -BackendRoot $BackendRoot -Simulate @{
-    HealthOk              = $false
+    HealthOk               = $false
     AceBackendProcessCount = 2
-    ListenerPids          = @()
-    AceListenerPids       = @()
-    ForeignListenerPids   = @()
-    UncertainListenerPids = @()
-    Action                = "BlockedDuplicate"
-    Reason                = "multiple_ace_backend_app_py_processes"
+    AceBackendTreeCount    = 2
+    ListenerPids           = @()
+    AceListenerPids        = @()
+    ForeignListenerPids    = @()
+    UncertainListenerPids  = @()
+    Action                 = "BlockedDuplicate"
+    Reason                 = "multiple_independent_backend_trees"
 }
 Assert-Test "simulate_duplicate" ($simDup.Action -eq "BlockedDuplicate")
+
+function New-BackendProcRow([int]$ProcId) {
+    return [PSCustomObject]@{ ProcId = $ProcId; CommandLine = "app.py" }
+}
+
+$parentChildParents = @{ 27040 = 16748; 28888 = 27040 }
+$parentChildProcs = @((New-BackendProcRow 27040), (New-BackendProcRow 28888))
+Assert-Test "tree_parent_child_count" (
+    (Get-AceBackendIndependentTreeCount -BackendProcesses $parentChildProcs -ParentProcessIdByPid $parentChildParents) -eq 1
+)
+
+$twoTreeParents = @{ 101 = 50; 102 = 60 }
+$twoTreeProcs = @((New-BackendProcRow 101), (New-BackendProcRow 102))
+Assert-Test "tree_two_independent" (
+    (Get-AceBackendIndependentTreeCount -BackendProcesses $twoTreeProcs -ParentProcessIdByPid $twoTreeParents) -eq 2
+)
+
+$simParentChildLive = Get-AceBackendLocalPortState -Port 5000 -BackendRoot $BackendRoot -Simulate @{
+    HealthOk               = $true
+    AceBackendProcessCount = 2
+    AceBackendTreeCount    = 0
+    ListenerPids           = @(28888)
+    AceListenerPids        = @(28888)
+    ForeignListenerPids    = @()
+    UncertainListenerPids  = @()
+    Action                 = "AlreadyRunning"
+    Reason                 = "ace_backend_listening_health_ok"
+}
+Assert-Test "simulate_parent_child_already_running" ($simParentChildLive.Action -eq "AlreadyRunning")
+
+$liveProcs = @(Find-LocalAceBackendProcesses -BackendRoot $BackendRoot -ListenerPort 5000)
+if ($liveProcs.Count -ge 2) {
+    $liveTrees = Get-AceBackendIndependentTreeCount -BackendProcesses $liveProcs
+    $liveState = Get-AceBackendLocalPortState -Port 5000 -BackendRoot $BackendRoot
+    Assert-Test "live_parent_child_not_blocked_as_duplicate" (
+        ($liveTrees -eq 1) -and ($liveState.Action -eq "AlreadyRunning")
+    )
+}
+elseif ($liveProcs.Count -eq 0) {
+    Write-Host "  skip live_parent_child (no backend running)" -ForegroundColor DarkGray
+}
 
 $simStart = Get-AceBackendLocalPortState -Port 5000 -BackendRoot $BackendRoot -Simulate @{
     HealthOk              = $false

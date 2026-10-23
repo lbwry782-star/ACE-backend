@@ -45,7 +45,7 @@ $portState = Get-AceBackendLocalPortState -Port $port -BackendRoot $RepoRoot
 Write-AceBackendLocalPortStateReport -State $portState
 
 if ($InspectOnly) {
-    $portState | Select-Object Port, BackendRoot, HealthOk, AceBackendProcessCount, ListenerPids, AceListenerPids, ForeignListenerPids, UncertainListenerPids, Action, Reason | ConvertTo-Json -Compress
+    $portState | Select-Object Port, BackendRoot, HealthOk, AceBackendProcessCount, AceBackendTreeCount, ListenerPids, AceListenerPids, ForeignListenerPids, UncertainListenerPids, Action, Reason | ConvertTo-Json -Compress
     if ($portState.Action -in @("Start", "AlreadyRunning")) {
         exit 0
     }

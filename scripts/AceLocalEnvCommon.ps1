@@ -320,6 +320,60 @@ function Test-Win32ProcessIsAceBackendApp {
     return $false
 }
 
+function Get-Win32ParentProcessId {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    if ($ProcessId -le 0) {
+        return 0
+    }
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
+    if (-not $proc) {
+        return 0
+    }
+    return [int]$proc.ParentProcessId
+}
+
+function Get-AceBackendIndependentTreeCount {
+    param(
+        [Parameter(Mandatory = $true)][array]$BackendProcesses,
+        [hashtable]$ParentProcessIdByPid = $null
+    )
+    if ($null -eq $BackendProcesses -or $BackendProcesses.Count -eq 0) {
+        return 0
+    }
+    $pidSet = @{}
+    foreach ($p in $BackendProcesses) {
+        if ($null -eq $p) { continue }
+        $pidSet[[int]$p.ProcId] = $true
+    }
+    if ($pidSet.Count -eq 0) {
+        return 0
+    }
+
+    function Get-ResolvedParentProcessId([int]$ProcId) {
+        if ($ParentProcessIdByPid -and $ParentProcessIdByPid.ContainsKey($ProcId)) {
+            return [int]$ParentProcessIdByPid[$ProcId]
+        }
+        return Get-Win32ParentProcessId -ProcessId $ProcId
+    }
+
+    $roots = @{}
+    foreach ($p in $BackendProcesses) {
+        if ($null -eq $p) { continue }
+        $current = [int]$p.ProcId
+        if (-not $pidSet.ContainsKey($current)) { continue }
+        while ($true) {
+            $parent = Get-ResolvedParentProcessId -ProcId $current
+            if ($parent -gt 0 -and $pidSet.ContainsKey($parent)) {
+                $current = $parent
+                continue
+            }
+            break
+        }
+        $roots[$current] = $true
+    }
+    return $roots.Count
+}
+
 function Find-LocalAceBackendProcesses {
     param(
         [string]$BackendRoot,
@@ -413,11 +467,16 @@ function Get-AceBackendLocalPortState {
         [hashtable]$Simulate = $null
     )
     if ($Simulate) {
+        $simTreeCount = 0
+        if ($Simulate.ContainsKey('AceBackendTreeCount')) {
+            $simTreeCount = [int]$Simulate.AceBackendTreeCount
+        }
         return [PSCustomObject]@{
             Port                     = $Port
             BackendRoot              = $BackendRoot
             HealthOk                 = [bool]$Simulate.HealthOk
             AceBackendProcessCount   = [int]$Simulate.AceBackendProcessCount
+            AceBackendTreeCount      = $simTreeCount
             AceBackendProcesses      = @()
             ListenerPids             = @($Simulate.ListenerPids)
             AceListenerPids          = @($Simulate.AceListenerPids)
@@ -452,12 +511,13 @@ function Get-AceBackendLocalPortState {
     }
 
     $healthOk = Test-BackendHealth -Port $Port
+    $backendTreeCount = Get-AceBackendIndependentTreeCount -BackendProcesses $backendProcs
     $action = "Start"
     $reason = "port_available"
 
-    if ($backendProcs.Count -gt 1) {
+    if ($backendTreeCount -gt 1) {
         $action = "BlockedDuplicate"
-        $reason = "multiple_ace_backend_app_py_processes"
+        $reason = "multiple_independent_backend_trees"
     }
     elseif ($aceListeners.Count -gt 1) {
         $action = "BlockedDuplicate"
@@ -493,7 +553,7 @@ function Get-AceBackendLocalPortState {
         $action = "BlockedUncertain"
         $reason = "port_in_use_listener_unknown"
     }
-    elseif ($backendProcs.Count -eq 1) {
+    elseif ($backendTreeCount -eq 1 -and $backendProcs.Count -ge 1 -and $aceListeners.Count -eq 0 -and $listenerPids.Count -eq 0) {
         $action = "BlockedDuplicate"
         $reason = "orphan_ace_backend_process_port_free"
     }
@@ -503,6 +563,7 @@ function Get-AceBackendLocalPortState {
         BackendRoot            = $BackendRoot
         HealthOk               = $healthOk
         AceBackendProcessCount = $backendProcs.Count
+        AceBackendTreeCount    = $backendTreeCount
         AceBackendProcesses    = $backendProcs
         ListenerPids           = $listenerPids
         AceListenerPids        = $aceListeners
