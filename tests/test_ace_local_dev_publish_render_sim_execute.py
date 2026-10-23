@@ -203,6 +203,7 @@ class RenderSimExecuteBase(unittest.TestCase):
             wait_deadline_seconds=10.0,
             **kwargs,
         )
+        adapters.allow_execute_gate_bypass_for_simulation = True
 
         def _git_push_hook(ctx):
             state.on_git_push(ctx.precheck.candidate_backend_sha)
@@ -379,6 +380,7 @@ class RenderSimExecuteIntegrationTests(RenderSimExecuteBase):
         bundle = _precheck_bundle()
         state = SimMockState()
         adapters, _ = self._build_adapters(state)
+        adapters.allow_execute_gate_bypass_for_simulation = False
         with patch(
             "engine.ace_local_dev_publish_uri_candidate_execute.publish_real_execute_permitted",
             return_value=False,

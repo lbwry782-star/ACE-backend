@@ -76,6 +76,7 @@ class SimulatedRenderPublishExecuteAdapters:
         self._wait_deadline_seconds = wait_deadline_seconds
         self._poll_interval_seconds = poll_interval_seconds
         self._prepare_guard = BlockedPublishExecuteAdapters()
+        self.allow_execute_gate_bypass_for_simulation = False
         self.stage_calls: Dict[str, int] = {}
 
     @property
@@ -92,7 +93,10 @@ class SimulatedRenderPublishExecuteAdapters:
     def git_push_backend(self, ctx: PublishExecuteContext) -> StageResult:
         self._tick("git_push_backend")
         sha = ctx.precheck.candidate_backend_sha
-        self._sim_state.mark_git_push_simulated(sha)
+        if hasattr(self._sim_state, "on_git_push"):
+            self._sim_state.on_git_push(sha)
+        else:
+            self._sim_state.mark_git_push_simulated(sha)
         ctx.notes["renderSimGitPush"] = {"simulated": True, "commitSha": sha}
         return StageResult(ok=True, code="ace_publish_sim_git_push_ok", details={"commitSha": sha})
 

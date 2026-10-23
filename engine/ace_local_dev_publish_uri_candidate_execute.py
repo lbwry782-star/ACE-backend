@@ -22,6 +22,9 @@ from engine.ace_local_dev_publish_execute_adapters import (
     PublishExecuteContext,
     StageResult,
 )
+from engine.ace_local_dev_publish_render_sim_execute_adapters import (
+    SimulatedRenderPublishExecuteAdapters,
+)
 from engine.ace_local_dev_publish_execute_progress import (
     STEP_CANDIDATE_SHA_MATCH,
     STEP_EXECUTION_PLAN,
@@ -200,14 +203,23 @@ def execute_publish_uri_candidate(
         progress.complete_step(STEP_CANDIDATE_SHA_MATCH)
 
         progress.begin_step(STEP_REAL_EXECUTE_GATE)
-        if not publish_real_execute_permitted():
+        if (
+            isinstance(adapter, SimulatedRenderPublishExecuteAdapters)
+            and getattr(adapter, "allow_execute_gate_bypass_for_simulation", False)
+        ):
+            progress.complete_step(
+                STEP_REAL_EXECUTE_GATE,
+                internal_note="external_publish_simulation_only",
+            )
+        elif not publish_real_execute_permitted():
             progress.block_step(
                 STEP_REAL_EXECUTE_GATE,
                 error="ace_publish_execute_not_allowed",
                 internal_error="ACE_LOCAL_DEV_ALLOW_REAL_PUBLISH_EXECUTE required; LOCAL layout blocked.",
             )
             raise PublishExecuteRejected("ace_publish_execute_not_allowed", operation_id=op)
-        progress.complete_step(STEP_REAL_EXECUTE_GATE)
+        else:
+            progress.complete_step(STEP_REAL_EXECUTE_GATE)
 
         _run_stage(
             progress,
