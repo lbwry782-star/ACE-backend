@@ -17,7 +17,10 @@ from engine.ace_local_dev_cycle_store import (
 from engine.ace_local_dev_post_cancel_auto_start import (
     PHASE_COMPLETED,
     PHASE_FAILED,
+    PHASE_IN_PROGRESS,
+    PHASE_PENDING,
     POST_CANCEL_AUTO_START_FILENAME,
+    ensure_post_cancel_auto_start_record,
     run_post_cancel_auto_start,
     try_resume_post_cancel_auto_start,
 )
@@ -100,6 +103,108 @@ class PostCancelAutoStartTests(unittest.TestCase):
             (self.sessions_root / old / POST_CANCEL_AUTO_START_FILENAME).read_text(encoding="utf-8")
         )
         self.assertEqual(record.get("phase"), PHASE_FAILED)
+
+    def test_try_resume_idle_without_record(self) -> None:
+        old = "ori-20261023-010342-2d952e88"
+        _session_fixture(self.sessions_root, old, cycle_status="CANCELLED")
+        self._mark_cancelled(old)
+        self.assertIsNone(try_resume_post_cancel_auto_start(sessions_root=self.sessions_root))
+        self.assertEqual(
+            resolve_active_dev_cycle(sessions_root=self.sessions_root).cycle_status,
+            "CANCELLED",
+        )
+
+    @patch("engine.ace_local_dev_post_cancel_auto_start.run_start_dev_cycle_core")
+    def test_try_resume_pending_record(self, mock_start) -> None:
+        old = "ori-20261023-010342-2d952e88"
+        new = "ori-20261024-120000-ccddeeff"
+        _session_fixture(self.sessions_root, old, cycle_status="CANCELLED")
+        self._mark_cancelled(old)
+        (self.sessions_root / old / POST_CANCEL_AUTO_START_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "cancelledSessionId": old,
+                    "phase": PHASE_PENDING,
+                    "newSessionId": None,
+                    "lastError": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        mock_start.side_effect = self._fake_start(new)
+
+        resumed = try_resume_post_cancel_auto_start(sessions_root=self.sessions_root)
+        self.assertTrue(resumed and resumed.get("ok"))
+        mock_start.assert_called_once()
+
+    @patch("engine.ace_local_dev_post_cancel_auto_start.run_start_dev_cycle_core")
+    def test_try_resume_in_progress_record(self, mock_start) -> None:
+        old = "ori-20261023-010342-2d952e88"
+        new = "ori-20261024-120000-ddeeff00"
+        _session_fixture(self.sessions_root, old, cycle_status="CANCELLED")
+        self._mark_cancelled(old)
+        (self.sessions_root / old / "cancel-dev-cycle.state.json").write_text(
+            json.dumps({"schemaVersion": 1, "status": "CANCELLED_AWAITING_NEW_CYCLE"}),
+            encoding="utf-8",
+        )
+        (self.sessions_root / old / POST_CANCEL_AUTO_START_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "cancelledSessionId": old,
+                    "phase": PHASE_IN_PROGRESS,
+                    "newSessionId": None,
+                    "lastError": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        mock_start.side_effect = self._fake_start(new)
+
+        resumed = try_resume_post_cancel_auto_start(sessions_root=self.sessions_root)
+        self.assertTrue(resumed and resumed.get("ok"))
+        mock_start.assert_called_once()
+
+    def test_try_resume_completed_record_no_op(self) -> None:
+        old = "ori-20261023-010342-2d952e88"
+        new = "ori-20261024-120000-eeff0011"
+        _session_fixture(self.sessions_root, old, cycle_status="CANCELLED")
+        self._mark_cancelled(old)
+        _session_fixture(self.sessions_root, new, cycle_status="OPEN")
+        write_active_dev_cycle_pointer(session_id=new, sessions_root=self.sessions_root)
+        (self.sessions_root / old / POST_CANCEL_AUTO_START_FILENAME).write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "cancelledSessionId": old,
+                    "phase": PHASE_COMPLETED,
+                    "newSessionId": new,
+                    "lastError": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertIsNone(try_resume_post_cancel_auto_start(sessions_root=self.sessions_root))
+
+    def test_try_resume_open_pointer_no_op(self) -> None:
+        sid = "ori-20261023-010342-2d952e88"
+        _session_fixture(self.sessions_root, sid)
+        write_active_dev_cycle_pointer(session_id=sid, sessions_root=self.sessions_root)
+        self.assertIsNone(try_resume_post_cancel_auto_start(sessions_root=self.sessions_root))
+
+    def test_ensure_record_idempotent(self) -> None:
+        old = "ori-20261023-010342-2d952e88"
+        _session_fixture(self.sessions_root, old, cycle_status="CANCELLED")
+        root = self.sessions_root / old
+        first = ensure_post_cancel_auto_start_record(root, old)
+        second = ensure_post_cancel_auto_start_record(root, old)
+        self.assertEqual(first.get("phase"), PHASE_PENDING)
+        self.assertEqual(second.get("phase"), PHASE_PENDING)
+        self.assertEqual(
+            len(list(root.glob(POST_CANCEL_AUTO_START_FILENAME))),
+            1,
+        )
 
     @patch("engine.ace_local_dev_post_cancel_auto_start.run_start_dev_cycle_core")
     def test_resume_after_failed_start(self, mock_start) -> None:

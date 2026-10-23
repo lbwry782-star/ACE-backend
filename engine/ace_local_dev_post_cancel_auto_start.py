@@ -51,6 +51,30 @@ def _read_auto_start_record(session_root: Path) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def ensure_post_cancel_auto_start_record(
+    session_root: Path,
+    cancelled_session_id: str,
+) -> Dict[str, Any]:
+    """
+    Persist PENDING when absent. Called from Cancel Execute before auto-start runs
+    so recovery can resume without treating bare CANCELLED as intent to start.
+    """
+    existing = _read_auto_start_record(session_root)
+    if existing is not None:
+        return dict(existing)
+    sid = _validate_session_id(cancelled_session_id)
+    if not sid:
+        raise ValueError("ace_post_cancel_auto_start_session_invalid")
+    payload = {
+        "cancelledSessionId": sid,
+        "phase": PHASE_PENDING,
+        "newSessionId": None,
+        "lastError": None,
+    }
+    _write_auto_start_record(session_root, payload)
+    return payload
+
+
 def _write_auto_start_record(session_root: Path, payload: Dict[str, Any]) -> None:
     payload = dict(payload)
     payload["schemaVersion"] = POST_CANCEL_AUTO_START_SCHEMA
@@ -143,12 +167,7 @@ def run_post_cancel_auto_start(
         resolution = resolve_active_dev_cycle(sessions_root=root)
         open_ids = scan_open_cycle_session_ids(root)
 
-        record = _read_auto_start_record(session_root) or {
-            "cancelledSessionId": sid,
-            "phase": PHASE_PENDING,
-            "newSessionId": None,
-            "lastError": None,
-        }
+        record = ensure_post_cancel_auto_start_record(session_root, sid)
 
         existing_new = _validate_session_id(str(record.get("newSessionId") or ""))
         if record.get("phase") == PHASE_COMPLETED and existing_new:
@@ -302,12 +321,6 @@ def try_resume_post_cancel_auto_start(
     session_root = root / ptr_sid
     record = _read_auto_start_record(session_root)
     if not record:
-        cycle = _normalize_cancelled_status(_load_cycle_status(session_root))
-        if cycle in (STATUS_CANCELLED, STATUS_AWAITING) and resolution.cycle_status in (
-            STATUS_CANCELLED,
-            STATUS_AWAITING,
-        ):
-            return run_post_cancel_auto_start(cancelled_session_id=ptr_sid, sessions_root=root)
         return None
 
     phase = str(record.get("phase") or "").upper()

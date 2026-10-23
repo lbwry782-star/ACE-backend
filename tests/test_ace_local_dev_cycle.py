@@ -198,6 +198,24 @@ class ActiveDevCycleStatusApiTests(unittest.TestCase):
         text = json.dumps(body)
         self.assertNotIn("ACE_ORI", text)
 
+    @patch("engine.ace_local_dev_post_cancel_auto_start.run_start_dev_cycle_core")
+    def test_status_cancelled_without_auto_start_record_does_not_open_cycle(self, mock_start) -> None:
+        enable_local_dev_security_bypass_for_tests()
+        confirm_local_dev_loopback_bind("127.0.0.1")
+        sid = "ori-20261023-010342-2d952e88"
+        _session_fixture(self.sessions_root, sid, cycle_status="CANCELLED")
+        (self.sessions_root / sid / "cancel-dev-cycle.state.json").write_text(
+            json.dumps({"schemaVersion": 1, "status": "CANCELLED"}),
+            encoding="utf-8",
+        )
+        write_active_dev_cycle_pointer(session_id=sid, sessions_root=self.sessions_root)
+        resp = self.client.get("/api/local-dev/dev-cycle/status")
+        body = resp.get_json()
+        self.assertTrue(body.get("ok"))
+        self.assertEqual(body["activeCycle"]["status"], "CANCELLED")
+        self.assertTrue(body.get("canStartNewCycle"))
+        mock_start.assert_not_called()
+
     @patch("engine.ace_local_dev_routes.run_cancel_dev_preview_powershell")
     def test_preview_with_pointer_no_env(self, mock_run) -> None:
         enable_local_dev_security_bypass_for_tests()

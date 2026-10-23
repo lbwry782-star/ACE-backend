@@ -19,6 +19,7 @@ from engine.ace_local_dev_cancel_progress import (
 from engine.ace_local_dev_cycle_store import (
     resolve_active_dev_cycle,
     resolve_active_dev_session_id_for_api,
+    resolve_sessions_root,
     write_active_dev_cycle_pointer,
 )
 from engine.ace_local_dev_execute_guard import (
@@ -28,7 +29,10 @@ from engine.ace_local_dev_execute_guard import (
 )
 from engine.ace_local_dev_powershell import run_cancel_execute_json
 from engine.ace_local_dev_preview_fingerprint import compute_preview_fingerprint
-from engine.ace_local_dev_post_cancel_auto_start import run_post_cancel_auto_start
+from engine.ace_local_dev_post_cancel_auto_start import (
+    ensure_post_cancel_auto_start_record,
+    run_post_cancel_auto_start,
+)
 from engine.ace_local_dev_real_execute_gate import is_real_ace_cancel_execute_guarded
 
 logger = logging.getLogger(__name__)
@@ -197,6 +201,10 @@ def execute_cancel_development(
             exc,
         )
 
+    ensure_post_cancel_auto_start_record(
+        resolve_sessions_root() / session_id,
+        session_id,
+    )
     progress.begin_post_cancel_auto_start()
     auto_start = run_post_cancel_auto_start(cancelled_session_id=session_id)
     progress.apply_post_cancel_auto_start_result(auto_start)

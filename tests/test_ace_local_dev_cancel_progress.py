@@ -379,6 +379,29 @@ class CancelProgressApiTests(unittest.TestCase):
         )
         self.assertEqual(resp.status_code, 403)
 
+    @patch("engine.ace_local_dev_post_cancel_auto_start.run_start_dev_cycle_core")
+    def test_progress_get_does_not_trigger_auto_start(self, mock_start) -> None:
+        enable_local_dev_security_bypass_for_tests()
+        confirm_local_dev_loopback_bind("127.0.0.1")
+        sid = "ori-20261023-010342-2d952e88"
+        from engine.ace_local_dev_cycle_store import write_active_dev_cycle_pointer
+        from tests.test_ace_local_dev_cycle import _session_fixture
+
+        root = self.sessions_root
+        _session_fixture(root, sid, cycle_status="CANCELLED")
+        (root / sid / "cancel-dev-cycle.state.json").write_text(
+            '{"schemaVersion":1,"status":"CANCELLED"}',
+            encoding="utf-8",
+        )
+        write_active_dev_cycle_pointer(session_id=sid, sessions_root=root)
+        op = new_operation_id()
+        resp = self.client.get(
+            f"/api/local-dev/cancel-development/progress?operationId={op}",
+        )
+        self.assertEqual(resp.status_code, 404)
+        mock_start.assert_not_called()
+        self.assertFalse((root / sid / "post-cancel-auto-start.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

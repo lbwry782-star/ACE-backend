@@ -177,6 +177,10 @@ class LocalDevStartCancelApiTests(unittest.TestCase):
         self.assertTrue(body.get("postCancelAutoStart", {}).get("ok"))
         mock_exec.assert_called_once()
         mock_auto_start.assert_called_once()
+        pending_path = self.sessions_root / sid / "post-cancel-auto-start.json"
+        self.assertTrue(pending_path.is_file())
+        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        self.assertEqual(str(pending.get("phase")).upper(), "PENDING")
 
     def test_cancel_without_confirm(self) -> None:
         enable_local_dev_security_bypass_for_tests()
