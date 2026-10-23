@@ -93,6 +93,9 @@ def build_public_publish_uri_candidate_preview_response(raw: Dict[str, Any]) -> 
         "publishUriPreviewFingerprint": fingerprint,
         "candidateBackendSha": str(plan.get("candidateBackendSha") or be_prop.get("proposedHeadSha") or ""),
         "executePublishEndpointAvailable": False,
+        "executePublishRouteAvailable": True,
+        "executeProgressRouteAvailable": True,
+        "prepareSimulateEndpointAvailable": True,
         "candidateDryRunAvailable": True,
         "sessionId": str(plan.get("sessionId") or ""),
         "production": {
@@ -151,6 +154,7 @@ def build_public_publish_uri_candidate_preview_response(raw: Dict[str, Any]) -> 
             ),
             "canPrepareLocalPublish": bool(readiness.get("canPrepareLocalPublish")),
             "candidateDryRunAvailable": bool(readiness.get("candidateDryRunAvailable", True)),
+            "candidatePrepareSimulateAvailable": bool(readiness.get("canPrepareLocalPublish")),
             "notes": list(readiness.get("notes") or []),
         },
         "activeCycle": {

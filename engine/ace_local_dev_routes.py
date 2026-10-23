@@ -44,6 +44,22 @@ from engine.ace_local_dev_publish_uri_candidate_dry_run import (
     PublishCandidateDryRunRejected,
     execute_publish_uri_candidate_dry_run,
 )
+from engine.ace_local_dev_publish_uri_candidate_prepare import (
+    PublishCandidatePrepareRejected,
+    execute_publish_uri_candidate_prepare_simulate,
+)
+from engine.ace_local_dev_publish_uri_candidate_execute import (
+    PublishExecuteRejected,
+    execute_publish_uri_candidate,
+)
+from engine.ace_local_dev_publish_prepare_progress import (
+    load_public_publish_prepare_progress,
+    validate_operation_id as validate_publish_prepare_operation_id,
+)
+from engine.ace_local_dev_publish_execute_progress import (
+    load_public_publish_execute_progress,
+    validate_operation_id as validate_publish_execute_operation_id,
+)
 from engine.ace_local_dev_publish_candidate_register import (
     PublishCandidateRegisterRejected,
     discover_registered_publish_candidate,
@@ -378,6 +394,213 @@ def local_dev_publish_uri_candidate_dry_run():
             503,
         )
 
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/prepare-simulate", methods=["POST"])
+def local_dev_publish_uri_candidate_prepare_simulate():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    body, body_err = parse_strict_json_object(
+        request,
+        allowed_keys={"publishUriPreviewFingerprint", "operationId"},
+    )
+    if body_err:
+        return _no_store_json({"ok": False, "error": body_err}, 400)
+
+    session_id, early = _resolve_publish_uri_session_or_response()
+    if early is not None:
+        return early
+
+    try:
+        payload = execute_publish_uri_candidate_prepare_simulate(
+            publish_uri_preview_fingerprint=str(body.get("publishUriPreviewFingerprint") or ""),
+            operation_id=str(body.get("operationId") or "") or None,
+        )
+    except PublishCandidatePrepareRejected as exc:
+        code = exc.code
+        status = 400
+        if code == "ace_local_dev_execute_in_progress":
+            status = 409
+        elif code == "ace_publish_uri_candidate_fingerprint_stale":
+            status = 409
+        elif code == "ace_publish_prepare_operation_id_already_used":
+            status = 409
+        body_out: dict = {
+            "ok": False,
+            "prepareMode": "SIMULATION_ONLY",
+            "simulationOnly": True,
+            "realExecuteBlocked": True,
+            "executePublishAvailable": False,
+            "error": code,
+            "message": exc.message,
+        }
+        if exc.operation_id:
+            body_out["operationId"] = exc.operation_id
+        if exc.blockers:
+            body_out["blockers"] = exc.blockers
+        return _no_store_json(body_out, status)
+    except RuntimeError as exc:
+        logger.warning(
+            "LOCAL_DEV_PUBLISH_URI_CANDIDATE_PREPARE_SIMULATE_FAILED sessionId=%s err=%s",
+            session_id,
+            exc,
+        )
+        return _no_store_json(
+            {
+                "ok": False,
+                "prepareMode": "SIMULATION_ONLY",
+                "error": "ace_publish_prepare_simulate_failed",
+                "message": str(exc)[:500],
+            },
+            503,
+        )
+
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/prepare-progress", methods=["GET"])
+def local_dev_publish_uri_candidate_prepare_progress():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params(frozenset({"operationId", "sessionId"}))
+    if bad_query is not None:
+        return bad_query
+
+    operation_id = (request.args.get("operationId") or "").strip()
+    if not operation_id:
+        return _no_store_json(
+            {"ok": False, "error": "ace_publish_prepare_operation_id_required"},
+            400,
+        )
+    try:
+        validate_publish_prepare_operation_id(operation_id)
+    except ValueError:
+        return _no_store_json(
+            {"ok": False, "error": "ace_publish_prepare_operation_id_invalid"},
+            400,
+        )
+
+    session_hint = (request.args.get("sessionId") or "").strip() or None
+    payload = load_public_publish_prepare_progress(
+        operation_id,
+        session_id_hint=session_hint,
+    )
+    if payload is None:
+        return _no_store_json({"ok": False, "error": "ace_publish_prepare_progress_not_found"}, 404)
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/execute", methods=["POST"])
+def local_dev_publish_uri_candidate_execute():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    body, body_err = parse_strict_json_object(
+        request,
+        allowed_keys={
+            "confirmExecute",
+            "publishUriPreviewFingerprint",
+            "operationId",
+        },
+    )
+    if body_err:
+        return _no_store_json({"ok": False, "error": body_err}, 400)
+
+    session_id, early = _resolve_publish_uri_session_or_response()
+    if early is not None:
+        return early
+
+    try:
+        payload = execute_publish_uri_candidate(
+            confirm_execute=str(body.get("confirmExecute") or ""),
+            publish_uri_preview_fingerprint=str(body.get("publishUriPreviewFingerprint") or ""),
+            operation_id=str(body.get("operationId") or "") or None,
+        )
+    except PublishExecuteRejected as exc:
+        code = exc.code
+        status = 400
+        if code == "ace_local_dev_execute_in_progress":
+            status = 409
+        elif code == "ace_publish_uri_candidate_fingerprint_stale":
+            status = 409
+        elif code in (
+            "ace_publish_execute_operation_id_already_used",
+            "ace_publish_execute_not_allowed",
+        ):
+            status = 409 if code == "ace_publish_execute_operation_id_already_used" else 403
+        body_out: dict = {
+            "ok": False,
+            "executeMode": "PUBLISH_CANDIDATE_EXECUTE",
+            "realExecuteBlocked": code == "ace_publish_execute_not_allowed",
+            "executePublishAvailable": False,
+            "error": code,
+            "message": exc.message,
+        }
+        if exc.operation_id:
+            body_out["operationId"] = exc.operation_id
+        if exc.blockers:
+            body_out["blockers"] = exc.blockers
+        return _no_store_json(body_out, status)
+    except RuntimeError as exc:
+        logger.warning(
+            "LOCAL_DEV_PUBLISH_URI_CANDIDATE_EXECUTE_FAILED sessionId=%s err=%s",
+            session_id,
+            exc,
+        )
+        return _no_store_json(
+            {
+                "ok": False,
+                "executeMode": "PUBLISH_CANDIDATE_EXECUTE",
+                "error": "ace_publish_execute_failed",
+                "message": str(exc)[:500],
+            },
+            503,
+        )
+
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/execute-progress", methods=["GET"])
+def local_dev_publish_uri_candidate_execute_progress():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params(frozenset({"operationId", "sessionId"}))
+    if bad_query is not None:
+        return bad_query
+
+    operation_id = (request.args.get("operationId") or "").strip()
+    if not operation_id:
+        return _no_store_json(
+            {"ok": False, "error": "ace_publish_execute_operation_id_required"},
+            400,
+        )
+    try:
+        validate_publish_execute_operation_id(operation_id)
+    except ValueError:
+        return _no_store_json(
+            {"ok": False, "error": "ace_publish_execute_operation_id_invalid"},
+            400,
+        )
+
+    session_hint = (request.args.get("sessionId") or "").strip() or None
+    payload = load_public_publish_execute_progress(
+        operation_id,
+        session_id_hint=session_hint,
+    )
+    if payload is None:
+        return _no_store_json({"ok": False, "error": "ace_publish_execute_progress_not_found"}, 404)
     return _no_store_json(payload, 200)
 
 
