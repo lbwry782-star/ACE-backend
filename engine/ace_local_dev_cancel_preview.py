@@ -7,10 +7,10 @@ import json
 import logging
 import os
 import re
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from engine.ace_local_dev_powershell import run_powershell_script_file
 from engine.ace_local_dev_preview_fingerprint import compute_preview_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -40,30 +40,22 @@ def run_cancel_dev_preview_powershell(session_id: str) -> Dict[str, Any]:
     if not script.is_file():
         raise FileNotFoundError("ace_cancel_preview_script_missing")
 
-    cmd = [
-        "powershell",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(script),
-        "-SessionId",
-        session_id,
-    ]
-    completed = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
+    returncode, stdout, stderr = run_powershell_script_file(
+        script,
+        ["-SessionId", session_id],
         timeout=120,
-        check=False,
         env=os.environ.copy(),
     )
-    if completed.returncode != 0:
-        err = (completed.stderr or completed.stdout or "").strip()
+    if returncode != 0:
+        err = (stderr or stdout or "").strip()
         raise RuntimeError(err or "ace_cancel_preview_powershell_failed")
 
+    text = stdout.strip()
+    if not text:
+        raise RuntimeError("ace_cancel_preview_powershell_empty_stdout")
+
     try:
-        data = json.loads(completed.stdout)
+        data = json.loads(text)
     except json.JSONDecodeError as exc:
         raise RuntimeError("ace_cancel_preview_invalid_json") from exc
     if not isinstance(data, dict):

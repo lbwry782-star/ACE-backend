@@ -356,7 +356,11 @@ class CancelProgressApiTests(unittest.TestCase):
         mock_run.return_value = type(
             "R",
             (),
-            {"returncode": 0, "stdout": '{"ok":true,"result":{"status":"SUCCESS"}}', "stderr": ""},
+            {
+                "returncode": 0,
+                "stdout": b'{"ok":true,"result":{"status":"SUCCESS"}}',
+                "stderr": b"",
+            },
         )()
         op = "a" * 32
         path = str(self.sessions_root / self.session_id / f"cancel-execute-progress-{op}.json")
