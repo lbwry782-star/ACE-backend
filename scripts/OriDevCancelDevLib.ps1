@@ -1395,11 +1395,12 @@ function Invoke-OriCancelDevExecute {
             }
         )) {
             if (-not $block.Snap.Present) { continue }
-            $built = Build-EnvRestoreKeys -EnvSnapshotItem $block.Snap -CurrentEnvPath $block.Path -ExamplePath $block.Example -Analysis $block.Analysis
+            $envTargetPath = [string]$block.Path
+            $built = Build-EnvRestoreKeys -EnvSnapshotItem $block.Snap -CurrentEnvPath $envTargetPath -ExamplePath $block.Example -Analysis $block.Analysis
             $text = Format-DotEnvFromKeys -Keys $built.EnvKeys -OrderSourcePlain $built.OrderPlain
-            $tmp = "$block.Path.tmp"
+            $tmp = "$envTargetPath.tmp"
             [System.IO.File]::WriteAllText($tmp, $text, [System.Text.UTF8Encoding]::new($false))
-            Move-Item -LiteralPath $tmp -Destination $block.Path -Force
+            Move-Item -LiteralPath $tmp -Destination $envTargetPath -Force
         }
         Add-OriCancelJournalStep -Journal $journal -Name 'env_restore' -Status 'SUCCESS'
 
