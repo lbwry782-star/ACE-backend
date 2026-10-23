@@ -21,6 +21,7 @@ from engine.ace_local_dev_config import (
 )
 from engine.ace_local_dev_cycle_store import (
     ACTIVE_CYCLE_FILENAME,
+    _read_json_file,
     resolve_active_dev_cycle,
     write_active_dev_cycle_pointer,
 )
@@ -218,6 +219,57 @@ class ActiveDevCycleStatusApiTests(unittest.TestCase):
         body = resp.get_json()
         self.assertFalse(body.get("ok"))
         self.assertEqual(body.get("error"), "ace_active_dev_cycle_invalid")
+
+
+class ReadJsonFileRegressionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp(prefix="ace-cycle-json-")
+        self.sessions_root = Path(self._tmp)
+        os.environ["ACE_SESSIONS_ROOT"] = str(self.sessions_root)
+        os.environ.pop("ACE_ORI_DEV_SESSION_ID", None)
+
+    def tearDown(self) -> None:
+        os.environ.pop("ACE_SESSIONS_ROOT", None)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_read_json_file_accepts_utf8_bom(self) -> None:
+        path = self.sessions_root / "session.json"
+        path.write_text(json.dumps({"status": "READY"}), encoding="utf-8-sig")
+        data = _read_json_file(path)
+        self.assertIsNotNone(data)
+        self.assertEqual(data.get("status"), "READY")
+
+    def test_read_json_file_accepts_utf8_without_bom(self) -> None:
+        path = self.sessions_root / "session.json"
+        path.write_text(json.dumps({"status": "READY"}), encoding="utf-8")
+        data = _read_json_file(path)
+        self.assertIsNotNone(data)
+        self.assertEqual(data.get("status"), "READY")
+
+    def test_read_json_file_rejects_corrupt_json(self) -> None:
+        path = self.sessions_root / "bad.json"
+        path.write_text("{not-json", encoding="utf-8-sig")
+        self.assertIsNone(_read_json_file(path))
+
+    def test_resolve_open_cycle_with_bom_session_and_pointer(self) -> None:
+        sid = "ori-20261023-010342-2d952e88"
+        folder = self.sessions_root / sid
+        folder.mkdir(parents=True)
+        (folder / "session.json").write_text(
+            json.dumps({"status": "READY"}),
+            encoding="utf-8-sig",
+        )
+        (folder / "cancel-dev-cycle.state.json").write_text(
+            json.dumps({"status": "OPEN"}),
+            encoding="utf-8",
+        )
+        write_active_dev_cycle_pointer(session_id=sid, sessions_root=self.sessions_root)
+        res = resolve_active_dev_cycle(sessions_root=self.sessions_root)
+        self.assertEqual(res.cycle_status, "OPEN")
+        self.assertEqual(res.source, "pointer")
+        self.assertTrue(res.pointer_valid)
+        self.assertEqual(res.session_id, sid)
+        self.assertEqual(res.blockers, [])
 
 
 if __name__ == "__main__":
