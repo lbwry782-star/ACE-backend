@@ -124,9 +124,12 @@ class LocalDevStartCancelApiTests(unittest.TestCase):
         body = resp.get_json()
         self.assertEqual(body.get("error"), "ace_cancel_execute_not_allowed")
 
+    @patch("engine.ace_local_dev_cancel_execute.run_post_cancel_auto_start")
     @patch("engine.ace_local_dev_cancel_execute.run_cancel_execute_json")
     @patch("engine.ace_local_dev_cancel_execute.run_cancel_dev_preview_powershell")
-    def test_cancel_execute_does_not_allow_real_without_env(self, mock_preview, mock_exec) -> None:
+    def test_cancel_execute_does_not_allow_real_without_env(
+        self, mock_preview, mock_exec, mock_auto_start
+    ) -> None:
         enable_local_dev_security_bypass_for_tests()
         confirm_local_dev_loopback_bind("127.0.0.1")
         sid = "ori-20261023-010342-2d952e88"
@@ -136,6 +139,7 @@ class LocalDevStartCancelApiTests(unittest.TestCase):
         mock_preview.return_value = raw
         fp = compute_preview_fingerprint(raw)
         mock_exec.return_value = {"ok": True, "result": {"status": "SUCCESS"}}
+        mock_auto_start.return_value = {"ok": True, "phase": "COMPLETED", "newSessionId": sid}
 
         self.client.post(
             "/api/local-dev/cancel-development/execute",
@@ -144,9 +148,10 @@ class LocalDevStartCancelApiTests(unittest.TestCase):
         mock_exec.assert_called_once()
         self.assertFalse(mock_exec.call_args.kwargs.get("allow_real_execute"))
 
+    @patch("engine.ace_local_dev_cancel_execute.run_post_cancel_auto_start")
     @patch("engine.ace_local_dev_cancel_execute.run_cancel_execute_json")
     @patch("engine.ace_local_dev_cancel_execute.run_cancel_dev_preview_powershell")
-    def test_cancel_execute_success(self, mock_preview, mock_exec) -> None:
+    def test_cancel_execute_success(self, mock_preview, mock_exec, mock_auto_start) -> None:
         enable_local_dev_security_bypass_for_tests()
         confirm_local_dev_loopback_bind("127.0.0.1")
         sid = "ori-20261023-010342-2d952e88"
@@ -156,14 +161,22 @@ class LocalDevStartCancelApiTests(unittest.TestCase):
         mock_preview.return_value = raw
         fp = compute_preview_fingerprint(raw)
         mock_exec.return_value = {"ok": True, "result": {"status": "SUCCESS"}}
+        mock_auto_start.return_value = {
+            "ok": True,
+            "phase": "COMPLETED",
+            "newSessionId": "ori-20261024-120000-aabbccdd",
+        }
 
         resp = self.client.post(
             "/api/local-dev/cancel-development/execute",
             json={"confirmExecute": "CANCEL", "previewFingerprint": fp},
         )
         self.assertEqual(resp.status_code, 200)
-        self.assertTrue(resp.get_json().get("ok"))
+        body = resp.get_json()
+        self.assertTrue(body.get("ok"))
+        self.assertTrue(body.get("postCancelAutoStart", {}).get("ok"))
         mock_exec.assert_called_once()
+        mock_auto_start.assert_called_once()
 
     def test_cancel_without_confirm(self) -> None:
         enable_local_dev_security_bypass_for_tests()

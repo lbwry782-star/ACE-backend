@@ -25,6 +25,7 @@ from engine.ace_local_dev_cycle_store import (
     resolve_active_dev_session_id_for_api,
 )
 from engine.ace_local_dev_request_body import parse_strict_json_object
+from engine.ace_local_dev_post_cancel_auto_start import try_resume_post_cancel_auto_start
 from engine.ace_local_dev_start_cycle import start_dev_cycle
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ def local_dev_dev_cycle_status():
     if bad_query is not None:
         return bad_query
 
+    try_resume_post_cancel_auto_start()
     resolution = resolve_active_dev_cycle()
     return _no_store_json(resolution.to_status_payload(), 200)
 

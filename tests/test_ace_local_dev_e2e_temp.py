@@ -145,6 +145,16 @@ class LocalDevApiE2ETemp(unittest.TestCase):
     def setUp(self) -> None:
         end_local_dev_execute()
         _restore_e2e_pre_start_wip(self.layout)
+        sessions = Path(self.layout["sessionsRoot"])
+        for entry in sessions.iterdir():
+            if entry.is_dir() and entry.name.startswith("ori-"):
+                shutil.rmtree(entry, ignore_errors=True)
+            elif entry.name in (
+                ACTIVE_CYCLE_FILENAME,
+                ".ori-cancel-dev.lock",
+                ".post-cancel-auto-start.lock",
+            ):
+                entry.unlink(missing_ok=True)
 
     def _ensure_open_dev_cycle(self) -> None:
         res = resolve_active_dev_cycle()
@@ -210,17 +220,21 @@ class LocalDevApiE2ETemp(unittest.TestCase):
         self.assertNotEqual(after_head, wip_head)
         _git(["rev-parse", "-q", "--verify", infra_head], backend)
 
-        cancelled = resolve_active_dev_cycle()
-        self.assertEqual(cancelled.cycle_status, "CANCELLED")
-        self.assertEqual(cancelled.session_id, sid)
-
-        resp2 = self.client.post("/api/local-dev/dev-cycle/start", json={"confirmStart": "START"})
-        self.assertEqual(resp2.status_code, 200)
-        sid2 = resp2.get_json()["sessionId"]
+        exec_body = exec_resp.get_json()
+        auto = exec_body.get("postCancelAutoStart") or {}
+        self.assertTrue(auto.get("ok"), exec_body)
+        sid2 = auto.get("newSessionId")
+        self.assertTrue(sid2)
         self.assertNotEqual(sid2, sid)
+
         res2 = resolve_active_dev_cycle()
         self.assertEqual(res2.cycle_status, "OPEN")
         self.assertEqual(res2.session_id, sid2)
+
+        old_state = json.loads(
+            (sessions / sid / "cancel-dev-cycle.state.json").read_text(encoding="utf-8-sig")
+        )
+        self.assertEqual(old_state.get("status"), "CANCELLED")
         self.assertTrue((sessions / sid / "cancel-dev-cycle.state.json").is_file())
 
     def test_full_cycle_no_product_changes_via_api(self) -> None:
@@ -264,12 +278,20 @@ class LocalDevApiE2ETemp(unittest.TestCase):
         self.assertEqual(_git(["rev-parse", "HEAD"], backend), infra_head)
         _git(["rev-parse", "-q", "--verify", infra_head], backend)
 
-        cancelled = resolve_active_dev_cycle()
-        self.assertEqual(cancelled.cycle_status, "CANCELLED")
+        exec_body = exec_resp.get_json()
+        auto = exec_body.get("postCancelAutoStart") or {}
+        self.assertTrue(auto.get("ok"), exec_body)
+        sid2 = auto.get("newSessionId")
+        self.assertNotEqual(sid2, sid)
 
-        status_resp = self.client.get("/api/local-dev/dev-cycle/status")
-        self.assertEqual(status_resp.status_code, 200)
-        self.assertTrue(status_resp.get_json().get("canStartNewCycle"))
+        res2 = resolve_active_dev_cycle()
+        self.assertEqual(res2.cycle_status, "OPEN")
+        self.assertEqual(res2.session_id, sid2)
+
+        old_state = json.loads(
+            (sessions / sid / "cancel-dev-cycle.state.json").read_text(encoding="utf-8-sig")
+        )
+        self.assertEqual(old_state.get("status"), "CANCELLED")
 
     def test_stale_fingerprint_rejected(self) -> None:
         self._ensure_open_dev_cycle()

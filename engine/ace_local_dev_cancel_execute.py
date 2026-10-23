@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 
 from engine.ace_local_dev_cancel_preview import run_cancel_dev_preview_powershell
 from engine.ace_local_dev_cycle_store import (
+    resolve_active_dev_cycle,
     resolve_active_dev_session_id_for_api,
     write_active_dev_cycle_pointer,
 )
@@ -17,6 +18,7 @@ from engine.ace_local_dev_execute_guard import (
 )
 from engine.ace_local_dev_powershell import run_cancel_execute_json
 from engine.ace_local_dev_preview_fingerprint import compute_preview_fingerprint
+from engine.ace_local_dev_post_cancel_auto_start import run_post_cancel_auto_start
 from engine.ace_local_dev_real_execute_gate import is_real_ace_cancel_execute_guarded
 
 logger = logging.getLogger(__name__)
@@ -47,7 +49,10 @@ def execute_cancel_development(
     session_id = resolution.session_id
     if not session_id:
         raise ValueError("ace_dev_cycle_none")
-    if resolution.cycle_status == "CANCELLED" or "CYCLE_ALREADY_CANCELLED" in resolution.blockers:
+    if (
+        resolution.cycle_status in ("CANCELLED", "CANCELLED_AWAITING_NEW_CYCLE")
+        or "CYCLE_ALREADY_CANCELLED" in resolution.blockers
+    ):
         raise ValueError("ace_dev_cycle_already_cancelled")
     if resolution.cycle_status != "OPEN":
         raise ValueError("ace_dev_cycle_not_open")
@@ -112,7 +117,10 @@ def execute_cancel_development(
             exc,
         )
 
-    after = resolve_active_dev_session_id_for_api()
+    auto_start = run_post_cancel_auto_start(cancelled_session_id=session_id)
+
+    after = resolve_active_dev_cycle()
+    status = after.to_status_payload()
     return {
         "ok": True,
         "mode": "EXECUTE",
@@ -120,6 +128,7 @@ def execute_cancel_development(
         "executeResult": {
             "status": (result.get("result") or {}).get("status") if isinstance(result.get("result"), dict) else None,
         },
-        "activeCycle": after.to_status_payload().get("activeCycle"),
-        "canStartNewCycle": after.to_status_payload().get("canStartNewCycle"),
+        "postCancelAutoStart": auto_start,
+        "activeCycle": status.get("activeCycle"),
+        "canStartNewCycle": status.get("canStartNewCycle"),
     }

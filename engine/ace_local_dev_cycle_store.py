@@ -74,6 +74,11 @@ def _load_cycle_status(session_root: Path) -> str:
     return str(cycle.get("status") or "OPEN").strip().upper()
 
 
+def is_cancelled_cycle_status(status: str) -> bool:
+    text = (status or "").strip().upper()
+    return text in ("CANCELLED", "CANCELLED_AWAITING_NEW_CYCLE")
+
+
 def scan_open_cycle_session_ids(sessions_root: Path) -> List[str]:
     if not sessions_root.is_dir():
         return []
@@ -145,10 +150,15 @@ class ActiveDevCycleResolution:
     def to_status_payload(self) -> Dict[str, Any]:
         if self.cycle_status == "OPEN" and self.session_id:
             can_start = False
+        elif self.cycle_status == "CANCELLED_AWAITING_NEW_CYCLE":
+            can_start = False
         elif self.cycle_status == "INVALID" or "MULTIPLE_OPEN_CYCLES" in self.blockers:
             can_start = False
         else:
             can_start = True
+        blockers = list(self.blockers)
+        if self.cycle_status == "CANCELLED_AWAITING_NEW_CYCLE":
+            blockers.append("POST_CANCEL_AUTO_START_IN_PROGRESS")
         return {
             "ok": True,
             "activeCycle": {
@@ -157,7 +167,7 @@ class ActiveDevCycleResolution:
                 "baselineReady": self.baseline_ready,
                 "source": self.source,
             },
-            "blockers": list(self.blockers),
+            "blockers": blockers,
             "canStartNewCycle": can_start,
             "pointer": {
                 "present": self.pointer_present,
@@ -260,6 +270,6 @@ def resolve_active_dev_session_id_for_api(
         return resolution
     if resolution.cycle_status == "NONE" or not resolution.session_id:
         return resolution
-    if resolution.cycle_status == "CANCELLED":
+    if is_cancelled_cycle_status(resolution.cycle_status):
         resolution.blockers.append("CYCLE_ALREADY_CANCELLED")
     return resolution
