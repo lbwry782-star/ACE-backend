@@ -1270,8 +1270,12 @@ function Invoke-OriGitRevertBaselinePaths {
         [Parameter(Mandatory = $true)][string]$RepoRoot,
         [Parameter(Mandatory = $true)][string]$SessionRoot,
         [Parameter(Mandatory = $true)][string]$Label,
-        [Parameter(Mandatory = $true)][array]$PathsToRevert
+        [AllowEmptyCollection()]
+        [array]$PathsToRevert = @()
     )
+    if ($null -eq $PathsToRevert -or $PathsToRevert.Count -eq 0) {
+        return
+    }
     foreach ($rel in $PathsToRevert) {
         $full = Join-Path $RepoRoot $rel
         $mirror = Join-Path $SessionRoot "$Label\mirror\$rel"

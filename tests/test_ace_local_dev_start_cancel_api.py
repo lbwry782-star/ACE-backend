@@ -108,6 +108,22 @@ class LocalDevStartCancelApiTests(unittest.TestCase):
         resp = self.client.post("/api/local-dev/dev-cycle/start", json={"confirmStart": "NOPE"})
         self.assertEqual(resp.status_code, 400)
 
+    @patch("engine.ace_local_dev_cancel_execute.is_real_ace_cancel_execute_guarded", return_value=True)
+    def test_cancel_execute_real_layout_blocked_without_env(self, _mock_guard) -> None:
+        enable_local_dev_security_bypass_for_tests()
+        confirm_local_dev_loopback_bind("127.0.0.1")
+        sid = "ori-20261023-010342-2d952e88"
+        _session_fixture(self.sessions_root, sid)
+        write_active_dev_cycle_pointer(session_id=sid, sessions_root=self.sessions_root)
+
+        resp = self.client.post(
+            "/api/local-dev/cancel-development/execute",
+            json={"confirmExecute": "CANCEL", "previewFingerprint": "a" * 64},
+        )
+        self.assertEqual(resp.status_code, 403, resp.get_data(as_text=True))
+        body = resp.get_json()
+        self.assertEqual(body.get("error"), "ace_cancel_execute_not_allowed")
+
     @patch("engine.ace_local_dev_cancel_execute.run_cancel_execute_json")
     @patch("engine.ace_local_dev_cancel_execute.run_cancel_dev_preview_powershell")
     def test_cancel_execute_does_not_allow_real_without_env(self, mock_preview, mock_exec) -> None:

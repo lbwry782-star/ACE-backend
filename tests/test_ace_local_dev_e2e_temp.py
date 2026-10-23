@@ -79,6 +79,48 @@ def _git(args: list[str], repo: Path) -> str:
     return (completed.stdout or "").strip()
 
 
+def _repo_scripts_src() -> Path:
+    return Path(__file__).resolve().parent.parent / "scripts"
+
+
+def _ensure_e2e_backend_wip_markers(backend: Path) -> None:
+    scripts_dir = backend / "scripts"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    src = _repo_scripts_src()
+    for name in (
+        "OriDevSessionBaselineLib.ps1",
+        "OriDevCancelDevLib.ps1",
+        "New-OriDevSessionBaseline.ps1",
+        "Invoke-OriCancelDev.ps1",
+    ):
+        shutil.copy2(src / name, scripts_dir / name)
+    (backend / ".env.local.example").write_text(
+        "ACE_LOCAL_DEV_ENABLED=true\nPORT=5000\nACE_PUBLIC_BASE_URL=http://127.0.0.1:5000\n",
+        encoding="utf-8",
+    )
+
+
+def _restore_e2e_pre_start_wip(layout: dict) -> None:
+    backend = Path(layout["backendRoot"])
+    frontend = Path(layout["frontendRoot"])
+    _git(["clean", "-fd"], backend)
+    _git(["checkout", "-f", "-q", "ori/local-dev-infrastructure"], backend)
+    _git(["reset", "--hard", layout["backendInfraHead"]], backend)
+    _git(["checkout", "-f", "-q", "ori/builder1-wip"], backend)
+    _ensure_e2e_backend_wip_markers(backend)
+    (backend / ".env.local").write_text(
+        "ACE_LOCAL_DEV_ENABLED=true\nPORT=5000\nACE_PUBLIC_BASE_URL=http://127.0.0.1:5000\nSESSION_TEMP=pre-start\n",
+        encoding="utf-8",
+    )
+    (frontend / ".env.development.local").write_text(
+        "VITE_BACKEND_URL=http://127.0.0.1:5000",
+        encoding="utf-8",
+    )
+    wip_file = backend / "wip-cycle.txt"
+    if not wip_file.is_file():
+        wip_file.write_text("pre-start-wip", encoding="utf-8")
+
+
 @unittest.skipUnless(os.environ.get("ACE_RUN_E2E_TEMP") == "1", "set ACE_RUN_E2E_TEMP=1")
 class LocalDevApiE2ETemp(unittest.TestCase):
     layout: dict
@@ -100,6 +142,17 @@ class LocalDevApiE2ETemp(unittest.TestCase):
         reset_local_dev_config_for_tests()
         shutil.rmtree(cls.temp_root, ignore_errors=True)
 
+    def setUp(self) -> None:
+        end_local_dev_execute()
+        _restore_e2e_pre_start_wip(self.layout)
+
+    def _ensure_open_dev_cycle(self) -> None:
+        res = resolve_active_dev_cycle()
+        if res.cycle_status == "OPEN":
+            return
+        resp = self.client.post("/api/local-dev/dev-cycle/start", json={"confirmStart": "START"})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+
     def test_full_cycle_start_cancel_start_via_api(self) -> None:
         backend = Path(self.layout["backendRoot"])
         frontend = Path(self.layout["frontendRoot"])
@@ -119,6 +172,7 @@ class LocalDevApiE2ETemp(unittest.TestCase):
 
         env_before = (backend / ".env.local").read_text(encoding="utf-8")
         _git(["checkout", "-q", "ori/builder1-wip"], backend)
+        _ensure_e2e_backend_wip_markers(backend)
         (backend / "api-e2e-wip.txt").write_text("dev", encoding="utf-8")
         (backend / ".env.local").write_text(
             env_before.replace("SESSION_TEMP=pre-start", "SESSION_TEMP=during-cycle"),
@@ -169,7 +223,56 @@ class LocalDevApiE2ETemp(unittest.TestCase):
         self.assertEqual(res2.session_id, sid2)
         self.assertTrue((sessions / sid / "cancel-dev-cycle.state.json").is_file())
 
+    def test_full_cycle_no_product_changes_via_api(self) -> None:
+        """Cancel Execute when preview has empty paths/commits (ENV-only drift since Start)."""
+        backend = Path(self.layout["backendRoot"])
+        frontend = Path(self.layout["frontendRoot"])
+        sessions = Path(self.layout["sessionsRoot"])
+        infra_head = self.layout["backendInfraHead"]
+
+        resp = self.client.post("/api/local-dev/dev-cycle/start", json={"confirmStart": "START"})
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True))
+        sid = resp.get_json()["sessionId"]
+
+        env_before = (backend / ".env.local").read_text(encoding="utf-8")
+        _git(["checkout", "-q", "ori/builder1-wip"], backend)
+        _ensure_e2e_backend_wip_markers(backend)
+        (backend / ".env.local").write_text(
+            env_before.replace("SESSION_TEMP=pre-start", "SESSION_TEMP=during-cycle-no-wip"),
+            encoding="utf-8",
+        )
+
+        prev = self.client.get("/api/local-dev/cancel-development/preview")
+        self.assertEqual(prev.status_code, 200)
+        plan = prev.get_json()
+        self.assertTrue(plan.get("ok"))
+        self.assertEqual(len(plan.get("commitsToCancel", {}).get("backend") or []), 0)
+        paths_be = (plan.get("git") or {}).get("backend") or {}
+        paths_list = paths_be.get("pathsToRevert") or paths_be.get("PathsToRevert") or []
+        self.assertEqual(len(paths_list), 0)
+        fp = plan.get("previewFingerprint")
+        self.assertTrue(fp)
+
+        exec_resp = self.client.post(
+            "/api/local-dev/cancel-development/execute",
+            json={"confirmExecute": "CANCEL", "previewFingerprint": fp},
+        )
+        self.assertEqual(exec_resp.status_code, 200, exec_resp.get_data(as_text=True))
+        self.assertTrue(exec_resp.get_json().get("ok"))
+
+        self.assertIn("SESSION_TEMP=pre-start", (backend / ".env.local").read_text(encoding="utf-8"))
+        self.assertEqual(_git(["rev-parse", "HEAD"], backend), infra_head)
+        _git(["rev-parse", "-q", "--verify", infra_head], backend)
+
+        cancelled = resolve_active_dev_cycle()
+        self.assertEqual(cancelled.cycle_status, "CANCELLED")
+
+        status_resp = self.client.get("/api/local-dev/dev-cycle/status")
+        self.assertEqual(status_resp.status_code, 200)
+        self.assertTrue(status_resp.get_json().get("canStartNewCycle"))
+
     def test_stale_fingerprint_rejected(self) -> None:
+        self._ensure_open_dev_cycle()
         resp = self.client.post(
             "/api/local-dev/cancel-development/execute",
             json={"confirmExecute": "CANCEL", "previewFingerprint": "0" * 64},
@@ -184,6 +287,7 @@ class LocalDevApiE2ETemp(unittest.TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_parallel_execute_rejected(self) -> None:
+        self._ensure_open_dev_cycle()
         try_begin_local_dev_execute()
         try:
             resp = self.client.post(

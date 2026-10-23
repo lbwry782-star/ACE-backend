@@ -197,8 +197,26 @@ def local_dev_cancel_development_execute():
                 },
                 409,
             )
+        if code == "ace_cancel_execute_not_allowed":
+            return _no_store_json(
+                {
+                    "ok": False,
+                    "error": code,
+                    "message": (
+                        "Real cancel Execute is blocked. Use isolated TEMP tests or set "
+                        "ACE_LOCAL_DEV_ALLOW_REAL_EXECUTE after explicit approval."
+                    ),
+                },
+                403,
+            )
         status = 409 if "in_progress" in code or "stale" in code or "cancelled" in code else 400
         return _no_store_json({"ok": False, "error": code, "message": code}, status)
+    except FileNotFoundError as exc:
+        logger.exception("LOCAL_DEV_CANCEL_EXECUTE_MISSING")
+        return _no_store_json(
+            {"ok": False, "error": "ace_cancel_execute_failed", "message": str(exc)[:500]},
+            503,
+        )
     except RuntimeError as exc:
         logger.exception("LOCAL_DEV_CANCEL_EXECUTE_RUNTIME")
         return _no_store_json(

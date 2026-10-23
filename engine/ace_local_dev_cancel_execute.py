@@ -17,6 +17,7 @@ from engine.ace_local_dev_execute_guard import (
 )
 from engine.ace_local_dev_powershell import run_cancel_execute_json
 from engine.ace_local_dev_preview_fingerprint import compute_preview_fingerprint
+from engine.ace_local_dev_real_execute_gate import is_real_ace_cancel_execute_guarded
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,9 @@ def execute_cancel_development(
     if resolution.cycle_status != "OPEN":
         raise ValueError("ace_dev_cycle_not_open")
 
+    if not _allow_real_execute_from_env() and is_real_ace_cancel_execute_guarded():
+        raise ValueError("ace_cancel_execute_not_allowed")
+
     raw_preview = run_cancel_dev_preview_powershell(session_id)
     if not raw_preview.get("ok"):
         raise RuntimeError("ace_cancel_preview_failed")
@@ -84,6 +88,8 @@ def execute_cancel_development(
 
     if not result.get("ok"):
         err = str(result.get("error") or "ace_cancel_execute_failed")
+        if err.startswith("REAL_EXECUTE_BLOCKED"):
+            raise ValueError("ace_cancel_execute_not_allowed")
         payload: Dict[str, Any] = {
             "ok": False,
             "error": "ace_cancel_execute_failed",

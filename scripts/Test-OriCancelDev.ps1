@@ -415,6 +415,10 @@ try {
     }
     catch { Assert-True $true 'not_ready_should_fail' }
 
+    Invoke-OriGitRevertBaselinePaths -RepoRoot $backendRoot -SessionRoot (Join-Path $sessionsRoot $sidBadInfra) `
+        -Label 'BACKEND' -PathsToRevert @()
+    Assert-True $true 'empty_paths_to_revert_no_throw'
+
     if ($realMainBefore) {
         Assert-True ((git -C (Split-Path -Parent $ScriptDir) rev-parse main) -eq $realMainBefore) 'main_unchanged'
     }
