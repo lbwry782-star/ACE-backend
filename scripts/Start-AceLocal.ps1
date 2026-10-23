@@ -118,6 +118,41 @@ function Ensure-MemuraiRunning {
     return $true
 }
 
+function Start-AceLocalMemuraiWatchAsync {
+    param(
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [Parameter(Mandatory = $true)][string]$RedisUrl
+    )
+    $watchScript = Join-Path $ScriptDir 'Start-AceLocalMemuraiWatch.ps1'
+    if (-not (Test-Path -LiteralPath $watchScript)) {
+        Write-Warn 'Memurai watch: script missing; monitoring not started.'
+        return
+    }
+    . (Join-Path $ScriptDir 'AceLocalMemuraiWatchLib.ps1')
+    $aceRoot = Split-Path -Parent $BackendRoot
+    $pidPath = Get-AceLocalMemuraiWatchPidPath -AceRoot $aceRoot
+    Stop-AceLocalMemuraiWatchProcess -PidPath $pidPath | Out-Null
+    try {
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        if (-not (Test-Path -LiteralPath $psExe)) {
+            $psExe = 'powershell.exe'
+        }
+        $psArgs = @(
+            '-NoProfile',
+            '-ExecutionPolicy', 'Bypass',
+            '-WindowStyle', 'Hidden',
+            '-File', $watchScript,
+            '-BackendRoot', $BackendRoot,
+            '-RedisUrl', $RedisUrl
+        )
+        Start-Process -FilePath $psExe -ArgumentList $psArgs -WorkingDirectory $ScriptDir -ErrorAction Stop | Out-Null
+        Write-Ok 'Memurai watch: background PING monitor started (30s, Windows alerts on state change).'
+    }
+    catch {
+        Write-Warn ("Memurai watch: could not start ({0})." -f $_.Exception.Message)
+    }
+}
+
 function Start-AceLocalUndoShellAsync {
     param(
         [Parameter(Mandatory = $true)][int]$VitePort,
@@ -290,6 +325,8 @@ if (-not $backendOk) {
     Read-Host "Press Enter to close"
     exit 1
 }
+
+Start-AceLocalMemuraiWatchAsync -BackendRoot $BackendRoot -RedisUrl $ExpectedRedisUrl
 
 if (-not $SkipLocalUndoShell) {
     Start-AceLocalUndoShellAsync -VitePort $frontendPort -FrontendRoot $FrontendRoot
