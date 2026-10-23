@@ -590,13 +590,10 @@ function Write-AceBackendLocalPortStateReport {
 }
 
 function Test-AceFrontendViteOnPort([int]$Port) {
-    $candidates = @(
-        "http://127.0.0.1:$Port/src/services/backendUrl.js",
-        "http://localhost:$Port/src/services/backendUrl.js"
-    )
-    foreach ($url in $candidates) {
+    foreach ($hostName in @('127.0.0.1', 'localhost')) {
         try {
-            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2
+            $url = "http://${hostName}:$Port/src/services/backendUrl.js"
+            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 1
             if ($resp.StatusCode -eq 200 -and $resp.Content -match "LOCAL_BACKEND_URL" -and $resp.Content -match "127\.0\.0\.1:5000") {
                 return $true
             }
@@ -608,11 +605,55 @@ function Test-AceFrontendViteOnPort([int]$Port) {
     return $false
 }
 
-function Find-AceFrontendVitePorts([int]$FromPort = 3000, [int]$ToPort = 3010) {
+function Get-AceFrontendListenPortsInRange {
+    param(
+        [Parameter(Mandatory = $true)][int]$FromPort,
+        [Parameter(Mandatory = $true)][int]$ToPort
+    )
+    $ports = @{}
+    try {
+        Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | ForEach-Object {
+            $port = [int]$_.LocalPort
+            if ($port -lt $FromPort -or $port -gt $ToPort) {
+                return
+            }
+            $addr = ([string]$_.LocalAddress).Trim().ToLowerInvariant()
+            if ($addr -in @('127.0.0.1', '::1', '0.0.0.0', '[::]')) {
+                $ports[$port] = $true
+            }
+        }
+    }
+    catch {
+        return @()
+    }
+    return @($ports.Keys | Sort-Object)
+}
+
+function Find-AceFrontendVitePorts {
+    param(
+        [int]$FromPort = 3000,
+        [int]$ToPort = 3010,
+        [switch]$StopAfterFirst,
+        [int[]]$ListenPortsOverride
+    )
+    $listenPorts = @()
+    if ($PSBoundParameters.ContainsKey('ListenPortsOverride')) {
+        $listenPorts = @($ListenPortsOverride | Sort-Object -Unique)
+    }
+    else {
+        $listenPorts = @(Get-AceFrontendListenPortsInRange -FromPort $FromPort -ToPort $ToPort)
+    }
+    if ($listenPorts.Count -eq 0) {
+        return @()
+    }
+
     $found = @()
-    for ($port = $FromPort; $port -le $ToPort; $port++) {
+    foreach ($port in $listenPorts) {
         if (Test-AceFrontendViteOnPort $port) {
             $found += $port
+            if ($StopAfterFirst) {
+                return @($found)
+            }
         }
     }
     return @($found)
@@ -633,7 +674,7 @@ function Wait-BackendLocalReady([int]$Port, [int]$TimeoutSec) {
 function Wait-AceFrontendVite([int]$FromPort, [int]$ToPort, [int]$TimeoutSec) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
-        $ports = @(Find-AceFrontendVitePorts -FromPort $FromPort -ToPort $ToPort)
+        $ports = @(Find-AceFrontendVitePorts -FromPort $FromPort -ToPort $ToPort -StopAfterFirst)
         if ($ports.Count -gt 0) {
             return $ports[0]
         }
