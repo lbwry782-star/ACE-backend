@@ -83,6 +83,10 @@ function New-BackendProcRow([int]$ProcId) {
     return [PSCustomObject]@{ ProcId = $ProcId; CommandLine = "app.py" }
 }
 
+Assert-Test "tree_empty_process_list" (
+    (Get-AceBackendIndependentTreeCount -BackendProcesses @()) -eq 0
+)
+
 $parentChildParents = @{ 27040 = 16748; 28888 = 27040 }
 $parentChildProcs = @((New-BackendProcRow 27040), (New-BackendProcRow 28888))
 Assert-Test "tree_parent_child_count" (
@@ -118,6 +122,14 @@ if ($liveProcs.Count -ge 2) {
 }
 elseif ($liveProcs.Count -eq 0) {
     Write-Host "  skip live_parent_child (no backend running)" -ForegroundColor DarkGray
+    $liveListeners = @(Get-AceLoopbackListenerProcessIds -Port 5000)
+    if ($liveListeners.Count -eq 0) {
+        $freePortState = Get-AceBackendLocalPortState -Port 5000 -BackendRoot $BackendRoot
+        Assert-Test "live_port_free_empty_backend_procs" ($freePortState.Action -eq "Start")
+    }
+    else {
+        Write-Host "  skip live_port_free_empty_backend_procs (port 5000 in use)" -ForegroundColor DarkGray
+    }
 }
 
 $simStart = Get-AceBackendLocalPortState -Port 5000 -BackendRoot $BackendRoot -Simulate @{
@@ -134,14 +146,20 @@ Assert-Test "simulate_start" ($simStart.Action -eq "Start")
 
 Write-Host ""
 Write-Host "InspectOnly (read-only live state, no start):" -ForegroundColor Cyan
-$inspectJson = & (Join-Path $ScriptDir "Start-AceBackendLocal.ps1") -InspectOnly 2>&1 | Select-Object -Last 1
-try {
-    $live = $inspectJson | ConvertFrom-Json
-    Assert-Test "inspect_json" ($null -ne $live.Action)
-    Write-Host ("  live Action={0} Reason={1} aceProcs={2}" -f $live.Action, $live.Reason, $live.AceBackendProcessCount) -ForegroundColor DarkGray
+$envLocal = Join-Path $BackendRoot ".env.local"
+if (-not (Test-Path -LiteralPath $envLocal)) {
+    Write-Host "  skip inspect_json (.env.local missing)" -ForegroundColor DarkGray
 }
-catch {
-    Assert-Test "inspect_json" $false
+else {
+    $inspectJson = & (Join-Path $ScriptDir "Start-AceBackendLocal.ps1") -InspectOnly 2>&1 | Select-Object -Last 1
+    try {
+        $live = $inspectJson | ConvertFrom-Json
+        Assert-Test "inspect_json" ($null -ne $live.Action)
+        Write-Host ("  live Action={0} Reason={1} aceProcs={2}" -f $live.Action, $live.Reason, $live.AceBackendProcessCount) -ForegroundColor DarkGray
+    }
+    catch {
+        Assert-Test "inspect_json" $false
+    }
 }
 
 Write-Host ""

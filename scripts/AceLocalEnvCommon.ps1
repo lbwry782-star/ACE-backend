@@ -334,7 +334,8 @@ function Get-Win32ParentProcessId {
 
 function Get-AceBackendIndependentTreeCount {
     param(
-        [Parameter(Mandatory = $true)][array]$BackendProcesses,
+        [AllowEmptyCollection()]
+        [array]$BackendProcesses = @(),
         [hashtable]$ParentProcessIdByPid = $null
     )
     if ($null -eq $BackendProcesses -or $BackendProcesses.Count -eq 0) {
