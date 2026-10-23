@@ -70,6 +70,13 @@ try {
         -WipBranch 'ori/builder1-wip' -InfraBranch 'ori/local-dev-infrastructure'
     Assert-True ($rowProd.classification -eq 'productCandidate') 'pure_product_commit'
     Assert-True ($rowProd.Ok) 'pure_product_ok'
+
+    $badCand = Test-OriPublishUriCandidateBackendSha -RepoRoot $backendRoot -ProductionSha $prodSha -CandidateSha 'notsha'
+    Assert-True (-not $badCand.Ok) 'candidate_sha_invalid_rejected'
+    $eqProd = Test-OriPublishUriCandidateBackendSha -RepoRoot $backendRoot -ProductionSha $prodSha -CandidateSha $prodSha
+    Assert-True (-not $eqProd.Ok) 'candidate_equals_production_rejected'
+    $goodCand = Test-OriPublishUriCandidateBackendSha -RepoRoot $backendRoot -ProductionSha $prodSha -CandidateSha $productSha
+    Assert-True ($goodCand.Ok) 'candidate_descendant_ok'
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {

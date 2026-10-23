@@ -117,6 +117,7 @@ def build_public_publish_uri_preview_response(raw: Dict[str, Any]) -> Dict[str, 
     return {
         "ok": True,
         "previewMode": "READ_ONLY",
+        "previewKind": "WIP_DEFAULT",
         "publishUriPreviewFingerprint": fingerprint,
         "executePublishEndpointAvailable": False,
         "sessionId": str(plan.get("sessionId") or ""),

@@ -34,6 +34,16 @@ from engine.ace_local_dev_publish_uri_preview import (
     publish_uri_preview_error_response,
     run_publish_uri_preview_powershell,
 )
+from engine.ace_local_dev_publish_uri_candidate_preview import (
+    build_public_publish_uri_candidate_preview_response,
+    normalize_candidate_backend_sha,
+    publish_uri_candidate_invalid_sha_response,
+    run_publish_uri_candidate_preview_powershell,
+)
+from engine.ace_local_dev_publish_uri_candidate_dry_run import (
+    PublishCandidateDryRunRejected,
+    execute_publish_uri_candidate_dry_run,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +223,156 @@ def local_dev_publish_uri_preview():
         return _no_store_json(payload, 503)
 
     payload = build_public_publish_uri_preview_response(raw)
+    return _no_store_json(payload, 200)
+
+
+def _resolve_publish_uri_session_or_response():
+    resolution = resolve_active_dev_session_id_for_api()
+    if resolution.cycle_status == "INVALID":
+        payload = publish_uri_preview_error_response(
+            error="ace_active_dev_cycle_invalid",
+            message="Active dev cycle pointer is missing or invalid; fix before preview.",
+            blockers=list(resolution.blockers) + list(resolution.pointer_errors),
+        )
+        return None, _no_store_json(payload, 200)
+
+    session_id = resolution.session_id
+    if not session_id or resolution.cycle_status == "NONE":
+        payload = publish_uri_no_active_cycle_response(
+            reason="No active dev cycle (set active-dev-cycle.json or ACE_ORI_DEV_SESSION_ID).",
+        )
+        return None, _no_store_json(payload, 200)
+
+    if resolution.cycle_status == "CANCELLED" or "CYCLE_ALREADY_CANCELLED" in resolution.blockers:
+        payload = publish_uri_no_active_cycle_response(
+            reason="Dev cancel cycle is CANCELLED for the configured session.",
+        )
+        return None, _no_store_json(payload, 200)
+
+    return session_id, None
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/preview", methods=["GET"])
+def local_dev_publish_uri_candidate_preview():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params(frozenset({"candidateBackendSha"}))
+    if bad_query is not None:
+        return bad_query
+
+    candidate_raw = (request.args.get("candidateBackendSha") or "").strip()
+    candidate_sha = normalize_candidate_backend_sha(candidate_raw)
+    if not candidate_sha:
+        return _no_store_json(publish_uri_candidate_invalid_sha_response(), 400)
+
+    session_id, early = _resolve_publish_uri_session_or_response()
+    if early is not None:
+        return early
+
+    try:
+        raw = run_publish_uri_candidate_preview_powershell(session_id, candidate_sha)
+    except FileNotFoundError:
+        payload = publish_uri_preview_error_response(
+            error="ace_publish_uri_candidate_preview_script_missing",
+            message="Publish Uri candidate preview script not found.",
+        )
+        return _no_store_json(payload, 503)
+    except RuntimeError as exc:
+        msg = str(exc)
+        logger.warning(
+            "LOCAL_DEV_PUBLISH_URI_CANDIDATE_PREVIEW_FAILED sessionId=%s candidate=%s err=%s",
+            session_id,
+            candidate_sha,
+            msg,
+        )
+        if "SESSION_JSON_MISSING" in msg or "SESSION_NOT_READY" in msg:
+            payload = publish_uri_no_active_cycle_response(
+                reason="Configured session is missing or not READY.",
+            )
+            status = 200
+        elif "REGISTRY" in msg.upper():
+            payload = publish_uri_preview_error_response(
+                error="ace_publish_uri_candidate_preview_blocked",
+                message="Candidate preview blocked; see blockers.",
+                blockers=[msg],
+            )
+            status = 200
+        else:
+            payload = publish_uri_preview_error_response(
+                error="ace_publish_uri_candidate_preview_failed",
+                message=msg[:500],
+            )
+            status = 503
+        return _no_store_json(payload, status)
+
+    if not raw.get("ok"):
+        payload = publish_uri_preview_error_response(
+            error="ace_publish_uri_candidate_preview_failed",
+            message=str(raw.get("error") or "unknown"),
+        )
+        return _no_store_json(payload, 503)
+
+    payload = build_public_publish_uri_candidate_preview_response(raw)
+    return _no_store_json(payload, 200)
+
+
+@ace_local_dev_bp.route("/api/local-dev/publish-uri/candidate/dry-run", methods=["POST"])
+def local_dev_publish_uri_candidate_dry_run():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+
+    body, body_err = parse_strict_json_object(
+        request,
+        allowed_keys={"candidateBackendSha", "publishUriPreviewFingerprint"},
+    )
+    if body_err:
+        return _no_store_json({"ok": False, "error": body_err}, 400)
+
+    session_id, early = _resolve_publish_uri_session_or_response()
+    if early is not None:
+        return early
+
+    try:
+        payload = execute_publish_uri_candidate_dry_run(
+            session_id=session_id,
+            candidate_backend_sha=str(body.get("candidateBackendSha") or ""),
+            publish_uri_preview_fingerprint=str(body.get("publishUriPreviewFingerprint") or ""),
+        )
+    except PublishCandidateDryRunRejected as exc:
+        code = exc.code
+        status = 409 if code == "ace_local_dev_execute_in_progress" else 400
+        if code == "ace_publish_uri_candidate_fingerprint_stale":
+            status = 409
+        return _no_store_json(
+            {
+                "ok": False,
+                "dryRun": True,
+                "error": code,
+                "message": exc.message,
+            },
+            status,
+        )
+    except RuntimeError as exc:
+        logger.warning(
+            "LOCAL_DEV_PUBLISH_URI_CANDIDATE_DRY_RUN_FAILED sessionId=%s err=%s",
+            session_id,
+            exc,
+        )
+        return _no_store_json(
+            {
+                "ok": False,
+                "dryRun": True,
+                "error": "ace_publish_uri_candidate_dry_run_failed",
+                "message": str(exc)[:500],
+            },
+            503,
+        )
+
     return _no_store_json(payload, 200)
 
 
