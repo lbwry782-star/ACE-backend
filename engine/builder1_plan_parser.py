@@ -41,14 +41,14 @@ from engine.builder1_series_distinctness import validate_ad_execution_distinctne
 SUPPORTED_LANGUAGES = {"he", "en", "ar", "ru", "fr", "de", "es", "it", "pt", "nl"}
 
 LEGACY_FIELDS = {
-    "objectA",
-    "objectASecondary",
-    "objectB",
-    "visualSimilarityScore",
-    "modeDecision",
+        "objectA",
+        "objectASecondary",
+        "objectB",
+        "visualSimilarityScore",
+        "modeDecision",
     "advertisingPromise",
-    "visualDescription",
-}
+        "visualDescription",
+    }
 
 LEGACY_MODES = {"SIDE_BY_SIDE", "REPLACEMENT"}
 
