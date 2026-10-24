@@ -72,7 +72,12 @@ def _service_id_from_url(url: str) -> str:
     return parts[parts.index("services") + 1]
 
 
-def build_publish_sim_mock_transport(state: PublishRenderSimState) -> MockRenderApiTransport:
+def build_publish_sim_mock_transport(
+    state: PublishRenderSimState,
+    *,
+    web_service_id: str = WEB,
+    worker_service_id: str = WORKER,
+) -> MockRenderApiTransport:
     transport = MockRenderApiTransport()
 
     def route(method: str, url: str, *, headers, json_body=None) -> Optional[RenderApiResponse]:
