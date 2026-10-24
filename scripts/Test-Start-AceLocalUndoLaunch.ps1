@@ -50,7 +50,10 @@ Assert-True ($validateCode -eq 0 -or $validateCode -eq 1) 'validate_only_runs'
 Assert-True ($validateOut -notmatch 'LOCAL shell: launch requested') 'validate_only_does_not_launch_local'
 
 $ports = @(Find-AceFrontendVitePorts -FromPort 3000 -ToPort 3010)
-if ($ports.Count -ge 1) {
+if ((@(Get-Process -Name 'AceUndo' -ErrorAction SilentlyContinue).Count -gt 0)) {
+    Write-Host '  skip undo_with_live_vite_port (AceUndo already running)' -ForegroundColor DarkYellow
+}
+elseif ($ports.Count -ge 1) {
     $p = $ports[0]
     Push-Location $FrontendRoot
     try {

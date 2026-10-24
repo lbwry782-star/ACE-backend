@@ -590,11 +590,15 @@ function Write-AceBackendLocalPortStateReport {
     Write-Info ("Decision: {0} ({1})" -f $State.Action, $State.Reason)
 }
 
-function Test-AceFrontendViteOnPort([int]$Port) {
+function Test-AceFrontendViteOnPort {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$RequestTimeoutSec = 1
+    )
     foreach ($hostName in @('127.0.0.1', 'localhost')) {
         try {
             $url = "http://${hostName}:$Port/src/services/backendUrl.js"
-            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 1
+            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec $RequestTimeoutSec
             if ($resp.StatusCode -eq 200 -and $resp.Content -match "LOCAL_BACKEND_URL" -and $resp.Content -match "127\.0\.0\.1:5000") {
                 return $true
             }
@@ -602,6 +606,22 @@ function Test-AceFrontendViteOnPort([int]$Port) {
         catch {
             continue
         }
+    }
+    return $false
+}
+
+function Wait-AceFrontendViteOnPort {
+    param(
+        [Parameter(Mandatory = $true)][int]$Port,
+        [int]$TotalTimeoutSec = 10,
+        [int]$RequestTimeoutSec = 2
+    )
+    $deadline = (Get-Date).AddSeconds($TotalTimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-AceFrontendViteOnPort -Port $Port -RequestTimeoutSec $RequestTimeoutSec) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
     }
     return $false
 }

@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0.."
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Start-AceLocal.ps1" %*
-if errorlevel 1 pause
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0Start-AceLocal.ps1" %*
+exit /b %ERRORLEVEL%

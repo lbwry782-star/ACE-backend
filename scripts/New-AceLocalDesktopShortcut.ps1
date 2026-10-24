@@ -1,13 +1,18 @@
 #Requires -Version 5.1
-# Creates desktop shortcut for unified local dev launcher (UTF-8 name).
+# Creates desktop shortcut for unified local dev launcher (UTF-8 name, silent headless start).
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Launcher = Join-Path $ScriptDir "Start-AceLocal.cmd"
-if (-not (Test-Path -LiteralPath $Launcher)) {
-    Write-Error "Start-AceLocal.cmd not found."
+$LauncherPs1 = Join-Path $ScriptDir "Start-AceLocal.ps1"
+if (-not (Test-Path -LiteralPath $LauncherPs1)) {
+    Write-Error "Start-AceLocal.ps1 not found."
     exit 1
+}
+
+$psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path -LiteralPath $psExe)) {
+    $psExe = 'powershell.exe'
 }
 
 $Desktop = [Environment]::GetFolderPath("Desktop")
@@ -20,10 +25,12 @@ $ShortcutPath = Join-Path $Desktop ($ShortcutName + ".lnk")
 
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut($ShortcutPath)
-$Shortcut.TargetPath = $Launcher
+$Shortcut.TargetPath = $psExe
+$Shortcut.Arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $LauncherPs1 + '"'
 $Shortcut.WorkingDirectory = $ScriptDir
-$Shortcut.WindowStyle = 1
-$Shortcut.Description = "ACE Ori local development"
+$Shortcut.WindowStyle = 7
+$Shortcut.Description = "ACE Ori local development (silent start)"
 $Shortcut.Save()
 
 Write-Host ("Shortcut created: " + $ShortcutPath) -ForegroundColor Green
+Write-Host "Diagnostic mode: run Start-AceLocal.ps1 with -ShowComponentWindows" -ForegroundColor DarkGray

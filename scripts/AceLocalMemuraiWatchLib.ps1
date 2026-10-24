@@ -1,10 +1,16 @@
 # ACE local Memurai watch — shared helpers (dot-sourced).
 Set-StrictMode -Version Latest
 
+$__AceLocalMemuraiWatchLibDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $__AceLocalMemuraiWatchLibDir 'AceLocalMemuraiInstructionLib.ps1')
+
 function Get-AceLocalMemuraiWatchPidPath {
-    param([Parameter(Mandatory = $true)][string]$AceRoot)
+    param(
+        [Parameter(Mandatory = $true)][string]$AceRoot,
+        [switch]$AllowCreateStateDir
+    )
     $dir = Join-Path $AceRoot '_backups\local-dev'
-    if (-not (Test-Path -LiteralPath $dir)) {
+    if ($AllowCreateStateDir -and -not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
     return Join-Path $dir 'memurai-watch.pid'
@@ -181,9 +187,15 @@ function Get-AceLocalMemuraiAlertText {
 }
 
 function Invoke-AceLocalMemuraiDownAlert {
-    Show-AceLocalMemuraiWindowsNotification -Title 'ACE LOCAL - Memurai' `
-        -Message (Get-AceLocalMemuraiAlertText -Kind Down) `
-        -Level Warning | Out-Null
+    param(
+        [Parameter(Mandatory = $true)][string]$AceRoot,
+        [Parameter(Mandatory = $true)][string]$RedisUrl,
+        [scriptblock]$PingFn = $null,
+        [scriptblock]$ServiceFn = $null,
+        [scriptblock]$ShowDialog = $null
+    )
+    Invoke-AceLocalMemuraiUserInstruction -AceRoot $AceRoot -RedisUrl $RedisUrl `
+        -IsNotifyDownTransition -PingFn $PingFn -ServiceFn $ServiceFn -ShowDialog $ShowDialog | Out-Null
 }
 
 function Invoke-AceLocalMemuraiUpAlert {

@@ -25,7 +25,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 $BackendRoot = (Resolve-Path -LiteralPath $BackendRoot).ProviderPath
 $AceRoot = Split-Path -Parent $BackendRoot
-$pidPath = Get-AceLocalMemuraiWatchPidPath -AceRoot $AceRoot
+$pidPath = Get-AceLocalMemuraiWatchPidPath -AceRoot $AceRoot -AllowCreateStateDir
 Set-Content -LiteralPath $pidPath -Value $PID -Encoding ASCII
 
 $notifyState = 'Grace'
@@ -45,13 +45,16 @@ try {
         }
 
         $ping = Test-LocalMemuraiPing -RedisUrl $RedisUrl
+        $diag = Get-AceLocalMemuraiDiagnosis -RedisUrl $RedisUrl
+        Write-AceLocalMemuraiAvailabilityState -AceRoot $AceRoot -Diagnosis $diag | Out-Null
         $inGrace = (Get-Date) -lt $graceUntil
         $tick = Get-AceMemuraiWatchTickResult -CurrentNotifyState $notifyState -PingOk:$ping.Ok -InGracePeriod:$inGrace
 
         if ($tick.NotifyDown) {
-            Invoke-AceLocalMemuraiDownAlert
+            Invoke-AceLocalMemuraiDownAlert -AceRoot $AceRoot -RedisUrl $RedisUrl
         }
         if ($tick.NotifyUp) {
+            Clear-AceLocalMemuraiOutageInstructionState -AceRoot $AceRoot
             Invoke-AceLocalMemuraiUpAlert
         }
 
