@@ -1403,7 +1403,7 @@ def _builder1_build_incremental_result(
     completion = campaign_completion_public_fields(session)
     artifact = dict((session.ad_artifacts or {}).get(str(ad_index)) or {})
     out = {
-        "ok": True,
+                "ok": True,
         "campaignId": campaign_id,
         "campaign": campaign_identity_to_dict(session.plan),
         "composition": composition,
@@ -2538,7 +2538,7 @@ def builder1_generate():
 
     response_body = {
         "status": "running",
-        "jobId": job_id,
+            "jobId": job_id,
         "stage": "planning",
         "completedAds": 0,
         "totalAds": ad_count,
