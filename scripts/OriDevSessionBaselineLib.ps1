@@ -207,6 +207,153 @@ function Parse-GitStatusLine {
     [PSCustomObject]@{ XY = $xy; RelPath = $rel; ChangeType = $changeType }
 }
 
+function Invoke-GitCommandStdoutBytes {
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    $stdoutFile = Join-Path $env:TEMP ("ace-git-out-{0}.bin" -f [guid]::NewGuid().ToString('N'))
+    $stderrFile = Join-Path $env:TEMP ("ace-git-err-{0}.txt" -f [guid]::NewGuid().ToString('N'))
+    try {
+        $argList = @('-C', $WorkingDirectory) + @($Arguments)
+        $proc = Start-Process -FilePath 'git' -ArgumentList $argList `
+            -WorkingDirectory $WorkingDirectory -RedirectStandardOutput $stdoutFile `
+            -RedirectStandardError $stderrFile -NoNewWindow -Wait -PassThru
+        if ($proc.ExitCode -ne 0) {
+            $errText = ''
+            if (Test-Path -LiteralPath $stderrFile) {
+                $errText = (Get-Content -LiteralPath $stderrFile -Raw -ErrorAction SilentlyContinue).Trim()
+            }
+            throw ("GIT_COMMAND_FAILED:exit={0}:{1}" -f $proc.ExitCode, $errText)
+        }
+        if (-not (Test-Path -LiteralPath $stdoutFile)) {
+            return [byte[]]@()
+        }
+        return [System.IO.File]::ReadAllBytes($stdoutFile)
+    }
+    finally {
+        Remove-Item -LiteralPath $stdoutFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stderrFile -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-GitPorcelainV1ChangeType {
+    param([Parameter(Mandatory = $true)][string]$XY)
+    switch -Regex ($XY) {
+        '^\?\?' { return 'untracked' }
+        '^ D|^D ' { return 'deleted' }
+        default { return 'modified' }
+    }
+}
+
+function ConvertFrom-GitPorcelainV1ZBytes {
+    param([AllowEmptyCollection()][byte[]]$Bytes)
+    $entries = [System.Collections.Generic.List[object]]::new()
+    $errors = [System.Collections.Generic.List[string]]::new()
+    if (-not $Bytes -or $Bytes.Length -eq 0) {
+        return @{ Ok = $true; Entries = @(); Errors = @() }
+    }
+
+    $len = $Bytes.Length
+    $i = 0
+    while ($i -lt $len) {
+        while ($i -lt $len -and $Bytes[$i] -eq 0) { $i++ }
+        if ($i -ge $len) { break }
+
+        $start = $i
+        $nul1 = $start
+        while ($nul1 -lt $len -and $Bytes[$nul1] -ne 0) { $nul1++ }
+        if ($nul1 -ge $len) {
+            $errors.Add('truncated_porcelain_record')
+            break
+        }
+
+        $recordLen = $nul1 - $start
+        $recordText = [System.Text.Encoding]::UTF8.GetString($Bytes, $start, $recordLen)
+        if ($recordText.Length -lt 4 -or $recordText[2] -ne ' ') {
+            $errors.Add('invalid_porcelain_status_header')
+            $i = $nul1 + 1
+            continue
+        }
+
+        $xy = $recordText.Substring(0, 2)
+        $path1 = $recordText.Substring(3)
+        $nextIdx = $nul1 + 1
+
+        if ($xy -match '^[RC]') {
+            if ($nextIdx -ge $len) {
+                $errors.Add('rename_missing_second_path')
+                break
+            }
+            $nul2 = $nextIdx
+            while ($nul2 -lt $len -and $Bytes[$nul2] -ne 0) { $nul2++ }
+            if ($nul2 -ge $len) {
+                $errors.Add('truncated_rename_old_path')
+                break
+            }
+            $nextIdx = $nul2 + 1
+        }
+
+        if ($path1 -match '[\u0000-\u001F]') {
+            $errors.Add('path_contains_control_chars')
+            $i = $nextIdx
+            continue
+        }
+        if ($path1.IndexOf('"') -ge 0) {
+            $errors.Add('path_contains_quote_char')
+            $i = $nextIdx
+            continue
+        }
+
+        $rel = $path1 -replace '/', [System.IO.Path]::DirectorySeparatorChar
+        $changeType = Get-GitPorcelainV1ChangeType -XY $xy
+        $entries.Add([PSCustomObject]@{
+            XY         = $xy
+            RelPath    = $rel
+            ChangeType = $changeType
+        }) | Out-Null
+        $i = $nextIdx
+    }
+
+    return @{
+        Ok      = ($errors.Count -eq 0)
+        Entries = @($entries)
+        Errors  = @($errors)
+    }
+}
+
+function ConvertFrom-GitPathListZBytes {
+    param([AllowEmptyCollection()][byte[]]$Bytes)
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $errors = [System.Collections.Generic.List[string]]::new()
+    if (-not $Bytes -or $Bytes.Length -eq 0) {
+        return @{ Ok = $true; Paths = @(); Errors = @() }
+    }
+
+    $len = $Bytes.Length
+    $i = 0
+    while ($i -lt $len) {
+        while ($i -lt $len -and $Bytes[$i] -eq 0) { $i++ }
+        if ($i -ge $len) { break }
+        $start = $i
+        while ($i -lt $len -and $Bytes[$i] -ne 0) { $i++ }
+        if ($i -eq $start) { continue }
+        $path = [System.Text.Encoding]::UTF8.GetString($Bytes, $start, $i - $start)
+        if ($path.IndexOf('"') -ge 0) {
+            $errors.Add('ignored_path_contains_quote_char')
+            continue
+        }
+        $paths.Add($path) | Out-Null
+        if ($i -lt $len) { $i++ }
+    }
+
+    return @{
+        Ok     = ($errors.Count -eq 0)
+        Paths  = @($paths)
+        Errors = @($errors)
+    }
+}
+
 function Export-GitWorkingTreeSnapshot {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
