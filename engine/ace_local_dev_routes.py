@@ -65,6 +65,15 @@ from engine.ace_local_dev_publish_candidate_register import (
     discover_registered_publish_candidate,
     register_publish_candidate,
 )
+from engine.ace_local_dev_memurai_gate import (
+    memurai_blocks_new_redis_work,
+    memurai_denied_json_response,
+    public_memurai_availability_payload,
+)
+from engine.ace_local_dev_shutdown_route_gate import (
+    local_dev_shutdown_blocks_new_operation,
+    shutdown_gate_denied_json_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +84,32 @@ def _no_store_json(payload, status: int = 200):
     response = jsonify(payload)
     response.headers["Cache-Control"] = "no-store"
     return response, status
+
+
+def _memurai_gate_or_none():
+    if memurai_blocks_new_redis_work():
+        body, status = memurai_denied_json_response()
+        return _no_store_json(body, status)
+    return None
+
+
+def _shutdown_gate_or_none():
+    code = local_dev_shutdown_blocks_new_operation()
+    if code:
+        body, status = shutdown_gate_denied_json_response(code)
+        return _no_store_json(body, status)
+    return None
+
+
+@ace_local_dev_bp.route("/api/local-dev/memurai/availability", methods=["GET"])
+def local_dev_memurai_availability():
+    denied = assert_local_dev_loopback_api_access()
+    if denied is not None:
+        return denied
+    bad_query = reject_unexpected_query_params()
+    if bad_query is not None:
+        return bad_query
+    return _no_store_json(public_memurai_availability_payload(), 200)
 
 
 @ace_local_dev_bp.route("/api/local-dev/dev-cycle/status", methods=["GET"])
@@ -347,6 +382,10 @@ def local_dev_publish_uri_candidate_dry_run():
     if bad_query is not None:
         return bad_query
 
+    shutdown_denied = _shutdown_gate_or_none()
+    if shutdown_denied is not None:
+        return shutdown_denied
+
     body, body_err = parse_strict_json_object(
         request,
         allowed_keys={"candidateBackendSha", "publishUriPreviewFingerprint"},
@@ -405,6 +444,10 @@ def local_dev_publish_uri_candidate_prepare_simulate():
     bad_query = reject_unexpected_query_params()
     if bad_query is not None:
         return bad_query
+
+    shutdown_denied = _shutdown_gate_or_none()
+    if shutdown_denied is not None:
+        return shutdown_denied
 
     body, body_err = parse_strict_json_object(
         request,
@@ -521,6 +564,14 @@ def local_dev_publish_uri_candidate_execute():
     if early is not None:
         return early
 
+    shutdown_denied = _shutdown_gate_or_none()
+    if shutdown_denied is not None:
+        return shutdown_denied
+
+    memurai_denied = _memurai_gate_or_none()
+    if memurai_denied is not None:
+        return memurai_denied
+
     try:
         payload = execute_publish_uri_candidate(
             confirm_execute=str(body.get("confirmExecute") or ""),
@@ -626,6 +677,10 @@ def local_dev_publish_uri_candidate_register():
     if bad_query is not None:
         return bad_query
 
+    shutdown_denied = _shutdown_gate_or_none()
+    if shutdown_denied is not None:
+        return shutdown_denied
+
     body, body_err = parse_strict_json_object(
         request,
         allowed_keys={"candidateBackendSha", "confirmRegister"},
@@ -670,6 +725,14 @@ def local_dev_dev_cycle_start():
     bad_query = reject_unexpected_query_params()
     if bad_query is not None:
         return bad_query
+
+    shutdown_denied = _shutdown_gate_or_none()
+    if shutdown_denied is not None:
+        return shutdown_denied
+
+    memurai_denied = _memurai_gate_or_none()
+    if memurai_denied is not None:
+        return memurai_denied
 
     body, body_err = parse_strict_json_object(request, allowed_keys={"confirmStart"})
     if body_err:

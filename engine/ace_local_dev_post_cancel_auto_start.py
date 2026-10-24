@@ -20,6 +20,7 @@ from engine.ace_local_dev_cycle_store import (
     scan_open_cycle_session_ids,
     write_active_dev_cycle_pointer,
 )
+from engine.ace_local_dev_shutdown_route_gate import local_dev_shutdown_blocks_new_operation
 from engine.ace_local_dev_start_cycle import run_start_dev_cycle_core
 
 logger = logging.getLogger(__name__)
@@ -235,6 +236,21 @@ def run_post_cancel_auto_start(
                 "lastError": None,
             },
         )
+
+        gate_code = local_dev_shutdown_blocks_new_operation()
+        if gate_code:
+            logger.info(
+                "POST_CANCEL_AUTO_START_DEFERRED cancelledSessionId=%s gate=%s",
+                sid,
+                gate_code,
+            )
+            return {
+                "ok": False,
+                "phase": str(record.get("phase") or PHASE_PENDING),
+                "cancelledSessionId": sid,
+                "error": gate_code,
+                "message": "Post-cancel auto-start deferred while LOCAL shutdown gate is active.",
+            }
 
         try:
             start_payload = run_start_dev_cycle_core(sessions_root=root)

@@ -23,3 +23,8 @@ def end_local_dev_execute() -> None:
     global _execute_in_progress
     with _execute_lock:
         _execute_in_progress = False
+
+
+def is_local_dev_execute_in_progress() -> bool:
+    with _execute_lock:
+        return _execute_in_progress
