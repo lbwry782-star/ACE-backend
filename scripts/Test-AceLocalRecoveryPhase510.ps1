@@ -15,6 +15,48 @@ function Assert-True($cond, [string]$name) {
     else { Write-Host "  ok $name" -ForegroundColor DarkGray }
 }
 
+function Wait-Phase510ServiceRunning {
+    param(
+        [Parameter(Mandatory = $true)][string]$AceRoot,
+        [Parameter(Mandatory = $true)][int]$WrapperPid,
+        [string]$SpawnToken = '',
+        [int]$WaitSeconds = 8
+    )
+    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    $state = $null
+    do {
+        $path = Get-AceLocalRecoveryPeriodicSaveStatePath -AceRoot $AceRoot
+        if (Test-Path -LiteralPath $path) {
+            try { $state = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $state = $null }
+        }
+        $status = if ($state -and $state.PSObject.Properties.Match('status').Count -gt 0) { [string]$state.status } else { '' }
+        $tok = if ($state -and $state.PSObject.Properties.Match('spawnToken').Count -gt 0) { [string]$state.spawnToken } else { '' }
+        $svcPid = 0
+        if ($state -and $state.PSObject.Properties.Match('pid').Count -gt 0) {
+            try { $svcPid = [int]$state.pid } catch { $svcPid = 0 }
+        }
+        $tokenOk = (-not $SpawnToken) -or ($tok -eq $SpawnToken)
+        if ($status -eq 'running' -and $svcPid -eq $WrapperPid -and $tokenOk) {
+            return @{ Ready = $true; State = $state }
+        }
+        Start-Sleep -Milliseconds 150
+    } while ((Get-Date) -lt $deadline)
+    return @{ Ready = $false; State = $state }
+}
+
+function Stop-Phase510OwnedIfSame {
+    param([int]$ProcId, [string]$CreatedAt, [string]$AceRootMarker)
+    if ($ProcId -le 0 -or -not (Test-ProcessAlive $ProcId)) { return }
+    $nowCreated = Get-Win32ProcessCreationTimeUtc -ProcId $ProcId
+    if (-not $CreatedAt -or -not (Test-IsoUtcTimesMatchWithinTolerance -ExpectedIso $CreatedAt -ActualIso $nowCreated -ToleranceSeconds 2)) {
+        return
+    }
+    $cim = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcId" -ErrorAction SilentlyContinue
+    $cmd = if ($cim) { [string]$cim.CommandLine } else { '' }
+    if ($AceRootMarker -and $cmd.IndexOf($AceRootMarker, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return }
+    Stop-Process -Id $ProcId -Force -ErrorAction SilentlyContinue
+}
+
 function Initialize-TempGitRepo {
     param([Parameter(Mandatory = $true)][string]$Root)
     New-Item -ItemType Directory -Path $Root -Force | Out-Null
@@ -72,6 +114,7 @@ Assert-True ($startText -match 'Start-AceLocalMemuraiWatchAsync') 'regression_me
 Assert-True ($startText -notmatch 'Invoke-AceLocalFailure[\s\S]{0,120}periodicSaveStart') 'local_not_blocked_on_periodic_fail'
 
 $layout = New-TempLayout
+$script:Phase510Owned = @()
 try {
     $ace = $layout.AceRoot
     $be = $layout.Backend
@@ -90,6 +133,15 @@ try {
     Start-Sleep -Seconds 1
 
     $spawnRec = Read-AceLocalRecoveryPeriodicSaveSpawnRecord -AceRoot $ace
+    $occBeforeStop = Test-AceLocalRecoveryPeriodicSaveInstanceOccupied -AceRoot $ace -ExpectedLauncherSession $launcher `
+        -ManagedRegistry $registry
+    $createdBefore = ''
+    if ($spawnRec -and $spawnRec.wrapperPid) {
+        $createdBefore = Get-Win32ProcessCreationTimeUtc -ProcId ([int]$spawnRec.wrapperPid)
+    }
+    Write-Host ("  DIAG occupancy before Stop Reason={0} Occupied={1}" -f $occBeforeStop.Reason, $occBeforeStop.Occupied) -ForegroundColor DarkCyan
+    Write-Host ("  DIAG spawn wrapperPid={0} createdAt={1}" -f $spawnRec.wrapperPid, $createdBefore) -ForegroundColor DarkCyan
+
     Set-Content -LiteralPath (Join-Path (Get-AceLocalRecoveryDevStateDir -AceRoot $ace) 'recovery-periodic-save.pid') `
         -Value '999999' -Encoding ASCII
     $second = Start-AceLocalRecoveryPeriodicSaveBackgroundProcess -BackendRoot $be -FrontendRoot $fe -AceRoot $ace `
@@ -97,24 +149,83 @@ try {
         -TickIntervalSeconds 2 -CheckpointsRootOverride $cpRoot -EngineBackendRoot $BackendRoot -ManagedRegistry $registry
     Assert-True (-not $second.Started -and $second.Reason -eq 'already_running') 'double_start_with_stale_pid_file'
 
-    [void](Stop-AceLocalRecoveryPeriodicSaveBackgroundProcess -AceRoot $ace -WaitSeconds 40)
+    $stop1 = Stop-AceLocalRecoveryPeriodicSaveBackgroundProcess -AceRoot $ace -WaitSeconds 40
+    $occAfterStop = Test-AceLocalRecoveryPeriodicSaveInstanceOccupied -AceRoot $ace -ExpectedLauncherSession $launcher `
+        -ManagedRegistry $registry
+    Write-Host ("  DIAG Stop Stopped={0} Reason={1} IsRunning={2} OccupancyReason={3} StateStatus={4} ProcessAlive={5} Liveness={6}" -f `
+            $stop1.Stopped, $stop1.Reason, $stop1.IsRunning, $stop1.OccupancyReason, $stop1.StateStatus, $stop1.ProcessAlive, $stop1.Liveness) `
+        -ForegroundColor DarkCyan
+    Write-Host ("  DIAG occupancy after Stop Reason={0} Occupied={1}" -f $occAfterStop.Reason, $occAfterStop.Occupied) -ForegroundColor DarkCyan
 
-    Remove-Item -LiteralPath (Get-AceLocalRecoveryPeriodicSaveSpawnPath -AceRoot $ace) -Force -ErrorAction SilentlyContinue
-    Write-AceLocalRecoveryPeriodicSaveServiceState -AceRoot $ace -State @{
+    if (-not [bool]$stop1.Stopped) {
+        Assert-True ([string]$stop1.Reason -in @('stop_timeout_instance_alive', 'stop_blocked_unresolved_instance')) `
+            'stop_incomplete_explicit_reason'
+        Assert-True (Test-Path -LiteralPath (Get-AceLocalRecoveryPeriodicSaveSpawnPath -AceRoot $ace)) `
+            'stop_incomplete_keeps_spawn'
+        Write-Host '  DIAG skip spawn-delete stale setup: Stop did not verify end' -ForegroundColor DarkYellow
+    }
+    else {
+        Assert-True ((Resolve-AceLocalRecoveryPeriodicSaveOccupancyLiveness -Occupancy $occAfterStop) -eq 'ended') `
+            'stop_verified_occupancy_ended'
+    }
+
+    $staleAce = Join-Path $layout.TempRoot 'ACE-stale-files'
+    New-Item -ItemType Directory -Path (Join-Path $staleAce 'ACE-Backend'), (Join-Path $staleAce 'ACE-Frontend') -Force | Out-Null
+    Initialize-AceLocalRecoveryLedger -AceRoot $staleAce -LauncherSession $launcher | Out-Null
+    Write-CoordinatorSnapshot -AceRoot $staleAce -Launcher $launcher -Outcome 'START_ALLOWED' -Allow $true
+    Write-AceLocalRecoveryPeriodicSaveServiceState -AceRoot $staleAce -State @{
         status          = 'running'
         launcherSession = $launcher
         pid             = 999999
         spawnToken      = 'dead-token'
     }
-    Set-Content -LiteralPath (Join-Path (Get-AceLocalRecoveryDevStateDir -AceRoot $ace) 'recovery-periodic-save.pid') `
+    Set-Content -LiteralPath (Join-Path (Get-AceLocalRecoveryDevStateDir -AceRoot $staleAce) 'recovery-periodic-save.pid') `
         -Value '999999' -Encoding ASCII
-    $reconciled = Clear-AceLocalRecoveryPeriodicSaveProvenStaleState -AceRoot $ace -ExpectedLauncherSession $launcher
+    $reconciled = Clear-AceLocalRecoveryPeriodicSaveProvenStaleState -AceRoot $staleAce -ExpectedLauncherSession $launcher
+    Write-Host ("  DIAG Clear Cleared={0} Reason={1}" -f $reconciled.Cleared, $reconciled.Reason) -ForegroundColor DarkCyan
     Assert-True $reconciled.Cleared 'stale_state_reconciled'
-    $afterCrashSpawn = Start-AceLocalRecoveryPeriodicSaveBackgroundProcess -BackendRoot $be -FrontendRoot $fe -AceRoot $ace `
+    $staleBe = Join-Path $staleAce 'ACE-Backend'
+    $staleFe = Join-Path $staleAce 'ACE-Frontend'
+    $staleCp = Join-Path $staleAce '_backups\recovery-checkpoints-test'
+    New-Item -ItemType Directory -Path $staleCp -Force | Out-Null
+    $staleReg = New-AceLocalManagedRegistryShell -BackendRoot $staleBe -FrontendRoot $staleFe -LauncherSessionId $launcher
+    $afterCrashSpawn = Start-AceLocalRecoveryPeriodicSaveBackgroundProcess -BackendRoot $staleBe -FrontendRoot $staleFe -AceRoot $staleAce `
         -LauncherSession $launcher -CoordinatorOutcome 'START_ALLOWED' -AllowPeriodicSaveService $true `
-        -TickIntervalSeconds 2 -CheckpointsRootOverride $cpRoot -EngineBackendRoot $BackendRoot -ManagedRegistry $registry
+        -TickIntervalSeconds 2 -CheckpointsRootOverride $staleCp -EngineBackendRoot $BackendRoot -ManagedRegistry $staleReg
+    Write-Host ("  DIAG Start-after-Clear Started={0} Reason={1} WrapperPid={2} SpawnToken={3}" -f `
+            $afterCrashSpawn.Started, $afterCrashSpawn.Reason, $afterCrashSpawn.WrapperPid, $afterCrashSpawn.SpawnToken) -ForegroundColor DarkCyan
     Assert-True $afterCrashSpawn.Started 'spawn_after_proven_stale'
-    [void](Stop-AceLocalRecoveryPeriodicSaveBackgroundProcess -AceRoot $ace -WaitSeconds 25)
+    $respawnPid = 0
+    if ($afterCrashSpawn.WrapperPid) { $respawnPid = [int]$afterCrashSpawn.WrapperPid }
+    $respawnCreated = ''
+    if ($respawnPid -gt 0) { $respawnCreated = Get-Win32ProcessCreationTimeUtc -ProcId $respawnPid }
+    $script:Phase510Owned += @{ Pid = $respawnPid; CreatedAt = $respawnCreated; AceRoot = $staleAce }
+    $wrapBefore = Test-AceLocalRecoveryPeriodicSaveWrapperProcess -WrapperPid $respawnPid
+    $cimBefore = Get-CimInstance Win32_Process -Filter "ProcessId=$respawnPid" -ErrorAction SilentlyContinue
+    $cmdBefore = if ($cimBefore) { [string]$cimBefore.CommandLine } else { '' }
+    Write-Host ("  DIAG respawn createdAt={0} wrap.Verified={1} wrap.Reason={2}" -f $respawnCreated, $wrapBefore.Verified, $wrapBefore.Reason) -ForegroundColor DarkCyan
+    Write-Host ("  DIAG respawn cmd={0}" -f $cmdBefore) -ForegroundColor DarkCyan
+    $ready = Wait-Phase510ServiceRunning -AceRoot $staleAce -WrapperPid $respawnPid -SpawnToken ([string]$afterCrashSpawn.SpawnToken)
+    Write-Host ("  DIAG service-ready={0} svcPid={1} svcToken={2} svcStatus={3}" -f `
+            $ready.Ready, $(if ($ready.State) { $ready.State.pid } else { '' }), `
+            $(if ($ready.State -and $ready.State.PSObject.Properties.Match('spawnToken').Count -gt 0) { $ready.State.spawnToken } else { '' }), `
+            $(if ($ready.State) { $ready.State.status } else { '' })) -ForegroundColor DarkCyan
+    $stopPath = Get-AceLocalRecoveryPeriodicSaveStopPath -AceRoot $staleAce
+    Write-Host ("  DIAG stopPath={0}" -f $stopPath) -ForegroundColor DarkCyan
+    $stopStale = Stop-AceLocalRecoveryPeriodicSaveBackgroundProcess -AceRoot $staleAce -WaitSeconds 40
+    $occAfterRespawnStop = Test-AceLocalRecoveryPeriodicSaveInstanceOccupied -AceRoot $staleAce
+    $wrapAfter = Test-AceLocalRecoveryPeriodicSaveWrapperProcess -WrapperPid $respawnPid
+    $lockAfter = Get-AceLocalRecoveryPeriodicSaveLockAssessment -AceRoot $staleAce
+    Write-Host ("  DIAG Stop-after-respawn Stopped={0} Reason={1} Occupied={2}/{3} wrap.Reason={4} lock={5} stopPresent={6}" -f `
+            $stopStale.Stopped, $stopStale.Reason, $occAfterRespawnStop.Occupied, $occAfterRespawnStop.Reason, `
+            $wrapAfter.Reason, $lockAfter.Classification, (Test-Path -LiteralPath $stopPath)) -ForegroundColor DarkCyan
+    if (-not [bool]$stopStale.Stopped) {
+        Assert-True ($false) 'respawn_stop_unexpected_timeout'
+        Write-Host '  DIAG unexpected timeout on normal respawn service (not a refuse-to-stop dummy)' -ForegroundColor Red
+    }
+    else {
+        Assert-True ([string]$stopStale.Reason -eq 'stopped') 'respawn_stop_verified'
+    }
 
     $wakeJob = Start-Job -ScriptBlock {
         param($AceRootPath, $LibPath)
@@ -250,6 +361,22 @@ finally {
     Remove-Item Env:ACE_RECOVERY_PERIODIC_SAVE_BACKEND_PROBE_FIXTURE -ErrorAction SilentlyContinue
     if ($layout.TempRoot) {
         Request-AceLocalRecoveryPeriodicSaveStop -AceRoot $layout.AceRoot -ErrorAction SilentlyContinue
+        $staleAceStop = Join-Path $layout.TempRoot 'ACE-stale-files'
+        if (Test-Path -LiteralPath $staleAceStop) {
+            Request-AceLocalRecoveryPeriodicSaveStop -AceRoot $staleAceStop -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Milliseconds 400
+        foreach ($owned in @($script:Phase510Owned)) {
+            Stop-Phase510OwnedIfSame -ProcId $owned.Pid -CreatedAt $owned.CreatedAt -AceRootMarker $owned.AceRoot
+            if ($owned.Pid -gt 0 -and (Test-ProcessAlive $owned.Pid)) {
+                $cim = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $owned.Pid) -ErrorAction SilentlyContinue
+                $cmd = if ($cim) { [string]$cim.CommandLine } else { '' }
+                if ($owned.AceRoot -and $cmd.IndexOf($owned.AceRoot, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    $failures += ('owned_process_not_cleaned:' + $owned.Pid)
+                    Write-Host ("  leftover owned pid={0}" -f $owned.Pid) -ForegroundColor Red
+                }
+            }
+        }
         Remove-Item -LiteralPath $layout.TempRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

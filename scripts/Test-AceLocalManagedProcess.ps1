@@ -29,6 +29,8 @@ Assert-True ($startLocalText -match 'ShowComponentWindows') 'start_ace_local_has
 Assert-True ($startLocalText -match 'Start-ComponentSilent') 'start_ace_local_has_silent_start'
 Assert-True ($startLocalText -match 'Discover-AceLocalManagedBackendTree') 'start_local_discovers_backend_tree'
 Assert-True ($startLocalText -match 'Register-ManagedComponentTree') 'start_local_registers_tree'
+Assert-True ($startLocalText -match 'Sync-AceLocalAlreadyRunningManagedComponent') 'start_local_syncs_already_running_ownership'
+Assert-True ($startLocalText -notmatch '\$managedRegistry\.components\.backend = \$null') 'start_local_does_not_null_already_running_backend'
 Assert-True ($startLocalText -match 'Start-Transcript') 'start_ace_local_has_launcher_log'
 Assert-True ($startLocalText -match 'if \(\$SilentMode\)[\s\S]*Stop managed stack') 'silent_mode_shows_log_and_stop_hint'
 Assert-True ($startLocalText -match 'ShowComponentWindows[\s\S]*Read-Host "Press Enter to close this launcher') 'diagnostic_mode_keeps_launcher_readhost'

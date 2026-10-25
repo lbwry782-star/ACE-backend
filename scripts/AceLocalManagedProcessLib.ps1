@@ -660,6 +660,73 @@ function Test-ManagedComponentRecordValid {
     }
 }
 
+function Test-ManagedComponentRecordRetainable {
+    param(
+        [Parameter(Mandatory = $true)]$Record,
+        [Parameter(Mandatory = $true)][ValidateSet('backend', 'worker', 'frontend')][string]$Component,
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [Parameter(Mandatory = $true)][string]$FrontendRoot,
+        [int]$BackendPort = 5000
+    )
+    # Retention must not use the current launcher attempt session. Stop authorization still does.
+    return Test-ManagedComponentRecordValid -Record $Record -Component $Component `
+        -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot `
+        -BackendPort $BackendPort -RequireProcessCreationTimes
+}
+
+function Sync-AceLocalAlreadyRunningManagedComponent {
+    param(
+        [Parameter(Mandatory = $true)]$Registry,
+        [Parameter(Mandatory = $true)][ValidateSet('backend', 'worker', 'frontend')][string]$Name,
+        [Parameter(Mandatory = $true)][string]$AceRoot,
+        [Parameter(Mandatory = $true)][string]$BackendRoot,
+        [Parameter(Mandatory = $true)][string]$FrontendRoot,
+        [Parameter(Mandatory = $true)][string]$CurrentLauncherSession,
+        [int]$BackendPort = 5000
+    )
+    $rec = $null
+    if ($Registry -and $Registry.components -and $Registry.components.PSObject.Properties.Match($Name).Count -gt 0) {
+        $rec = $Registry.components.$Name
+    }
+    if (-not $rec) {
+        return [PSCustomObject]@{
+            Outcome         = 'unverified'
+            Reason          = 'missing_record'
+            Component       = $Name
+            OriginalSession = ''
+            StopEligible    = $false
+        }
+    }
+    $check = Test-ManagedComponentRecordRetainable -Record $rec -Component $Name `
+        -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot -BackendPort $BackendPort
+    if (-not $check.Ok) {
+        return [PSCustomObject]@{
+            Outcome         = 'unverified'
+            Reason          = [string]$check.Reason
+            Component       = $Name
+            OriginalSession = [string]$rec.launcherSession
+            StopEligible    = $false
+        }
+    }
+    $originSession = [string]$rec.launcherSession
+    if ($rec.PSObject.Properties.Match('lastAttachedLauncherSession').Count -eq 0) {
+        $rec | Add-Member -NotePropertyName 'lastAttachedLauncherSession' -NotePropertyValue $CurrentLauncherSession -Force
+    }
+    else {
+        $rec.lastAttachedLauncherSession = $CurrentLauncherSession
+    }
+    $Registry.components.$Name = $rec
+    $Registry.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    Write-AceLocalManagedRegistry -AceRoot $AceRoot -RegistryObject $Registry
+    return [PSCustomObject]@{
+        Outcome         = 'retained'
+        Reason          = 'ok'
+        Component       = $Name
+        OriginalSession = $originSession
+        StopEligible    = $false
+    }
+}
+
 function Confirm-ManagedComponentStopAllowed {
     param(
         [Parameter(Mandatory = $true)]$Record,
@@ -807,7 +874,6 @@ function Get-StaleManagedComponentsPreview {
         [int]$BackendPort = 5000
     )
     $preview = @()
-    $session = [string]$Registry.launcherSession
     foreach ($name in @('backend', 'worker', 'frontend')) {
         $rec = $Registry.components.$name
         if (-not $rec) {
@@ -815,7 +881,7 @@ function Get-StaleManagedComponentsPreview {
         }
         $check = Test-ManagedComponentRecordValid -Record $rec -Component $name `
             -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot `
-            -ExpectedLauncherSession $session -BackendPort $BackendPort
+            -BackendPort $BackendPort
         if (-not $check.Ok -and ($script:ManagedComponentInactiveReasons -contains $check.Reason)) {
             $preview += [PSCustomObject]@{
                 Component = $name

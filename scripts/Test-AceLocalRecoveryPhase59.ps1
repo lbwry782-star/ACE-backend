@@ -80,7 +80,7 @@ try {
         -AceRoot $ace -BackendPort 5000 -GateResult $gate -ManagedRegistry $registry -EngineBackendRoot $BackendRoot
     Assert-True (-not $second.Started -and $second.Reason -eq 'already_running') 'double_start_blocked'
 
-    Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $ace -BackendPort 5101 -LauncherSession '20260201-120000'
+    [void](Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $ace -BackendPort 5101 -LauncherSession '20260201-120000')
     $runtimePath = Get-AceLocalRecoveryPeriodicSaveRuntimePath -AceRoot $ace
     $runtime = Get-Content -LiteralPath $runtimePath -Raw | ConvertFrom-Json
     Assert-True ([int]$runtime.backendPort -eq 5101) 'custom_port_runtime'

@@ -55,8 +55,8 @@ if (-not $LauncherSession) {
 }
 
 if ($BackendPort -gt 0 -and $LauncherSession) {
-    Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $AceRoot -BackendPort $BackendPort `
-        -LauncherSession $LauncherSession
+    [void](Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $AceRoot -BackendPort $BackendPort `
+        -LauncherSession $LauncherSession)
     $env:PORT = [string]$BackendPort
 }
 Clear-AceLocalRecoveryPeriodicSaveStopRequest -AceRoot $AceRoot

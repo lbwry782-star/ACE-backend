@@ -355,19 +355,166 @@ function Get-AceLocalRecoveryPeriodicSaveRuntimePath {
     return Join-Path (Get-AceLocalRecoveryDevStateDir -AceRoot $AceRoot) $script:AceLocalRecoveryPeriodicSaveRuntimeFileName
 }
 
+function Read-AceLocalRecoveryPeriodicSaveRuntimeConfig {
+    param([Parameter(Mandatory = $true)][string]$AceRoot)
+    $path = Get-AceLocalRecoveryPeriodicSaveRuntimePath -AceRoot $AceRoot
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return $null
+        }
+        return ($raw | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-AceLocalRecoveryPeriodicSaveRuntimeOptionalText {
+    param(
+        $Runtime,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if (-not $Runtime -or $Runtime.PSObject.Properties.Match($Name).Count -eq 0) {
+        return ''
+    }
+    return ([string]$Runtime.$Name).Trim()
+}
+
+function Test-AceLocalRecoveryPeriodicSaveRuntimeBindTimesMatch {
+    param(
+        [Parameter(Mandatory = $true)][string]$RuntimeIso,
+        [Parameter(Mandatory = $true)][string]$VerifiedIso,
+        [int]$ToleranceSeconds = 180
+    )
+    if ([string]::IsNullOrWhiteSpace($RuntimeIso) -or [string]::IsNullOrWhiteSpace($VerifiedIso)) {
+        return $false
+    }
+    try {
+        $runtimeAt = [DateTime]::Parse($RuntimeIso, $null, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        $verifiedAt = [DateTime]::Parse($VerifiedIso, $null, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        return ([Math]::Abs(($runtimeAt - $verifiedAt).TotalSeconds) -le $ToleranceSeconds)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Write-AceLocalRecoveryPeriodicSaveRuntimeConfig {
     param(
         [Parameter(Mandatory = $true)][string]$AceRoot,
         [Parameter(Mandatory = $true)][int]$BackendPort,
-        [Parameter(Mandatory = $true)][string]$LauncherSession
+        [Parameter(Mandatory = $true)][string]$LauncherSession,
+        [string]$AttachedByLauncherSession = '',
+        [switch]$PreserveExistingIdentity,
+        [string]$VerifiedLauncherSession = '',
+        [int]$VerifiedWrapperPid = 0,
+        [string]$VerifiedWrapperStartedAt = '',
+        [string]$VerifiedSpawnToken = ''
     )
     $path = Get-AceLocalRecoveryPeriodicSaveRuntimePath -AceRoot $AceRoot
-    Write-AceLocalRecoveryJsonAtomic -Path $path -Object @{
+    if ($PreserveExistingIdentity) {
+        $existing = Read-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $AceRoot
+        $existingSession = Get-AceLocalRecoveryPeriodicSaveRuntimeOptionalText -Runtime $existing -Name 'launcherSession'
+        $verifiedSession = ($VerifiedLauncherSession -replace '\s', '').Trim()
+        if ([string]::IsNullOrWhiteSpace($verifiedSession)) {
+            return @{ Ok = $false; Reason = 'runtime_identity_unknown'; Matched = $false }
+        }
+        if (-not $existing -or [string]::IsNullOrWhiteSpace($existingSession)) {
+            return @{ Ok = $false; Reason = 'runtime_identity_unknown'; Matched = $false }
+        }
+        if ($existingSession -ne $verifiedSession) {
+            return @{
+                Ok                      = $false
+                Reason                  = 'runtime_identity_mismatch'
+                Matched                 = $false
+                RuntimeLauncherSession  = $existingSession
+                VerifiedLauncherSession = $verifiedSession
+            }
+        }
+
+        $runtimePidText = Get-AceLocalRecoveryPeriodicSaveRuntimeOptionalText -Runtime $existing -Name 'wrapperPid'
+        if (-not $runtimePidText) {
+            $runtimePidText = Get-AceLocalRecoveryPeriodicSaveRuntimeOptionalText -Runtime $existing -Name 'pid'
+        }
+        $runtimePid = 0
+        if ($runtimePidText -match '^\d+$') {
+            $runtimePid = [int]$runtimePidText
+        }
+        if ($runtimePid -gt 0) {
+            if ($VerifiedWrapperPid -le 0) {
+                return @{ Ok = $false; Reason = 'runtime_identity_unknown'; Matched = $false }
+            }
+            if ($runtimePid -ne $VerifiedWrapperPid) {
+                return @{ Ok = $false; Reason = 'runtime_identity_mismatch'; Matched = $false }
+            }
+        }
+
+        $runtimeToken = Get-AceLocalRecoveryPeriodicSaveRuntimeOptionalText -Runtime $existing -Name 'spawnToken'
+        if ($runtimeToken) {
+            $verifiedToken = ($VerifiedSpawnToken -replace '\s', '').Trim()
+            if (-not $verifiedToken) {
+                return @{ Ok = $false; Reason = 'runtime_identity_unknown'; Matched = $false }
+            }
+            if ($runtimeToken -ne $verifiedToken) {
+                return @{ Ok = $false; Reason = 'runtime_identity_mismatch'; Matched = $false }
+            }
+        }
+
+        $runtimeStarted = Get-AceLocalRecoveryPeriodicSaveRuntimeOptionalText -Runtime $existing -Name 'wrapperStartedAt'
+        if (-not $runtimeStarted) {
+            $runtimeStarted = Get-AceLocalRecoveryPeriodicSaveRuntimeOptionalText -Runtime $existing -Name 'processCreatedAt'
+        }
+        if ($runtimeStarted) {
+            $verifiedStarted = ($VerifiedWrapperStartedAt -replace '\s', '').Trim()
+            if (-not $verifiedStarted) {
+                return @{ Ok = $false; Reason = 'runtime_identity_unknown'; Matched = $false }
+            }
+            if (-not (Test-AceLocalRecoveryPeriodicSaveRuntimeBindTimesMatch -RuntimeIso $runtimeStarted -VerifiedIso $verifiedStarted)) {
+                return @{ Ok = $false; Reason = 'runtime_identity_mismatch'; Matched = $false }
+            }
+        }
+
+        $port = 0
+        if ($existing.PSObject.Properties.Match('backendPort').Count -gt 0) {
+            try { $port = [int]$existing.backendPort } catch { $port = 0 }
+        }
+        if ($port -le 0) {
+            $port = $BackendPort
+        }
+        $payload = @{
+            schemaVersion              = 1
+            backendPort                = $port
+            launcherSession            = $existingSession
+            attachedByLauncherSession  = $AttachedByLauncherSession
+            writtenAt                  = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        if ($runtimePid -gt 0) {
+            $payload['wrapperPid'] = $runtimePid
+        }
+        if ($runtimeToken) {
+            $payload['spawnToken'] = $runtimeToken
+        }
+        if ($runtimeStarted) {
+            $payload['wrapperStartedAt'] = $runtimeStarted
+        }
+        Write-AceLocalRecoveryJsonAtomic -Path $path -Object $payload
+        return @{ Ok = $true; Reason = 'preserved'; Matched = $true; LauncherSession = $existingSession }
+    }
+    $payload = @{
         schemaVersion   = 1
         backendPort     = $BackendPort
         launcherSession = $LauncherSession
         writtenAt       = (Get-Date).ToUniversalTime().ToString('o')
     }
+    if ($AttachedByLauncherSession) {
+        $payload['attachedByLauncherSession'] = $AttachedByLauncherSession
+    }
+    Write-AceLocalRecoveryJsonAtomic -Path $path -Object $payload
+    return @{ Ok = $true; Reason = 'written'; LauncherSession = $LauncherSession }
 }
 
 function Get-AceLocalRecoveryPeriodicSaveActivationSnapshotPath {

@@ -423,8 +423,15 @@ $started = @()
 
 if ($backendOk) {
     Write-Ok ("Backend: already running (127.0.0.1:{0}, local dev verified)" -f $BackendPort)
-    $managedRegistry.components.backend = $null
-    Write-AceLocalManagedRegistry -AceRoot $AceRoot -RegistryObject $managedRegistry
+    $backendRetain = Sync-AceLocalAlreadyRunningManagedComponent -Registry $managedRegistry -Name 'backend' `
+        -AceRoot $AceRoot -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot `
+        -CurrentLauncherSession ([string]$managedRegistry.launcherSession) -BackendPort $BackendPort
+    if ([string]$backendRetain.Outcome -eq 'retained') {
+        Write-Info ("Backend: managed ownership retained (origin session {0}; not stop-authorized by this attach)." -f $backendRetain.OriginalSession)
+    }
+    else {
+        Write-Warn ("Backend: running, ownership not verified ({0}). Not registered for automatic stop." -f $backendRetain.Reason)
+    }
     if ($ProgressUiEnabled) {
         Set-AceLocalProgressStep -StatePath $script:ProgressStatePath -Step 'Backend'
     }
@@ -473,8 +480,15 @@ else {
 
 if ($workerProcs.Count -gt 0) {
     Write-Ok ("Worker: already running (PID {0})" -f $workerProcs[0].ProcId)
-    $managedRegistry.components.worker = $null
-    Write-AceLocalManagedRegistry -AceRoot $AceRoot -RegistryObject $managedRegistry
+    $workerRetain = Sync-AceLocalAlreadyRunningManagedComponent -Registry $managedRegistry -Name 'worker' `
+        -AceRoot $AceRoot -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot `
+        -CurrentLauncherSession ([string]$managedRegistry.launcherSession) -BackendPort $BackendPort
+    if ([string]$workerRetain.Outcome -eq 'retained') {
+        Write-Info ("Worker: managed ownership retained (origin session {0}; not stop-authorized by this attach)." -f $workerRetain.OriginalSession)
+    }
+    else {
+        Write-Warn ("Worker: running, ownership not verified ({0}). Not registered for automatic stop." -f $workerRetain.Reason)
+    }
     if ($ProgressUiEnabled) {
         Set-AceLocalProgressStep -StatePath $script:ProgressStatePath -Step 'Worker'
     }
@@ -523,8 +537,15 @@ $frontendPort = $null
 if ($frontendPorts.Count -ge 1) {
     $frontendPort = $frontendPorts[0]
     Write-Ok ("Frontend: already running (http://localhost:{0}/)" -f $frontendPort)
-    $managedRegistry.components.frontend = $null
-    Write-AceLocalManagedRegistry -AceRoot $AceRoot -RegistryObject $managedRegistry
+    $frontendRetain = Sync-AceLocalAlreadyRunningManagedComponent -Registry $managedRegistry -Name 'frontend' `
+        -AceRoot $AceRoot -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot `
+        -CurrentLauncherSession ([string]$managedRegistry.launcherSession) -BackendPort $BackendPort
+    if ([string]$frontendRetain.Outcome -eq 'retained') {
+        Write-Info ("Frontend: managed ownership retained (origin session {0}; not stop-authorized by this attach)." -f $frontendRetain.OriginalSession)
+    }
+    else {
+        Write-Warn ("Frontend: running, ownership not verified ({0}). Not registered for automatic stop." -f $frontendRetain.Reason)
+    }
     if ($ProgressUiEnabled) {
         Set-AceLocalProgressStep -StatePath $script:ProgressStatePath -Step 'Frontend'
     }

@@ -284,10 +284,11 @@ try {
     Assert-True ($regHash -eq $regHashAfter) 'ledger_init_does_not_touch_registry'
     Assert-True (Test-Path -LiteralPath (Join-Path $liveState 'recovery-session-ledger.json')) 'ledger_created'
 
-    # Start-AceLocal: already-running path clears component slot (no duplicate registration)
+    # Start-AceLocal: already-running path retains a valid record instead of clearing it.
     Assert-True ($startText -match 'already running') 'start_handles_already_running'
     Assert-True ($startText -match 'Test-BackendLocalDevIdentity') 'start_verifies_backend_identity'
-    Assert-True ($startText -match '\$managedRegistry\.components\.backend = \$null') 'already_running_clears_backend_slot'
+    Assert-True ($startText -match 'Sync-AceLocalAlreadyRunningManagedComponent') 'already_running_syncs_ownership'
+    Assert-True ($startText -notmatch '\$managedRegistry\.components\.backend = \$null') 'already_running_does_not_clear_backend_slot'
 }
 finally {
     Remove-Item -LiteralPath $layout.TempRoot -Recurse -Force -ErrorAction SilentlyContinue

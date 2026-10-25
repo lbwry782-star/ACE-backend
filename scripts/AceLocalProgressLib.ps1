@@ -26,6 +26,26 @@ function Get-AceLocalProgressStepPercent {
     return 0
 }
 
+function Test-AceLocalProgressReplaceTransient {
+    param([Parameter(Mandatory = $true)]$ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    while ($ex) {
+        if ($ex -is [System.IO.IOException] -or $ex -is [System.UnauthorizedAccessException]) {
+            $hr = [int]$ex.HResult
+            # ERROR_ACCESS_DENIED (5), ERROR_SHARING_VIOLATION (32), ERROR_LOCK_VIOLATION (33), ERROR_ALREADY_EXISTS (183)
+            if ($hr -eq -2147024891 -or $hr -eq -2147024864 -or $hr -eq -2147024863 -or $hr -eq -2147024713) {
+                return $true
+            }
+            $msg = [string]$ex.Message
+            if ($msg -match 'already exists|being used by another process|Access is denied|cannot access the file') {
+                return $true
+            }
+        }
+        $ex = $ex.InnerException
+    }
+    return $false
+}
+
 function Write-AceLocalProgressState {
     param(
         [Parameter(Mandatory = $true)][string]$StatePath,
@@ -41,9 +61,49 @@ function Write-AceLocalProgressState {
     }
     $json = $payload | ConvertTo-Json -Compress
     $dir = Split-Path -Parent $StatePath
-    $tmp = Join-Path $dir ("local-start-progress.json.tmp.{0}" -f [guid]::NewGuid().ToString('N'))
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    $writeId = [guid]::NewGuid().ToString('N')
+    $tmp = Join-Path $dir ("local-start-progress.json.tmp.{0}" -f $writeId)
+    $bak = Join-Path $dir ("local-start-progress.json.bak.{0}" -f $writeId)
     Set-Content -LiteralPath $tmp -Value $json -Encoding UTF8
-    Move-Item -LiteralPath $tmp -Destination $StatePath -Force
+
+    $maxAttempts = 8
+    $retryDelayMs = 50
+    $deadlineUtc = [DateTime]::UtcNow.AddSeconds(2)
+    $committed = $false
+    try {
+        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+                if (Test-Path -LiteralPath $StatePath) {
+                    [System.IO.File]::Replace($tmp, $StatePath, $bak)
+                }
+                else {
+                    [System.IO.File]::Move($tmp, $StatePath)
+                }
+                $committed = $true
+                break
+            }
+            catch {
+                $canRetry = (Test-AceLocalProgressReplaceTransient -ErrorRecord $_) -and
+                    ($attempt -lt $maxAttempts) -and
+                    ([DateTime]::UtcNow -lt $deadlineUtc)
+                if (-not $canRetry) {
+                    throw
+                }
+                Start-Sleep -Milliseconds $retryDelayMs
+            }
+        }
+    }
+    finally {
+        if (-not $committed -and (Test-Path -LiteralPath $tmp)) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $bak) {
+            Remove-Item -LiteralPath $bak -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Initialize-AceLocalProgressState {

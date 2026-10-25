@@ -302,6 +302,106 @@ function Test-AceLocalRecoveryBackendHealthProbe {
     }
 }
 
+function Get-AceLocalRecoveryPeriodicSaveVerifiedInstanceIdentity {
+    param(
+        [Parameter(Mandatory = $true)][string]$AceRoot,
+        $Occupancy = $null,
+        $ManagedRegistry = $null
+    )
+    $reason = if ($Occupancy) { [string]$Occupancy.Reason } else { '' }
+    $verifiedReasons = @(
+        'verified_wrapper',
+        'verified_registry_wrapper',
+        'verified_service_pid',
+        'registry_session_mismatch_live'
+    )
+    if ($verifiedReasons -notcontains $reason) {
+        return @{
+            Verified          = $false
+            Reason            = $(if ($reason) { $reason } else { 'instance_not_verified' })
+            LauncherSession   = ''
+            WrapperPid        = 0
+            WrapperStartedAt  = ''
+            SpawnToken        = ''
+        }
+    }
+
+    $spawn = Read-AceLocalRecoveryPeriodicSaveSpawnRecord -AceRoot $AceRoot
+    $session = ''
+    $wrapperPid = 0
+    $startedAt = ''
+    $token = ''
+    if ($Occupancy) {
+        $pidProp = $null
+        if ($Occupancy -is [hashtable]) {
+            if ($Occupancy.ContainsKey('WrapperPid')) { $pidProp = $Occupancy['WrapperPid'] }
+        }
+        elseif ($Occupancy.PSObject.Properties.Match('WrapperPid').Count -gt 0) {
+            $pidProp = $Occupancy.WrapperPid
+        }
+        if ($null -ne $pidProp -and [string]$pidProp -match '^\d+$') {
+            $wrapperPid = [int]$pidProp
+        }
+    }
+    if ($spawn) {
+        if ($spawn.PSObject.Properties.Match('launcherSession').Count -gt 0) {
+            $session = [string]$spawn.launcherSession
+        }
+        if ($wrapperPid -le 0 -and $spawn.PSObject.Properties.Match('wrapperPid').Count -gt 0) {
+            try { $wrapperPid = [int]$spawn.wrapperPid } catch { $wrapperPid = 0 }
+        }
+        if ($spawn.PSObject.Properties.Match('wrapperStartedAt').Count -gt 0) {
+            $startedAt = [string]$spawn.wrapperStartedAt
+        }
+        if ($spawn.PSObject.Properties.Match('spawnToken').Count -gt 0) {
+            $token = [string]$spawn.spawnToken
+        }
+    }
+
+    $rec = $null
+    if ($ManagedRegistry -and $ManagedRegistry.components `
+            -and $ManagedRegistry.components.PSObject.Properties.Match('recoveryPeriodicSave').Count -gt 0) {
+        $rec = $ManagedRegistry.components.recoveryPeriodicSave
+    }
+    if ($rec) {
+        if ([string]::IsNullOrWhiteSpace($session) -and $rec.PSObject.Properties.Match('launcherSession').Count -gt 0) {
+            $session = [string]$rec.launcherSession
+        }
+        if ($wrapperPid -le 0) {
+            if ($rec.wrapperPid) { $wrapperPid = [int]$rec.wrapperPid }
+            elseif ($rec.pid) { $wrapperPid = [int]$rec.pid }
+        }
+        if ([string]::IsNullOrWhiteSpace($startedAt) -and $rec.processCreatedAt -and $wrapperPid -gt 0) {
+            if ($rec.processCreatedAt.PSObject.Properties.Match([string]$wrapperPid).Count -gt 0) {
+                $startedAt = [string]$rec.processCreatedAt.($wrapperPid)
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($token) -and $rec.PSObject.Properties.Match('spawnToken').Count -gt 0) {
+            $token = [string]$rec.spawnToken
+        }
+    }
+
+    $session = ($session -replace '\s', '').Trim()
+    if ([string]::IsNullOrWhiteSpace($session) -or $wrapperPid -le 0) {
+        return @{
+            Verified          = $false
+            Reason            = 'verified_identity_incomplete'
+            LauncherSession   = $session
+            WrapperPid        = $wrapperPid
+            WrapperStartedAt  = $startedAt
+            SpawnToken        = $token
+        }
+    }
+    return @{
+        Verified          = $true
+        Reason            = $reason
+        LauncherSession   = $session
+        WrapperPid        = $wrapperPid
+        WrapperStartedAt  = $startedAt
+        SpawnToken        = $token
+    }
+}
+
 function Start-AceLocalRecoveryPeriodicSaveFromLocalStackStart {
     param(
         [Parameter(Mandatory = $true)][string]$BackendRoot,
@@ -332,12 +432,26 @@ function Start-AceLocalRecoveryPeriodicSaveFromLocalStackStart {
     if (-not $probe.Ok) {
         return @{ Started = $false; Reason = 'backend_probe_failed'; Detail = $probe.Reason }
     }
-    Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $AceRoot -BackendPort $BackendPort `
-        -LauncherSession $launcher
     $spawn = Start-AceLocalRecoveryPeriodicSaveBackgroundProcess -BackendRoot $BackendRoot -FrontendRoot $FrontendRoot `
         -AceRoot $AceRoot -LauncherSession $launcher -CoordinatorOutcome $ctx.CoordinatorOutcome `
         -AllowPeriodicSaveService $ctx.AllowPeriodicSaveService -IsolatedOperations $ctx.IsolatedOperations `
         -EngineBackendRoot $EngineBackendRoot -BackendPort $BackendPort -ManagedRegistry $ManagedRegistry
+    if ([string]$spawn.Reason -eq 'already_running') {
+        $verifiedId = Get-AceLocalRecoveryPeriodicSaveVerifiedInstanceIdentity -AceRoot $AceRoot `
+            -Occupancy $spawn.Status -ManagedRegistry $ManagedRegistry
+        $runtimeMerge = Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $AceRoot -BackendPort $BackendPort `
+            -LauncherSession $launcher -AttachedByLauncherSession $launcher -PreserveExistingIdentity `
+            -VerifiedLauncherSession $verifiedId.LauncherSession -VerifiedWrapperPid $verifiedId.WrapperPid `
+            -VerifiedWrapperStartedAt $verifiedId.WrapperStartedAt -VerifiedSpawnToken $verifiedId.SpawnToken
+        if (-not $runtimeMerge.Ok) {
+            $spawn.RuntimeNote = [string]$runtimeMerge.Reason
+            $spawn.RuntimeMatched = $false
+        }
+        else {
+            $spawn.RuntimeNote = 'identity_preserved'
+            $spawn.RuntimeMatched = $true
+        }
+    }
     if ($spawn.Started -and $spawn.WrapperPid) {
         $logs = Get-AceLocalRecoveryPeriodicSaveBackgroundLogPaths -AceRoot $AceRoot
         $spawnRecord = Read-AceLocalRecoveryPeriodicSaveSpawnRecord -AceRoot $AceRoot
@@ -680,8 +794,8 @@ function Start-AceLocalRecoveryPeriodicSaveBackgroundProcess {
     }
 
     if ($BackendPort -gt 0) {
-        Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $aceRoot -BackendPort $BackendPort `
-            -LauncherSession $LauncherSession
+        [void](Write-AceLocalRecoveryPeriodicSaveRuntimeConfig -AceRoot $aceRoot -BackendPort $BackendPort `
+            -LauncherSession $LauncherSession)
     }
     Write-AceLocalRecoveryPeriodicSaveActivationSnapshot -AceRoot $aceRoot -LauncherSession $LauncherSession `
         -CoordinatorOutcome $CoordinatorOutcome -AllowPeriodicSaveService $AllowPeriodicSaveService
@@ -764,6 +878,26 @@ function Start-AceLocalRecoveryPeriodicSaveBackgroundProcess {
     }
 }
 
+function Resolve-AceLocalRecoveryPeriodicSaveOccupancyLiveness {
+    param($Occupancy)
+    $reason = if ($Occupancy) { [string]$Occupancy.Reason } else { '' }
+    switch ($reason) {
+        'verified_wrapper' { return 'verified_live' }
+        'verified_registry_wrapper' { return 'verified_live' }
+        'verified_service_pid' { return 'verified_live' }
+        'lock_live' { return 'verified_live' }
+        'instance_unverified_process' { return 'unresolved' }
+        'lock_unresolved' { return 'unresolved' }
+        'registry_session_mismatch_live' { return 'unresolved' }
+        'stale_running_state' { return 'ended' }
+        'no_live_instance' { return 'ended' }
+        default {
+            if ($Occupancy -and [bool]$Occupancy.Occupied) { return 'unresolved' }
+            return 'ended'
+        }
+    }
+}
+
 function Stop-AceLocalRecoveryPeriodicSaveBackgroundProcess {
     param(
         [Parameter(Mandatory = $true)][string]$AceRoot,
@@ -771,18 +905,46 @@ function Stop-AceLocalRecoveryPeriodicSaveBackgroundProcess {
     )
     $aceRoot = (Resolve-Path -LiteralPath $AceRoot).ProviderPath
     Request-AceLocalRecoveryPeriodicSaveStop -AceRoot $aceRoot
-    $deadline = (Get-Date).AddSeconds($WaitSeconds)
+    $deadline = (Get-Date).AddSeconds([Math]::Max(0, $WaitSeconds))
+    $occupancy = $null
+    $liveness = 'ended'
     do {
-        $status = Get-AceLocalRecoveryPeriodicSaveBackgroundStatus -AceRoot $aceRoot
-        if (-not $status.IsRunning -and $status.StateStatus -ne 'running') {
-            break
-        }
-        if ($status.ServicePid -and -not $status.ProcessAlive) {
+        $managedRegistry = Read-AceLocalManagedRegistry -AceRoot $aceRoot -AllowCreateStateDir
+        $occupancy = Test-AceLocalRecoveryPeriodicSaveInstanceOccupied -AceRoot $aceRoot `
+            -ExpectedLauncherSession '' -ManagedRegistry $managedRegistry
+        $liveness = Resolve-AceLocalRecoveryPeriodicSaveOccupancyLiveness -Occupancy $occupancy
+        if ($liveness -eq 'ended') {
             break
         }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
 
+    if ($liveness -ne 'ended') {
+        $managedRegistry = Read-AceLocalManagedRegistry -AceRoot $aceRoot -AllowCreateStateDir
+        $occupancy = Test-AceLocalRecoveryPeriodicSaveInstanceOccupied -AceRoot $aceRoot `
+            -ExpectedLauncherSession '' -ManagedRegistry $managedRegistry
+        $liveness = Resolve-AceLocalRecoveryPeriodicSaveOccupancyLiveness -Occupancy $occupancy
+    }
+
+    $status = Get-AceLocalRecoveryPeriodicSaveBackgroundStatus -AceRoot $aceRoot
+    $status.Occupancy = $occupancy
+    $status.Liveness = $liveness
+    if ($liveness -eq 'verified_live') {
+        $status.Stopped = $false
+        $status.Reason = 'stop_timeout_instance_alive'
+        $status.StopRequestCleared = $false
+        return $status
+    }
+    if ($liveness -eq 'unresolved') {
+        $status.Stopped = $false
+        $status.Reason = 'stop_blocked_unresolved_instance'
+        $status.StopRequestCleared = $false
+        return $status
+    }
+
     Clear-AceLocalRecoveryPeriodicSaveStopRequest -AceRoot $aceRoot
-    return Get-AceLocalRecoveryPeriodicSaveBackgroundStatus -AceRoot $aceRoot
+    $status.Stopped = $true
+    $status.Reason = $(if ([string]$status.OccupancyReason -eq 'stale_running_state') { 'stopped_stale_state' } else { 'stopped' })
+    $status.StopRequestCleared = $true
+    return $status
 }
