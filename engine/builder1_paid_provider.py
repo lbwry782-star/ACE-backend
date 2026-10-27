@@ -6,6 +6,14 @@ from __future__ import annotations
 import logging
 from typing import Callable, Literal, Optional, TypeVar
 
+_after_halt_checkpoint: Optional[Callable[[str, str], None]] = None
+
+
+def set_after_builder1_halt_checkpoint_hook(hook: Optional[Callable[[str, str], None]]) -> None:
+    """Test-only. Runs after halt check and before the vendor dispatch."""
+    global _after_halt_checkpoint
+    _after_halt_checkpoint = hook
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
@@ -108,6 +116,9 @@ def run_paid_provider_call(
     """
     Execute one paid provider dispatch with durable submitted/succeeded/outcome tracking.
     pre_submit runs before submission (config validation — failures are failed_known).
+    Halt is checked before dispatch; a halt that arrives after that check and before
+    the vendor call is not atomic. An already-started vendor call is not cancelled.
+    The returned value is inquiry-only if halt is visible after dispatch.
     """
     from engine.builder1_job_cancellation import Builder1JobCancelledError, checkpoint_builder1_cancellation
     from engine.builder1_paid_stage_guard import (
@@ -123,6 +134,9 @@ def run_paid_provider_call(
     jid = current_builder1_job_id()
     cid = current_builder1_campaign_id()
     checkpoint_builder1_cancellation(jid, campaign_id=cid, stage=stage_name)
+    hook = _after_halt_checkpoint
+    if hook is not None:
+        hook(jid, stage_name)
     assert_paid_stage_may_start(jid)
 
     if pre_submit is not None:
@@ -148,6 +162,17 @@ def run_paid_provider_call(
 
     try:
         result = dispatch()
+        if jid:
+            from engine.builder1_job_cancellation import record_late_builder1_vendor_result
+
+            try:
+                checkpoint_builder1_cancellation(jid, campaign_id=cid, stage=f"{stage_name}_after_vendor")
+            except Builder1JobCancelledError:
+                record_late_builder1_vendor_result(
+                    jid,
+                    {"imageUrl": str(result)[:240] if result is not None else "", "adIndex": ad_index},
+                )
+                raise
     except Builder1JobCancelledError:
         raise
     except PaidStageOutcomeUnknownError:

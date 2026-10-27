@@ -112,16 +112,78 @@ from engine.builder1_zip import build_builder1_zip_bytes, build_builder1_zip_fro
 app = Flask(__name__)
 
 from engine.ace_payment_routes import ace_payment_bp
-from engine.ace_local_dev_routes import ace_local_dev_bp
 
 app.register_blueprint(ace_payment_bp)
-app.register_blueprint(ace_local_dev_bp)
+
+from engine.ace_local_dev_config import is_local_dev_enabled as _ace_local_dev_runtime_enabled
+
+if _ace_local_dev_runtime_enabled():
+    from engine.ace_local_dev_routes import ace_local_dev_bp
+
+    app.register_blueprint(ace_local_dev_bp)
 
 # Configure logging early (handlers use logger at request time)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 _builder1_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="builder1_job")
+_builder1_worker_start_hook = None
+
+
+def set_builder1_worker_start_hook(hook) -> None:
+    """Test-only. Runs after submit, at worker start, before paid stages."""
+    global _builder1_worker_start_hook
+    _builder1_worker_start_hook = hook
+
+
+def _builder1_try_begin_coordination(job_id: str):
+    if not _ace_local_dev_runtime_enabled():
+        return None, None
+    from engine.ace_local_dev_builder1_coordination import (
+        begin_builder1_coordination,
+        builder1_coordination_http_status,
+    )
+    from engine.ace_local_dev_coordination_lease import CoordinationBeginRejected
+
+    try:
+        return begin_builder1_coordination(job_id), None
+    except CoordinationBeginRejected as exc:
+        return None, (
+            jsonify({"ok": False, "error": exc.code, "jobId": job_id}),
+            builder1_coordination_http_status(exc.code),
+        )
+
+
+def _builder1_reuse_or_begin_lease(job_id: str, coord_lease):
+    if not _ace_local_dev_runtime_enabled():
+        return None
+    if coord_lease is not None:
+        return coord_lease
+    from engine.ace_local_dev_builder1_coordination import begin_builder1_coordination
+
+    return begin_builder1_coordination(job_id)
+
+
+def _builder1_submit_coordinated(fn, *args, coordination_lease=None, **kwargs):
+    if not _ace_local_dev_runtime_enabled():
+        return _builder1_executor.submit(fn, *args, **kwargs)
+    from engine.ace_local_dev_builder1_coordination import submit_builder1_coordinated
+
+    return submit_builder1_coordinated(
+        _builder1_executor,
+        fn,
+        *args,
+        coordination_lease=coordination_lease,
+        **kwargs,
+    )
+
+
+def _builder1_finish_coordination(lease, *, uncaught: bool) -> None:
+    if lease is None or not _ace_local_dev_runtime_enabled():
+        return
+    from engine.ace_local_dev_builder1_coordination import finish_builder1_background_coordination
+
+    finish_builder1_background_coordination(lease, uncaught=uncaught)
 
 
 def _builder1_require_production_ready() -> Optional[tuple[Any, int]]:
@@ -225,8 +287,13 @@ def _builder1_idempotency_finish(
 
 
 def _builder1_mark_worker_started(job_id: str) -> None:
+    from engine.builder1_job_cancellation import checkpoint_builder1_cancellation
     from engine.builder1_request_idempotency import mark_builder1_worker_started
 
+    hook = _builder1_worker_start_hook
+    if hook is not None:
+        hook(job_id)
+    checkpoint_builder1_cancellation(job_id, stage="worker_start")
     mark_builder1_worker_started(job_id)
 
 
@@ -493,11 +560,23 @@ def is_origin_allowed(origin: Optional[str]) -> bool:
     return origin in ALLOWED_ORIGINS
 
 
+def _cors_allow_request_origin(origin: Optional[str]) -> bool:
+    if request.path.startswith("/api/local-dev/"):
+        if not _ace_local_dev_runtime_enabled():
+            return False
+        from engine.ace_local_dev_origin import local_dev_cors_allow_origin
+
+        return local_dev_cors_allow_origin(request.path, origin) is not None
+    if is_security_enabled():
+        return is_origin_allowed(origin)
+    return bool(origin)
+
+
 @app.before_request
 def handle_preflight():
     if request.method == "OPTIONS" and request.path.startswith("/api/"):
         origin = request.headers.get("Origin")
-        allow_origin = is_origin_allowed(origin) if is_security_enabled() else bool(origin)
+        allow_origin = _cors_allow_request_origin(origin)
         if allow_origin and origin:
             response = Response("", status=200)
             response.headers["Access-Control-Allow-Origin"] = origin
@@ -516,7 +595,7 @@ def handle_preflight():
 def add_cors_headers(response):
     if request.path.startswith("/api/"):
         origin = request.headers.get("Origin")
-        allow_origin = is_origin_allowed(origin) if is_security_enabled() else bool(origin)
+        allow_origin = _cors_allow_request_origin(origin)
         if allow_origin and origin:
             response.headers["Access-Control-Allow-Origin"] = origin
             response.headers["Vary"] = "Origin"
@@ -850,7 +929,9 @@ def generate_video():
             claim_initial_generate_enqueue,
             extract_request_id,
             fingerprint_initial_generate_video,
+            initial_generate_work_kind,
             mark_initial_generate_enqueued,
+            peek_initial_generate_idempotency,
             replay_response_from_record,
             validate_request_id_format,
         )
@@ -861,124 +942,201 @@ def generate_video():
         if request_id and not validate_request_id_format(request_id):
             return jsonify({"ok": False, "error": "builder2_initial_generate_request_id_invalid"}), 400
 
+        owner_ref = extract_owner_context_from_request(request).get("ownerContextRef") or ""
+        req_fingerprint = fingerprint_initial_generate_video(payload, target_video_count=target_video_count)
+        peeked = peek_initial_generate_idempotency(owner_context_ref=owner_ref, request_id=request_id)
+        work_kind = initial_generate_work_kind(peeked, request_fingerprint=req_fingerprint) if request_id else "new"
+        if work_kind == "conflict":
+            return jsonify({"ok": False, "error": "builder2_idempotency_conflict"}), 409
+        if work_kind == "replay" and peeked:
+            if peeked.get("response"):
+                return jsonify(replay_response_from_record(peeked)), 200
+            return jsonify(build_in_progress_response(peeked)), 200
+
         idem_key = ""
-        if request_id:
-            owner_ref = extract_owner_context_from_request(request).get("ownerContextRef") or ""
-            req_fingerprint = fingerprint_initial_generate_video(payload, target_video_count=target_video_count)
-            proposed_job_id = str(uuid.uuid4())
-            proposed_allowance_id = str(uuid.uuid4())
-            begin = begin_initial_generate_idempotency(
-                request_id=request_id,
-                owner_context_ref=owner_ref,
-                request_fingerprint=req_fingerprint,
-                job_id=proposed_job_id,
-                video_allowance_id=proposed_allowance_id if tournament_enabled else "",
-                target_video_count=target_video_count,
+        builder2_lease = None
+        proposed_job_id = str((peeked or {}).get("jobId") or uuid.uuid4())
+        proposed_allowance_id = str((peeked or {}).get("videoAllowanceId") or uuid.uuid4())
+        if _ace_local_dev_runtime_enabled():
+            from engine.ace_local_dev_builder2_coordination import (
+                builder2_coordination_http_status,
+                try_begin_builder2_coordination,
             )
-            idem_key = begin.key
-            if begin.kind == "conflict":
-                return jsonify({"ok": False, "error": "builder2_idempotency_conflict"}), 409
-            job_id = str(begin.record.get("jobId") or proposed_job_id)
-            video_allowance_id = str(begin.record.get("videoAllowanceId") or proposed_allowance_id)
-            if begin.kind == "replay":
-                if begin.record.get("response"):
-                    return jsonify(replay_response_from_record(begin.record)), 200
-                return jsonify(build_in_progress_response(begin.record)), 200
 
-            claimed, should_replay, idem_record = claim_initial_generate_enqueue(idem_key)
-            if should_replay:
-                if idem_record.get("response"):
-                    return jsonify(replay_response_from_record(idem_record)), 200
-                return jsonify(build_in_progress_response(idem_record)), 200
-            if not claimed:
-                return jsonify(build_in_progress_response(idem_record or begin.record)), 200
+            builder2_lease, coord_deny = try_begin_builder2_coordination(proposed_job_id)
+            if coord_deny is not None:
+                return jsonify(coord_deny), builder2_coordination_http_status(str(coord_deny.get("error") or ""))
 
-            if video_job_get_raw(job_id):
-                response_body = replay_response_from_record(idem_record or begin.record)
-                if not (idem_record or begin.record).get("response"):
-                    response_body = {
-                        "ok": True,
-                        "jobId": job_id,
-                        "status": "queued",
-                        "videoAllowanceId": video_allowance_id or None,
+        submission_unresolved = True
+
+        def _end_builder2_submission(*, unresolved: bool = False) -> None:
+            nonlocal submission_unresolved
+            submission_unresolved = False
+            if not _ace_local_dev_runtime_enabled():
+                return
+            from engine.ace_local_dev_builder2_coordination import finish_builder2_submission
+
+            finish_builder2_submission(builder2_lease, unresolved=unresolved)
+
+        try:
+            if request_id:
+                begin = begin_initial_generate_idempotency(
+                    request_id=request_id,
+                    owner_context_ref=owner_ref,
+                    request_fingerprint=req_fingerprint,
+                    job_id=proposed_job_id,
+                    video_allowance_id=proposed_allowance_id if tournament_enabled else "",
+                    target_video_count=target_video_count,
+                )
+                idem_key = begin.key
+                if begin.kind == "conflict":
+                    _end_builder2_submission()
+                    return jsonify({"ok": False, "error": "builder2_idempotency_conflict"}), 409
+                job_id = str(begin.record.get("jobId") or proposed_job_id)
+                video_allowance_id = str(begin.record.get("videoAllowanceId") or proposed_allowance_id)
+                if begin.kind == "replay":
+                    _end_builder2_submission()
+                    if begin.record.get("response"):
+                        return jsonify(replay_response_from_record(begin.record)), 200
+                    return jsonify(build_in_progress_response(begin.record)), 200
+
+                claimed, should_replay, idem_record = claim_initial_generate_enqueue(idem_key)
+                if should_replay:
+                    _end_builder2_submission()
+                    if idem_record.get("response"):
+                        return jsonify(replay_response_from_record(idem_record)), 200
+                    return jsonify(build_in_progress_response(idem_record)), 200
+                if not claimed:
+                    _end_builder2_submission()
+                    return jsonify(build_in_progress_response(idem_record or begin.record)), 200
+
+                if video_job_get_raw(job_id):
+                    authorized_ace_root = (
+                        builder2_lease.ace_root
+                        if builder2_lease is not None
+                        and builder2_lease.registered
+                        and builder2_lease.ace_root is not None
+                        else None
+                    )
+                    try:
+                        video_job_create(
+                            job_id,
+                            product_name,
+                            product_description,
+                            base,
+                            extra_fields=None,
+                            authorized_ace_root=authorized_ace_root,
+                        )
+                    except Exception as e:
+                        logger.error("VIDEO_JOB_REDIS_ENQUEUE_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
+                        _end_builder2_submission()
+                        return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+                    response_body = replay_response_from_record(idem_record or begin.record)
+                    if not (idem_record or begin.record).get("response"):
+                        response_body = {
+                            "ok": True,
+                            "jobId": job_id,
+                            "status": "queued",
+                            "videoAllowanceId": video_allowance_id or None,
+                            "targetVideoCount": target_video_count,
+                            "videoIndex": 1,
+                        }
+                        if not tournament_enabled:
+                            response_body.pop("videoAllowanceId", None)
+                            response_body.pop("targetVideoCount", None)
+                            response_body.pop("videoIndex", None)
+                        mark_initial_generate_enqueued(idem_key, response=response_body)
+                    _end_builder2_submission()
+                    return jsonify(response_body), 200
+            else:
+                job_id = proposed_job_id
+                video_allowance_id = proposed_allowance_id if tournament_enabled else ""
+
+            if not video_allowance_id and tournament_enabled:
+                video_allowance_id = str(uuid.uuid4())
+
+            config_err = _ace_security_config_or_fail()
+            if config_err is not None:
+                _end_builder2_submission()
+                return config_err
+            if is_security_enabled():
+                if not tournament_enabled:
+                    from engine.ace_payment_authorization import auth_reject
+
+                    _end_builder2_submission()
+                    return auth_reject("ace_checkout_allowance_required")
+                purchased_video_count, _, sec_deny = _ace_security_guard_builder2_create(
+                    client_video_count=payload.get("targetVideoCount"),
+                    video_allowance_id=video_allowance_id,
+                )
+                if sec_deny is not None:
+                    _end_builder2_submission()
+                    return sec_deny
+                if purchased_video_count is not None:
+                    target_video_count = int(purchased_video_count)
+
+            logger.info("VIDEO_TIMING_STAGE_START stage=request_received jobId=%s", job_id)
+            extra_fields = None
+            authorized_ace_root = (
+                builder2_lease.ace_root
+                if builder2_lease is not None and builder2_lease.registered and builder2_lease.ace_root is not None
+                else None
+            )
+            try:
+                from engine.builder2_video_allowance import create_initial_allowance_and_job_fields
+
+                if tournament_enabled:
+                    extra_fields, video_allowance_id = create_initial_allowance_and_job_fields(
+                        request=request,
+                        payload=payload,
+                        target_video_count=target_video_count,
+                        job_id=job_id,
+                        product_name=product_name,
+                        product_description=product_description,
+                        video_allowance_id=video_allowance_id,
+                    )
+            except Exception:
+                extra_fields = None
+                video_allowance_id = ""
+            try:
+                video_job_create(
+                    job_id,
+                    product_name,
+                    product_description,
+                    base,
+                    extra_fields=extra_fields,
+                    authorized_ace_root=authorized_ace_root,
+                )
+            except Exception as e:
+                logger.error("VIDEO_JOB_REDIS_ENQUEUE_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
+                _end_builder2_submission()
+                return jsonify({"ok": False, "error": "video_generation_failed"}), 200
+            logger.info("VIDEO_JOB_CREATED jobId=%s", job_id)
+            logger.info(
+                "VIDEO_TIMING_STAGE_END stage=job_created jobId=%s elapsed_ms=%.1f",
+                job_id,
+                (_time.monotonic() - t_req0) * 1000.0,
+            )
+            response_body = {
+                "ok": True,
+                "jobId": job_id,
+                "status": "queued",
+            }
+            if video_allowance_id:
+                response_body.update(
+                    {
+                        "videoAllowanceId": video_allowance_id,
                         "targetVideoCount": target_video_count,
                         "videoIndex": 1,
                     }
-                    if not tournament_enabled:
-                        response_body.pop("videoAllowanceId", None)
-                        response_body.pop("targetVideoCount", None)
-                        response_body.pop("videoIndex", None)
-                    mark_initial_generate_enqueued(idem_key, response=response_body)
-                return jsonify(response_body), 200
-        else:
-            job_id = str(uuid.uuid4())
-            video_allowance_id = str(uuid.uuid4()) if tournament_enabled else ""
-
-        if not video_allowance_id and tournament_enabled:
-            video_allowance_id = str(uuid.uuid4())
-
-        config_err = _ace_security_config_or_fail()
-        if config_err is not None:
-            return config_err
-        if is_security_enabled():
-            if not tournament_enabled:
-                from engine.ace_payment_authorization import auth_reject
-
-                return auth_reject("ace_checkout_allowance_required")
-            purchased_video_count, _, sec_deny = _ace_security_guard_builder2_create(
-                client_video_count=payload.get("targetVideoCount"),
-                video_allowance_id=video_allowance_id,
-            )
-            if sec_deny is not None:
-                return sec_deny
-            if purchased_video_count is not None:
-                target_video_count = int(purchased_video_count)
-
-        logger.info("VIDEO_TIMING_STAGE_START stage=request_received jobId=%s", job_id)
-        extra_fields = None
-        try:
-            from engine.builder2_video_allowance import create_initial_allowance_and_job_fields
-
-            if tournament_enabled:
-                extra_fields, video_allowance_id = create_initial_allowance_and_job_fields(
-                    request=request,
-                    payload=payload,
-                    target_video_count=target_video_count,
-                    job_id=job_id,
-                    product_name=product_name,
-                    product_description=product_description,
-                    video_allowance_id=video_allowance_id,
                 )
-        except Exception:
-            extra_fields = None
-            video_allowance_id = ""
-        try:
-            video_job_create(job_id, product_name, product_description, base, extra_fields=extra_fields)
-        except Exception as e:
-            logger.error("VIDEO_JOB_REDIS_ENQUEUE_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
-            return jsonify({"ok": False, "error": "video_generation_failed"}), 200
-        logger.info("VIDEO_JOB_CREATED jobId=%s", job_id)
-        logger.info(
-            "VIDEO_TIMING_STAGE_END stage=job_created jobId=%s elapsed_ms=%.1f",
-            job_id,
-            (_time.monotonic() - t_req0) * 1000.0,
-        )
-        response_body = {
-            "ok": True,
-            "jobId": job_id,
-            "status": "queued",
-        }
-        if video_allowance_id:
-            response_body.update(
-                {
-                    "videoAllowanceId": video_allowance_id,
-                    "targetVideoCount": target_video_count,
-                    "videoIndex": 1,
-                }
-            )
-        if idem_key:
-            mark_initial_generate_enqueued(idem_key, response=response_body)
-        return jsonify(response_body), 200
+            if idem_key:
+                mark_initial_generate_enqueued(idem_key, response=response_body)
+            _end_builder2_submission()
+            return jsonify(response_body), 200
+        finally:
+            if submission_unresolved:
+                _end_builder2_submission(unresolved=True)
     except Exception as e:
         logger.error("generate_video enqueue failed: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": "video_generation_failed"}), 200
@@ -1171,7 +1329,9 @@ def generate_video_next():
             "allowance_consumed",
             "video_one_not_complete",
             "target_video_count_not_two",
-        } else 404 if code == "allowance_not_found" else 400
+            "ace_local_dev_operations_frozen",
+            "ace_local_dev_operation_in_progress",
+        } else 503 if code == "ace_local_dev_coordination_unavailable" else 404 if code == "allowance_not_found" else 400
         return jsonify(result), status
     return jsonify(result), 200
 
@@ -1208,7 +1368,11 @@ def builder2_resume():
             "ownership_mismatch",
             "ownership_required",
             "ownership_required_historical_job",
-        } else 409 if result.get("error") == "not_resumable" else 404 if result.get("error") == "not_found" else 400
+        } else 409 if result.get("error") in {
+            "not_resumable",
+            "ace_local_dev_operations_frozen",
+            "ace_local_dev_operation_in_progress",
+        } else 503 if result.get("error") == "ace_local_dev_coordination_unavailable" else 404 if result.get("error") == "not_found" else 400
         return jsonify(result), status_code
     except Exception as e:
         logger.error("BUILDER2_RESUME_FAILED jobId=%s err=%s", job_id, e, exc_info=True)
@@ -2168,34 +2332,42 @@ def _builder1_run_resume_integrity_recovered_job(
     job_id: str,
     campaign_id: str,
     target_ad_count: int,
+    coordination_lease=None,
 ) -> None:
     """Resume image generation after integrity recovery — no planning calls."""
     from engine.builder1_job_cancellation import Builder1JobCancelledError
     from engine.builder1_paid_stage_guard import builder1_paid_stage_context
 
-    logger.info(
-        "BUILDER1_INTEGRITY_RECOVERY_RESUME jobId=%s campaignId=%s targetAdCount=%s",
-        job_id,
-        campaign_id,
-        target_ad_count,
-    )
-    _builder1_mark_worker_started(job_id)
-    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
-        try:
-            result = _builder1_generate_single_ad(
-                job_id=job_id,
-                campaign_id=campaign_id,
-                ad_index=1,
-                already_reserved=False,
-            )
-            _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
-        except Builder1JobCancelledError:
-            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
-        except Exception as e:
-            _builder1_handle_background_job_exception(job_id, e)
+    uncaught = False
+    try:
+        logger.info(
+            "BUILDER1_INTEGRITY_RECOVERY_RESUME jobId=%s campaignId=%s targetAdCount=%s",
+            job_id,
+            campaign_id,
+            target_ad_count,
+        )
+        _builder1_mark_worker_started(job_id)
+        with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+            try:
+                result = _builder1_generate_single_ad(
+                    job_id=job_id,
+                    campaign_id=campaign_id,
+                    ad_index=1,
+                    already_reserved=False,
+                )
+                _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
+            except Builder1JobCancelledError:
+                logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+            except Exception as e:
+                _builder1_handle_background_job_exception(job_id, e)
+    except BaseException:
+        uncaught = True
+        raise
+    finally:
+        _builder1_finish_coordination(coordination_lease, uncaught=uncaught)
 
 
-def _builder1_run_resume_planning_job(job_id: str, campaign_id: str) -> None:
+def _builder1_run_resume_planning_job(job_id: str, campaign_id: str, coordination_lease=None) -> None:
     from engine.builder1_job_planning_request import planning_request_snapshot_from_job
     from engine.builder1_planning_resume import (
         clear_builder1_planning_resume_requested,
@@ -2203,39 +2375,46 @@ def _builder1_run_resume_planning_job(job_id: str, campaign_id: str) -> None:
         log_builder1_planning_resume_started,
     )
 
-    job = get_builder1_job(job_id) or {}
-    snapshot = planning_request_snapshot_from_job(job)
-    if snapshot is None:
-        log_builder1_planning_resume_completed(job_id, campaign_id=campaign_id, ok=False, error="snapshot_missing")
-        update_builder1_job(
-            job_id,
-            status="error",
-            error="planning_resume_snapshot_missing",
-            planningResumeRequested=False,
-        )
-        return
-
-    log_builder1_planning_resume_started(job_id, campaign_id=campaign_id)
+    uncaught = False
     try:
-        _builder1_run_initial_job(
+        job = get_builder1_job(job_id) or {}
+        snapshot = planning_request_snapshot_from_job(job)
+        if snapshot is None:
+            log_builder1_planning_resume_completed(job_id, campaign_id=campaign_id, ok=False, error="snapshot_missing")
+            update_builder1_job(
+                job_id,
+                status="error",
+                error="planning_resume_snapshot_missing",
+                planningResumeRequested=False,
+            )
+            return
+
+        log_builder1_planning_resume_started(job_id, campaign_id=campaign_id)
+        try:
+            _builder1_run_initial_job(
+                job_id,
+                campaign_id,
+                str(snapshot.get("productName") or ""),
+                str(snapshot.get("productDescription") or ""),
+                str(snapshot.get("format") or "portrait"),
+                int(snapshot.get("adCount") or job.get("targetAdCount") or 2),
+                snapshot.get("brandGuidelines"),
+            )
+        finally:
+            clear_builder1_planning_resume_requested(job_id)
+        reloaded = get_builder1_job(job_id) or {}
+        status = str(reloaded.get("status") or "")
+        log_builder1_planning_resume_completed(
             job_id,
-            campaign_id,
-            str(snapshot.get("productName") or ""),
-            str(snapshot.get("productDescription") or ""),
-            str(snapshot.get("format") or "portrait"),
-            int(snapshot.get("adCount") or job.get("targetAdCount") or 2),
-            snapshot.get("brandGuidelines"),
+            campaign_id=campaign_id,
+            ok=status == "done",
+            error=str(reloaded.get("error") or ""),
         )
+    except BaseException:
+        uncaught = True
+        raise
     finally:
-        clear_builder1_planning_resume_requested(job_id)
-    reloaded = get_builder1_job(job_id) or {}
-    status = str(reloaded.get("status") or "")
-    log_builder1_planning_resume_completed(
-        job_id,
-        campaign_id=campaign_id,
-        ok=status == "done",
-        error=str(reloaded.get("error") or ""),
-    )
+        _builder1_finish_coordination(coordination_lease, uncaught=uncaught)
 
 
 def _builder1_run_initial_job(
@@ -2246,91 +2425,125 @@ def _builder1_run_initial_job(
     format_val: str,
     ad_count: int,
     brand_guidelines: Optional[dict[str, Any]],
+    coordination_lease=None,
 ) -> None:
     from engine.builder1_job_cancellation import Builder1JobCancelledError
     from engine.builder1_paid_stage_guard import builder1_paid_stage_context
 
-    logger.info("BUILDER1_JOB_STARTED jobId=%s campaignId=%s adCount=%s", job_id, campaign_id, ad_count)
-    _builder1_mark_worker_started(job_id)
-    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
-        try:
-            result = _builder1_generate_initial(
-                job_id, campaign_id, product_name, product_description, format_val, ad_count, brand_guidelines
-            )
-            _builder1_finalize_job(job_id, result, target_ad_count=ad_count)
-        except Builder1JobCancelledError:
-            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
-        except Exception as e:
-            _builder1_handle_background_job_exception(job_id, e)
+    uncaught = False
+    try:
+        logger.info("BUILDER1_JOB_STARTED jobId=%s campaignId=%s adCount=%s", job_id, campaign_id, ad_count)
+        _builder1_mark_worker_started(job_id)
+        with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+            try:
+                result = _builder1_generate_initial(
+                    job_id, campaign_id, product_name, product_description, format_val, ad_count, brand_guidelines
+                )
+                _builder1_finalize_job(job_id, result, target_ad_count=ad_count)
+            except Builder1JobCancelledError:
+                logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+            except Exception as e:
+                _builder1_handle_background_job_exception(job_id, e)
+    except BaseException:
+        uncaught = True
+        raise
+    finally:
+        _builder1_finish_coordination(coordination_lease, uncaught=uncaught)
 
 
-def _builder1_run_review_only_job(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
+def _builder1_run_review_only_job(job_id: str, campaign_id: str, retry_ad_index: int, coordination_lease=None) -> None:
     from engine.builder1_job_cancellation import Builder1JobCancelledError
     from engine.builder1_paid_stage_guard import builder1_paid_stage_context
 
-    logger.info(
-        "BUILDER1_REVIEW_ONLY_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
-        job_id,
-        campaign_id,
-        retry_ad_index,
-    )
-    _builder1_mark_worker_started(job_id)
-    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
-        try:
-            result = _builder1_generate_review_only_ad(
-                job_id=job_id,
-                campaign_id=campaign_id,
-                ad_index=retry_ad_index,
-                already_reserved=True,
-            )
-            target_ad_count = get_campaign_session(campaign_id).target_ad_count
-            _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
-        except Builder1JobCancelledError:
-            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
-        except Exception as e:
-            _builder1_handle_background_job_exception(job_id, e)
+    uncaught = False
+    try:
+        logger.info(
+            "BUILDER1_REVIEW_ONLY_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
+            job_id,
+            campaign_id,
+            retry_ad_index,
+        )
+        _builder1_mark_worker_started(job_id)
+        with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+            try:
+                result = _builder1_generate_review_only_ad(
+                    job_id=job_id,
+                    campaign_id=campaign_id,
+                    ad_index=retry_ad_index,
+                    already_reserved=True,
+                )
+                target_ad_count = get_campaign_session(campaign_id).target_ad_count
+                _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
+            except Builder1JobCancelledError:
+                logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+            except Exception as e:
+                _builder1_handle_background_job_exception(job_id, e)
+    except BaseException:
+        uncaught = True
+        raise
+    finally:
+        _builder1_finish_coordination(coordination_lease, uncaught=uncaught)
 
 
-def _builder1_run_next_job(job_id: str, campaign_id: str, expected_next_index: int) -> None:
+def _builder1_run_next_job(job_id: str, campaign_id: str, expected_next_index: int, coordination_lease=None) -> None:
     from engine.builder1_job_cancellation import Builder1JobCancelledError
     from engine.builder1_paid_stage_guard import builder1_paid_stage_context
 
-    logger.info(
-        "BUILDER1_NEXT_AD_REQUEST jobId=%s campaignId=%s expectedNextIndex=%s",
-        job_id,
-        campaign_id,
-        expected_next_index,
-    )
-    _builder1_mark_worker_started(job_id)
-    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
-        try:
-            result = _builder1_generate_single_ad(
-                job_id=job_id,
-                campaign_id=campaign_id,
-                ad_index=expected_next_index,
-                already_reserved=True,
-                log_next_ad_timing=True,
-            )
-            target_ad_count = get_campaign_session(campaign_id).target_ad_count
-            _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
-        except Builder1JobCancelledError:
-            logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
-        except Exception as e:
-            _builder1_handle_background_job_exception(job_id, e)
+    uncaught = False
+    try:
+        logger.info(
+            "BUILDER1_NEXT_AD_REQUEST jobId=%s campaignId=%s expectedNextIndex=%s",
+            job_id,
+            campaign_id,
+            expected_next_index,
+        )
+        _builder1_mark_worker_started(job_id)
+        with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+            try:
+                result = _builder1_generate_single_ad(
+                    job_id=job_id,
+                    campaign_id=campaign_id,
+                    ad_index=expected_next_index,
+                    already_reserved=True,
+                    log_next_ad_timing=True,
+                )
+                target_ad_count = get_campaign_session(campaign_id).target_ad_count
+                _builder1_finalize_job(job_id, result, target_ad_count=target_ad_count)
+            except Builder1JobCancelledError:
+                logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+            except Exception as e:
+                _builder1_handle_background_job_exception(job_id, e)
+    except BaseException:
+        uncaught = True
+        raise
+    finally:
+        _builder1_finish_coordination(coordination_lease, uncaught=uncaught)
 
 
-def _builder1_run_physical_repair_job(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
+def _builder1_run_physical_repair_job(job_id: str, campaign_id: str, retry_ad_index: int, coordination_lease=None) -> None:
     from engine.builder1_paid_stage_guard import builder1_paid_stage_context
 
-    logger.info(
-        "BUILDER1_PHYSICAL_REPAIR_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
-        job_id,
-        campaign_id,
-        retry_ad_index,
-    )
-    _builder1_mark_worker_started(job_id)
-    with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
-        _builder1_run_physical_repair_job_inner(job_id, campaign_id, retry_ad_index)
+    uncaught = False
+    try:
+        logger.info(
+            "BUILDER1_PHYSICAL_REPAIR_REQUEST jobId=%s campaignId=%s retryAdIndex=%s",
+            job_id,
+            campaign_id,
+            retry_ad_index,
+        )
+        from engine.builder1_job_cancellation import Builder1JobCancelledError
+
+        _builder1_mark_worker_started(job_id)
+        with builder1_paid_stage_context(job_id=job_id, campaign_id=campaign_id):
+            try:
+                _builder1_run_physical_repair_job_inner(job_id, campaign_id, retry_ad_index)
+            except Builder1JobCancelledError:
+                logger.info("BUILDER1_JOB_CANCELLED_DURING_RUN jobId=%s", job_id)
+    except BaseException:
+        uncaught = True
+        raise
+    finally:
+        _builder1_finish_coordination(coordination_lease, uncaught=uncaught)
 
 
 def _builder1_run_physical_repair_job_inner(job_id: str, campaign_id: str, retry_ad_index: int) -> None:
@@ -2525,7 +2738,11 @@ def builder1_generate():
         ad_count=ad_count,
         brand_guidelines=brand_guidelines,
     )
+    coord_lease = None
     if get_builder1_job(job_id) is None:
+        coord_lease, coord_deny = _builder1_try_begin_coordination(job_id)
+        if coord_deny is not None:
+            return coord_deny
         create_builder1_job(
             job_id=job_id,
             campaign_id=campaign_id,
@@ -2548,7 +2765,8 @@ def builder1_generate():
     }
 
     def _submit() -> None:
-        _builder1_executor.submit(
+        active = _builder1_reuse_or_begin_lease(job_id, coord_lease)
+        _builder1_submit_coordinated(
             _builder1_run_initial_job,
             job_id,
             campaign_id,
@@ -2557,6 +2775,7 @@ def builder1_generate():
             format_val,
             ad_count,
             brand_guidelines,
+            coordination_lease=active,
         )
 
     return _builder1_idempotency_finish(
@@ -2650,6 +2869,10 @@ def builder1_resume_planning():
 
     from engine.builder1_request_idempotency import extract_request_id
 
+    coord_lease, coord_deny = _builder1_try_begin_coordination(job_id)
+    if coord_deny is not None:
+        return coord_deny
+
     mark_builder1_planning_resume_requested(
         job_id,
         source="api",
@@ -2667,7 +2890,12 @@ def builder1_resume_planning():
     }
 
     def _submit() -> None:
-        _builder1_executor.submit(_builder1_run_resume_planning_job, job_id, campaign_id)
+        _builder1_submit_coordinated(
+            _builder1_run_resume_planning_job,
+            job_id,
+            campaign_id,
+            coordination_lease=coord_lease,
+        )
 
     return _builder1_idempotency_finish(
         idem_key=idem_key,
@@ -2749,7 +2977,11 @@ def builder1_retry_image():
     if early is not None:
         return early
 
+    coord_lease = None
     if get_builder1_job(job_id) is None:
+        coord_lease, coord_deny = _builder1_try_begin_coordination(job_id)
+        if coord_deny is not None:
+            return coord_deny
         try:
             if (
                 session.generating_lock_owner_job_id == job_id
@@ -2759,6 +2991,8 @@ def builder1_retry_image():
             else:
                 session = reserve_next_ad_index(campaign_id, retry_ad_index, job_id=job_id)
         except CampaignStoreError as e:
+            if coord_lease is not None:
+                coord_lease.complete()
             return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
         create_builder1_job(
             job_id=job_id,
@@ -2790,11 +3024,13 @@ def builder1_retry_image():
     }
 
     def _submit() -> None:
-        _builder1_executor.submit(
+        active = _builder1_reuse_or_begin_lease(job_id, coord_lease)
+        _builder1_submit_coordinated(
             _builder1_run_next_job,
             job_id,
             campaign_id,
             retry_ad_index,
+            coordination_lease=active,
         )
 
     return _builder1_idempotency_finish(
@@ -2861,7 +3097,11 @@ def builder1_repair_physical():
     if early is not None:
         return early
 
+    coord_lease = None
     if get_builder1_job(job_id) is None:
+        coord_lease, coord_deny = _builder1_try_begin_coordination(job_id)
+        if coord_deny is not None:
+            return coord_deny
         create_builder1_job(
             job_id=job_id,
             campaign_id=campaign_id,
@@ -2892,11 +3132,13 @@ def builder1_repair_physical():
     }
 
     def _submit() -> None:
-        _builder1_executor.submit(
+        active = _builder1_reuse_or_begin_lease(job_id, coord_lease)
+        _builder1_submit_coordinated(
             _builder1_run_physical_repair_job,
             job_id,
             campaign_id,
             retry_ad_index,
+            coordination_lease=active,
         )
 
     return _builder1_idempotency_finish(
@@ -2959,6 +3201,12 @@ def builder1_generate_next():
     if early is not None:
         return early
 
+    coord_lease = None
+    if get_builder1_job(job_id) is None:
+        coord_lease, coord_deny = _builder1_try_begin_coordination(job_id)
+        if coord_deny is not None:
+            return coord_deny
+
     retry_mode = resolve_authoritative_retry_mode(
         status=session.status,
         retry_mode=session.retry_mode,
@@ -2969,6 +3217,8 @@ def builder1_generate_next():
             try:
                 session = begin_physical_repair(campaign_id, job_id=job_id)
             except CampaignStoreError as e:
+                if coord_lease is not None:
+                    coord_lease.complete()
                 return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
             create_builder1_job(
                 job_id=job_id,
@@ -3004,11 +3254,13 @@ def builder1_generate_next():
         }
 
         def _submit_repair() -> None:
-            _builder1_executor.submit(
+            active = _builder1_reuse_or_begin_lease(job_id, coord_lease)
+            _builder1_submit_coordinated(
                 _builder1_run_physical_repair_job,
                 job_id,
                 campaign_id,
                 expected_next_index,
+                coordination_lease=active,
             )
 
         return _builder1_idempotency_finish(
@@ -3029,6 +3281,8 @@ def builder1_generate_next():
                 else:
                     session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
             except CampaignStoreError as e:
+                if coord_lease is not None:
+                    coord_lease.complete()
                 return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
             create_builder1_job(
                 job_id=job_id,
@@ -3060,11 +3314,13 @@ def builder1_generate_next():
         }
 
         def _submit_review() -> None:
-            _builder1_executor.submit(
+            active = _builder1_reuse_or_begin_lease(job_id, coord_lease)
+            _builder1_submit_coordinated(
                 _builder1_run_review_only_job,
                 job_id,
                 campaign_id,
                 expected_next_index,
+                coordination_lease=active,
             )
 
         return _builder1_idempotency_finish(
@@ -3084,6 +3340,8 @@ def builder1_generate_next():
             else:
                 session = reserve_next_ad_index(campaign_id, expected_next_index, job_id=job_id)
         except CampaignStoreError as e:
+            if coord_lease is not None:
+                coord_lease.complete()
             return jsonify({"ok": False, "error": e.code, "message": e.message, "campaignId": campaign_id}), 200
         create_builder1_job(
             job_id=job_id,
@@ -3118,7 +3376,14 @@ def builder1_generate_next():
     }
 
     def _submit_next() -> None:
-        _builder1_executor.submit(_builder1_run_next_job, job_id, campaign_id, expected_next_index)
+        active = _builder1_reuse_or_begin_lease(job_id, coord_lease)
+        _builder1_submit_coordinated(
+            _builder1_run_next_job,
+            job_id,
+            campaign_id,
+            expected_next_index,
+            coordination_lease=active,
+        )
 
     return _builder1_idempotency_finish(
         idem_key=idem_key,
@@ -3625,4 +3890,9 @@ if __name__ == "__main__":
     log_security_config_on_startup()
     logger.info("ACE_BIND host=%s port=%s", bind_host, port)
     logger.info("HEALTH_READY /health returns 200 immediately")
-    app.run(host=bind_host, port=port, debug=False)
+    if _ace_local_dev_runtime_enabled():
+        from engine.ace_local_dev_backend_run_stop import maybe_serve_local_backend_with_verified_stop
+
+        if maybe_serve_local_backend_with_verified_stop(app, bind_host, port):
+            raise SystemExit(0)
+    app.run(host=bind_host, port=port, debug=False, use_reloader=False)

@@ -10,11 +10,19 @@ from typing import Any
 from unittest.mock import patch
 
 import app as app_module
+from tests.builder1_test_helpers import (
+    attach_public_builder1_flask_security,
+    detach_public_builder1_flask_security,
+)
 
 
 class TestBuilder1CorsPreflight(unittest.TestCase):
     def setUp(self) -> None:
+        attach_public_builder1_flask_security(self)
         self.client = app_module.app.test_client()
+
+    def tearDown(self) -> None:
+        detach_public_builder1_flask_security(self)
 
     def test_builder1_generate_options_allows_request_id_header(self) -> None:
         resp = self.client.open(

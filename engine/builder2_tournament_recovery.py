@@ -164,7 +164,7 @@ def register_recoverable_job(job_id: str) -> None:
     logger.info("BUILDER2_TOURNAMENT_RECOVERY_REGISTERED jobId=%s", jid)
 
 
-def remove_recoverable_job(job_id: str, *, clear_meta: bool = True) -> None:
+def remove_recoverable_job(job_id: str, *, clear_meta: bool = True, expire_lease: bool = True) -> None:
     jid = (job_id or "").strip()
     if not jid:
         return
@@ -174,7 +174,8 @@ def remove_recoverable_job(job_id: str, *, clear_meta: bool = True) -> None:
         get_redis().srem(RECOVERABLE_JOBS_KEY, jid)
     if clear_meta:
         _clear_recovery_meta(jid)
-    expire_job_lease(jid)
+    if expire_lease:
+        expire_job_lease(jid)
 
 
 def is_job_queued(job_id: str) -> bool:
@@ -290,6 +291,37 @@ def has_active_lease(job_id: str) -> bool:
         current = _memory_leases.get(jid)
         return bool(current and int(current.get("expiresAt") or 0) > int(time.time()))
     return bool(get_redis().exists(_lease_key(jid)))
+
+
+def get_job_lease_owner(job_id: str) -> Optional[str]:
+    jid = (job_id or "").strip()
+    if not jid:
+        return None
+    if _use_memory_recovery:
+        current = _memory_leases.get(jid)
+        if current and int(current.get("expiresAt") or 0) > int(time.time()):
+            return str(current.get("owner") or "").strip() or None
+        return None
+    raw = get_redis().get(_lease_key(jid))
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return str(data.get("owner") or "").strip() or None
+
+
+def expire_job_lease_if_owner(job_id: str, owner_token: str) -> bool:
+    jid = (job_id or "").strip()
+    token = (owner_token or "").strip()
+    current = get_job_lease_owner(jid)
+    if not jid or not token or not current:
+        return False
+    if current != token:
+        return False
+    expire_job_lease(jid)
+    return True
 
 
 def expire_job_lease(job_id: str) -> None:
@@ -444,6 +476,22 @@ def requeue_recoverable_job(job_id: str) -> bool:
         logger.info("BUILDER2_CREATOR_PREFLIGHT_SKIP_REQUEUE jobId=%s", (job_id or "").strip())
         return False
     jid = (job_id or "").strip()
+    from engine.ace_local_dev_config import is_local_dev_enabled
+    from engine.builder2_job_cancellation import should_block_builder2_execution
+
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_builder2_binding import HaltStateUnavailable
+
+        try:
+            if should_block_builder2_execution(jid):
+                logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=halted_or_cancelled", jid)
+                return False
+        except HaltStateUnavailable:
+            logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=halt_state_unavailable", jid)
+            return False
+    elif should_block_builder2_execution(jid):
+        logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=halted_or_cancelled", jid)
+        return False
     _migrate_legacy_recovery_meta(jid)
     if not _job_is_recoverable(jid):
         logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=not_recoverable", jid)
@@ -461,10 +509,9 @@ def requeue_recoverable_job(job_id: str) -> bool:
     meta["recoveryAttemptCount"] = int(meta.get("recoveryAttemptCount") or 0) + 1
     meta["lastRecoveryAttemptAt"] = _utc_now_iso()
     _save_recovery_meta(jid, meta)
-    if _use_memory_recovery:
-        pass
-    else:
-        get_redis().lpush(QUEUE_KEY, jid)
+    from engine.video_jobs_redis import video_job_lpush
+
+    video_job_lpush(jid)
     logger.info("BUILDER2_TOURNAMENT_RECOVERY_REQUEUED jobId=%s", jid)
     return True
 

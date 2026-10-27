@@ -68,7 +68,9 @@ def create_builder1_job(
         "builder1ContractVersion": "builder1_production_v1",
     }
     if ownership_fields:
-        entry.update(dict(ownership_fields))
+        from engine.builder_client_binding import strip_client_binding_fields
+
+        entry.update(strip_client_binding_fields(ownership_fields))
     if _redis_configured():
         try:
             _get_redis().set(_job_key(jid), json.dumps(entry, ensure_ascii=False), ex=JOB_TTL_SECONDS)
@@ -240,6 +242,19 @@ def finalize_builder1_job(job_id: str, result: dict[str, Any], *, target_ad_coun
         entry["retryable"] = True
     update_builder1_job(jid, **entry)
     logger.error("BUILDER1_JOB_ERROR jobId=%s campaignId=%s err=%s", jid, campaign_id, err)
+
+
+def list_known_builder1_job_ids() -> list[str]:
+    if _redis_configured():
+        try:
+            keys = list(_get_redis().scan_iter(match=f"{JOB_KEY_PREFIX}*", count=64))
+            prefix = len(JOB_KEY_PREFIX)
+            return [str(k)[prefix:] for k in keys if str(k)[prefix:]]
+        except Exception as exc:
+            logger.error("BUILDER1_JOB_REDIS_LIST_ERR err=%s", exc)
+            return []
+    with _memory_lock:
+        return list(_memory_jobs.keys())
 
 
 def clear_memory_jobs_for_tests() -> None:

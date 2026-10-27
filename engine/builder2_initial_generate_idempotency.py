@@ -221,6 +221,38 @@ class InitialGenerateIdempotencyBeginResult:
     key: str
 
 
+def peek_initial_generate_idempotency(
+    *,
+    owner_context_ref: str,
+    request_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Read-only. Does not reserve or claim."""
+    rid = _clean(request_id)
+    if not rid:
+        return None
+    return _load_record(_idempotency_key(owner_context_ref=owner_context_ref, request_id=rid))
+
+
+def initial_generate_work_kind(
+    record: Optional[Dict[str, Any]],
+    *,
+    request_fingerprint: str,
+) -> str:
+    """
+    Proven replay requires an existing server record that will not create more work.
+    A client flag is not sufficient.
+    """
+    if not record:
+        return "new"
+    if _clean(record.get("requestFingerprint")) != _clean(request_fingerprint):
+        return "conflict"
+    if _clean(record.get("state")) == STATE_ENQUEUED:
+        return "replay"
+    if _creation_claim_is_live(record):
+        return "replay"
+    return "new"
+
+
 def begin_initial_generate_idempotency(
     *,
     request_id: str,

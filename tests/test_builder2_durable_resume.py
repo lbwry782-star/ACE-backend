@@ -76,8 +76,13 @@ def _mock_request(*, batch_state: str = "batch-abc", authorization: str = "") ->
     return request
 
 
-def _owned_job_hash(job_id: str, *, batch_state: str = "batch-abc") -> Dict[str, str]:
-    fields = ownership_fields_for_job_create(_mock_request(batch_state=batch_state), {"productDescription": "desc"})
+def _owned_job_hash(
+    job_id: str, *, batch_state: str = "batch-abc", authorization: str = ""
+) -> Dict[str, str]:
+    fields = ownership_fields_for_job_create(
+        _mock_request(batch_state=batch_state, authorization=authorization),
+        {"productDescription": "desc"},
+    )
     return {
         "status": "running",
         "product_description": "desc",
@@ -611,7 +616,51 @@ class TestBuilder2ResumeRedisPath(unittest.TestCase):
 
 
 class TestBuilder2DurableResumeAppRoutes(unittest.TestCase):
-    @patch.dict(os.environ, {"REDIS_URL": "redis://test", "BUILDER2_TOURNAMENT_ENABLED": "true"}, clear=False)
+    def setUp(self) -> None:
+        from engine.builder2_initial_generate_idempotency import (
+            clear_memory_idempotency_for_tests,
+            enable_memory_idempotency_store,
+        )
+        from engine.builder2_video_allowance_store import (
+            clear_memory_allowance_store_for_tests,
+            enable_memory_allowance_store,
+        )
+        from tests.builder2_test_helpers import attach_public_builder2_flask_security
+
+        os.environ["BUILDER2_TOURNAMENT_ENABLED"] = "true"
+        enable_memory_jobs()
+        enable_memory_store()
+        enable_memory_recovery()
+        enable_memory_allowance_store()
+        enable_memory_idempotency_store()
+        clear_memory_allowance_store_for_tests()
+        clear_memory_idempotency_for_tests()
+        attach_public_builder2_flask_security(self)
+
+    def tearDown(self) -> None:
+        from engine.builder2_initial_generate_idempotency import (
+            clear_memory_idempotency_for_tests,
+            disable_memory_idempotency_store,
+        )
+        from engine.builder2_video_allowance_store import (
+            clear_memory_allowance_store_for_tests,
+            disable_memory_allowance_store,
+        )
+        from tests.builder2_test_helpers import detach_public_builder2_flask_security
+
+        detach_public_builder2_flask_security(self)
+        disable_memory_jobs()
+        disable_memory_store()
+        disable_memory_recovery()
+        disable_memory_allowance_store()
+        disable_memory_idempotency_store()
+        clear_memory_allowance_store_for_tests()
+        clear_memory_idempotency_for_tests()
+        os.environ.pop("BUILDER2_TOURNAMENT_ENABLED", None)
+
+    def _headers(self) -> Dict[str, str]:
+        return {"X-ACE-Batch-State": "frontend-batch-1", "Authorization": "Bearer token-a"}
+
     @patch("app.redis_configured", return_value=True)
     @patch("app.video_job_create")
     def test_generate_video_returns_queued_status(self, create_mock: Any, _cfg: Any) -> None:
@@ -621,25 +670,134 @@ class TestBuilder2DurableResumeAppRoutes(unittest.TestCase):
         response = client.post(
             "/api/generate-video",
             json={"productDescription": "A durable resume test product."},
-            headers={"X-ACE-Batch-State": "frontend-batch-1"},
+            headers=self._headers(),
         )
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.get_json())
         body = response.get_json()
         self.assertTrue(body.get("ok"))
         self.assertEqual(body.get("status"), "queued")
         create_mock.assert_called_once()
 
-    @patch.dict(os.environ, {"REDIS_URL": "redis://test", "BUILDER2_TOURNAMENT_ENABLED": "true"}, clear=False)
     @patch("app.redis_configured", return_value=True)
-    @patch("engine.builder2_resume_service.request_builder2_resume")
-    def test_builder2_resume_route(self, resume_mock: Any, _cfg: Any) -> None:
+    def test_builder2_resume_route_reaches_handler(self, _cfg: Any) -> None:
         from app import app as flask_app
 
-        resume_mock.return_value = {"ok": True, "jobId": "job-1", "status": "queued", "resumeRequested": True}
+        job_id = "job-1"
+        job_hash = _owned_job_hash(
+            job_id, batch_state="frontend-batch-1", authorization="Bearer token-a"
+        )
+        job_hash["status"] = "error"
+        job_hash["builder"] = "builder2"
+        set_memory_job_hash(job_id, job_hash)
         client = flask_app.test_client()
-        response = client.post("/api/builder2-resume", json={"jobId": "job-1"}, headers={"X-ACE-Batch-State": "frontend-batch-1"})
-        self.assertEqual(response.status_code, 200)
-        resume_mock.assert_called_once()
+        with patch(
+            "engine.builder2_resume_service.resolve_builder2_resume_stage",
+            return_value={"canResume": True, "resumeFromStage": "media"},
+        ), patch("engine.builder2_resume_service.has_active_lease", return_value=False), patch(
+            "engine.builder2_resume_service.is_job_queued", return_value=False
+        ), patch(
+            "engine.builder2_resume_service.mark_job_queued", return_value=True
+        ) as mock_q:
+            response = client.post(
+                "/api/builder2-resume",
+                json={"jobId": job_id},
+                headers=self._headers(),
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        body = response.get_json()
+        self.assertTrue(body.get("ok"))
+        self.assertTrue(body.get("resumeRequested"))
+        mock_q.assert_called_once_with(job_id)
+
+    @patch("app.redis_configured", return_value=True)
+    def test_builder2_resume_cancelled_job_rejected_without_enqueue(self, _cfg: Any) -> None:
+        from app import app as flask_app
+
+        job_id = "job-cancelled"
+        job_hash = _owned_job_hash(
+            job_id, batch_state="frontend-batch-1", authorization="Bearer token-a"
+        )
+        job_hash["status"] = "cancelled"
+        job_hash["cancelRequested"] = "1"
+        job_hash["builder"] = "builder2"
+        set_memory_job_hash(job_id, job_hash)
+        client = flask_app.test_client()
+        with patch("engine.builder2_resume_service.mark_job_queued") as mock_q:
+            response = client.post(
+                "/api/builder2-resume",
+                json={"jobId": job_id},
+                headers=self._headers(),
+            )
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertEqual(response.get_json().get("error"), "builder2_job_cancelled")
+        mock_q.assert_not_called()
+
+    @patch("app.redis_configured", return_value=True)
+    def test_generate_video_next_reaches_handler(self, _cfg: Any) -> None:
+        from app import app as flask_app
+        from engine.builder2_tournament_recovery import set_memory_job_hash as set_hash
+        from engine.video_jobs_redis import video_job_get_raw
+
+        client = flask_app.test_client()
+        created = client.post(
+            "/api/generate-video",
+            json={
+                "productDescription": "A durable resume test product.",
+                "productName": "Product A",
+                "targetVideoCount": 2,
+            },
+            headers=self._headers(),
+        )
+        self.assertEqual(created.status_code, 200, created.get_json())
+        body = created.get_json()
+        job_id = body["jobId"]
+        allowance_id = body["videoAllowanceId"]
+        raw = video_job_get_raw(job_id) or {}
+        raw["status"] = "done"
+        raw["video_url"] = "https://example.test/v1.mp4"
+        raw["marketing_text"] = " ".join(f"word{i}" for i in range(1, 51))
+        set_hash(job_id, raw)
+        from engine.builder2_video_allowance_store import ReserveVideoTwoResult
+
+        with patch("engine.builder2_video_allowance.reserve_video_two_slot") as mock_reserve:
+            mock_reserve.return_value = ReserveVideoTwoResult(
+                ok=True, job_id="job-two", video_index=2, idempotent=False
+            )
+            with patch("engine.builder2_video_allowance.video_job_create") as mock_create:
+                nxt = client.post(
+                    "/api/generate-video-next",
+                    json={"videoAllowanceId": allowance_id},
+                    headers=self._headers(),
+                )
+        self.assertEqual(nxt.status_code, 200, nxt.get_json())
+        self.assertTrue(nxt.get_json().get("ok"))
+        mock_reserve.assert_called_once()
+        mock_create.assert_called_once()
+
+    @patch("app.redis_configured", return_value=True)
+    def test_missing_security_config_still_rejected(self, _cfg: Any) -> None:
+        from tests.builder2_test_helpers import detach_public_builder2_flask_security
+        from app import app as flask_app
+
+        detach_public_builder2_flask_security(self)
+        reset = os.environ.pop("ACE_SECURITY_ENABLED", None)
+        try:
+            client = flask_app.test_client()
+            with patch("app.video_job_create") as mock_create:
+                response = client.post(
+                    "/api/generate-video",
+                    json={"productDescription": "A durable resume test product."},
+                    headers=self._headers(),
+                )
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.get_json().get("error"), "ace_security_config_invalid")
+            mock_create.assert_not_called()
+        finally:
+            if reset is not None:
+                os.environ["ACE_SECURITY_ENABLED"] = reset
+            from tests.builder2_test_helpers import attach_public_builder2_flask_security
+
+            attach_public_builder2_flask_security(self)
 
 
 if __name__ == "__main__":

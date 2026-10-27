@@ -211,7 +211,7 @@ def assess_builder1_planning_resume(job_id: str) -> Dict[str, Any]:
         report["rejectionReasons"].append("not_builder1_job")
 
     status = _clean(job.get("status")).lower()
-    if status == "cancelled" or _truthy(job.get("cancelRequested")):
+    if status == "cancelled" or _truthy(job.get("cancelRequested")) or _truthy(job.get("haltRequested")):
         report["rejectionReasons"].append("job_cancelled")
     elif status == "running":
         report["rejectionReasons"].append("job_already_running")
@@ -219,6 +219,10 @@ def assess_builder1_planning_resume(job_id: str) -> Dict[str, Any]:
         report["rejectionReasons"].append("job_already_done")
     elif status != "error":
         report["rejectionReasons"].append("job_not_in_error_state")
+    from engine.builder1_job_cancellation import should_block_builder1_execution
+
+    if should_block_builder1_execution(jid):
+        report["rejectionReasons"].append("job_halted")
 
     if _truthy(job.get("retryable")) is False and _clean(job.get("error")) == "stale_job_abandoned":
         report["rejectionReasons"].append("job_non_retryable")

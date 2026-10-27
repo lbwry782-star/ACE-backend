@@ -39,7 +39,12 @@ from engine.builder1_pending_image_store import (
     save_pending_image,
 )
 from engine.builder1_retry_state import RETRY_MODE_REVIEW_ONLY
-from tests.builder1_test_helpers import pass_compliance_reviewer, seed_builder1_image_job
+from tests.builder1_test_helpers import (
+    attach_public_builder1_flask_security,
+    detach_public_builder1_flask_security,
+    pass_compliance_reviewer,
+    seed_builder1_image_job,
+)
 from tests.test_builder1_series import _base_campaign, _parse
 
 
@@ -379,6 +384,10 @@ class TestPublicContract(unittest.TestCase):
     def setUp(self) -> None:
         clear_memory_store_for_tests()
         clear_memory_pending_for_tests()
+        attach_public_builder1_flask_security(self)
+
+    def tearDown(self) -> None:
+        detach_public_builder1_flask_security(self)
 
     def test_compliance_unavailable_payload(self) -> None:
         from app import _builder1_generate_single_ad

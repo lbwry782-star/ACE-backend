@@ -2,9 +2,64 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+import os
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator
+from unittest.mock import patch
 
 from engine.builder1_image_compliance import ImageComplianceResult
+
+
+@contextmanager
+def public_builder1_flask_security() -> Iterator[None]:
+    """
+    Process-only public Ori Flask security: ACE_SECURITY_ENABLED=true and mocked
+    paid-auth success. Does not edit ENV files, touch Redis, or change product code.
+    """
+    from engine.ace_local_dev_config import reset_local_dev_config_for_tests
+    import app as app_module
+
+    saved = os.environ.get("ACE_SECURITY_ENABLED")
+    reset_local_dev_config_for_tests()
+    os.environ["ACE_SECURITY_ENABLED"] = "true"
+    try:
+        with patch.object(
+            app_module,
+            "_ace_security_peek_builder1_create",
+            return_value=(None, None, None, None),
+        ), patch.object(
+            app_module,
+            "_ace_security_guard_builder1_create",
+            return_value=(None, None, None),
+        ), patch.object(
+            app_module,
+            "_ace_security_guard_builder1_campaign",
+            return_value=None,
+        ), patch.object(
+            app_module,
+            "_ace_security_guard_builder1_job",
+            return_value=None,
+        ):
+            yield
+    finally:
+        if saved is None:
+            os.environ.pop("ACE_SECURITY_ENABLED", None)
+        else:
+            os.environ["ACE_SECURITY_ENABLED"] = saved
+
+
+def attach_public_builder1_flask_security(test_case: Any) -> None:
+    cm = public_builder1_flask_security()
+    test_case._public_builder1_flask_security_cm = cm
+    cm.__enter__()
+
+
+def detach_public_builder1_flask_security(test_case: Any) -> None:
+    cm = getattr(test_case, "_public_builder1_flask_security_cm", None)
+    if cm is None:
+        return
+    test_case._public_builder1_flask_security_cm = None
+    cm.__exit__(None, None, None)
 
 
 def pass_compliance_reviewer(**_kwargs: Any) -> ImageComplianceResult:

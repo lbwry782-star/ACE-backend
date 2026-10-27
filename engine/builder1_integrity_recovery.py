@@ -153,6 +153,14 @@ def assess_builder1_integrity_recovery(job_id: str) -> Dict[str, Any]:
         return report
     report["rejectedPlanPresent"] = True
 
+    try:
+        from engine.builder1_job_cancellation import should_block_builder1_execution
+
+        if should_block_builder1_execution(jid):
+            report["eligibilityFailures"].append("job_halted")
+    except Exception:
+        report["eligibilityFailures"].append("halt_state_unavailable")
+
     if not _job_planning_failed(job):
         report["eligibilityFailures"].append("job_not_planning_failure")
     if _clean(job.get("lastPaidStageStatus")) != "succeeded":
@@ -212,6 +220,26 @@ def apply_builder1_integrity_recovery(
         and v is not None
     }
 
+    from engine.ace_local_dev_config import is_local_dev_enabled
+    from engine.builder1_job_cancellation import should_block_builder1_execution
+
+    if should_block_builder1_execution(job_id):
+        report["eligibilityFailures"].append("job_halted")
+        report["recoveryEligible"] = False
+        return report
+
+    coord_lease = None
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_builder1_coordination import begin_builder1_coordination
+        from engine.ace_local_dev_coordination_lease import CoordinationBeginRejected
+
+        try:
+            coord_lease = begin_builder1_coordination(job_id)
+        except CoordinationBeginRejected as exc:
+            report["eligibilityFailures"].append(str(exc.code))
+            report["recoveryEligible"] = False
+            return report
+
     if not report.get("campaignSessionExists"):
         create_campaign_session(
             campaign_id=campaign_id,
@@ -238,11 +266,12 @@ def apply_builder1_integrity_recovery(
         try:
             import app as ace_app
 
-            ace_app._builder1_executor.submit(
+            ace_app._builder1_submit_coordinated(
                 ace_app._builder1_run_resume_integrity_recovered_job,
                 job_id,
                 campaign_id,
                 target_ad_count,
+                coordination_lease=coord_lease,
             )
             report["imagePipelineEnqueued"] = True
         except Exception as exc:
@@ -252,5 +281,7 @@ def apply_builder1_integrity_recovery(
                 job_id,
                 exc,
             )
+    elif coord_lease is not None:
+        coord_lease.complete()
 
     return report

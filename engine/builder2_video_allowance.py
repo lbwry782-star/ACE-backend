@@ -257,72 +257,109 @@ def request_generate_video_next(
 
     existing_two = next((e for e in entries if e["videoIndex"] == 2), None)
     if existing_two:
-        return {
-            "ok": True,
-            "videoAllowanceId": aid,
-            "jobId": existing_two["jobId"],
-            "videoIndex": 2,
-            "status": "queued",
-            "idempotent": True,
-            **derived,
-        }
+        from engine.video_jobs_redis import video_job_get_raw as _job_raw, video_job_is_in_execution_queue
 
-    proposed_job_id = str(uuid.uuid4())
-    reserve = reserve_video_two_slot(
-        aid,
-        owner_context_ref=owner_ref,
-        job_id=proposed_job_id,
-    )
-    if not reserve.ok:
-        return {"ok": False, "error": reserve.code or "reserve_failed", "videoAllowanceId": aid}
+        existing_job_id = str(existing_two["jobId"] or "").strip()
+        if existing_job_id and _job_raw(existing_job_id) and video_job_is_in_execution_queue(existing_job_id):
+            return {
+                "ok": True,
+                "videoAllowanceId": aid,
+                "jobId": existing_job_id,
+                "videoIndex": 2,
+                "status": "queued",
+                "idempotent": True,
+                **derived,
+            }
 
-    job_id = reserve.job_id
-    if reserve.idempotent and job_id != proposed_job_id:
+    proposed_job_id = str(existing_two["jobId"]) if existing_two else str(uuid.uuid4())
+    from engine.ace_local_dev_config import is_local_dev_enabled
+
+    lease = None
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_builder2_coordination import (
+            builder2_coordination_error_payload,
+            try_begin_builder2_coordination,
+        )
+
+        lease, coord_deny = try_begin_builder2_coordination(proposed_job_id)
+        if coord_deny is not None:
+            payload = builder2_coordination_error_payload(
+                str(coord_deny.get("error") or ""),
+                job_id=proposed_job_id,
+                video_allowance_id=aid,
+            )
+            return payload
+
+    def _finish_builder2_submission(*, unresolved: bool = False) -> None:
+        if not is_local_dev_enabled():
+            return
+        from engine.ace_local_dev_builder2_coordination import finish_builder2_submission
+
+        finish_builder2_submission(lease, unresolved=unresolved)
+
+    submission_unresolved = True
+    try:
+        reserve = reserve_video_two_slot(
+            aid,
+            owner_context_ref=owner_ref,
+            job_id=proposed_job_id,
+        )
+        if not reserve.ok:
+            submission_unresolved = False
+            _finish_builder2_submission()
+            return {"ok": False, "error": reserve.code or "reserve_failed", "videoAllowanceId": aid}
+
+        job_id = reserve.job_id
+        product_name = _clean(allowance.get("productName"))
+        product_description = _clean(allowance.get("productDescription"))
+        extra_fields = ownership_fields_for_job_create(
+            request,
+            {"productDescription": product_description, "productName": product_name},
+        )
+        extra_fields.update(allowance_job_fields(video_allowance_id=aid, video_index=2))
+        authorized_ace_root = lease.ace_root if lease is not None and lease.registered else None
+
+        try:
+            video_job_create(
+                job_id,
+                product_name,
+                product_description,
+                public_base_url,
+                extra_fields=extra_fields,
+                authorized_ace_root=authorized_ace_root,
+            )
+        except Exception as exc:
+            logger.error(
+                "BUILDER2_VIDEO_TWO_ENQUEUE_FAILED videoAllowanceId=%s jobId=%s err=%s",
+                aid,
+                job_id,
+                exc,
+                exc_info=True,
+            )
+            submission_unresolved = False
+            _finish_builder2_submission()
+            return {"ok": False, "error": "video_generation_failed", "videoAllowanceId": aid, "jobId": job_id}
+
+        logger.info(
+            "BUILDER2_VIDEO_TWO_JOB_CREATED videoAllowanceId=%s jobId=%s videoIndex=2",
+            aid,
+            job_id,
+        )
+        refreshed = get_video_allowance(aid) or allowance
+        submission_unresolved = False
+        _finish_builder2_submission()
         return {
             "ok": True,
             "videoAllowanceId": aid,
             "jobId": job_id,
             "videoIndex": 2,
             "status": "queued",
-            "idempotent": True,
-            **_derive_allowance_payload(get_video_allowance(aid) or allowance),
+            "idempotent": bool(reserve.idempotent or existing_two),
+            **_derive_allowance_payload(refreshed),
         }
-
-    product_name = _clean(allowance.get("productName"))
-    product_description = _clean(allowance.get("productDescription"))
-    extra_fields = ownership_fields_for_job_create(
-        request,
-        {"productDescription": product_description, "productName": product_name},
-    )
-    extra_fields.update(allowance_job_fields(video_allowance_id=aid, video_index=2))
-
-    try:
-        video_job_create(job_id, product_name, product_description, public_base_url, extra_fields=extra_fields)
-    except Exception as exc:
-        logger.error(
-            "BUILDER2_VIDEO_TWO_ENQUEUE_FAILED videoAllowanceId=%s jobId=%s err=%s",
-            aid,
-            job_id,
-            exc,
-            exc_info=True,
-        )
-        return {"ok": False, "error": "video_generation_failed", "videoAllowanceId": aid, "jobId": job_id}
-
-    logger.info(
-        "BUILDER2_VIDEO_TWO_JOB_CREATED videoAllowanceId=%s jobId=%s videoIndex=2",
-        aid,
-        job_id,
-    )
-    refreshed = get_video_allowance(aid) or allowance
-    return {
-        "ok": True,
-        "videoAllowanceId": aid,
-        "jobId": job_id,
-        "videoIndex": 2,
-        "status": "queued",
-        "idempotent": False,
-        **_derive_allowance_payload(refreshed),
-    }
+    finally:
+        if submission_unresolved:
+            _finish_builder2_submission(unresolved=True)
 
 
 def resolve_zip_payload_from_job(

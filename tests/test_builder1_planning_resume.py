@@ -39,6 +39,10 @@ from engine.builder1_planning_contract import (
     STAGE_SERIES_ADS_SYSTEM,
     STAGE_STRATEGY_SLOGAN_STAGE_SYSTEM,
 )
+from tests.builder1_test_helpers import (
+    attach_public_builder1_flask_security,
+    detach_public_builder1_flask_security,
+)
 from tests.test_builder1_staged_planning import (
     STAGE_PRODUCT_NAME_RESOLUTION_SYSTEM,
     _full_final_responses,
@@ -178,6 +182,7 @@ class TestPlanningResumeApi(unittest.TestCase):
         os.environ.pop("BUILDER1_PRODUCTION_MODE", None)
         os.environ.pop("BUILDER1_OWNERSHIP_REQUIRED", None)
         os.environ["BUILDER1_REQUEST_ID_REQUIRED"] = "1"
+        attach_public_builder1_flask_security(self)
         self.client = app_module.app.test_client()
         self._stage_counts: Dict[str, int] = {
             "strategy_slogan_stage": 0,
@@ -190,6 +195,7 @@ class TestPlanningResumeApi(unittest.TestCase):
         self._responses = _full_final_responses(2)
 
     def tearDown(self) -> None:
+        detach_public_builder1_flask_security(self)
         delete_planning_checkpoint(JOB_ID)
         clear_memory_idempotency_for_tests()
         clear_memory_jobs_for_tests()

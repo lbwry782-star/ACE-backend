@@ -30,7 +30,11 @@ from engine.builder1_jobs_store import (
     finalize_builder1_job,
     get_builder1_job,
 )
-from tests.builder1_test_helpers import pass_compliance_reviewer
+from tests.builder1_test_helpers import (
+    attach_public_builder1_flask_security,
+    detach_public_builder1_flask_security,
+    pass_compliance_reviewer,
+)
 from tests.test_builder1_series import _base_campaign, _parse
 
 
@@ -296,6 +300,10 @@ class TestGenerateNextOwnership(unittest.TestCase):
     def setUp(self) -> None:
         clear_memory_store_for_tests()
         clear_memory_jobs_for_tests()
+        attach_public_builder1_flask_security(self)
+
+    def tearDown(self) -> None:
+        detach_public_builder1_flask_security(self)
 
     @patch("app.generate_builder1_ad_image")
     def test_generate_next_reserves_with_job_owner_before_worker(self, mock_image) -> None:

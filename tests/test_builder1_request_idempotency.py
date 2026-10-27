@@ -12,6 +12,10 @@ from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
 from engine.builder1_campaign_store import clear_memory_store_for_tests
+from tests.builder1_test_helpers import (
+    attach_public_builder1_flask_security,
+    detach_public_builder1_flask_security,
+)
 from engine.builder1_job_ownership import extract_owner_context_from_request, ownership_fields_for_builder1_create
 from engine.builder1_jobs_store import clear_memory_jobs_for_tests, create_builder1_job, get_builder1_job
 from engine.builder1_request_idempotency import (
@@ -469,6 +473,10 @@ class TestIdempotencyFlaskRoutes(unittest.TestCase):
         clear_memory_idempotency_for_tests()
         clear_memory_jobs_for_tests()
         clear_memory_store_for_tests()
+        attach_public_builder1_flask_security(self)
+
+    def tearDown(self) -> None:
+        detach_public_builder1_flask_security(self)
 
     @patch.dict(os.environ, {"BUILDER1_REQUEST_ID_REQUIRED": "true"}, clear=False)
     def test_missing_request_id_rejected_in_production_mode(self) -> None:

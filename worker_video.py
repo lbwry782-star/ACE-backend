@@ -10,12 +10,14 @@ Does not import Flask.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
 import sys
 import threading
 import time
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +29,7 @@ _active_lock = threading.Lock()
 _active_job_id: str | None = None
 _heartbeat_stop = threading.Event()
 _worker_token: str = ""
+LOCAL_VERIFIED_BRPOP_SECONDS = 1
 
 
 def _get_active_job_id() -> str | None:
@@ -118,12 +121,63 @@ def _install_shutdown_signals() -> None:
     signal.signal(signal.SIGINT, _handle)
 
 
+def _local_verified_stop_requested(ace_root: Path) -> bool:
+    from engine.ace_local_dev_owned_run_stop import isolated_owned_verified_stop_enabled
+    from engine.ace_local_dev_worker_isolated import _stop_matches
+
+    return isolated_owned_verified_stop_enabled() and _stop_matches(ace_root)
+
+
+def _announce_local_worker_waiting(ace_root: Path, *, brpop_timeout: int) -> None:
+    from engine.ace_local_dev_builder2_binding import local_dev_instance_id
+    from engine.ace_local_dev_isolated_redis import ISOLATED_MARKER_KEY, WORKER_WAITING_KEY, worker_token_key
+    from engine.ace_local_dev_worker_isolated import isolated_worker_waiting_path
+    from engine.video_jobs_redis import QUEUE_KEY, get_redis
+
+    marker_expected = str(os.environ.get("ACE_ISOLATED_REDIS_MARKER") or "").strip()
+    marker_seen = ""
+    try:
+        marker_seen = str(get_redis().get(ISOLATED_MARKER_KEY) or "")
+    except Exception:
+        marker_seen = ""
+    payload = {
+        "ok": True,
+        "pid": os.getpid(),
+        "waiting": True,
+        "queue": QUEUE_KEY,
+        "brpopTimeout": int(brpop_timeout),
+        "markerExpected": marker_expected,
+        "markerSeen": marker_seen,
+        "sameIsolatedRedis": bool(marker_expected) and marker_expected == marker_seen,
+    }
+    waiting = isolated_worker_waiting_path(ace_root)
+    waiting.parent.mkdir(parents=True, exist_ok=True)
+    waiting.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    try:
+        r = get_redis()
+        r.set(WORKER_WAITING_KEY, json.dumps(payload, ensure_ascii=False))
+        if _worker_token:
+            r.set(worker_token_key(local_dev_instance_id(ace_root)), _worker_token)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    from engine.ace_local_dev_config import (
+        assert_local_dev_startup_safe,
+        confirm_local_dev_loopback_bind,
+        is_local_dev_enabled,
+    )
+
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_worker_isolated import maybe_run_isolated_local_worker
+
+        if maybe_run_isolated_local_worker():
+            return
+
     if not (os.environ.get("REDIS_URL") or "").strip():
         logger.error("REDIS_URL is required for worker_video")
         sys.exit(1)
-
-    from engine.ace_local_dev_config import assert_local_dev_startup_safe, confirm_local_dev_loopback_bind
 
     confirm_local_dev_loopback_bind("127.0.0.1")
     try:
@@ -161,6 +215,24 @@ def main() -> None:
     get_redis()  # connect once
     global _worker_token
     _worker_token = new_worker_token()
+    generate_fn = None
+    brpop_timeout = 30
+    ace_root = None
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_owned_run_stop import isolated_owned_verified_stop_enabled, spawn_isolated_job_child_if_requested
+        from engine.ace_local_dev_worker_isolated import is_local_dev_isolated_worker_context, _fixture_generate
+
+        if is_local_dev_isolated_worker_context():
+            from engine.ace_local_dev_builder2_binding import set_local_builder2_worker_context
+            from engine.ace_local_dev_coordination import assert_isolated_temp_ace_root
+
+            ace_root = assert_isolated_temp_ace_root(Path(os.environ["ACE_ORI_ACE_ROOT"]))
+            set_local_builder2_worker_context(ace_root)
+            spawn_isolated_job_child_if_requested()
+            generate_fn = _fixture_generate(ace_root)
+            if isolated_owned_verified_stop_enabled():
+                brpop_timeout = LOCAL_VERIFIED_BRPOP_SECONDS
+            _announce_local_worker_waiting(ace_root, brpop_timeout=brpop_timeout)
     _install_shutdown_signals()
     hb_thread = threading.Thread(target=_heartbeat_loop, name="video_job_heartbeat", daemon=True)
     hb_thread.start()
@@ -189,7 +261,7 @@ def main() -> None:
         print_preflight_report(report)
         sys.exit(0 if report.get("ok") else 1)
 
-    logger.info("VIDEO_WORKER_START queue=%s", QUEUE_KEY)
+    logger.info("VIDEO_WORKER_START queue=%s brpopTimeout=%s", QUEUE_KEY, brpop_timeout)
     try:
         requeued = scan_and_requeue_recoverable_jobs()
         if requeued:
@@ -198,200 +270,213 @@ def main() -> None:
         logger.warning("BUILDER2_TOURNAMENT_RECOVERY_STARTUP_FAIL err=%s", e)
 
     while True:
-        logger.info("VIDEO_WORKER_WAITING queue=%s", QUEUE_KEY)
+        if ace_root is not None and _local_verified_stop_requested(ace_root):
+            logger.info("ACE_LOCAL_WORKER_VERIFIED_STOP pid=%s queue=%s", os.getpid(), QUEUE_KEY)
+            return
+        logger.info("VIDEO_WORKER_WAITING queue=%s brpopTimeout=%s", QUEUE_KEY, brpop_timeout)
         try:
-            job_id = video_job_brpop(timeout_seconds=30)
+            job_id = video_job_brpop(timeout_seconds=brpop_timeout)
         except Exception as e:
             logger.error("VIDEO_WORKER_REDIS_ERROR err=%s", e, exc_info=True)
             time.sleep(1.0)
             continue
+        if ace_root is not None and _local_verified_stop_requested(ace_root):
+            logger.info("ACE_LOCAL_WORKER_VERIFIED_STOP pid=%s after_brpop jobId=%s", os.getpid(), job_id or "")
+            if job_id:
+                claim_and_process_builder2_job(
+                    job_id, worker_token=_worker_token, generate_mvp=generate_fn
+                )
+            return
         if not job_id:
             logger.info("VIDEO_WORKER_EMPTY_QUEUE")
             continue
-        logger.info("VIDEO_WORKER_DEQUEUED jobId=%s", job_id)
-        if not acquire_job_lease(job_id, _worker_token):
-            logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=lease_not_acquired", job_id)
-            try:
-                from engine.builder2_tournament_recovery import mark_job_queued, register_recoverable_job
+        claim_and_process_builder2_job(job_id, worker_token=_worker_token, generate_mvp=generate_fn)
 
-                if mark_job_queued(job_id):
-                    r = get_redis()
-                    r.lpush(QUEUE_KEY, job_id)
-                    register_recoverable_job(job_id)
-                    logger.info("BUILDER2_RESUME_REQUEUED_AFTER_LEASE_FAIL jobId=%s", job_id)
+
+def claim_and_process_builder2_job(
+    job_id: str,
+    *,
+    worker_token: str,
+    generate_mvp=None,
+) -> dict:
+    """
+    Product worker step after a queue pop: acquire lease, halt gate, execute or skip.
+    Tests inject generate_mvp; live worker uses generate_one_video_mvp.
+    """
+    from engine.builder2_job_cancellation import try_requeue_builder2_after_lease_fail
+    from engine.builder2_tournament_recovery import acquire_job_lease, clear_job_queued, release_job_lease
+
+    logger.info("VIDEO_WORKER_DEQUEUED jobId=%s", job_id)
+    if not acquire_job_lease(job_id, worker_token):
+        logger.info("BUILDER2_TOURNAMENT_RECOVERY_SKIPPED jobId=%s reason=lease_not_acquired", job_id)
+        requeued = False
+        try:
+            requeued = try_requeue_builder2_after_lease_fail(job_id)
+            if requeued:
+                logger.info("BUILDER2_RESUME_REQUEUED_AFTER_LEASE_FAIL jobId=%s", job_id)
+        except Exception:
+            pass
+        return {"outcome": "lease_not_acquired", "requeued": requeued, "jobId": job_id}
+    clear_job_queued(job_id)
+    logger.info("VIDEO_TIMING_STAGE_START stage=worker_dequeued jobId=%s", job_id)
+    _set_active_job_id(job_id)
+    try:
+        return process_claimed_builder2_job(job_id, worker_token=worker_token, generate_mvp=generate_mvp)
+    finally:
+        try:
+            release_job_lease(job_id, worker_token)
+        except Exception:
+            pass
+        _set_active_job_id(None)
+
+
+def process_claimed_builder2_job(
+    job_id: str,
+    *,
+    worker_token: str,
+    generate_mvp=None,
+) -> dict:
+    from engine.builder2_job_cancellation import (
+        CANCELLED_ERROR_CODE,
+        accept_dequeued_builder2_job,
+        checkpoint_builder2_cancellation,
+        video_job_mark_done_respecting_cancellation,
+    )
+    from engine.builder2_tournament_recovery import register_recoverable_job, remove_recoverable_job
+    from engine.runway_video import RunwayVideoMVPError, generate_one_video_mvp
+    from engine.video_jobs_redis import get_redis, job_key, video_job_mark_error, video_job_touch_progress
+
+    generate_fn = generate_mvp or generate_one_video_mvp
+    t_worker_job0 = time.monotonic()
+    try:
+        from engine.video_jobs_redis import video_job_get_raw
+
+        logger.info("VIDEO_JOB_STEP step=load_job_data start jobId=%s", job_id)
+        data = video_job_get_raw(job_id) or {}
+        logger.info(
+            "VIDEO_JOB_STEP step=load_job_data done jobId=%s fields=%s",
+            job_id,
+            len(data),
+        )
+        if not data:
+            logger.warning("VIDEO_JOB_MISSING jobId=%s (no hash)", job_id)
+            return {"outcome": "missing_job", "jobId": job_id}
+
+        accepted = accept_dequeued_builder2_job(job_id)
+        if not accepted.get("accepted"):
+            logger.info("BUILDER2_JOB_CANCEL_DEQUEUE_SKIP jobId=%s", job_id)
+            if accepted.get("mutated") is not False:
+                try:
+                    remove_recoverable_job(job_id, expire_lease=False)
+                except Exception:
+                    pass
+            logger.info("VIDEO_JOB_DONE jobId=%s outcome=cancelled", job_id)
+            return {"outcome": "halted", "reason": accepted.get("reason"), "jobId": job_id}
+
+        checkpoint_builder2_cancellation(job_id, stage="worker_execution_start")
+
+        logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
+        try:
+            from engine.video_jobs_redis import _use_memory_jobs, set_memory_job_hash
+
+            if _use_memory_jobs:
+                updated = dict(data)
+                updated.update({"status": "running", "progressStage": "processing"})
+                set_memory_job_hash(job_id, updated)
+            else:
+                get_redis().hset(job_key(job_id), mapping={"status": "running", "progressStage": "processing"})
+        except Exception:
+            pass
+
+        raw_enqueued = (data.get("enqueued_ts") or data.get("last_progress_ts") or "").strip()
+        if raw_enqueued:
+            try:
+                queue_wait_ms = (time.time() - int(raw_enqueued)) * 1000.0
+                if queue_wait_ms >= 0:
+                    logger.info(
+                        "VIDEO_TIMING_QUEUE_WAIT_MS=%.1f jobId=%s",
+                        queue_wait_ms,
+                        job_id,
+                    )
+            except ValueError:
+                pass
+
+        try:
+            video_job_touch_progress(job_id)
+        except Exception as e:
+            logger.warning("VIDEO_JOB_TOUCH_PROGRESS_FAIL jobId=%s err=%s", job_id, e)
+
+        product_name = data.get("product_name") or ""
+        product_description = data.get("product_description") or ""
+        public_base_url = data.get("public_base_url") or ""
+
+        logger.info("VIDEO_TIMING_STAGE_START stage=generate_mvp jobId=%s", job_id)
+        logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp start jobId=%s", job_id)
+        t_mvp0 = time.monotonic()
+        video_url, marketing_text, overlay_headline = generate_fn(
+            product_name,
+            product_description,
+            public_base_url=public_base_url,
+            job_id=job_id,
+        )
+        mvp_ms = (time.monotonic() - t_mvp0) * 1000.0
+        logger.info(
+            "VIDEO_TIMING_STAGE_END stage=generate_mvp jobId=%s elapsed_ms=%.1f",
+            job_id,
+            mvp_ms,
+        )
+        logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp done jobId=%s", job_id)
+
+        logger.info("VIDEO_JOB_CHOSEN_URL video_url=%s jobId=%s", video_url, job_id)
+        if not video_job_mark_done_respecting_cancellation(
+            job_id, video_url, marketing_text or "", overlay_headline or ""
+        ):
+            logger.info("VIDEO_JOB_CANCELLED jobId=%s outcome=cancelled_before_mark_done", job_id)
+            return {"outcome": "halted_before_mark_done", "jobId": job_id, "vendorResultKept": True}
+        logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
+        try:
+            remove_recoverable_job(job_id)
+        except Exception:
+            pass
+        return {"outcome": "success", "jobId": job_id}
+    except RunwayVideoMVPError as e:
+        _reason = e.args[0] if getattr(e, "args", None) else "runway_mvp"
+        if _reason == CANCELLED_ERROR_CODE:
+            logger.info("VIDEO_JOB_CANCELLED jobId=%s", job_id)
+            try:
+                remove_recoverable_job(job_id, expire_lease=False)
             except Exception:
                 pass
-            continue
-        clear_job_queued(job_id)
-        logger.info("VIDEO_TIMING_STAGE_START stage=worker_dequeued jobId=%s", job_id)
+            return {"outcome": "halted", "jobId": job_id}
+        if _reason == "builder2_media_finalization_recoverable":
+            logger.warning("VIDEO_JOB_RECOVERABLE_FINALIZATION jobId=%s reason=%s", job_id, _reason)
+            try:
+                from engine.builder2_job_cancellation import should_block_builder2_execution
 
-        _set_active_job_id(job_id)
-        t_worker_job0 = time.monotonic()
+                if should_block_builder2_execution(job_id):
+                    return {"outcome": "halted", "jobId": job_id}
+                register_recoverable_job(job_id)
+                video_job_touch_progress(job_id)
+            except Exception:
+                pass
+            return {"outcome": "recoverable_finalization", "jobId": job_id}
+        logger.warning("VIDEO_JOB_FAILED jobId=%s reason=%s", job_id, _reason)
         try:
-            from engine.builder2_job_cancellation import (
-                CANCELLED_ERROR_CODE,
-                is_builder2_job_cancelled,
-                video_job_mark_done_respecting_cancellation,
-            )
-
-            logger.info("VIDEO_JOB_STEP step=redis_get_client start jobId=%s", job_id)
-            r = get_redis()
-            logger.info("VIDEO_JOB_STEP step=redis_get_client done jobId=%s", job_id)
-
-            logger.info("VIDEO_JOB_STEP step=load_job_data start jobId=%s", job_id)
-            data = r.hgetall(job_key(job_id))
-            logger.info(
-                "VIDEO_JOB_STEP step=load_job_data done jobId=%s fields=%s",
-                job_id,
-                len(data),
-            )
-            if not data:
-                logger.warning("VIDEO_JOB_MISSING jobId=%s (no hash)", job_id)
-                continue
+            video_job_mark_error(job_id, (_reason or "").strip() or "video_generation_failed")
+        except Exception:
+            pass
+        return {"outcome": "error", "jobId": job_id, "reason": _reason}
+    except Exception as e:
+        logger.error("VIDEO_JOB_FATAL jobId=%s error=%s", job_id, e, exc_info=True)
+        try:
+            from engine.builder2_job_cancellation import is_builder2_job_cancelled
 
             if is_builder2_job_cancelled(job_id):
-                logger.info("BUILDER2_JOB_CANCEL_DEQUEUE_SKIP jobId=%s", job_id)
-                try:
-                    remove_recoverable_job(job_id)
-                except Exception:
-                    pass
-                logger.info("VIDEO_JOB_DONE jobId=%s outcome=cancelled", job_id)
-                continue
-
-            logger.info("VIDEO_JOB_STARTED jobId=%s", job_id)
-            try:
-                get_redis().hset(job_key(job_id), mapping={"status": "running", "progressStage": "processing"})
-            except Exception:
-                pass
-
-            raw_enqueued = (data.get("enqueued_ts") or data.get("last_progress_ts") or "").strip()
-            if raw_enqueued:
-                try:
-                    queue_wait_ms = (time.time() - int(raw_enqueued)) * 1000.0
-                    if queue_wait_ms >= 0:
-                        logger.info(
-                            "VIDEO_TIMING_QUEUE_WAIT_MS=%.1f jobId=%s",
-                            queue_wait_ms,
-                            job_id,
-                        )
-                except ValueError:
-                    pass
-
-            try:
-                video_job_touch_progress(job_id)
-            except Exception as e:
-                logger.warning("VIDEO_JOB_TOUCH_PROGRESS_FAIL jobId=%s err=%s", job_id, e)
-
-            product_name = data.get("product_name") or ""
-            product_description = data.get("product_description") or ""
-            public_base_url = data.get("public_base_url") or ""
-
-            logger.info("VIDEO_TIMING_STAGE_START stage=generate_mvp jobId=%s", job_id)
-            logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp start jobId=%s", job_id)
-            t_mvp0 = time.monotonic()
-            video_url, marketing_text, overlay_headline = generate_one_video_mvp(
-                product_name,
-                product_description,
-                public_base_url=public_base_url,
-                job_id=job_id,
-            )
-            mvp_ms = (time.monotonic() - t_mvp0) * 1000.0
-            logger.info(
-                "VIDEO_TIMING_STAGE_END stage=generate_mvp jobId=%s elapsed_ms=%.1f",
-                job_id,
-                mvp_ms,
-            )
-            logger.info("VIDEO_JOB_STEP step=generate_one_video_mvp done jobId=%s", job_id)
-
-            logger.info("VIDEO_JOB_CHOSEN_URL video_url=%s jobId=%s", video_url, job_id)
-            logger.info(
-                "VIDEO_JOB_CHOSEN_URL jobId=%s video_url=%s before_redis=1",
-                job_id,
-                video_url,
-            )
-            logger.info("VIDEO_TIMING_STAGE_START stage=redis_mark_done jobId=%s", job_id)
-            logger.info("VIDEO_JOB_STEP step=redis_mark_done start jobId=%s", job_id)
-            if not video_job_mark_done_respecting_cancellation(
-                job_id, video_url, marketing_text or "", overlay_headline or ""
-            ):
-                logger.info("VIDEO_JOB_CANCELLED jobId=%s outcome=cancelled_before_mark_done", job_id)
-                logger.info("VIDEO_JOB_DONE jobId=%s outcome=cancelled", job_id)
-                continue
-            logger.info("VIDEO_JOB_STEP step=redis_mark_done done jobId=%s", job_id)
-            logger.info("VIDEO_JOB_RESULT video_url=%s jobId=%s", video_url, job_id)
-            logger.info(
-                "VIDEO_JOB_RESULT jobId=%s video_url=%s redis_written=1",
-                job_id,
-                video_url,
-            )
-            logger.info(
-                "VIDEO_TIMING_STAGE_END stage=worker_job_total jobId=%s elapsed_ms=%.1f",
-                job_id,
-                (time.monotonic() - t_worker_job0) * 1000.0,
-            )
-            logger.info("VIDEO_JOB_DONE jobId=%s outcome=success", job_id)
-            try:
-                remove_recoverable_job(job_id)
-            except Exception:
-                pass
-        except RunwayVideoMVPError as e:
-            _reason = e.args[0] if getattr(e, "args", None) else "runway_mvp"
-            if _reason == CANCELLED_ERROR_CODE:
-                logger.info("VIDEO_JOB_CANCELLED jobId=%s", job_id)
-                try:
-                    remove_recoverable_job(job_id)
-                except Exception:
-                    pass
-                logger.info("VIDEO_JOB_DONE jobId=%s outcome=cancelled", job_id)
-                continue
-            if _reason == "builder2_media_finalization_recoverable":
-                logger.warning(
-                    "VIDEO_JOB_RECOVERABLE_FINALIZATION jobId=%s reason=%s",
-                    job_id,
-                    _reason,
-                )
-                try:
-                    register_recoverable_job(job_id)
-                    video_job_touch_progress(job_id)
-                except Exception:
-                    pass
-                logger.info("VIDEO_JOB_DONE jobId=%s outcome=recoverable_finalization", job_id)
-                continue
-            logger.warning("VIDEO_JOB_FAILED jobId=%s reason=%s", job_id, _reason)
-            logger.warning("VIDEO_JOB_ERROR jobId=%s err=RunwayVideoMVPError", job_id)
-            try:
-                video_job_mark_error(job_id, (_reason or "").strip() or "video_generation_failed")
-            except Exception as mark_err:
-                logger.error(
-                    "VIDEO_JOB_ERROR mark_failed jobId=%s err=%s",
-                    job_id,
-                    mark_err,
-                    exc_info=True,
-                )
-            logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
-        except Exception as e:
-            logger.error("VIDEO_JOB_FATAL jobId=%s error=%s", job_id, e, exc_info=True)
-            try:
-                from engine.builder2_job_cancellation import is_builder2_job_cancelled
-
-                if is_builder2_job_cancelled(job_id):
-                    logger.info("VIDEO_JOB_CANCELLED jobId=%s outcome=cancelled_after_error", job_id)
-                else:
-                    video_job_mark_error(job_id, "video_generation_failed")
-            except Exception as mark_err:
-                logger.error(
-                    "VIDEO_JOB_FATAL mark_error_failed jobId=%s err=%s",
-                    job_id,
-                    mark_err,
-                    exc_info=True,
-                )
-            logger.info("VIDEO_JOB_DONE jobId=%s outcome=error", job_id)
-        finally:
-            try:
-                release_job_lease(job_id, _worker_token)
-            except Exception:
-                pass
-            _set_active_job_id(None)
+                return {"outcome": "halted", "jobId": job_id}
+            video_job_mark_error(job_id, "video_generation_failed")
+        except Exception:
+            pass
+        return {"outcome": "error", "jobId": job_id}
 
 
 if __name__ == "__main__":

@@ -144,9 +144,24 @@ def request_builder2_resume(
     if not raw:
         return {"ok": False, "error": "not_found", "jobId": jid}
 
-    from engine.builder2_job_cancellation import is_builder2_job_cancelled
+    from engine.ace_local_dev_config import is_local_dev_enabled
+    from engine.builder2_job_cancellation import is_builder2_job_cancelled, should_block_builder2_execution
 
-    if is_builder2_job_cancelled(jid):
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_builder2_binding import HaltStateUnavailable
+
+        try:
+            blocked = should_block_builder2_execution(jid)
+        except HaltStateUnavailable:
+            return {
+                "ok": False,
+                "error": "halt_state_unavailable",
+                "jobId": jid,
+                "canResume": False,
+            }
+    else:
+        blocked = should_block_builder2_execution(jid)
+    if blocked or is_builder2_job_cancelled(jid):
         return {
             "ok": False,
             "error": "builder2_job_cancelled",
@@ -202,43 +217,70 @@ def request_builder2_resume(
     if not resolve_builder2_tournament_enabled():
         return {"ok": False, "error": "builder2_disabled", "jobId": jid}
 
-    if not mark_job_queued(jid):
-        payload = build_builder2_status_payload(jid, raw, tournament_state=tournament)
-        payload["ok"] = True
-        payload["resumeAlreadyInProgress"] = True
-        return payload
+    lease = None
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_builder2_coordination import (
+            builder2_coordination_error_payload,
+            try_begin_builder2_coordination,
+        )
 
-    now_iso = _utc_now_iso()
-    mapping = {
-        "lastResumeRequestedAt": now_iso,
-        "currentStageStartedAt": now_iso,
-        "canResume": "1",
-        "resumeFromStage": _clean(resolver.get("resumeFromStage")),
-    }
-    if not _clean(raw.get("progressStartedAt")):
-        mapping["progressStartedAt"] = now_iso
+        lease, coord_deny = try_begin_builder2_coordination(jid)
+        if coord_deny is not None:
+            return builder2_coordination_error_payload(str(coord_deny.get("error") or ""), job_id=jid)
 
-    from engine.builder2_tournament_recovery import _use_memory_recovery, set_memory_job_hash
+    def _finish_builder2_submission(*, unresolved: bool = False) -> None:
+        if not is_local_dev_enabled():
+            return
+        from engine.ace_local_dev_builder2_coordination import finish_builder2_submission
 
-    if _use_memory_recovery:
-        updated = dict(raw)
-        updated.update({k: str(v) for k, v in mapping.items()})
-        set_memory_job_hash(jid, updated)
-    else:
-        r = get_redis()
-        r.hset(job_key(jid), mapping=mapping)
-        r.lpush(QUEUE_KEY, jid)
-    register_recoverable_job(jid)
+        finish_builder2_submission(lease, unresolved=unresolved)
+
+    submission_unresolved = True
     try:
-        video_job_touch_progress(jid)
-    except Exception:
-        pass
+        if not mark_job_queued(jid):
+            submission_unresolved = False
+            _finish_builder2_submission()
+            payload = build_builder2_status_payload(jid, raw, tournament_state=tournament)
+            payload["ok"] = True
+            payload["resumeAlreadyInProgress"] = True
+            return payload
 
-    return {
-        "ok": True,
-        "jobId": jid,
-        "status": "queued",
-        "resumeRequested": True,
-        "resumeFromStage": resolver.get("resumeFromStage"),
-        **public_owner_fields(raw),
-    }
+        now_iso = _utc_now_iso()
+        mapping = {
+            "lastResumeRequestedAt": now_iso,
+            "currentStageStartedAt": now_iso,
+            "canResume": "1",
+            "resumeFromStage": _clean(resolver.get("resumeFromStage")),
+        }
+        if not _clean(raw.get("progressStartedAt")):
+            mapping["progressStartedAt"] = now_iso
+
+        from engine.builder2_tournament_recovery import _use_memory_recovery, set_memory_job_hash
+
+        if _use_memory_recovery:
+            updated = dict(raw)
+            updated.update({k: str(v) for k, v in mapping.items()})
+            set_memory_job_hash(jid, updated)
+        else:
+            r = get_redis()
+            r.hset(job_key(jid), mapping=mapping)
+            r.lpush(QUEUE_KEY, jid)
+        register_recoverable_job(jid)
+        try:
+            video_job_touch_progress(jid)
+        except Exception:
+            pass
+
+        submission_unresolved = False
+        _finish_builder2_submission()
+        return {
+            "ok": True,
+            "jobId": jid,
+            "status": "queued",
+            "resumeRequested": True,
+            "resumeFromStage": resolver.get("resumeFromStage"),
+            **public_owner_fields(raw),
+        }
+    finally:
+        if submission_unresolved:
+            _finish_builder2_submission(unresolved=True)

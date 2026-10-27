@@ -52,7 +52,11 @@ from engine.builder1_planning_profile import resolve_stage_model
 from engine.builder1_planner import plan_builder1
 from engine.builder1_product_visibility import ProductVisibilityPolicy
 from engine.builder1_retry_state import RETRY_MODE_IMAGE_ONLY, public_retry_fields
-from tests.builder1_test_helpers import marketing_text_words
+from tests.builder1_test_helpers import (
+    attach_public_builder1_flask_security,
+    detach_public_builder1_flask_security,
+    marketing_text_words,
+)
 from tests.test_builder1_series import _base_campaign, _parse
 from tests.test_builder1_staged_planning import _full_final_responses
 
@@ -364,6 +368,10 @@ class TestImageOnlyRouting(unittest.TestCase):
     def setUp(self) -> None:
         clear_memory_store_for_tests()
         clear_memory_jobs_for_tests()
+        attach_public_builder1_flask_security(self)
+
+    def tearDown(self) -> None:
+        detach_public_builder1_flask_security(self)
 
     def test_image_only_retry_performs_zero_planning_calls(self) -> None:
         from app import app

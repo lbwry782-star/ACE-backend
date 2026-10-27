@@ -41,6 +41,10 @@ from engine.builder1_retry_state import (
     public_retry_fields,
     resolve_authoritative_retry_mode,
 )
+from tests.builder1_test_helpers import (
+    attach_public_builder1_flask_security,
+    detach_public_builder1_flask_security,
+)
 from tests.test_builder1_series import _base_campaign, _parse
 from tests.test_builder1_staged_planning import _full_final_responses
 
@@ -121,6 +125,10 @@ class TestGenerateNextRouting(unittest.TestCase):
     def setUp(self) -> None:
         clear_memory_store_for_tests()
         clear_memory_jobs_for_tests()
+        attach_public_builder1_flask_security(self)
+
+    def tearDown(self) -> None:
+        detach_public_builder1_flask_security(self)
 
     def test_generate_next_routes_physical_repair_without_reservation(self) -> None:
         from app import app

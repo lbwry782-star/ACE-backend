@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 CANCELLED_ERROR_CODE = "builder1_job_cancelled"
 CANCEL_REASON_FRONTEND_REFRESH = "frontend_refresh"
+CANCEL_REASON_INTENTIONAL_LOCAL_QUIT = "intentional_local_quit"
 CAMPAIGN_CANCELLED_ERROR_CODE = "builder1_campaign_cancelled"
 
 
@@ -45,7 +46,13 @@ def is_builder1_job_cancelled(job_id: str) -> bool:
         return False
     if _clean(raw.get("status")) == "cancelled":
         return True
-    return _truthy(raw.get("cancelRequested"))
+    if _truthy(raw.get("cancelRequested")):
+        return True
+    if _truthy(raw.get("haltRequested")):
+        return True
+    if _clean(raw.get("haltReason")) == CANCEL_REASON_INTENTIONAL_LOCAL_QUIT:
+        return True
+    return _clean(raw.get("localStopStatus")) in {"halt_requested", "uncertain", "local_stopped"}
 
 
 def is_builder1_campaign_cancelled(campaign_id: str) -> bool:
@@ -87,15 +94,69 @@ def raise_if_builder1_cancelled(
         raise Builder1JobCancelledError(CANCELLED_ERROR_CODE)
 
 
+def should_block_builder1_execution(job_id: str) -> bool:
+    """Lasting halt of jobs included in a quit attempt. Does not freeze new admissions."""
+    from engine.builder1_jobs_store import get_builder1_job
+
+    jid = _clean(job_id)
+    if not jid:
+        return True
+    if is_builder1_job_cancelled(jid):
+        return True
+    from engine.ace_local_dev_config import is_local_dev_enabled
+
+    if not is_local_dev_enabled():
+        return False
+    from engine.ace_local_dev_builder2_binding import (
+        HaltStateUnavailable,
+        LOCAL_DEV_BOUND_FIELD,
+        LOCAL_DEV_INSTANCE_FIELD,
+        local_builder2_worker_ace_root,
+    )
+    from engine.ace_local_dev_builder2_halt_registry import halted_job_index
+
+    try:
+        raw = get_builder1_job(jid)
+    except Exception as exc:
+        raise HaltStateUnavailable("job_hash_unreadable") from exc
+    instance_id = _clean((raw or {}).get(LOCAL_DEV_INSTANCE_FIELD))
+    bound = _truthy((raw or {}).get(LOCAL_DEV_BOUND_FIELD))
+    if not bound or not instance_id:
+        return False
+    ace_root = local_builder2_worker_ace_root()
+    if ace_root is None:
+        from engine.ace_local_dev_coordination import resolve_product_coordination_ace_root
+
+        ace_root = resolve_product_coordination_ace_root()
+    halted, _consistency = halted_job_index(instance_id=instance_id, ace_root=ace_root)
+    return jid in halted
+
+
 def checkpoint_builder1_cancellation(
     job_id: str,
     *,
     campaign_id: str = "",
     stage: str = "",
 ) -> None:
-    """Central checkpoint before paid or continuation stages."""
-    raise_if_builder1_cancelled(job_id=job_id, campaign_id=campaign_id, stage=stage)
+    """Central checkpoint before paid or continuation stages. Not atomic with the vendor call."""
+    from engine.ace_local_dev_config import is_local_dev_enabled
+
     jid = _clean(job_id)
+    if is_local_dev_enabled():
+        from engine.ace_local_dev_builder2_binding import HaltStateUnavailable
+
+        try:
+            blocked = should_block_builder1_execution(jid) if jid else False
+        except HaltStateUnavailable:
+            logger.warning("BUILDER1_JOB_HALT_STATE_UNAVAILABLE jobId=%s stage=%s", jid, stage)
+            raise Builder1JobCancelledError(CANCELLED_ERROR_CODE)
+        if blocked:
+            raise_if_builder1_cancelled(job_id=jid, campaign_id=campaign_id, stage=stage)
+            raise Builder1JobCancelledError(CANCELLED_ERROR_CODE)
+    elif jid and should_block_builder1_execution(jid):
+        raise_if_builder1_cancelled(job_id=jid, campaign_id=campaign_id, stage=stage)
+        raise Builder1JobCancelledError(CANCELLED_ERROR_CODE)
+    raise_if_builder1_cancelled(job_id=job_id, campaign_id=campaign_id, stage=stage)
     if jid:
         from engine.builder1_jobs_store import touch_builder1_job_heartbeat
 
@@ -118,9 +179,13 @@ def request_builder1_job_cancellation(
     job_id: str,
     *,
     reason: str = CANCEL_REASON_FRONTEND_REFRESH,
+    release_generation_lock: bool = True,
 ) -> Dict[str, Any]:
     """
     Idempotent Builder1 cancellation. Fast — does not wait for in-flight paid calls.
+
+    release_generation_lock defaults True for public/frontend cancel. Intentional LOCAL
+    halt keeps the lock until writer stop is proven.
     """
     from engine.builder1_jobs_store import get_builder1_job, update_builder1_job
 
@@ -169,7 +234,8 @@ def request_builder1_job_cancellation(
     campaign_id = _clean(raw.get("campaignId"))
     if campaign_id:
         _mark_campaign_cancelled(campaign_id, reason=_clean(reason) or CANCEL_REASON_FRONTEND_REFRESH)
-        _release_campaign_lock_for_job(campaign_id, jid)
+        if release_generation_lock:
+            _release_campaign_lock_for_job(campaign_id, jid)
 
     logger.info(
         "BUILDER1_JOB_CANCELLED jobId=%s campaignId=%s reason=%s",
@@ -204,6 +270,7 @@ def finalize_builder1_job_respecting_cancellation(
         return False
     if is_builder1_job_cancelled(jid):
         logger.info("BUILDER1_JOB_CANCEL_COMPLETION_RACE jobId=%s winner=cancelled", jid)
+        record_late_builder1_vendor_result(jid, result)
         return False
     campaign_id = _clean(result.get("campaignId"))
     if campaign_id and is_builder1_campaign_cancelled(campaign_id):
@@ -217,3 +284,24 @@ def finalize_builder1_job_respecting_cancellation(
 
     finalize_builder1_job(jid, result, target_ad_count=target_ad_count)
     return True
+
+
+def record_late_builder1_vendor_result(job_id: str, result: Optional[Dict[str, Any]] = None) -> None:
+    """Inquiry-only. Does not mark success, retry, or clear halt."""
+    from engine.builder1_jobs_store import get_builder1_job, update_builder1_job
+
+    jid = _clean(job_id)
+    if not jid or not get_builder1_job(jid):
+        return
+    payload = result if isinstance(result, dict) else {}
+    fields: Dict[str, Any] = {
+        "lateVendorReceivedAt": _utc_now_iso(),
+        "lateVendorInquiryOnly": True,
+    }
+    image_url = _clean(payload.get("imageUrl") or payload.get("image_url") or payload.get("url"))
+    if image_url:
+        fields["lateVendorImageUrl"] = image_url
+    ad_index = payload.get("adIndex") or payload.get("ad_index")
+    if ad_index is not None:
+        fields["lateVendorAdIndex"] = ad_index
+    update_builder1_job(jid, **fields)

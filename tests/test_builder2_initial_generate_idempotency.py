@@ -4,9 +4,12 @@ Builder2 initial generate idempotency + cancel ownership — mocked/offline only
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import threading
 import unittest
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +31,10 @@ from engine.video_jobs_redis import (
     disable_memory_jobs,
     enable_memory_jobs,
     video_job_get_raw,
+)
+from tests.builder2_test_helpers import (
+    attach_public_builder2_flask_security,
+    detach_public_builder2_flask_security,
 )
 
 
@@ -53,14 +60,13 @@ class Builder2IdempotencyTestCase(unittest.TestCase):
         enable_memory_idempotency_store()
         clear_memory_allowance_store_for_tests()
         clear_memory_idempotency_for_tests()
-        from engine.ace_local_dev_config import enable_local_dev_security_bypass_for_tests
-
         os.environ["BUILDER2_TOURNAMENT_ENABLED"] = "true"
-        enable_local_dev_security_bypass_for_tests()
-        os.environ["ACE_SECURITY_ENABLED"] = "false"
+        self._tmp = tempfile.mkdtemp(prefix="ace-b2-idem-")
+        os.environ["ACE_SESSIONS_ROOT"] = str(Path(self._tmp))
         from app import app
 
         self.app = app
+        attach_public_builder2_flask_security(self)
         self.client = app.test_client()
 
     def tearDown(self) -> None:
@@ -71,7 +77,9 @@ class Builder2IdempotencyTestCase(unittest.TestCase):
         disable_memory_idempotency_store()
         clear_memory_allowance_store_for_tests()
         clear_memory_idempotency_for_tests()
-        os.environ.pop("ACE_SECURITY_ENABLED", None)
+        detach_public_builder2_flask_security(self)
+        os.environ.pop("ACE_SESSIONS_ROOT", None)
+        shutil.rmtree(getattr(self, "_tmp", ""), ignore_errors=True)
         from engine.ace_local_dev_config import reset_local_dev_config_for_tests
 
         reset_local_dev_config_for_tests()
