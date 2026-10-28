@@ -1342,6 +1342,8 @@ def build_series_ads_user_prompt(
         f"Graphic system:\n{json.dumps(graphic_generator, ensure_ascii=False, indent=2)}\n"
         f"Server product visibility policy: {visibility_policy}\n"
         "Every ad must execute the same transferred physical family — no product-shot fallbacks or literal slogan/category traps in later ads.\n"
+        "The dominant scene must not read as advertising a different commercial service or teachable discipline. "
+        "Everyday cross-domain objects are allowed; competing instructional or professional venues are not.\n"
         "Before returning each ad, run the slogan-literalness scan. "
         "Ask: is this too close to the product, the literal slogan noun, or merely illustrating the wording? "
         "If yes, replace it with a stronger external expressive object that stays simple and immediately readable.\n"
@@ -1366,6 +1368,10 @@ def build_series_ads_user_prompt(
 
 
 def build_series_ads_repair_prompt(*, broken_json: str, reasons: List[str], ad_count: int) -> str:
+    from engine.builder1_advertising_comprehension import build_analogy_repair_guidance_block
+
+    analogy_block = build_analogy_repair_guidance_block(reasons)
+    analogy_section = f"\n{analogy_block}\n" if analogy_block else ""
     return (
         "Repair ONLY seriesGenerator and ads. Return exactly:\n"
         '{"seriesGenerator":{"type":"...","principle":"...","progression":"..."},'
@@ -1377,6 +1383,7 @@ def build_series_ads_repair_prompt(*, broken_json: str, reasons: List[str], ad_c
         '"executionScene":"...","executionPunchline":"...",'
         '"objectDesignMode":"CANONICAL_FAMILIAR","objectDesignDescription":"...",'
         '"objectDesignDeviationReason":""}]}\n'
+        f"{analogy_section}"
         f"Required ad count: {ad_count}\n"
         f"Errors:\n" + "\n".join(f"- {r}" for r in reasons) + "\n"
         f"Broken:\n{broken_json}"

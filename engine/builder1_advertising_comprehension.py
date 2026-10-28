@@ -1218,6 +1218,7 @@ def detect_competing_category_visual(
     plan_dict: Mapping[str, Any],
     ad: Mapping[str, Any],
     fields: Optional[Mapping[str, Any]] = None,
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """True when dominant execution reads as advertising a different service category."""
     merged_fields = dict(fields or _ad_internal_fields(plan_dict, ad))
@@ -1236,12 +1237,37 @@ def detect_competing_category_visual(
     if not competing_visual:
         return False
 
+    instructional_overlap = competing_visual & _INSTRUCTIONAL_SERVICE_CLUSTERS
     # Cross-domain objects alone are not a category failure — require a plausible
     # instructional/professional service scene, not merely an external metaphor object.
-    if competing_visual & _INSTRUCTIONAL_SERVICE_CLUSTERS:
-        return _contains_any(visual_text, _INSTRUCTIONAL_SCENE_MARKERS)
+    if instructional_overlap and not _contains_any(visual_text, _INSTRUCTIONAL_SCENE_MARKERS):
+        return False
 
-    return bool(competing_visual)
+    record_integrity_evidence(
+        integrity_evidence,
+        code="competing_category_visual",
+        detector="advertising_comprehension",
+        branch=(
+            "instructional_scene_overlap"
+            if instructional_overlap
+            else "professional_cluster_overlap"
+        ),
+        reason=(
+            "execution_reads_as_competing_instructional_service"
+            if instructional_overlap
+            else "execution_reads_as_competing_professional_service"
+        ),
+        level="ad",
+        ad_index=int(ad.get("index") or 0) or None,
+        field="executionScene",
+        field_value_preview=_norm(merged_fields.get("executionScene") or visual_text),
+        extra={
+            "advertisedClusters": sorted(advertised_prof),
+            "visualClusters": sorted(visual_prof),
+            "competingClusters": sorted(competing_visual),
+        },
+    )
+    return True
 
 
 def detect_mechanism_not_observable(
@@ -1275,7 +1301,10 @@ def detect_mechanism_not_observable(
     return False
 
 
-def scan_plan_category_integrity(plan_dict: Mapping[str, Any]) -> List[str]:
+def scan_plan_category_integrity(
+    plan_dict: Mapping[str, Any],
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
+) -> List[str]:
     """Deterministic category-integrity and observable-mechanism scan for a stored plan."""
     ads = plan_dict.get("ads")
     if not isinstance(ads, list):
@@ -1284,8 +1313,33 @@ def scan_plan_category_integrity(plan_dict: Mapping[str, Any]) -> List[str]:
     for ad in ads:
         if isinstance(ad, dict):
             reasons.extend(
-                validate_ad_category_integrity(plan_dict=plan_dict, ad=ad)
+                validate_ad_category_integrity(
+                    plan_dict=plan_dict,
+                    ad=ad,
+                    integrity_evidence=integrity_evidence,
+                )
             )
+    return list(dict.fromkeys(reasons))
+
+
+def scan_series_ads_competing_category(
+    *,
+    ads: Sequence[Mapping[str, Any]],
+    product_description: str,
+    product_name: str = "",
+    relative_advantage: str = "",
+) -> List[str]:
+    """Series-stage category scan — competing instructional/professional scene only."""
+    plan_dict: Dict[str, Any] = {
+        "productDescription": product_description,
+        "productName": product_name,
+        "relativeAdvantage": relative_advantage,
+        "ads": [dict(ad) for ad in ads if isinstance(ad, Mapping)],
+    }
+    reasons: List[str] = []
+    for ad in plan_dict["ads"]:
+        if detect_competing_category_visual(plan_dict=plan_dict, ad=ad):
+            reasons.append("competing_category_visual")
     return list(dict.fromkeys(reasons))
 
 
@@ -1302,10 +1356,16 @@ def validate_ad_category_integrity(
     *,
     plan_dict: Mapping[str, Any],
     ad: Mapping[str, Any],
+    integrity_evidence: Optional[List[Dict[str, Any]]] = None,
 ) -> List[str]:
     reasons: List[str] = []
     fields = _ad_internal_fields(plan_dict, ad)
-    if detect_competing_category_visual(plan_dict=plan_dict, ad=ad, fields=fields):
+    if detect_competing_category_visual(
+        plan_dict=plan_dict,
+        ad=ad,
+        fields=fields,
+        integrity_evidence=integrity_evidence,
+    ):
         reasons.append("competing_category_visual")
     if detect_mechanism_not_observable(plan_dict=plan_dict, ad=ad, fields=fields):
         reasons.append("advertising_mechanism_not_observable")
@@ -1397,7 +1457,13 @@ def validate_ad_advertising_comprehension(
             reasons.append("dominant_object_strategic_role_missing")
             break
 
-    reasons.extend(validate_ad_category_integrity(plan_dict=plan_dict, ad=ad))
+    reasons.extend(
+        validate_ad_category_integrity(
+            plan_dict=plan_dict,
+            ad=ad,
+            integrity_evidence=integrity_evidence,
+        )
+    )
 
     if detect_public_analogy_too_complex(
         plan_dict=plan_dict,

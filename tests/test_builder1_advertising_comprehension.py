@@ -21,6 +21,7 @@ from engine.builder1_advertising_comprehension import (
     detect_mechanism_not_observable,
     detect_public_analogy_too_complex,
     scan_advertising_comprehension,
+    scan_series_ads_competing_category,
     validate_ad_advertising_comprehension,
 )
 from engine.builder1_idea_memory import (
@@ -31,7 +32,12 @@ from engine.builder1_idea_memory import (
     build_stage_memory_block,
     classify_physical_generator_family,
 )
-from engine.builder1_planning_contract import build_brand_physical_repair_prompt
+from engine.builder1_final_stages import parse_series_ads_output
+from engine.builder1_planning_contract import (
+    build_brand_physical_repair_prompt,
+    build_series_ads_repair_prompt,
+)
+from engine.builder1_staged_parsers import StageParseError
 from engine.builder1_failure_classification import (
     Builder1FailureAction,
     Builder1FailureClass,
@@ -64,7 +70,11 @@ from engine.builder1_retry_state import RETRY_MODE_REPAIR_FROM_PHYSICAL, public_
 from engine.builder1_creative_methodology import methodology_repair_stage
 from tests.builder1_test_helpers import marketing_text_words
 from tests.test_builder1_series import _base_campaign, _parse
-from tests.test_builder1_staged_planning import _full_final_responses, _internal_ad_fields
+from tests.test_builder1_staged_planning import (
+    _full_final_responses,
+    _internal_ad_fields,
+    _series_ads,
+)
 
 
 def _plan_dict_with_ad_fields(**ad_overrides: Any) -> Dict[str, Any]:
@@ -426,6 +436,83 @@ class TestCategoryIntegrity(unittest.TestCase):
             methodology_repair_stage(["advertising_mechanism_not_observable"]),
             "brand_physical",
         )
+
+    def test_hebrew_tutor_brief_magnet_metaphor_passes(self) -> None:
+        plan = _plan_dict_with_ad_fields(
+            executionScene="Magnet on a table pulling one metal sphere while others stay still",
+            executionSubject="Magnet attracting one sphere",
+            physicalExecution="Visible magnet pull on one metal sphere",
+        )
+        plan["productDescription"] = "מורה פרטי להיסטוריה. הכנת תלמידים לבגרות"
+        plan["productName"] = ""
+        plan["productNameResolved"] = ""
+        evidence: List[Dict[str, Any]] = []
+        self.assertFalse(
+            detect_competing_category_visual(
+                plan_dict=plan, ad=plan["ads"][0], integrity_evidence=evidence
+            )
+        )
+        self.assertEqual(evidence, [])
+
+    def test_hebrew_tutor_brief_gymnastics_scene_rejected_with_branch(self) -> None:
+        plan = _plan_dict_with_ad_fields(
+            executionScene="Young gymnast on gymnastics training floor with other gymnasts blurred",
+            executionSubject="Gymnast in sharp focus",
+            physicalExecution="Sports action photo of gymnast on floor",
+        )
+        plan["productDescription"] = "מורה פרטי להיסטוריה. הכנת תלמידים לבגרות"
+        plan["productName"] = ""
+        plan["productNameResolved"] = ""
+        evidence: List[Dict[str, Any]] = []
+        self.assertTrue(
+            detect_competing_category_visual(
+                plan_dict=plan, ad=plan["ads"][0], integrity_evidence=evidence
+            )
+        )
+        self.assertEqual(evidence[0]["code"], "competing_category_visual")
+        self.assertEqual(evidence[0]["branch"], "instructional_scene_overlap")
+        self.assertIn("sports_coaching", evidence[0]["competingClusters"])
+
+    def test_series_parse_rejects_competing_instructional_scene(self) -> None:
+        payload = _series_ads(2)
+        payload["ads"][0]["executionScene"] = "Child at piano during a music lesson"
+        payload["ads"][0]["physicalExecution"] = "Piano lesson with violin in background"
+        payload["ads"][0]["sceneDescription"] = "Music classroom with piano and violin"
+        with self.assertRaises(StageParseError) as ctx:
+            parse_series_ads_output(
+                payload,
+                expected_ad_count=2,
+                product_description="מורה פרטי להיסטוריה. הכנת תלמידים לבגרות",
+            )
+        self.assertIn("competing_category_visual", ctx.exception.reasons)
+
+    def test_series_parse_allows_everyday_metaphor(self) -> None:
+        payload = _series_ads(2)
+        payload["ads"][0]["executionScene"] = "Magnet on a table pulling one metal sphere"
+        payload["ads"][0]["physicalExecution"] = "Visible magnet pull on one metal sphere"
+        payload["ads"][0]["sceneDescription"] = "One sphere jumps to the magnet"
+        parsed = parse_series_ads_output(
+            payload,
+            expected_ad_count=2,
+            product_description="מורה פרטי להיסטוריה. הכנת תלמידים לבגרות",
+        )
+        self.assertEqual(len(parsed.ads), 2)
+        self.assertEqual(
+            scan_series_ads_competing_category(
+                ads=parsed.ads,
+                product_description="מורה פרטי להיסטוריה. הכנת תלמידים לבגרות",
+            ),
+            [],
+        )
+
+    def test_series_repair_prompt_includes_analogy_guidance_for_category(self) -> None:
+        prompt = build_series_ads_repair_prompt(
+            broken_json="{}",
+            reasons=["competing_category_visual"],
+            ad_count=3,
+        )
+        self.assertIn("ANALOGY REPAIR", prompt)
+        self.assertIn("competing_category_visual", prompt)
 
 
 class TestObservableMechanism(unittest.TestCase):

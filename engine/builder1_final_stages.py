@@ -623,6 +623,8 @@ def parse_series_ads_output(
     *,
     expected_ad_count: int,
     product_description: str = "",
+    product_name: str = "",
+    relative_advantage: str = "",
     visibility_policy: Optional[Any] = None,
     brand_physical: Optional[Any] = None,
 ) -> SeriesAdsOutput:
@@ -668,6 +670,16 @@ def parse_series_ads_output(
     from engine.builder1_object_design_integrity import validate_series_ads_object_design
 
     reasons.extend(validate_series_ads_object_design(normalized_ads))
+    from engine.builder1_advertising_comprehension import scan_series_ads_competing_category
+
+    reasons.extend(
+        scan_series_ads_competing_category(
+            ads=normalized_ads,
+            product_description=product_description,
+            product_name=product_name,
+            relative_advantage=relative_advantage,
+        )
+    )
 
     if reasons:
         log_stage_parse_failure("series_ads", obj, reasons)

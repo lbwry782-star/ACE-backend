@@ -315,6 +315,8 @@ def repair_builder1_campaign_from_physical(
             raw,
             expected_ad_count=plan.ad_count,
             product_description=plan.product_description,
+            product_name=plan.product_name,
+            relative_advantage=plan.relative_advantage,
             visibility_policy=visibility_policy,
             brand_physical=brand_physical,
         ),

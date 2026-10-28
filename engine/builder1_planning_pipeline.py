@@ -704,6 +704,8 @@ def _run_series_stage_with_integrity(
             raw,
             expected_ad_count=normalized.ad_count,
             product_description=normalized.product_description,
+            product_name=normalized.product_name,
+            relative_advantage=selected_strategy.relative_advantage,
             visibility_policy=visibility_policy,
             brand_physical=brand_physical_dict,
         ),
